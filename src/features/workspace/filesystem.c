@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <wchar.h>
 #include <limits.h>
 
@@ -57,10 +58,12 @@ static AxyneStatus axyne_win_error(DWORD code)
     if (code == ERROR_NOT_ENOUGH_MEMORY || code == ERROR_OUTOFMEMORY)
         return AXYNE_STATUS_OUT_OF_MEMORY;
     if (code == ERROR_SHARING_VIOLATION || code == ERROR_ALREADY_EXISTS ||
-        code == ERROR_FILE_EXISTS)
+        code == ERROR_FILE_EXISTS || code == ERROR_DIR_NOT_EMPTY ||
+        code == ERROR_BUSY)
         return AXYNE_STATUS_BUSY;
     return AXYNE_STATUS_IO_ERROR;
 }
+
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -88,6 +91,18 @@ static AxyneStatus axyne_errno_status(int value)
     return AXYNE_STATUS_IO_ERROR;
 }
 #endif
+
+static int axyne_valid_child_name(const char *name)
+{
+    const unsigned char *p;
+    if (name == NULL || name[0] == '\0' ||
+        !axyne_workspace_utf8_is_valid(name) || strcmp(name, ".") == 0 ||
+        strcmp(name, "..") == 0)
+        return 0;
+    for (p = (const unsigned char *)name; *p != '\0'; ++p)
+        if (*p == '/' || *p == '\\' || *p == ':') return 0;
+    return 1;
+}
 
 static AxyneStatus axyne_current_open_error(void)
 {
@@ -128,6 +143,391 @@ static int axyne_valid_path(const char *path)
     return path != NULL && path[0] != '\0' &&
            axyne_workspace_utf8_is_valid(path);
 }
+
+#ifdef _WIN32
+/* Windows has no documented CreateFileW-at equivalent.  These helpers use
+ * the native handle-relative file calls exported by ntdll: the verified
+ * parent HANDLE is passed as OBJECT_ATTRIBUTES.RootDirectory, and the child
+ * is named relative to that handle.  The parent remains open throughout the
+ * operation, so replacing its path with a junction cannot redirect it. */
+#define AXYNE_OBJ_CASE_INSENSITIVE 0x00000040UL
+#define AXYNE_FILE_OPEN 1UL
+#define AXYNE_FILE_CREATE 2UL
+#define AXYNE_FILE_DIRECTORY_FILE 0x00000001UL
+#define AXYNE_FILE_NON_DIRECTORY_FILE 0x00000040UL
+#define AXYNE_FILE_SYNCHRONOUS_IO_NONALERT 0x00000020UL
+#define AXYNE_FILE_OPEN_REPARSE_POINT 0x00200000UL
+typedef LONG AxyneNtStatus;
+typedef struct AxyneUnicodeString {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR Buffer;
+} AxyneUnicodeString;
+typedef struct AxyneObjectAttributes {
+    ULONG Length;
+    HANDLE RootDirectory;
+    AxyneUnicodeString *ObjectName;
+    ULONG Attributes;
+    PVOID SecurityDescriptor;
+    PVOID SecurityQualityOfService;
+} AxyneObjectAttributes;
+typedef struct AxyneIoStatusBlock {
+    union { AxyneNtStatus Status; PVOID Pointer; } DUMMYUNIONNAME;
+    ULONG_PTR Information;
+} AxyneIoStatusBlock;
+typedef struct AxyneFileRenameInformation {
+    BOOLEAN ReplaceIfExists;
+    HANDLE RootDirectory;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+} AxyneFileRenameInformation;
+typedef struct AxyneFileDispositionInformation {
+    BOOLEAN DeleteFile;
+} AxyneFileDispositionInformation;
+typedef AxyneNtStatus (NTAPI *AxyneNtCreateFileFn)(
+    PHANDLE, ACCESS_MASK, AxyneObjectAttributes *, PVOID,
+    PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+typedef AxyneNtStatus (NTAPI *AxyneNtSetInformationFileFn)(
+    HANDLE, AxyneIoStatusBlock *, PVOID, ULONG, ULONG);
+typedef ULONG (WINAPI *AxyneRtlNtStatusToDosErrorFn)(AxyneNtStatus);
+
+static int axyne_nt_functions(AxyneNtCreateFileFn *create_file,
+                              AxyneNtSetInformationFileFn *set_information,
+                              AxyneRtlNtStatusToDosErrorFn *to_dos)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll == NULL) return 0;
+    *create_file = (AxyneNtCreateFileFn)GetProcAddress(ntdll, "NtCreateFile");
+    *set_information = (AxyneNtSetInformationFileFn)GetProcAddress(
+        ntdll, "NtSetInformationFile");
+    *to_dos = (AxyneRtlNtStatusToDosErrorFn)GetProcAddress(
+        ntdll, "RtlNtStatusToDosError");
+    return *create_file != NULL && *set_information != NULL && *to_dos != NULL;
+}
+
+static AxyneStatus axyne_nt_error(AxyneNtStatus status,
+                                  AxyneRtlNtStatusToDosErrorFn to_dos,
+                                  AxyneError *error, const char *operation)
+{
+    DWORD code = to_dos != NULL ? to_dos(status) : ERROR_GEN_FAILURE;
+    return axyne_system_error(error, axyne_win_error(code), operation);
+}
+
+static AxyneStatus axyne_windows_parent(const char *utf8_parent,
+                                        HANDLE *parent, AxyneError *error)
+{
+    wchar_t *wide;
+    HANDLE handle;
+    FILE_ATTRIBUTE_TAG_INFO attributes;
+    if (!axyne_valid_path(utf8_parent) || parent == NULL)
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "parent directory is required");
+    wide = axyne_wide(utf8_parent);
+    if (wide == NULL)
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "parent directory is not valid UTF-8");
+    handle = CreateFileW(wide,
+        FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY |
+        FILE_DELETE_CHILD | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE)
+        return axyne_system_error(error, axyne_win_error(GetLastError()),
+                                  "open parent directory");
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
+                                      &attributes, sizeof(attributes))) {
+        DWORD code = GetLastError();
+        CloseHandle(handle);
+        return axyne_system_error(error, axyne_win_error(code),
+                                  "inspect parent directory");
+    }
+    if ((attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        CloseHandle(handle);
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "parent is not a directory");
+    }
+    if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        CloseHandle(handle);
+        return axyne_error(error, AXYNE_STATUS_PERMISSION_DENIED,
+                           "reparse-point parent is not allowed");
+    }
+    *parent = handle;
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_windows_child_name(const char *utf8_name,
+                                             wchar_t **wide,
+                                             AxyneUnicodeString *name,
+                                             AxyneError *error)
+{
+    size_t length;
+    if (!axyne_valid_child_name(utf8_name))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "child name must be one valid name");
+    *wide = axyne_wide(utf8_name);
+    if (*wide == NULL)
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "child name is not valid UTF-8");
+    length = wcslen(*wide) * sizeof(wchar_t);
+    if (length > USHRT_MAX - sizeof(wchar_t)) {
+        free(*wide); *wide = NULL;
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "child name is too long");
+    }
+    name->Length = (USHORT)length;
+    name->MaximumLength = (USHORT)(length + sizeof(wchar_t));
+    name->Buffer = *wide;
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_windows_create_at(const char *utf8_parent,
+                                           const char *child_name,
+                                           int directory, AxyneError *error)
+{
+    AxyneNtCreateFileFn create_file;
+    AxyneNtSetInformationFileFn set_information;
+    AxyneRtlNtStatusToDosErrorFn to_dos;
+    AxyneUnicodeString name;
+    AxyneObjectAttributes attributes;
+    AxyneIoStatusBlock io;
+    wchar_t *wide = NULL;
+    HANDLE parent = INVALID_HANDLE_VALUE, child = INVALID_HANDLE_VALUE;
+    AxyneNtStatus native_status;
+    AxyneStatus status;
+    if (!axyne_nt_functions(&create_file, &set_information, &to_dos))
+        return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                           "handle-relative Windows operations are unavailable");
+    status = axyne_windows_parent(utf8_parent, &parent, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    status = axyne_windows_child_name(child_name, &wide, &name, error);
+    if (status != AXYNE_STATUS_OK) { CloseHandle(parent); return status; }
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.Length = sizeof(attributes);
+    attributes.RootDirectory = parent;
+    attributes.ObjectName = &name;
+    attributes.Attributes = AXYNE_OBJ_CASE_INSENSITIVE;
+    memset(&io, 0, sizeof(io));
+    native_status = create_file(&child,
+        directory ? (FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+                  : (FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE),
+        &attributes, &io, NULL, directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, AXYNE_FILE_CREATE,
+        (directory ? AXYNE_FILE_DIRECTORY_FILE : AXYNE_FILE_NON_DIRECTORY_FILE) |
+            AXYNE_FILE_SYNCHRONOUS_IO_NONALERT | AXYNE_FILE_OPEN_REPARSE_POINT,
+        NULL, 0);
+    free(wide); CloseHandle(parent);
+    if (native_status < 0)
+        return axyne_nt_error(native_status, to_dos, error,
+                              directory ? "create directory" : "create file");
+    CloseHandle(child);
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_windows_open_child(
+    const char *utf8_parent, const char *utf8_name, HANDLE *child,
+    HANDLE *parent, AxyneUnicodeString *name, wchar_t **wide, AxyneError *error,
+    AxyneNtCreateFileFn create_file, AxyneRtlNtStatusToDosErrorFn to_dos)
+{
+    AxyneObjectAttributes attributes;
+    AxyneIoStatusBlock io;
+    AxyneNtStatus native_status;
+    AxyneStatus status = axyne_windows_parent(utf8_parent, parent, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    status = axyne_windows_child_name(utf8_name, wide, name, error);
+    if (status != AXYNE_STATUS_OK) { CloseHandle(*parent); return status; }
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.Length = sizeof(attributes);
+    attributes.RootDirectory = *parent;
+    attributes.ObjectName = name;
+    attributes.Attributes = AXYNE_OBJ_CASE_INSENSITIVE;
+    memset(&io, 0, sizeof(io));
+    native_status = create_file(child,
+        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attributes, &io, NULL,
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        AXYNE_FILE_OPEN, AXYNE_FILE_SYNCHRONOUS_IO_NONALERT |
+            AXYNE_FILE_OPEN_REPARSE_POINT,
+        NULL, 0);
+    if (native_status < 0) {
+        free(*wide); *wide = NULL; CloseHandle(*parent); *parent = INVALID_HANDLE_VALUE;
+        return axyne_nt_error(native_status, to_dos, error, "open child");
+    }
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_windows_rename_at(const char *utf8_parent,
+                                           const char *old_name,
+                                           const char *new_name,
+                                           AxyneError *error)
+{
+    AxyneNtCreateFileFn create_file;
+    AxyneNtSetInformationFileFn set_information;
+    AxyneRtlNtStatusToDosErrorFn to_dos;
+    AxyneUnicodeString old_unicode, new_unicode;
+    wchar_t *old_wide = NULL, *new_wide = NULL;
+    HANDLE parent = INVALID_HANDLE_VALUE, child = INVALID_HANDLE_VALUE;
+    AxyneIoStatusBlock io;
+    AxyneFileRenameInformation *rename_info;
+    size_t size;
+    AxyneNtStatus native_status;
+    AxyneStatus status;
+    if (!axyne_nt_functions(&create_file, &set_information, &to_dos))
+        return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                           "handle-relative Windows operations are unavailable");
+    status = axyne_windows_open_child(utf8_parent, old_name, &child, &parent,
+                                       &old_unicode, &old_wide, error,
+                                       create_file, to_dos);
+    if (status != AXYNE_STATUS_OK) return status;
+    status = axyne_windows_child_name(new_name, &new_wide, &new_unicode, error);
+    if (status != AXYNE_STATUS_OK) {
+        free(old_wide); CloseHandle(child); CloseHandle(parent); return status;
+    }
+    size = offsetof(AxyneFileRenameInformation, FileName) + new_unicode.Length;
+    rename_info = (AxyneFileRenameInformation *)calloc(1, size);
+    if (rename_info == NULL) {
+        free(old_wide); free(new_wide); CloseHandle(child); CloseHandle(parent);
+        return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                           "out of memory renaming child");
+    }
+    rename_info->ReplaceIfExists = FALSE;
+    rename_info->RootDirectory = parent;
+    rename_info->FileNameLength = new_unicode.Length;
+    memcpy(rename_info->FileName, new_unicode.Buffer, new_unicode.Length);
+    memset(&io, 0, sizeof(io));
+    native_status = set_information(child, &io, rename_info, (ULONG)size,
+                                    10 /* FileRenameInformation */);
+    free(rename_info); free(old_wide); free(new_wide);
+    CloseHandle(child); CloseHandle(parent);
+    if (native_status < 0)
+        return axyne_nt_error(native_status, to_dos, error, "rename");
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_windows_remove_at(const char *utf8_parent,
+                                           const char *child_name,
+                                           AxyneError *error)
+{
+    AxyneNtCreateFileFn create_file;
+    AxyneNtSetInformationFileFn set_information;
+    AxyneRtlNtStatusToDosErrorFn to_dos;
+    AxyneUnicodeString name;
+    wchar_t *wide = NULL;
+    HANDLE parent = INVALID_HANDLE_VALUE, child = INVALID_HANDLE_VALUE;
+    AxyneFileDispositionInformation disposition;
+    AxyneIoStatusBlock io;
+    AxyneNtStatus native_status;
+    AxyneStatus status;
+    if (!axyne_nt_functions(&create_file, &set_information, &to_dos))
+        return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                           "handle-relative Windows operations are unavailable");
+    status = axyne_windows_open_child(utf8_parent, child_name, &child, &parent,
+                                       &name, &wide, error, create_file, to_dos);
+    if (status != AXYNE_STATUS_OK) return status;
+    disposition.DeleteFile = TRUE;
+    memset(&io, 0, sizeof(io));
+    native_status = set_information(child, &io, &disposition,
+                                    sizeof(disposition),
+                                    13 /* FileDispositionInformation */);
+    free(wide); CloseHandle(child); CloseHandle(parent);
+    if (native_status < 0)
+        return axyne_nt_error(native_status, to_dos, error, "remove");
+    return AXYNE_STATUS_OK;
+}
+#else
+static int axyne_posix_open_parent(const char *utf8_parent,
+                                   AxyneError *error)
+{
+    int fd;
+    struct stat info;
+    if (!axyne_valid_path(utf8_parent)) {
+        axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                    "parent directory is required");
+        return -1;
+    }
+    fd = open(utf8_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        axyne_system_error(error, axyne_errno_status(errno),
+                           "open parent directory");
+        return -1;
+    }
+    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
+        int saved = errno;
+        close(fd);
+        axyne_system_error(error, saved == 0 ? EINVAL : saved,
+                           "inspect parent directory");
+        return -1;
+    }
+    return fd;
+}
+
+static AxyneStatus axyne_posix_create_at(const char *utf8_parent,
+                                         const char *child_name,
+                                         int directory, AxyneError *error)
+{
+    int parent, child;
+    if (!axyne_valid_child_name(child_name))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "child name must be one valid name");
+    parent = axyne_posix_open_parent(utf8_parent, error);
+    if (parent < 0) return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
+    if (directory) {
+        int result = mkdirat(parent, child_name, 0777);
+        int saved = errno;
+        close(parent);
+        if (result != 0) return axyne_system_error(error, axyne_errno_status(saved), "create directory");
+    } else {
+        child = openat(parent, child_name, O_WRONLY | O_CREAT | O_EXCL |
+                       O_CLOEXEC | O_NOFOLLOW, 0666);
+        if (child < 0) { int saved = errno; close(parent); return axyne_system_error(error, axyne_errno_status(saved), "create file"); }
+        close(child); close(parent);
+    }
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_posix_rename_at(const char *utf8_parent,
+                                         const char *old_name,
+                                         const char *new_name,
+                                         AxyneError *error)
+{
+    int parent, result;
+    if (!axyne_valid_child_name(old_name) || !axyne_valid_child_name(new_name))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "source and destination names must be valid");
+    parent = axyne_posix_open_parent(utf8_parent, error);
+    if (parent < 0) return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
+#ifdef __APPLE__
+    result = renameatx_np(parent, old_name, parent, new_name, RENAME_EXCL);
+#else
+    result = -1;
+    errno = ENOTSUP;
+#endif
+    if (result != 0) { int saved = errno; close(parent); return axyne_system_error(error, axyne_errno_status(saved), "rename"); }
+    close(parent);
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_posix_remove_at(const char *utf8_parent,
+                                         const char *child_name,
+                                         AxyneError *error)
+{
+    int parent, result;
+    struct stat info;
+    if (!axyne_valid_child_name(child_name))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "child name must be one valid name");
+    parent = axyne_posix_open_parent(utf8_parent, error);
+    if (parent < 0) return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
+    if (fstatat(parent, child_name, &info, AT_SYMLINK_NOFOLLOW) != 0) {
+        int saved = errno; close(parent);
+        return axyne_system_error(error, axyne_errno_status(saved), "inspect child");
+    }
+    result = unlinkat(parent, child_name, S_ISDIR(info.st_mode) ? AT_REMOVEDIR : 0);
+    if (result != 0) { int saved = errno; close(parent); return axyne_system_error(error, axyne_errno_status(saved), "remove"); }
+    close(parent);
+    return AXYNE_STATUS_OK;
+}
+#endif
 
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error)
@@ -508,6 +908,28 @@ AxyneStatus axyne_fs_create_directory(const char *utf8_path, AxyneError *error)
     return AXYNE_STATUS_OK;
 }
 
+AxyneStatus axyne_fs_create_file_at(const char *utf8_parent,
+                                    const char *child_name,
+                                    AxyneError *error)
+{
+#ifdef _WIN32
+    return axyne_windows_create_at(utf8_parent, child_name, 0, error);
+#else
+    return axyne_posix_create_at(utf8_parent, child_name, 0, error);
+#endif
+}
+
+AxyneStatus axyne_fs_create_directory_at(const char *utf8_parent,
+                                         const char *child_name,
+                                         AxyneError *error)
+{
+#ifdef _WIN32
+    return axyne_windows_create_at(utf8_parent, child_name, 1, error);
+#else
+    return axyne_posix_create_at(utf8_parent, child_name, 1, error);
+#endif
+}
+
 AxyneStatus axyne_fs_rename(const char *utf8_path, const char *new_utf8_path,
                             AxyneError *error)
 {
@@ -533,6 +955,18 @@ AxyneStatus axyne_fs_rename(const char *utf8_path, const char *new_utf8_path,
     return AXYNE_STATUS_OK;
 }
 
+AxyneStatus axyne_fs_rename_at(const char *utf8_parent,
+                               const char *old_name,
+                               const char *new_name,
+                               AxyneError *error)
+{
+#ifdef _WIN32
+    return axyne_windows_rename_at(utf8_parent, old_name, new_name, error);
+#else
+    return axyne_posix_rename_at(utf8_parent, old_name, new_name, error);
+#endif
+}
+
 AxyneStatus axyne_fs_remove(const char *utf8_path, AxyneError *error)
 {
     if (!axyne_valid_path(utf8_path)) return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "path is required");
@@ -550,6 +984,17 @@ AxyneStatus axyne_fs_remove(const char *utf8_path, AxyneError *error)
           return axyne_system_error(error, axyne_errno_status(errno), "remove"); }
 #endif
     return AXYNE_STATUS_OK;
+}
+
+AxyneStatus axyne_fs_remove_at(const char *utf8_parent,
+                               const char *child_name,
+                               AxyneError *error)
+{
+#ifdef _WIN32
+    return axyne_windows_remove_at(utf8_parent, child_name, error);
+#else
+    return axyne_posix_remove_at(utf8_parent, child_name, error);
+#endif
 }
 
 void axyne_fs_free_directory_list(AxyneDirectoryList *list)

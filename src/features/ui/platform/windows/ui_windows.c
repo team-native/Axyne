@@ -543,7 +543,7 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
 {
     AxyneExplorerNode *node = NULL;
     const char *parent;
-    char *name = NULL, *path = NULL, *old_path = NULL, *owned_parent = NULL;
+    char *name = NULL, *old_path = NULL, *owned_parent = NULL;
     AxyneError error;
     AxyneStatus status;
     if (command == AXYNE_CMD_WORKSPACE) {
@@ -552,6 +552,14 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
     if (!state->explorer.root) return;
     if (state->explorer_has_selection && state->explorer_selection < state->explorer.count)
         node = &state->explorer.nodes[state->explorer_selection];
+    if (node != NULL && node->path != NULL &&
+        strcmp(node->path, state->explorer.root) == 0 &&
+        (command == AXYNE_CMD_EXPLORER_RENAME ||
+         command == AXYNE_CMD_EXPLORER_REMOVE)) {
+        MessageBoxA(window, "The workspace root cannot be renamed or deleted.",
+                    "Axyne - Workspace", MB_OK | MB_ICONWARNING);
+        return;
+    }
     owned_parent = node != NULL && node->kind != AXYNE_FILE_KIND_DIRECTORY
         ? axyne_workspace_parent(node->path) : NULL;
     parent = node != NULL && node->kind == AXYNE_FILE_KIND_DIRECTORY
@@ -570,11 +578,9 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
                 free(name); free(owned_parent);
                 return;
             }
-            path = axyne_workspace_join(parent, name);
-            status = path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
-                (command == AXYNE_CMD_EXPLORER_NEW_FILE
-                    ? axyne_fs_create_file(path, &error)
-                    : axyne_fs_create_directory(path, &error));
+            status = command == AXYNE_CMD_EXPLORER_NEW_FILE
+                ? axyne_fs_create_file_at(parent, name, &error)
+                : axyne_fs_create_directory_at(parent, name, &error);
         } else status = AXYNE_STATUS_OK;
     } else if (node != NULL && command == AXYNE_CMD_EXPLORER_RENAME) {
         name = axyne_prompt_utf8(window, L"Rename", L"New name:");
@@ -586,12 +592,13 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
             return;
         }
         old_path = axyne_workspace_parent(node->path);
-        path = name != NULL && old_path != NULL ? axyne_workspace_join(old_path, name) : NULL;
         status = name == NULL ? AXYNE_STATUS_OK :
-            (path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
-             axyne_fs_rename(node->path, path, &error));
+            (old_path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
+             axyne_fs_rename_at(old_path, node->name, name, &error));
     } else if (node != NULL && command == AXYNE_CMD_EXPLORER_REMOVE) {
-        status = axyne_fs_remove(node->path, &error);
+        old_path = axyne_workspace_parent(node->path);
+        status = old_path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
+            axyne_fs_remove_at(old_path, node->name, &error);
     } else status = AXYNE_STATUS_OK;
     if (status != AXYNE_STATUS_OK) {
         if (status == AXYNE_STATUS_OUT_OF_MEMORY)
@@ -604,7 +611,7 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
     }
     if (node != NULL && command == AXYNE_CMD_EXPLORER_REMOVE)
         axyne_workspace_refresh(window, state);
-    free(name); free(path); free(old_path); free(owned_parent);
+    free(name); free(old_path); free(owned_parent);
 }
 
 static void axyne_find(HWND window, AxyneWindowState *state, int replace,
