@@ -45,7 +45,8 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * reaps children. If the root is nevertheless observed reaped (ECHILD), the
  * API skips later group signals to avoid signaling a reused ID; termination of
  * remaining descendants is then not guaranteed. Do not call release from a
- * callback.
+ * callback; use release_deferred there, which schedules cleanup after the
+ * callback returns.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.
