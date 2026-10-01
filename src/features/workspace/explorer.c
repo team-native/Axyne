@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "utf8.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 static void axyne_explorer_error(AxyneError *error, AxyneStatus code,
                                  const char *message)
 {
@@ -63,6 +70,43 @@ int axyne_explorer_is_expanded(const AxyneExplorer *explorer,
     if (explorer == NULL || utf8_path == NULL) return 0;
     return axyne_explorer_path_is_expanded(explorer, utf8_path);
 }
+
+int axyne_explorer_is_safe_child_name(const char *utf8_name)
+{
+    const unsigned char *p;
+    if (utf8_name == NULL || utf8_name[0] == '\0' ||
+        !axyne_workspace_utf8_is_valid(utf8_name) ||
+        strcmp(utf8_name, ".") == 0 || strcmp(utf8_name, "..") == 0)
+        return 0;
+    for (p = (const unsigned char *)utf8_name; *p != '\0'; ++p) {
+        if (*p == '/' || *p == '\\' || *p == ':') return 0;
+    }
+    return 1;
+}
+
+#ifdef _WIN32
+static int axyne_explorer_is_reparse_directory(const char *path)
+{
+    int count;
+    wchar_t *wide;
+    DWORD attributes;
+    count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                NULL, 0);
+    if (count <= 0) return 0;
+    wide = (wchar_t *)malloc((size_t)count * sizeof(*wide));
+    if (wide == NULL) return 0;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                            wide, count) <= 0) {
+        free(wide);
+        return 0;
+    }
+    attributes = GetFileAttributesW(wide);
+    free(wide);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+#endif
 
 static int axyne_explorer_set_expanded(AxyneExplorer *explorer,
                                        const char *path, int expanded)
@@ -145,6 +189,11 @@ static AxyneStatus axyne_explorer_append_directory(AxyneExplorer *explorer,
     qsort(list.entries, list.count, sizeof(*list.entries),
           axyne_explorer_compare_entries);
     for (i = 0; i < list.count; ++i) {
+#ifdef _WIN32
+        if (list.entries[i].kind == AXYNE_FILE_KIND_DIRECTORY &&
+            axyne_explorer_is_reparse_directory(list.entries[i].path))
+            continue;
+#endif
         if (!axyne_explorer_append(explorer, &list.entries[i], depth)) {
             axyne_fs_free_directory_list(&list);
             axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
