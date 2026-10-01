@@ -30,6 +30,9 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * still arrive until the child exits. Release is safe while the child is
  * running: it requests termination and blocks until the child and callbacks
  * have finished. Do not call release from one of this process's callbacks.
+ * The start call consumes the executable, working directory, argument, and
+ * environment strings before it returns; callers may release those inputs
+ * afterward. user_data is borrowed and must remain valid until release returns.
  */
 
 typedef struct AxyneProcessSpec {
