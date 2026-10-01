@@ -524,18 +524,20 @@ static void axyne_workspace_open_selected(HWND window,
     InvalidateRect(window, NULL, FALSE);
 }
 
-static void axyne_workspace_refresh(HWND window, AxyneWindowState *state)
+static int axyne_workspace_refresh(HWND window, AxyneWindowState *state)
 {
     AxyneError error;
-    if (state->explorer.root == NULL) return;
+    if (state->explorer.root == NULL) return 0;
     if (axyne_explorer_reload(&state->explorer, &error) != AXYNE_STATUS_OK) {
         axyne_workspace_show_error(window, "Unable to refresh workspace", &error);
-        state->explorer_has_selection = 0;
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
     } else if (state->explorer_has_selection &&
                state->explorer_selection >= state->explorer.count) {
         state->explorer_has_selection = 0;
     }
     InvalidateRect(window, NULL, FALSE);
+    return 1;
 }
 
 static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
@@ -605,12 +607,15 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
             MessageBoxA(window, "Unable to allocate the requested path.",
                         "Axyne - Workspace", MB_OK | MB_ICONERROR);
         else axyne_workspace_show_error(window, "Workspace operation failed", &error);
-    } else if (command != AXYNE_CMD_WORKSPACE && name != NULL) {
-        state->explorer_has_selection = 0;
-        axyne_workspace_refresh(window, state);
+    } else if (command == AXYNE_CMD_EXPLORER_REMOVE ||
+               ((command == AXYNE_CMD_EXPLORER_NEW_FILE ||
+                 command == AXYNE_CMD_EXPLORER_NEW_FOLDER ||
+                 command == AXYNE_CMD_EXPLORER_RENAME) && name != NULL)) {
+        if (axyne_workspace_refresh(window, state)) {
+            state->explorer_has_selection = 0;
+            InvalidateRect(window, NULL, FALSE);
+        }
     }
-    if (node != NULL && command == AXYNE_CMD_EXPLORER_REMOVE)
-        axyne_workspace_refresh(window, state);
     free(name); free(old_path); free(owned_parent);
 }
 
