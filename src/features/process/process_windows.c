@@ -9,6 +9,7 @@
 
 typedef struct ProcessState {
     HANDLE process;
+    HANDLE job;
     HANDLE stdin_write;
     HANDLE stdout_read;
     HANDLE stderr_read;
@@ -217,7 +218,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
 {
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), NULL, TRUE };
     HANDLE in_read = NULL, in_write = NULL, out_read = NULL, out_write = NULL;
-    HANDLE err_read = NULL, err_write = NULL;
+    HANDLE err_read = NULL, err_write = NULL, job = NULL;
     STARTUPINFOW startup;
     PROCESS_INFORMATION info;
     AxyneProcess *process = NULL;
@@ -250,28 +251,54 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     ZeroMemory(&info, sizeof(info));
     environment = build_environment(spec);
     if (environment == NULL) goto oom;
-    if (!CreateProcessW(exe, command, NULL, NULL, TRUE, CREATE_UNICODE_ENVIRONMENT,
+    job = CreateJobObjectW(NULL, NULL);
+    if (job == NULL) goto os_error;
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+        ZeroMemory(&limits, sizeof(limits));
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                     &limits, sizeof(limits))) goto os_error;
+    }
+    if (!CreateProcessW(exe, command, NULL, NULL, TRUE,
+                        CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                         environment, cwd, &startup, &info)) goto os_error;
+    if (!AssignProcessToJobObject(job, info.hProcess)) {
+        TerminateProcess(info.hProcess, 1); WaitForSingleObject(info.hProcess, INFINITE);
+        CloseHandle(info.hProcess); CloseHandle(info.hThread);
+        goto os_error;
+    }
     CloseHandle(in_read); in_read = NULL; CloseHandle(out_write); out_write = NULL;
     CloseHandle(err_write); err_write = NULL;
     state = (ProcessState *)calloc(1, sizeof(*state));
     process = (AxyneProcess *)calloc(1, sizeof(*process));
     if (state == NULL || process == NULL) {
         TerminateProcess(info.hProcess, 1); WaitForSingleObject(info.hProcess, INFINITE);
-        CloseHandle(info.hProcess); CloseHandle(info.hThread);
+        CloseHandle(info.hProcess); CloseHandle(info.hThread); CloseHandle(job);
+        job = NULL;
         free(state); free(process); state = NULL; process = NULL;
         goto oom;
     }
-    CloseHandle(info.hThread);
-    state->process = info.hProcess; state->stdin_write = in_write; in_write = NULL;
+    state->process = info.hProcess; state->job = job; job = NULL;
+    state->stdin_write = in_write; in_write = NULL;
     state->stdout_read = out_read; out_read = NULL; state->stderr_read = err_read; err_read = NULL;
     InitializeCriticalSection(&state->write_lock);
     process->implementation = state; process->on_output = spec->on_output;
     process->on_exit = spec->on_exit; process->user_data = spec->user_data;
+    if (ResumeThread(info.hThread) == (DWORD)-1) {
+        (void)TerminateJobObject(state->job, 1);
+        WaitForSingleObject(state->process, INFINITE);
+        CloseHandle(info.hThread);
+        CloseHandle(state->process); CloseHandle(state->job);
+        CloseHandle(state->stdin_write); CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
+        DeleteCriticalSection(&state->write_lock); free(state); free(process);
+        goto os_error;
+    }
+    CloseHandle(info.hThread);
     state->worker = CreateThread(NULL, 0, process_worker, process, 0, NULL);
     if (state->worker == NULL) {
-        TerminateProcess(state->process, 1); WaitForSingleObject(state->process, INFINITE);
-        CloseHandle(state->process); CloseHandle(state->stdin_write);
+        (void)TerminateJobObject(state->job, 1); WaitForSingleObject(state->process, INFINITE);
+        CloseHandle(state->process); CloseHandle(state->job); CloseHandle(state->stdin_write);
         CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
         DeleteCriticalSection(&state->write_lock); free(state); free(process);
         goto os_error;
@@ -289,6 +316,7 @@ done:
     if (in_read != NULL) CloseHandle(in_read); if (in_write != NULL) CloseHandle(in_write);
     if (out_read != NULL) CloseHandle(out_read); if (out_write != NULL) CloseHandle(out_write);
     if (err_read != NULL) CloseHandle(err_read); if (err_write != NULL) CloseHandle(err_write);
+    if (job != NULL) CloseHandle(job);
     free(exe); free(cwd); free(command); free(environment);
     return result;
 }
@@ -319,7 +347,7 @@ AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
     ProcessState *state;
     if (process == NULL) return axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Process is null");
     state = (ProcessState *)process->implementation;
-    if (!TerminateProcess(state->process, 1) && GetLastError() != ERROR_ACCESS_DENIED)
+    if (!TerminateJobObject(state->job, 1) && GetLastError() != ERROR_ACCESS_DENIED)
         return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR, "Unable to terminate child process");
     return axyne_process_set_error(error, AXYNE_STATUS_OK, "");
 }
@@ -329,9 +357,9 @@ void axyne_process_release(AxyneProcess *process)
     ProcessState *state;
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
-    (void)TerminateProcess(state->process, 1);
+    (void)TerminateJobObject(state->job, 1);
     WaitForSingleObject(state->worker, INFINITE);
-    CloseHandle(state->worker); CloseHandle(state->process);
+    CloseHandle(state->worker); CloseHandle(state->process); CloseHandle(state->job);
     CloseHandle(state->stdin_write); CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
     DeleteCriticalSection(&state->write_lock);
     free(state); free(process);
