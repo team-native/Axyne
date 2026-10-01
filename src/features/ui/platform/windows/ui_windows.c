@@ -15,7 +15,6 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
-#include "axyne/git.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -55,6 +54,8 @@ static const COLORREF AXYNE_TEXT = RGB(199, 201, 206);
 static const COLORREF AXYNE_MUTED = RGB(115, 119, 128);
 static const COLORREF AXYNE_ACCENT = RGB(182, 122, 246);
 
+typedef struct AxyneGitUiRun AxyneGitUiRun;
+
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
     HWND editor;
@@ -71,6 +72,8 @@ typedef struct AxyneWindowState {
     AxyneRunnerConfig terminal_runner;
     AxyneRunnerConfig action_runner;
     AxyneProcess *terminal_process;
+    AxyneProcess *git_process;
+    AxyneGitUiRun *git_run;
     HWND terminal_output;
     HWND terminal_input;
     HWND terminal_start;
@@ -104,7 +107,8 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
-       AXYNE_WM_TERMINAL_EXIT = WM_APP + 23 };
+       AXYNE_WM_TERMINAL_EXIT = WM_APP + 23,
+       AXYNE_WM_GIT_COMPLETE = WM_APP + 24 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -117,6 +121,19 @@ typedef struct AxyneTerminalMessage {
     size_t length;
     AxyneProcessStream stream;
 } AxyneTerminalMessage;
+
+struct AxyneGitUiRun {
+    HWND window;
+    AxyneProcess *process;
+    char *output;
+    size_t length;
+    size_t capacity;
+    const char *empty_message;
+    int allocation_failed;
+    int exit_code;
+};
+
+enum { AXYNE_GIT_UI_OUTPUT_LIMIT = 16 * 1024 * 1024 };
 
 static AxyneDocument *axyne_active(AxyneWindowState *state);
 static int axyne_capture_editor(AxyneWindowState *state);
@@ -301,34 +318,183 @@ static void axyne_terminal_send(AxyneWindowState *state)
     free(text);
 }
 
-typedef AxyneStatus (*AxyneGitAction)(const char *, AxyneGitResult *,
-                                      AxyneError *);
-
-static void axyne_git_show_output(HWND window, AxyneWindowState *state,
-                                  const char *title, AxyneGitAction action)
+static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
+                               size_t length)
 {
-    AxyneGitResult result = {0};
+    size_t required, capacity;
+    char *grown;
+    if (length == 0) return 1;
+    if (length > SIZE_MAX - run->length - 1) return 0;
+    required = run->length + length + 1;
+    if (required > AXYNE_GIT_UI_OUTPUT_LIMIT) return 0;
+    if (required > run->capacity) {
+        capacity = run->capacity == 0 ? 4096 : run->capacity;
+        while (capacity < required) {
+            if (capacity > SIZE_MAX / 2) {
+                capacity = required;
+                break;
+            }
+            capacity *= 2;
+        }
+        grown = (char *)realloc(run->output, capacity);
+        if (grown == NULL) return 0;
+        run->output = grown;
+        run->capacity = capacity;
+    }
+    memcpy(run->output + run->length, bytes, length);
+    run->length += length;
+    run->output[run->length] = '\0';
+    return 1;
+}
+
+static void axyne_git_ui_output(AxyneProcess *process,
+                                AxyneProcessStream stream,
+                                const char *bytes, size_t length,
+                                void *user_data)
+{
+    AxyneGitUiRun *run = (AxyneGitUiRun *)user_data;
+    (void)stream;
+    if (run != NULL && bytes != NULL && !run->allocation_failed &&
+        !axyne_git_ui_append(run, bytes, length)) {
+        run->allocation_failed = 1;
+        (void)axyne_process_terminate(process, NULL);
+    }
+}
+
+static DWORD WINAPI axyne_git_ui_orphan_cleanup(void *opaque)
+{
+    AxyneGitUiRun *run = (AxyneGitUiRun *)opaque;
+    if (run != NULL) {
+        axyne_process_release(run->process);
+        free(run->output);
+        free(run);
+    }
+    return 0;
+}
+
+static void axyne_git_ui_exit(AxyneProcess *process, int exit_code,
+                              void *user_data)
+{
+    AxyneGitUiRun *run = (AxyneGitUiRun *)user_data;
+    (void)process;
+    if (run == NULL) return;
+    run->exit_code = exit_code;
+    if (run->window == NULL || !PostMessageW(run->window,
+                                             AXYNE_WM_GIT_COMPLETE, 0,
+                                             (LPARAM)run)) {
+        /* The normal owner is the UI completion message. If the window has
+         * gone away, leave process_release to a separate thread because
+         * release is allowed to wait for this worker but callbacks cannot. */
+        HANDLE cleanup;
+        run->window = NULL;
+        cleanup = CreateThread(NULL, 0, axyne_git_ui_orphan_cleanup,
+                               run, 0, NULL);
+        if (cleanup != NULL) CloseHandle(cleanup);
+    }
+}
+
+static wchar_t *axyne_git_ui_wide(const char *text)
+{
+    if (text == NULL) text = "";
+    return axyne_wide(text);
+}
+
+static void axyne_git_ui_complete(HWND window, AxyneWindowState *state,
+                                  AxyneGitUiRun *run)
+{
+    const char *text;
+    wchar_t *wide;
+    char error_message[128];
+    if (run == NULL || state == NULL) return;
+    if (run->allocation_failed) {
+        text = "Unable to allocate Git output.";
+    } else if (run->length != 0) {
+        text = run->output;
+    } else if (run->exit_code == 0) {
+        text = run->empty_message;
+    } else {
+        (void)snprintf(error_message, sizeof(error_message),
+                       "Git command failed with exit code %d",
+                       run->exit_code);
+        text = error_message;
+    }
+    wide = axyne_git_ui_wide(text);
+    if (state->terminal_output != NULL) {
+        SetWindowTextW(state->terminal_output,
+                       wide != NULL ? wide : L"(invalid Git output)");
+    }
+    free(wide);
+    if (state->git_process == run->process)
+        state->git_process = NULL;
+    state->git_run = NULL;
+    axyne_process_release(run->process);
+    free(run->output);
+    free(run);
+    InvalidateRect(window, NULL, FALSE);
+}
+
+static void axyne_git_start(HWND window, AxyneWindowState *state,
+                            const char *empty_message, int command)
+{
+    static const char *const status_arguments[] = {
+        "--no-pager", "status", "--short", "--branch"
+    };
+    static const char *const diff_arguments[] = {
+        "--no-pager", "diff", "--no-color"
+    };
+    static const char *const stage_arguments[] = { "add", "--all" };
+    static const char *const unstage_arguments[] = { "reset", "--mixed" };
+    static const char *const utf8_environment[] = {
+        "LANG=C.UTF-8", "LC_ALL=C.UTF-8"
+    };
+    const char *const *arguments;
+    size_t argument_count;
+    AxyneGitUiRun *run;
+    AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
-    const char *text;
     if (state->explorer.root == NULL) {
         MessageBoxA(window, "Open a workspace folder before using Git.",
                     "Axyne - Git", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    status = action(state->explorer.root, &result, &error);
-    if (status == AXYNE_STATUS_OK && result.length != 0) {
-        text = result.output;
-    } else if (status == AXYNE_STATUS_OK) {
-        text = title;
-    } else if (result.length != 0) {
-        text = result.output;
-    } else {
-        text = error.message;
+    if (state->git_process != NULL) {
+        MessageBoxA(window, "A Git operation is already running.",
+                    "Axyne - Git", MB_OK | MB_ICONINFORMATION);
+        return;
     }
-    if (state->terminal_output != NULL) SetWindowTextA(state->terminal_output, text);
-    axyne_git_result_free(&result);
-    InvalidateRect(window, NULL, FALSE);
+    switch (command) {
+    case AXYNE_CMD_GIT_STATUS: arguments = status_arguments; argument_count = 4; break;
+    case AXYNE_CMD_GIT_DIFF: arguments = diff_arguments; argument_count = 3; break;
+    case AXYNE_CMD_GIT_STAGE_ALL: arguments = stage_arguments; argument_count = 2; break;
+    default: arguments = unstage_arguments; argument_count = 2; break;
+    }
+    run = (AxyneGitUiRun *)calloc(1, sizeof(*run));
+    if (run == NULL) {
+        MessageBoxA(window, "Unable to allocate Git operation.",
+                    "Axyne - Git", MB_OK | MB_ICONERROR);
+        return;
+    }
+    run->window = window;
+    run->empty_message = empty_message;
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = "git";
+    spec.arguments = arguments;
+    spec.argument_count = argument_count;
+    spec.working_directory = state->explorer.root;
+    spec.environment = utf8_environment;
+    spec.environment_count = 2;
+    spec.on_output = axyne_git_ui_output;
+    spec.on_exit = axyne_git_ui_exit;
+    spec.user_data = run;
+    status = axyne_process_start(&spec, &run->process, &error);
+    if (status != AXYNE_STATUS_OK) {
+        free(run);
+        MessageBoxA(window, error.message, "Axyne - Git", MB_OK | MB_ICONERROR);
+        return;
+    }
+    state->git_process = run->process;
+    state->git_run = run;
 }
 
 static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
@@ -1741,17 +1907,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
         else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
         else if (command == AXYNE_CMD_GIT_STATUS)
-            axyne_git_show_output(window, state, "No Git status output.",
-                                  axyne_git_status);
+            axyne_git_start(window, state, "No Git status output.", command);
         else if (command == AXYNE_CMD_GIT_DIFF)
-            axyne_git_show_output(window, state, "No Git differences.",
-                                  axyne_git_diff);
+            axyne_git_start(window, state, "No Git differences.", command);
         else if (command == AXYNE_CMD_GIT_STAGE_ALL)
-            axyne_git_show_output(window, state, "All workspace changes staged.",
-                                  axyne_git_stage_all);
+            axyne_git_start(window, state, "All workspace changes staged.", command);
         else if (command == AXYNE_CMD_GIT_UNSTAGE_ALL)
-            axyne_git_show_output(window, state, "All changes unstaged.",
-                                  axyne_git_unstage_all);
+            axyne_git_start(window, state, "All changes unstaged.", command);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
             axyne_workspace_operation(window, state, command);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
@@ -1802,6 +1964,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->terminal_stop, FALSE);
         InvalidateRect(window, NULL, FALSE);
         return 0;
+    case AXYNE_WM_GIT_COMPLETE:
+        axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
+        if (state->closing) DestroyWindow(window);
+        return 0;
     case WM_NOTIFY: {
         NMHDR *header = (NMHDR *)l_param;
         if (header != NULL && header->code == SCN_MODIFIED &&
@@ -1830,6 +1996,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         for (size_t i = 0; i < state->documents.count; ++i) {
             if (!axyne_confirm_document_close(window, state, i)) return 0;
         }
+        if (state->git_process != NULL) {
+            state->closing = 1;
+            (void)axyne_process_terminate(state->git_process, NULL);
+            return 0;
+        }
         DestroyWindow(window);
         return 0;
     case WM_PAINT:
@@ -1843,6 +2014,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->terminal_process != NULL) {
                 axyne_process_release(state->terminal_process);
                 state->terminal_process = NULL;
+            }
+            if (state->git_process != NULL) {
+                if (state->git_run != NULL) state->git_run->window = NULL;
+                (void)axyne_process_terminate(state->git_process, NULL);
+                state->git_process = NULL;
+                state->git_run = NULL;
             }
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
