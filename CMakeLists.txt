@@ -76,6 +76,11 @@ if(WIN32)
     # cannot accidentally look for a Debug binary that was never built.
     set(AXYNE_SCINTILLA_CONFIGURATION "Release" CACHE STRING
         "Configuration used to build the staged Scintilla Win32 component")
+    if(NOT AXYNE_SCINTILLA_CONFIGURATION STREQUAL "Release")
+        message(FATAL_ERROR
+            "Axyne packaging requires AXYNE_SCINTILLA_CONFIGURATION=Release; "
+            "got '${AXYNE_SCINTILLA_CONFIGURATION}'.")
+    endif()
     set(AXYNE_SCINTILLA_OUTPUT_DIR
         "${CMAKE_CURRENT_BINARY_DIR}/scintilla/${AXYNE_SCINTILLA_CONFIGURATION}")
     set(AXYNE_SCINTILLA_DLL "${AXYNE_SCINTILLA_OUTPUT_DIR}/Scintilla.dll")
