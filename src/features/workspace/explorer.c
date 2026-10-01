@@ -1,6 +1,7 @@
 #include "axyne/explorer.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "utf8.h"
@@ -85,52 +86,246 @@ int axyne_explorer_is_safe_child_name(const char *utf8_name)
 }
 
 #ifdef _WIN32
-/* Returns 1 for a reparse directory, 0 for a normal directory, and -1 when
- * the safety check itself cannot be completed. */
-static int axyne_explorer_check_reparse_directory(const char *path,
-                                                  AxyneError *error)
+static AxyneStatus axyne_explorer_windows_error(DWORD code,
+                                                AxyneError *error,
+                                                const char *operation)
 {
-    int count;
+    AxyneStatus status = code == ERROR_ACCESS_DENIED
+        ? AXYNE_STATUS_PERMISSION_DENIED
+        : code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND
+            ? AXYNE_STATUS_NOT_FOUND : AXYNE_STATUS_IO_ERROR;
+    char message[128];
+    (void)snprintf(message, sizeof(message), "%s (Windows error %lu)",
+                   operation, (unsigned long)code);
+    axyne_explorer_error(error, status, message);
+    return status;
+}
+
+static wchar_t *axyne_explorer_windows_wide(const char *path,
+                                            AxyneError *error)
+{
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                    NULL, 0);
     wchar_t *wide;
-    DWORD attributes;
-    DWORD win_error;
-    count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-                                NULL, 0);
     if (count <= 0) {
         axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                              "invalid UTF-8 path");
-        return -1;
+        return NULL;
     }
     wide = (wchar_t *)malloc((size_t)count * sizeof(*wide));
     if (wide == NULL) {
         axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                             "out of memory checking directory attributes");
-        return -1;
+                             "out of memory converting path");
+        return NULL;
     }
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                             wide, count) <= 0) {
         free(wide);
         axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                              "invalid UTF-8 path");
-        return -1;
+        return NULL;
     }
-    attributes = GetFileAttributesW(wide);
-    win_error = GetLastError();
+    return wide;
+}
+
+static char *axyne_explorer_windows_utf8(const wchar_t *name, size_t length)
+{
+    int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name,
+                                    (int)length, NULL, 0, NULL, NULL);
+    char *utf8;
+    if (count <= 0) return NULL;
+    utf8 = (char *)malloc((size_t)count + 1);
+    if (utf8 == NULL) return NULL;
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name,
+                            (int)length, utf8, count, NULL, NULL) <= 0) {
+        free(utf8);
+        return NULL;
+    }
+    utf8[count] = '\0';
+    return utf8;
+}
+
+static char *axyne_explorer_windows_join(const char *base,
+                                         const char *name)
+{
+    size_t base_length = strlen(base), name_length = strlen(name);
+    int separator = base_length != 0 && base[base_length - 1] != '\\' &&
+                    base[base_length - 1] != '/';
+    char *path;
+    if (base_length > SIZE_MAX - name_length - (size_t)separator - 1)
+        return NULL;
+    path = (char *)malloc(base_length + name_length + (size_t)separator + 1);
+    if (path == NULL) return NULL;
+    memcpy(path, base, base_length);
+    if (separator) path[base_length++] = '\\';
+    memcpy(path + base_length, name, name_length + 1);
+    return path;
+}
+
+static AxyneStatus axyne_explorer_windows_list_directory(
+    const char *path, AxyneDirectoryList *list, AxyneError *error)
+{
+    enum { AXYNE_EXPLORER_INITIAL_BUFFER = 64 * 1024,
+           AXYNE_EXPLORER_MAX_BUFFER = 16 * 1024 * 1024 };
+    wchar_t *wide = NULL;
+    HANDLE directory = INVALID_HANDLE_VALUE;
+    unsigned char *buffer = NULL;
+    size_t buffer_size = AXYNE_EXPLORER_INITIAL_BUFFER;
+    AxyneStatus status = AXYNE_STATUS_OK;
+    if (list == NULL || path == NULL) {
+        axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                             "directory and output are required");
+        return AXYNE_STATUS_INVALID_ARGUMENT;
+    }
+    list->entries = NULL; list->count = 0;
+    wide = axyne_explorer_windows_wide(path, error);
+    if (wide == NULL) return error != NULL ? error->code : AXYNE_STATUS_INVALID_ARGUMENT;
+    directory = CreateFileW(wide, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
     free(wide);
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        axyne_explorer_error(error,
-            win_error == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED :
-            win_error == ERROR_FILE_NOT_FOUND || win_error == ERROR_PATH_NOT_FOUND
-                ? AXYNE_STATUS_NOT_FOUND : AXYNE_STATUS_IO_ERROR,
-            "unable to inspect directory attributes");
-        return -1;
+    if (directory == INVALID_HANDLE_VALUE)
+        return axyne_explorer_windows_error(GetLastError(), error,
+                                            "open workspace directory");
+    {
+        BY_HANDLE_FILE_INFORMATION attributes;
+        if (!GetFileInformationByHandle(directory, &attributes)) {
+            status = axyne_explorer_windows_error(GetLastError(), error,
+                                                  "inspect workspace directory");
+            goto cleanup;
+        }
+        if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            axyne_explorer_error(error, AXYNE_STATUS_UNSUPPORTED,
+                                 "reparse-point workspace roots are not supported");
+            status = AXYNE_STATUS_UNSUPPORTED;
+            goto cleanup;
+        }
+        if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                                 "workspace root is not a directory");
+            status = AXYNE_STATUS_INVALID_ARGUMENT;
+            goto cleanup;
+        }
     }
-    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        axyne_explorer_error(error, AXYNE_STATUS_UNSUPPORTED,
-                             "reparse-point directories are not traversed");
-        return 1;
+    buffer = (unsigned char *)malloc(buffer_size);
+    if (buffer == NULL) {
+        axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                             "out of memory listing workspace directory");
+        status = AXYNE_STATUS_OUT_OF_MEMORY;
+        goto cleanup;
     }
-    return 0;
+    for (;;) {
+        if (!GetFileInformationByHandleEx(directory, FileIdBothDirectoryInfo,
+                                          buffer, (DWORD)buffer_size)) {
+            DWORD code = GetLastError();
+            if (code == ERROR_NO_MORE_FILES) break;
+            if (code == ERROR_INSUFFICIENT_BUFFER &&
+                buffer_size < AXYNE_EXPLORER_MAX_BUFFER) {
+                unsigned char *grown;
+                buffer_size *= 2;
+                grown = (unsigned char *)realloc(buffer, buffer_size);
+                if (grown == NULL) {
+                    axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                         "out of memory listing workspace directory");
+                    status = AXYNE_STATUS_OUT_OF_MEMORY;
+                    goto cleanup;
+                }
+                buffer = grown;
+                continue;
+            }
+            status = axyne_explorer_windows_error(code, error,
+                                                  "enumerate workspace directory");
+            goto cleanup;
+        }
+        {
+            size_t offset = 0;
+            for (;;) {
+                FILE_ID_BOTH_DIR_INFO *entry =
+                    (FILE_ID_BOTH_DIR_INFO *)(buffer + offset);
+                size_t name_length = entry->FileNameLength / sizeof(wchar_t);
+                char *name = NULL, *entry_path = NULL;
+                size_t next = entry->NextEntryOffset;
+                if (name_length == 0 ||
+                    name_length > (buffer_size - offset -
+                                   offsetof(FILE_ID_BOTH_DIR_INFO, FileName)) /
+                                  sizeof(wchar_t)) {
+                    axyne_explorer_error(error, AXYNE_STATUS_UNSUPPORTED,
+                                         "invalid directory enumeration data");
+                    status = AXYNE_STATUS_UNSUPPORTED;
+                    goto cleanup;
+                }
+                name = axyne_explorer_windows_utf8(entry->FileName,
+                                                   name_length);
+                if (name == NULL) {
+                    axyne_explorer_error(error, AXYNE_STATUS_UNSUPPORTED,
+                                         "directory name is not valid UTF-8");
+                    status = AXYNE_STATUS_UNSUPPORTED;
+                    goto cleanup;
+                }
+                if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+                    entry_path = axyne_explorer_windows_join(path, name);
+                    if (entry_path == NULL) {
+                        free(name);
+                        axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                             "out of memory listing workspace directory");
+                        status = AXYNE_STATUS_OUT_OF_MEMORY;
+                        goto cleanup;
+                    }
+                    if ((entry->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                        (entry->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                        AxyneFileEntry *grown = (AxyneFileEntry *)realloc(
+                            list->entries, (list->count + 1) * sizeof(*grown));
+                        if (grown == NULL) {
+                            free(name); free(entry_path);
+                            axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                                 "out of memory listing workspace directory");
+                            status = AXYNE_STATUS_OUT_OF_MEMORY;
+                            goto cleanup;
+                        }
+                        list->entries = grown;
+                        grown[list->count].name = name;
+                        grown[list->count].path = entry_path;
+                        grown[list->count].kind = AXYNE_FILE_KIND_DIRECTORY;
+                        ++list->count;
+                        name = NULL; entry_path = NULL;
+                    } else if ((entry->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                        AxyneFileEntry *grown = (AxyneFileEntry *)realloc(
+                            list->entries, (list->count + 1) * sizeof(*grown));
+                        if (grown == NULL) {
+                            free(name); free(entry_path);
+                            axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                                 "out of memory listing workspace directory");
+                            status = AXYNE_STATUS_OUT_OF_MEMORY;
+                            goto cleanup;
+                        }
+                        list->entries = grown;
+                        grown[list->count].name = name;
+                        grown[list->count].path = entry_path;
+                        grown[list->count].kind = AXYNE_FILE_KIND_FILE;
+                        ++list->count;
+                        name = NULL; entry_path = NULL;
+                    }
+                }
+                free(name); free(entry_path);
+                if (next == 0) break;
+                if (next < offsetof(FILE_ID_BOTH_DIR_INFO, FileName) ||
+                    next > buffer_size - offset) {
+                    axyne_explorer_error(error, AXYNE_STATUS_UNSUPPORTED,
+                                         "invalid directory enumeration offset");
+                    status = AXYNE_STATUS_UNSUPPORTED;
+                    goto cleanup;
+                }
+                offset += next;
+            }
+        }
+    }
+cleanup:
+    free(buffer);
+    if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+    if (status != AXYNE_STATUS_OK)
+        axyne_fs_free_directory_list(list);
+    return status;
 }
 #endif
 
@@ -210,24 +405,15 @@ static AxyneStatus axyne_explorer_append_directory(AxyneExplorer *explorer,
     AxyneDirectoryList list = {0};
     AxyneStatus status;
     size_t i;
+    #ifdef _WIN32
+    status = axyne_explorer_windows_list_directory(path, &list, error);
+    #else
     status = axyne_fs_list_directory(path, &list, error);
+    #endif
     if (status != AXYNE_STATUS_OK) return status;
     qsort(list.entries, list.count, sizeof(*list.entries),
           axyne_explorer_compare_entries);
     for (i = 0; i < list.count; ++i) {
-#ifdef _WIN32
-        if (list.entries[i].kind == AXYNE_FILE_KIND_DIRECTORY) {
-            AxyneError reparse_error;
-            int reparse = axyne_explorer_check_reparse_directory(
-                list.entries[i].path, &reparse_error);
-            if (reparse > 0) continue;
-            if (reparse < 0) {
-                axyne_fs_free_directory_list(&list);
-                if (error != NULL) *error = reparse_error;
-                return reparse_error.code;
-            }
-        }
-#endif
         if (!axyne_explorer_append(explorer, &list.entries[i], depth)) {
             axyne_fs_free_directory_list(&list);
             axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
@@ -285,17 +471,6 @@ AxyneStatus axyne_explorer_set_root(AxyneExplorer *explorer,
                              "workspace root is required");
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
-#ifdef _WIN32
-    {
-        AxyneError reparse_error;
-        int reparse = axyne_explorer_check_reparse_directory(utf8_path,
-                                                               &reparse_error);
-        if (reparse != 0) {
-            if (error != NULL) *error = reparse_error;
-            return reparse_error.code;
-        }
-    }
-#endif
     copy = axyne_explorer_strdup(utf8_path);
     if (copy == NULL) {
         axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
