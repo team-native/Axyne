@@ -401,7 +401,6 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
 
 - (void)workspaceEvent
 {
-    _hasExplorerSelection = NO;
     [self refreshExplorer];
 }
 
@@ -411,7 +410,6 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     if (_explorer.root == NULL) return;
     if (axyne_explorer_reload(&_explorer, &error) != AXYNE_STATUS_OK) {
         [self showWorkspaceError:@"Unable to refresh workspace" error:&error];
-        _hasExplorerSelection = NO;
     } else if (_hasExplorerSelection &&
                (size_t)_explorerSelection >= _explorer.count) {
         _hasExplorerSelection = NO;
