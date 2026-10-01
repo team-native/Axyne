@@ -89,6 +89,7 @@ typedef struct AxyneWindowState {
     AxynePreferences preferences;
     char *global_preferences_path;
     char *workspace_preferences_path;
+    unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
 } AxyneWindowState;
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -321,15 +322,22 @@ static void axyne_load_workspace_preferences(AxyneWindowState *state,
     AxyneError error;
     AxyneStatus status;
     state->preferences = state->global_preferences;
+    memset(state->workspace_binding_present, 0,
+           sizeof(state->workspace_binding_present));
     free(state->workspace_preferences_path);
     state->workspace_preferences_path = axyne_workspace_preferences_path(root);
     if (state->workspace_preferences_path == NULL) {
         axyne_apply_preferences(state);
         return;
     }
-    status = axyne_preferences_load_workspace(state->workspace_preferences_path,
-                                               &workspace, &error);
+    status = axyne_preferences_load(state->workspace_preferences_path,
+                                     &workspace, &error);
     if (status == AXYNE_STATUS_OK) {
+        /* Keep the file's binding mask separate from the normalized snapshot
+         * used to calculate effective workspace preferences. */
+        memcpy(state->workspace_binding_present, workspace.binding_present,
+               sizeof(state->workspace_binding_present));
+        axyne_preferences_mark_all(&workspace);
         axyne_preferences_apply_workspace(&state->preferences, &workspace);
         axyne_apply_preferences(state);
     } else if (status != AXYNE_STATUS_NOT_FOUND) {
@@ -849,6 +857,9 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     AxyneError error;
     AxyneStatus status;
     const char *path;
+    if (workspace)
+        memcpy(next.binding_present, state->workspace_binding_present,
+               sizeof(next.binding_present));
     (void)swprintf_s(value, 128, L"%ls", next.theme.preset == AXYNE_THEME_LIGHT ? L"light" : next.theme.preset == AXYNE_THEME_SYSTEM ? L"system" : L"dark");
     if (!axyne_prompt(owner, workspace ? L"Workspace Settings" : L"Preferences",
                       L"Theme (dark, light, or system)", value, 128)) return 0;
@@ -933,6 +944,9 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
     if (status != AXYNE_STATUS_OK) { MessageBoxA(owner, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     state->preferences = next;
+    if (workspace)
+        memcpy(state->workspace_binding_present, next.binding_present,
+               sizeof(state->workspace_binding_present));
     if (!workspace) {
         state->global_preferences = next;
         if (state->workspace_preferences_path != NULL) {
