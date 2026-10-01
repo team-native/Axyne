@@ -322,9 +322,10 @@ static void axyne_load_workspace_preferences(AxyneWindowState *state,
     if (status == AXYNE_STATUS_OK) {
         axyne_preferences_apply_workspace(&state->preferences, &workspace);
         axyne_apply_preferences(state);
-    } else if (status != AXYNE_STATUS_NOT_FOUND)
+    } else if (status != AXYNE_STATUS_NOT_FOUND) {
         axyne_workspace_show_error(NULL, "Unable to load workspace preferences", &error);
-    else axyne_apply_preferences(state);
+        axyne_apply_preferences(state);
+    } else axyne_apply_preferences(state);
 }
 
 static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
@@ -830,7 +831,7 @@ static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
 static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
                                     int workspace)
 {
-    AxynePreferences next = state->preferences;
+    AxynePreferences next = workspace ? state->preferences : state->global_preferences;
     wchar_t value[128];
     char *utf8 = NULL;
     unsigned long parsed;
@@ -908,7 +909,18 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
     if (status != AXYNE_STATUS_OK) { MessageBoxA(owner, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     state->preferences = next;
-    if (!workspace) state->global_preferences = next;
+    if (!workspace) {
+        state->global_preferences = next;
+        if (state->workspace_preferences_path != NULL) {
+            AxynePreferences workspace_preferences;
+            AxyneStatus workspace_status = axyne_preferences_load_workspace(
+                state->workspace_preferences_path, &workspace_preferences, &error);
+            if (workspace_status == AXYNE_STATUS_OK)
+                axyne_preferences_apply_workspace(&state->preferences, &workspace_preferences);
+            else if (workspace_status != AXYNE_STATUS_NOT_FOUND)
+                axyne_workspace_show_error(owner, "Unable to reload workspace preferences", &error);
+        }
+    }
     axyne_apply_preferences(state);
     InvalidateRect(owner, NULL, FALSE);
     return 1;
