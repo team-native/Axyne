@@ -125,6 +125,8 @@ elseif(APPLE)
         COMMAND xcodebuild
             -project "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla/Scintilla.xcodeproj"
             -target Scintilla -configuration Release -sdk macosx
+            ARCHS=arm64
+            MACOSX_DEPLOYMENT_TARGET=12.0
             "CONFIGURATION_BUILD_DIR=${AXYNE_SCINTILLA_OUTPUT_DIR}"
         WORKING_DIRECTORY "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla"
         DEPENDS
@@ -139,11 +141,19 @@ elseif(APPLE)
     )
     set_target_properties(axyne PROPERTIES
         MACOSX_BUNDLE TRUE
+        OUTPUT_NAME "${AXYNE_DISPLAY_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${AXYNE_DISPLAY_NAME}"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.axyne.ide"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_COPYRIGHT "Copyright (C) ${AXYNE_AUTHOR}"
+    )
+    get_target_property(AXYNE_MACOS_BUNDLE_OUTPUT_NAME axyne OUTPUT_NAME)
+    set(AXYNE_MACOS_BUNDLE_NAME "${AXYNE_MACOS_BUNDLE_OUTPUT_NAME}.app")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Uninstall Axyne.command.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/Uninstall ${AXYNE_DISPLAY_NAME}.command"
+        @ONLY
     )
     target_link_libraries(axyne PRIVATE axyne_core "-framework AppKit")
     add_dependencies(axyne axyne_scintilla)
@@ -184,6 +194,7 @@ if(WIN32 OR APPLE)
 
     if(WIN32)
         install(TARGETS axyne
+            CONFIGURATIONS Release
             RUNTIME DESTINATION .
         )
         install(FILES
@@ -191,29 +202,35 @@ if(WIN32 OR APPLE)
             "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
             DESTINATION share/axyne
+            CONFIGURATIONS Release
         )
         install(FILES
             "${AXYNE_SCINTILLA_DLL}"
             DESTINATION .
+            CONFIGURATIONS Release
         )
         install(FILES
             "${axyne_scintilla_SOURCE_DIR}/License.txt"
             RENAME Scintilla-LICENSE.txt
             DESTINATION .
+            CONFIGURATIONS Release
         )
     elseif(APPLE)
         install(TARGETS axyne
+            CONFIGURATIONS Release
             BUNDLE DESTINATION .
         )
         install(FILES
             "${CMAKE_CURRENT_BINARY_DIR}/version.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-            DESTINATION "Axyne.app/Contents/Resources"
+            DESTINATION "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Resources"
+            CONFIGURATIONS Release
         )
         install(PROGRAMS
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Uninstall Axyne.command"
+            "${CMAKE_CURRENT_BINARY_DIR}/Uninstall ${AXYNE_DISPLAY_NAME}.command"
             DESTINATION .
+            CONFIGURATIONS Release
         )
     endif()
 endif()
@@ -244,6 +261,14 @@ if(WIN32 OR APPLE)
         "A native offline desktop IDE for Windows and macOS")
     set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
     set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md")
+    set(AXYNE_PACKAGING_CONFIGURED_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/CPackProjectConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/CPackProjectConfig.cmake"
+        @ONLY
+    )
+    set(CPACK_PROJECT_CONFIG_FILE
+        "${CMAKE_CURRENT_BINARY_DIR}/CPackProjectConfig.cmake")
 
     if(WIN32)
         set(CPACK_GENERATOR "NSIS")

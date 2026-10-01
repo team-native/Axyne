@@ -110,10 +110,10 @@ Remote update checks and remote release-note retrieval are also excluded because
 |---|---|---|---|
 | Windows installer generator | CPack NSIS; the generated NSIS installer includes CPack's standard uninstaller and a Start Menu link to Axyne | AGENT_PARAMETER | ASSUMED |
 | macOS installer generators | CPack ProductBuild `.pkg` and DragNDrop `.dmg`; both place Axyne in `/Applications` when installed through their normal flow | AGENT_PARAMETER | ASSUMED |
-| macOS uninstaller delivery | Ship `Uninstall Axyne.command` beside the app in the macOS package. It locates the adjacent app first, falls back to `/Applications/Axyne.app`, asks for confirmation, and requests administrator authorization before removal. | AGENT_PARAMETER | ASSUMED |
+| macOS uninstaller delivery | Ship `Uninstall <bundle-name>.command` beside the app in the macOS package. It derives the bundle name from the CMake target output name, locates the adjacent app first, falls back to `/Applications`, asks for confirmation, and requests administrator authorization before removal. | AGENT_PARAMETER | ASSUMED |
 | Offline version metadata | Install a generated `version.json` containing product name, semantic version, author, release-note filename, and an `offline` marker. Windows stores it under `share/axyne`; macOS stores it in the app's Resources directory. | AGENT_PARAMETER | ASSUMED |
 | Bundled release notes | Install `docs/RELEASE_NOTES.md` beside Windows package metadata and inside the macOS app Resources directory; the same file is also used as CPack's package readme. | AGENT_PARAMETER | ASSUMED |
-| Packaging scope | Package the existing CMake target and its already-staged Scintilla runtime dependencies. Do not add server, account, plugin, marketplace, remote-update, or runtime-bundling behavior. | USER + AGENT_PARAMETER | ASSUMED |
+| Packaging scope | Package the existing CMake target and its already-staged Scintilla runtime dependencies. Package only Release; reject Debug package requests. Do not add server, account, plugin, marketplace, remote-update, or runtime-bundling behavior. | USER + AGENT_PARAMETER | ASSUMED |
 
 ## UI-1 implementation boundary and status
 
