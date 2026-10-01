@@ -280,11 +280,13 @@ AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
         memcpy(temporary + n, ".axyne-tmp-XXXXXX", sizeof(".axyne-tmp-XXXXXX"));
         fd = mkstemp(temporary);
         if (fd < 0) { saved = errno; free(temporary); return axyne_system_error(error, axyne_errno_status(saved), "create temporary file"); }
-        if (existed && fchmod(fd, original.st_mode & 07777) != 0) ok = 0;
         file = fdopen(fd, "wb");
         if (file == NULL) { saved = errno; close(fd); unlink(temporary); free(temporary); return axyne_system_error(error, axyne_errno_status(saved), "open temporary file"); }
         if (ok && length != 0 && fwrite(contents, 1, length, file) != length) ok = 0;
         if (ok && fflush(file) != 0) ok = 0;
+        /* Apply ordinary permissions only after writing: writes may clear
+         * special bits, which are intentionally not copied to the replacement. */
+        if (ok && existed && fchmod(fileno(file), original.st_mode & 0777) != 0) ok = 0;
         if (ok && fsync(fileno(file)) != 0) ok = 0;
         if (fclose(file) != 0) ok = 0;
         if (ok) {
@@ -294,7 +296,11 @@ AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
                 ok = renamex_np(temporary, utf8_path, RENAME_EXCL) == 0;
 #else
                 ok = link(temporary, utf8_path) == 0;
-                if (ok) (void)unlink(temporary);
+                if (ok) {
+                    /* The destination is committed. Cleanup is best-effort;
+                     * failure may leave an extra temporary hard link behind. */
+                    (void)unlink(temporary);
+                }
 #endif
             }
         }

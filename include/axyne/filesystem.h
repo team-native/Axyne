@@ -34,10 +34,13 @@ typedef struct AxyneDirectoryList {
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error);
 /* Atomically replaces the destination with exactly length bytes, or creates
- * it if absent. A failed write preserves the previous destination. POSIX
- * permission bits are preserved when replacing an existing regular file;
- * ownership, ACLs, timestamps, extended attributes, and other metadata are
- * not guaranteed to carry over to the replacement. */
+ * it if absent. A failed write preserves the previous destination. Concurrent
+ * successful writes to the same existing file are last-writer-wins. On POSIX,
+ * only ordinary read, write, and execute permission bits (0777) are preserved
+ * when replacing an existing regular file; setuid, setgid, and sticky bits are
+ * cleared intentionally for safety. Permissions are applied after file data is
+ * written and flushed. Ownership, ACLs, timestamps, extended attributes, and
+ * other metadata are not guaranteed to carry over to the replacement. */
 AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
                                 size_t length, AxyneError *error);
 /* Lists immediate children. Each entry owns UTF-8 name and joined path
