@@ -77,6 +77,7 @@ AxyneStatus axyne_process_write(AxyneProcess *process, const char *bytes,
 AxyneStatus axyne_process_terminate(AxyneProcess *process,
                                     AxyneError *error);
 void axyne_process_release(AxyneProcess *process);
+void axyne_process_release_deferred(AxyneProcess *process);
 
 #ifdef __cplusplus
 }
