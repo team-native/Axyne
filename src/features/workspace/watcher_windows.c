@@ -85,6 +85,7 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
     char *pending_old = NULL;
     while (!InterlockedCompareExchange(&watcher->stopping, 0, 0)) {
         DWORD bytes = 0;
+        DWORD read_error;
         FILE_NOTIFY_INFORMATION *item;
         if (!ReadDirectoryChangesW(watcher->directory, buffer, sizeof(buffer),
                                    TRUE, FILE_NOTIFY_CHANGE_FILE_NAME |
@@ -92,7 +93,16 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
                                    FILE_NOTIFY_CHANGE_SIZE |
                                    FILE_NOTIFY_CHANGE_LAST_WRITE |
                                    FILE_NOTIFY_CHANGE_CREATION,
-                                   &bytes, NULL, NULL)) break;
+                                   &bytes, NULL, NULL)) {
+            read_error = GetLastError();
+            if (!InterlockedCompareExchange(&watcher->stopping, 0, 0) &&
+                read_error != ERROR_OPERATION_ABORTED) {
+                axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                           watcher->utf8_directory, NULL);
+                if (read_error == ERROR_NOTIFY_ENUM_DIR) continue;
+            }
+            break;
+        }
         if (bytes == 0) {
             axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
                        watcher->utf8_directory, NULL);
