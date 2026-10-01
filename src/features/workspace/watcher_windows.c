@@ -176,14 +176,32 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
         axyne_watch_error(error, e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_NOT_FOUND, "workspace directory is unavailable");
         return e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_NOT_FOUND;
     }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        axyne_watcher_release(watcher);
+        axyne_watch_error(error, AXYNE_STATUS_UNSUPPORTED,
+                          "reparse-point workspace roots are not supported");
+        return AXYNE_STATUS_UNSUPPORTED;
+    }
     watcher->directory = CreateFileW(watcher->wide_directory, FILE_LIST_DIRECTORY,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     if (watcher->directory == INVALID_HANDLE_VALUE) {
         DWORD e = GetLastError(); watcher->directory = NULL;
         axyne_watcher_release(watcher);
         axyne_watch_error(error, e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_IO_ERROR, "unable to open workspace directory");
         return e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_IO_ERROR;
+    }
+    {
+        BY_HANDLE_FILE_INFORMATION information;
+        if (!GetFileInformationByHandle(watcher->directory, &information) ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            CloseHandle(watcher->directory); watcher->directory = NULL;
+            axyne_watcher_release(watcher);
+            axyne_watch_error(error, AXYNE_STATUS_UNSUPPORTED,
+                              "workspace root changed to an unsafe directory");
+            return AXYNE_STATUS_UNSUPPORTED;
+        }
     }
     watcher->thread = CreateThread(NULL, 0, axyne_watch_thread, watcher, 0, NULL);
     if (watcher->thread == NULL) {
