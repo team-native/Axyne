@@ -15,7 +15,7 @@
 | Product identity | Axyne, author Native, version 0.1.0 | USER | CONFIRMED |
 | Public filesystem and watcher paths | Accept well-formed UTF-8 only; malformed path input returns `AXYNE_STATUS_INVALID_ARGUMENT` | USER | CONFIRMED |
 | Explorer mutation names | File/folder creation and rename accept only one valid UTF-8 child name; separators, absolute/path-like names, `.`, and `..` are rejected before filesystem access. | USER | CONFIRMED |
-| Explorer mutation safety | Explorer create, rename, and remove keep a verified parent directory open for the complete operation. Windows uses native handle-relative file calls with `RootDirectory`; macOS uses `openat`/`mkdirat`/`renameatx_np`/`unlinkat` with `O_NOFOLLOW`. Workspace roots cannot be renamed or removed. | AGENT_PARAMETER | ASSUMED |
+| Explorer mutation safety | Explorer create, rename, and remove resolve every parent path component from the filesystem root with no-follow handles/FDs before keeping the verified parent open for the complete operation. Windows uses native handle-relative file calls with `RootDirectory`; macOS uses `openat`/`mkdirat`/`renameatx_np`/`unlinkat` with `O_NOFOLLOW`. Workspace roots cannot be renamed or removed, and a failed mutation or refresh preserves the existing Explorer tree and selection. | AGENT_PARAMETER | ASSUMED |
 
 ## Provisional implementation assumptions
 
