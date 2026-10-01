@@ -33,7 +33,11 @@ typedef struct AxyneDirectoryList {
  * axyne_fs_free. */
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error);
-/* Creates or truncates the destination and writes exactly length bytes. */
+/* Atomically replaces the destination with exactly length bytes, or creates
+ * it if absent. A failed write preserves the previous destination. POSIX
+ * permission bits are preserved when replacing an existing regular file;
+ * ownership, ACLs, timestamps, extended attributes, and other metadata are
+ * not guaranteed to carry over to the replacement. */
 AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
                                 size_t length, AxyneError *error);
 /* Lists immediate children. Each entry owns UTF-8 name and joined path
