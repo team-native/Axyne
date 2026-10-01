@@ -59,7 +59,8 @@ enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_RELEASEDOCUMENT = 2377, SCN_SAVEPOINTREACHED = 2002,
        SCN_SAVEPOINTLEFT = 2003, SCN_MODIFIED = 2008 };
 enum { SCI_GETCURRENTPOS = 2008, SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
-       SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170 };
+       SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170,
+       SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
 
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
@@ -393,7 +394,25 @@ static void axyne_find(HWND window, AxyneWindowState *state, int replace,
         if (axyne_search_replace_all(text, length, query, strlen(query),
                 replacement, strlen(replacement), 0, &output, &output_length,
                 &count, &error) == AXYNE_STATUS_OK) {
-            SendMessageA(state->editor, SCI_SETTEXT, 0, (LPARAM)output);
+            if (count > 0) {
+                SendMessageA(state->editor, SCI_BEGINUNDOACTION, 0, 0);
+                size_t query_length = strlen(query), replacement_length = strlen(replacement);
+                size_t search_start = 0, previous_source_end = 0, previous_live_end = 0;
+                size_t at = 0; int first = 1;
+                while (axyne_search_find(text, length, query, query_length,
+                                         search_start, 0, &at) && at >= search_start) {
+                    size_t live_at = first ? at : previous_live_end +
+                        (at - previous_source_end);
+                    SendMessageA(state->editor, SCI_SETSEL, live_at,
+                                 live_at + query_length);
+                    SendMessageA(state->editor, SCI_REPLACESEL, 0, (LPARAM)replacement);
+                    previous_source_end = at + query_length;
+                    previous_live_end = live_at + replacement_length;
+                    search_start = previous_source_end;
+                    first = 0;
+                }
+                SendMessageA(state->editor, SCI_ENDUNDOACTION, 0, 0);
+            }
             free(output);
             wchar_t message[128]; swprintf_s(message, 128, L"Replaced %zu occurrence(s).", count);
             MessageBoxW(window, message, L"Axyne", MB_OK | MB_ICONINFORMATION);
@@ -425,24 +444,35 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
                 size_t chosen = 0;
                 size_t listed = count < 40 ? count : 40;
                 wchar_t *listing = (wchar_t *)calloc(32768, sizeof(wchar_t));
-                size_t used = 0;
-                if (listing != NULL) {
-                    for (size_t i = 0; i < listed && used < 30000; ++i) {
-                        wchar_t *path = axyne_wide(paths[i]);
-                        if (path != NULL) {
-                            int n = swprintf_s(listing + used, 32768 - used,
-                                               L"%zu. %ls\n", i + 1, path);
-                            if (n > 0) used += (size_t)n;
-                            free(path);
-                        }
-                    }
-                    MessageBoxW(window, listing, L"Quick File Matches", MB_OK | MB_ICONINFORMATION);
-                    free(listing);
+                if (listing == NULL) {
+                    MessageBoxW(window, L"Unable to allocate the file result list.",
+                                L"Quick File", MB_OK | MB_ICONERROR);
+                    axyne_search_paths_destroy(paths, count);
+                    free(query); free(root); return;
                 }
-                wchar_t prompt[256]; swprintf_s(prompt, 256, L"Enter a displayed result number (1-%zu):", listed);
-                if (axyne_prompt(window, L"Quick File", prompt, summary, 32768) &&
-                    swscanf_s(summary, L"%zu", &chosen) == 1 && chosen > 0 && chosen <= listed)
-                    axyne_open_document(window, state, paths[chosen - 1]);
+                size_t used = 0;
+                size_t path_indices[40], displayed = 0;
+                for (size_t i = 0; i < listed && used < 30000; ++i) {
+                    wchar_t *path = axyne_wide(paths[i]);
+                    int n = path != NULL ? swprintf_s(listing + used, 32768 - used,
+                        L"%zu. %ls\n", displayed + 1, path) : -1;
+                    free(path);
+                    if (n > 0) {
+                        used += (size_t)n;
+                        path_indices[displayed++] = i;
+                    }
+                }
+                if (displayed == 0) {
+                    MessageBoxW(window, L"File matches could not be displayed.",
+                                L"Quick File", MB_OK | MB_ICONERROR);
+                } else {
+                    MessageBoxW(window, listing, L"Quick File Matches", MB_OK | MB_ICONINFORMATION);
+                    wchar_t prompt[256]; swprintf_s(prompt, 256, L"Enter a displayed result number (1-%zu):", displayed);
+                    if (axyne_prompt(window, L"Quick File", prompt, summary, 32768) &&
+                        swscanf_s(summary, L"%zu", &chosen) == 1 && chosen > 0 && chosen <= displayed)
+                        axyne_open_document(window, state, paths[path_indices[chosen - 1]]);
+                }
+                free(listing);
             }
         }
         axyne_search_paths_destroy(paths, count);
@@ -453,16 +483,47 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
             if (shown == 0) MessageBoxW(window, L"No text matches found.", L"Axyne", MB_OK);
             else {
                 wchar_t *listing = (wchar_t *)calloc(32768, sizeof(wchar_t));
+                if (listing == NULL) {
+                    MessageBoxW(window, L"Unable to allocate the search result list.",
+                                L"Search Results", MB_OK | MB_ICONERROR);
+                    axyne_search_results_destroy(&results);
+                    free(query); free(root); return;
+                }
                 size_t used = 0;
+                size_t display_indices[20], displayed = 0;
                 for (size_t i = 0; i < shown && used < 30000; ++i) {
                     wchar_t *path = axyne_wide(results.items[i].path);
-                    if (path != NULL) {
-                        used += (size_t)swprintf_s(listing + used, 32768 - used,
-                            L"%zu. %ls:%zu\n", i + 1, path, results.items[i].line);
-                        free(path);
+                    int n = path != NULL
+                        ? swprintf_s(listing + used, 32768 - used,
+                            L"%zu. %ls:%zu\n", displayed + 1, path,
+                            results.items[i].line) : -1;
+                    free(path);
+                    if (n > 0) {
+                        used += (size_t)n;
+                        display_indices[displayed++] = i;
                     }
                 }
-                MessageBoxW(window, listing != NULL ? listing : L"Matches found.", L"Search Results", MB_OK | MB_ICONINFORMATION);
+                if (displayed == 0) {
+                    MessageBoxW(window, L"Search results could not be displayed.",
+                                L"Search Results", MB_OK | MB_ICONERROR);
+                } else {
+                    MessageBoxW(window, listing, L"Search Results", MB_OK | MB_ICONINFORMATION);
+                    size_t chosen = 0;
+                    wchar_t prompt[256], answer[64] = L"";
+                    swprintf_s(prompt, 256, L"Enter a result number (1-%zu) to open at its line:", displayed);
+                    if (axyne_prompt(window, L"Open Search Match", prompt, answer, 64) &&
+                        swscanf_s(answer, L"%zu", &chosen) == 1 && chosen > 0 && chosen <= displayed) {
+                        AxyneSearchResult *hit = &results.items[display_indices[chosen - 1]];
+                        axyne_open_document(window, state, hit->path);
+                        AxyneDocument *opened = axyne_active(state);
+                        if (opened != NULL && opened->path != NULL &&
+                            strcmp(opened->path, hit->path) == 0) {
+                            LRESULT position = SendMessageA(state->editor,
+                                SCI_POSITIONFROMLINE, hit->line > 0 ? hit->line - 1 : 0, 0);
+                            SendMessageA(state->editor, SCI_GOTOPOS, (WPARAM)position, 0);
+                        }
+                    }
+                }
                 free(listing);
             }
         }
