@@ -1110,7 +1110,6 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [theme isEqualToString:@"system"] ? AXYNE_THEME_SYSTEM : AXYNE_THEME_DARK);
     if (workspace) {
         next.present_fields = 0;
-        memset(next.binding_present, 0, sizeof(next.binding_present));
         next.present_fields |= AXYNE_PREFERENCE_THEME_PRESET;
     }
     fontSize = [self askForText:@"Editor Preferences" label:@"Font size: 6-72"];
