@@ -39,10 +39,13 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * the tree that this API can terminate and may keep inherited output pipes
  * open, causing release to wait for them. On POSIX, the root remains an
  * unreaped zombie until release so its process-group ID stays reserved while
- * the group is signaled. If a host SIGCHLD handler reaps the root first, the
- * API detects ECHILD and skips later group signals to avoid signaling a reused
- * ID; termination of remaining descendants is then not guaranteed. Do not
- * call release from a callback.
+ * the group is signaled. For the lifetime of a POSIX process handle, callers
+ * must not externally wait for or reap Axyne-managed PIDs, set SIGCHLD to
+ * SIG_IGN, enable SA_NOCLDWAIT, or install a SIGCHLD handler that broadly
+ * reaps children. If the root is nevertheless observed reaped (ECHILD), the
+ * API skips later group signals to avoid signaling a reused ID; termination of
+ * remaining descendants is then not guaranteed. Do not call release from a
+ * callback.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.
