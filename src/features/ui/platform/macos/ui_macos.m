@@ -146,7 +146,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
                 size:10 color:muted family:@"SF Pro Text"];
 
     if (_editorView == nil) {
-        [self drawLabel:@"Scintilla framework unavailable"
+        [self drawLabel:@"Required Scintilla framework failed to load"
                     at:NSMakePoint(AXYNE_SIDEBAR + 24, AXYNE_TOOLBAR + AXYNE_TABS + 24)
                     size:12 color:muted family:@"Menlo"];
     }
