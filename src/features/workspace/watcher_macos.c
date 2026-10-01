@@ -54,6 +54,17 @@ static void axyne_fsevents_callback(ConstFSEventStreamRef stream,
     (void)stream; (void)ids;
     for (i = 0; i < event_count && !atomic_load(&watcher->stopping); ++i) {
         FSEventStreamEventFlags f = flags[i];
+        const FSEventStreamEventFlags rescan_flags =
+            kFSEventStreamEventFlagMustScanSubDirs |
+            kFSEventStreamEventFlagUserDropped |
+            kFSEventStreamEventFlagKernelDropped |
+            kFSEventStreamEventFlagEventIdsWrapped |
+            kFSEventStreamEventFlagRootChanged;
+        if (f & rescan_flags) {
+            axyne_emit_event(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                             watcher->directory);
+            continue;
+        }
         if (f & kFSEventStreamEventFlagItemRenamed)
             axyne_emit_event(watcher, AXYNE_WATCH_RENAMED, paths[i]);
         else if (f & kFSEventStreamEventFlagItemCreated)

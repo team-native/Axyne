@@ -93,7 +93,11 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
                                    FILE_NOTIFY_CHANGE_LAST_WRITE |
                                    FILE_NOTIFY_CHANGE_CREATION,
                                    &bytes, NULL, NULL)) break;
-        if (bytes == 0) continue;
+        if (bytes == 0) {
+            axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                       watcher->utf8_directory, NULL);
+            continue;
+        }
         item = (FILE_NOTIFY_INFORMATION *)buffer;
         for (;;) {
             int chars = (int)(item->FileNameLength / sizeof(wchar_t));
