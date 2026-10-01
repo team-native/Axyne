@@ -13,6 +13,10 @@ typedef struct AxyneDebuggerSync {
     CONDITION_VARIABLE condition;
     DWORD callback_thread;
     int callback_active;
+    AxyneProcess *deferred_process;
+    AxyneProcess *deferred_exited_process;
+    int deferred_worker_active;
+    int destroy_pending;
 } AxyneDebuggerSync;
 #else
 #include <pthread.h>
@@ -21,13 +25,20 @@ typedef struct AxyneDebuggerSync {
     pthread_cond_t condition;
     pthread_t callback_thread;
     int callback_active;
+    AxyneProcess *deferred_process;
+    AxyneProcess *deferred_exited_process;
+    int deferred_worker_active;
+    int destroy_pending;
 } AxyneDebuggerSync;
 #endif
+
+static void debugger_finalize(AxyneDebugger *debugger);
 
 static AxyneDebuggerSync *debugger_mutex_create(void)
 {
     AxyneDebuggerSync *sync = (AxyneDebuggerSync *)malloc(sizeof(*sync));
     if (sync == NULL) return NULL;
+    memset(sync, 0, sizeof(*sync));
 #if defined(_WIN32)
     InitializeCriticalSection(&sync->mutex);
     InitializeConditionVariable(&sync->condition);
@@ -87,7 +98,7 @@ static void debugger_wait_for_release(const AxyneDebugger *debugger)
     AxyneDebuggerSync *sync;
     if (debugger == NULL || debugger->mutex == NULL) return;
     sync = (AxyneDebuggerSync *)debugger->mutex;
-    while (debugger->releasing) {
+    while (debugger->releasing || sync->callback_active) {
 #if defined(_WIN32)
         (void)SleepConditionVariableCS(&sync->condition, &sync->mutex,
                                        INFINITE);
@@ -172,11 +183,108 @@ static void debugger_callback_begin_locked(AxyneDebugger *debugger)
 static void debugger_callback_end(AxyneDebugger *debugger)
 {
     AxyneDebuggerSync *sync;
+    int finalize = 0;
     if (debugger == NULL || debugger->mutex == NULL) return;
     debugger_mutex_lock(debugger);
     sync = (AxyneDebuggerSync *)debugger->mutex;
     sync->callback_active = 0;
+    debugger_signal_release(debugger);
+    finalize = sync->destroy_pending && !debugger->releasing &&
+        !sync->deferred_worker_active && sync->deferred_process == NULL &&
+        sync->deferred_exited_process == NULL;
     debugger_mutex_unlock(debugger);
+    if (finalize) debugger_finalize(debugger);
+}
+
+static void debugger_deferred_release_complete(AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync;
+    int finalize;
+    debugger_mutex_lock(debugger);
+    sync = (AxyneDebuggerSync *)debugger->mutex;
+    sync->deferred_worker_active = 0;
+    debugger->releasing = 0;
+    debugger_signal_release(debugger);
+    finalize = sync->destroy_pending && !sync->callback_active &&
+        sync->deferred_process == NULL && sync->deferred_exited_process == NULL;
+    debugger_mutex_unlock(debugger);
+    if (finalize) debugger_finalize(debugger);
+}
+
+static void debugger_deferred_release_worker_body(AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync;
+    AxyneProcess *process;
+    AxyneProcess *exited_process;
+
+    debugger_mutex_lock(debugger);
+    sync = (AxyneDebuggerSync *)debugger->mutex;
+    process = sync->deferred_process;
+    exited_process = sync->deferred_exited_process;
+    sync->deferred_process = NULL;
+    sync->deferred_exited_process = NULL;
+    debugger_mutex_unlock(debugger);
+
+    if (process != NULL) axyne_process_release(process);
+    if (exited_process != NULL && exited_process != process)
+        axyne_process_release(exited_process);
+    debugger_deferred_release_complete(debugger);
+}
+
+#if defined(_WIN32)
+static DWORD WINAPI debugger_deferred_release_worker(void *opaque)
+{
+    debugger_deferred_release_worker_body((AxyneDebugger *)opaque);
+    return 0;
+}
+#else
+static void *debugger_deferred_release_worker(void *opaque)
+{
+    debugger_deferred_release_worker_body((AxyneDebugger *)opaque);
+    return NULL;
+}
+#endif
+
+/* Must be called with debugger->mutex held. The worker is detached so the
+ * callback thread never attempts to join its own process worker. */
+static int debugger_start_deferred_release_locked(AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync = (AxyneDebuggerSync *)debugger->mutex;
+    if (sync->deferred_worker_active) return 1;
+    if (sync->deferred_process == NULL && sync->deferred_exited_process == NULL)
+        return 1;
+    sync->deferred_worker_active = 1;
+#if defined(_WIN32)
+    {
+        HANDLE worker = CreateThread(NULL, 0, debugger_deferred_release_worker,
+                                     debugger, 0, NULL);
+        if (worker == NULL) {
+            sync->deferred_worker_active = 0;
+            return 0;
+        }
+        CloseHandle(worker);
+    }
+#else
+    {
+        pthread_attr_t attributes;
+        pthread_t worker;
+        int status = pthread_attr_init(&attributes);
+        if (status == 0) {
+            status = pthread_attr_setdetachstate(&attributes,
+                                                 PTHREAD_CREATE_DETACHED);
+            if (status == 0)
+                status = pthread_create(&worker, &attributes,
+                                        debugger_deferred_release_worker,
+                                        debugger);
+            (void)pthread_attr_destroy(&attributes);
+        }
+        if (status != 0) {
+            sync->deferred_worker_active = 0;
+            return 0;
+        }
+    }
+#endif
+    return 1;
 }
 
 static const char *debugger_command_text(AxyneDebuggerCommand command)
@@ -452,12 +560,17 @@ AxyneStatus axyne_debugger_start(AxyneDebugger *debugger,
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
     debugger_api_lock(debugger);
-    if (debugger->runner.executable == NULL || debugger->process != NULL ||
-        debugger->exited_process != NULL) {
-        debugger_mutex_unlock(debugger);
-        debugger_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
-                       "saved and clean document and inactive debugger are required");
-        return AXYNE_STATUS_INVALID_ARGUMENT;
+    {
+        AxyneDebuggerSync *sync = (AxyneDebuggerSync *)debugger->mutex;
+        if (debugger->runner.executable == NULL || debugger->process != NULL ||
+            debugger->exited_process != NULL || debugger->releasing ||
+            sync->deferred_worker_active || sync->deferred_process != NULL ||
+            sync->deferred_exited_process != NULL) {
+            debugger_mutex_unlock(debugger);
+            debugger_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "saved and clean document and inactive debugger are required");
+            return AXYNE_STATUS_INVALID_ARGUMENT;
+        }
     }
     count = debugger->runner.argument_count + 1;
     arguments = (const char **)calloc(count, sizeof(*arguments));
@@ -638,16 +751,57 @@ void axyne_debugger_release(AxyneDebugger *debugger)
 {
     AxyneProcess *process;
     AxyneProcess *exited_process;
+    AxyneDebuggerSync *sync;
+    int callback_thread;
     if (debugger == NULL) return;
     debugger_api_lock(debugger);
+    sync = (AxyneDebuggerSync *)debugger->mutex;
+    if (sync->deferred_worker_active) {
+        debugger->on_output = NULL;
+        debugger->on_exit = NULL;
+        debugger->user_data = NULL;
+        debugger_mutex_unlock(debugger);
+        return;
+    }
+    callback_thread = debugger_is_callback_thread_locked(debugger);
     debugger->releasing = 1;
     process = debugger->process;
     exited_process = debugger->exited_process;
     debugger->process = NULL;
     debugger->exited_process = NULL;
+    debugger->on_output = NULL;
+    debugger->on_exit = NULL;
+    debugger->user_data = NULL;
+
+    if (sync->deferred_process != NULL) {
+        if (process == NULL) process = sync->deferred_process;
+        else if (exited_process == NULL) exited_process = sync->deferred_process;
+        sync->deferred_process = NULL;
+    }
+    if (sync->deferred_exited_process != NULL) {
+        if (process == NULL) process = sync->deferred_exited_process;
+        else if (exited_process == NULL) exited_process = sync->deferred_exited_process;
+        sync->deferred_exited_process = NULL;
+    }
+
+    if (callback_thread) {
+        sync->deferred_process = process;
+        sync->deferred_exited_process = exited_process;
+        if (debugger_start_deferred_release_locked(debugger)) {
+            debugger_mutex_unlock(debugger);
+            return;
+        }
+        /* Thread creation can fail. Keep ownership in the debugger for a
+         * later non-callback release rather than joining the worker here. */
+        debugger->releasing = 0;
+        debugger_signal_release(debugger);
+        debugger_mutex_unlock(debugger);
+        return;
+    }
     debugger_mutex_unlock(debugger);
     if (process != NULL) axyne_process_release(process);
-    if (exited_process != NULL) axyne_process_release(exited_process);
+    if (exited_process != NULL && exited_process != process)
+        axyne_process_release(exited_process);
     debugger_mutex_lock(debugger);
     debugger->releasing = 0;
     debugger_signal_release(debugger);
@@ -664,12 +818,13 @@ int axyne_debugger_is_active(const AxyneDebugger *debugger)
     return active;
 }
 
-void axyne_debugger_destroy(AxyneDebugger *debugger)
+static void debugger_finalize(AxyneDebugger *debugger)
 {
+    void *mutex;
     size_t i;
-    if (debugger == NULL) return;
-    axyne_debugger_release(debugger);
+    if (debugger == NULL || debugger->mutex == NULL) return;
     debugger_api_lock(debugger);
+    mutex = debugger->mutex;
     axyne_runner_destroy(&debugger->runner);
     for (i = 0; i < debugger->breakpoint_count; ++i)
     {
@@ -679,6 +834,23 @@ void axyne_debugger_destroy(AxyneDebugger *debugger)
     free(debugger->breakpoints);
     free(debugger->mi_buffer);
     debugger_mutex_unlock(debugger);
-    debugger_mutex_destroy(debugger->mutex);
+    debugger->mutex = NULL;
+    debugger_mutex_destroy(mutex);
     memset(debugger, 0, sizeof(*debugger));
+}
+
+void axyne_debugger_destroy(AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync;
+    if (debugger == NULL) return;
+    axyne_debugger_release(debugger);
+    debugger_mutex_lock(debugger);
+    sync = (AxyneDebuggerSync *)debugger->mutex;
+    if (debugger_is_callback_thread_locked(debugger)) {
+        sync->destroy_pending = 1;
+        debugger_mutex_unlock(debugger);
+        return;
+    }
+    debugger_mutex_unlock(debugger);
+    debugger_finalize(debugger);
 }
