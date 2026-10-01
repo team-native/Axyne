@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <pthread.h>
 #include <dispatch/dispatch.h>
 
 #include "axyne/document.h"
@@ -11,7 +13,6 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
-#include "axyne/git.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -33,6 +34,9 @@ static const CGFloat AXYNE_TOOLBAR = 40.0;
 static const CGFloat AXYNE_TABS = 36.0;
 static const CGFloat AXYNE_STATUS = 26.0;
 static const CGFloat AXYNE_BOTTOM = 158.0;
+
+typedef struct AxyneMacGitRun AxyneMacGitRun;
+typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
 
 static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 {
@@ -56,6 +60,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
     AxyneProcess *_terminalProcess;
+    AxyneProcess *_gitProcess;
+    AxyneMacGitRun *_gitRun;
     NSTextView *_terminalOutput;
     NSTextField *_terminalInput;
     NSButton *_terminalStart;
@@ -107,10 +113,36 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)showGitDiff:(id)sender;
 - (void)stageAllGitChanges:(id)sender;
 - (void)unstageAllGitChanges:(id)sender;
+- (void)completeGitOperation:(AxyneMacGitCompletion *)completion
+                         run:(AxyneMacGitRun *)run;
+- (void)startGitOperationWithEmptyMessage:(const char *)emptyMessage
+                                arguments:(const char *const *)arguments
+                                   count:(size_t)argumentCount;
 @end
 
-typedef AxyneStatus (*AxyneGitAction)(const char *, AxyneGitResult *,
-                                      AxyneError *);
+struct AxyneMacGitRun {
+    AxyneWorkspaceView *view;
+    AxyneProcess *process;
+    char *output;
+    size_t length;
+    size_t capacity;
+    const char *empty_message;
+    int allocation_failed;
+    int exit_code;
+    pthread_mutex_t lock;
+    int cancelled;
+};
+
+struct AxyneMacGitCompletion {
+    AxyneWorkspaceView *view;
+    AxyneProcess *process;
+    char *output;
+    size_t length;
+    const char *empty_message;
+    int allocation_failed;
+    int exit_code;
+    char failure_message[128];
+};
 
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace);
@@ -922,55 +954,223 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     return [alert runModal] == NSAlertFirstButtonReturn ? [field stringValue] : nil;
 }
 
-- (void)showGitOutput:(NSString *)emptyMessage action:(AxyneGitAction)action
+static int axyne_macos_git_append(AxyneMacGitRun *run,
+                                  const char *bytes, size_t length)
 {
-    AxyneGitResult result = {0};
+    size_t required;
+    char *grown;
+    size_t capacity;
+    if (run == NULL || bytes == NULL || length == 0) return 1;
+    if (length > SIZE_MAX - run->length - 1) return 0;
+    required = run->length + length + 1;
+    if (required > run->capacity) {
+        capacity = run->capacity == 0 ? 4096 : run->capacity;
+        while (capacity < required) {
+            if (capacity > SIZE_MAX / 2) {
+                capacity = required;
+                break;
+            }
+            capacity *= 2;
+        }
+        grown = (char *)realloc(run->output, capacity);
+        if (grown == NULL) return 0;
+        run->output = grown;
+        run->capacity = capacity;
+    }
+    memcpy(run->output + run->length, bytes, length);
+    run->length += length;
+    run->output[run->length] = '\0';
+    return 1;
+}
+
+static void axyne_macos_git_output(AxyneProcess *process,
+                                   AxyneProcessStream stream,
+                                   const char *bytes, size_t length,
+                                   void *user_data)
+{
+    AxyneMacGitRun *run = (AxyneMacGitRun *)user_data;
+    (void)stream;
+    if (run != NULL && bytes != NULL && !run->allocation_failed &&
+        !axyne_macos_git_append(run, bytes, length)) {
+        run->allocation_failed = 1;
+        (void)axyne_process_terminate(process, NULL);
+    }
+}
+
+static void axyne_macos_git_cleanup(AxyneMacGitRun *run)
+{
+    if (run == NULL) return;
+    axyne_process_release(run->process);
+    free(run->output);
+    (void)pthread_mutex_destroy(&run->lock);
+    free(run);
+}
+
+static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
+                                 void *user_data)
+{
+    AxyneMacGitRun *run = (AxyneMacGitRun *)user_data;
+    AxyneMacGitCompletion *completion;
+    AxyneWorkspaceView *view = nil;
+    size_t output_size;
+    (void)process;
+    if (run == NULL) return;
+
+    (void)pthread_mutex_lock(&run->lock);
+    if (!run->cancelled && run->view != nil) {
+        view = run->view;
+        [view retain];
+    }
+    (void)pthread_mutex_unlock(&run->lock);
+    if (view == nil) return;
+
+    completion = (AxyneMacGitCompletion *)calloc(1, sizeof(*completion));
+    if (completion == NULL) {
+        [view release];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            axyne_macos_git_cleanup(run);
+        });
+        return;
+    }
+    completion->view = view;
+    completion->process = run->process;
+    completion->empty_message = run->empty_message;
+    completion->exit_code = exit_code;
+    if (exit_code != 0) {
+        (void)snprintf(completion->failure_message,
+                       sizeof(completion->failure_message),
+                       "Git command failed with exit code %d", exit_code);
+    }
+    if (!completion->allocation_failed && run->output != NULL && run->length != 0) {
+        output_size = run->length + 1;
+        completion->output = (char *)malloc(output_size);
+        if (completion->output == NULL) {
+            completion->allocation_failed = 1;
+        } else {
+            memcpy(completion->output, run->output, output_size);
+            completion->length = run->length;
+        }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [completion->view completeGitOperation:completion run:run];
+    });
+}
+
+- (void)startGitOperationWithEmptyMessage:(const char *)empty_message
+                                arguments:(const char *const *)arguments
+                                   count:(size_t)argument_count
+{
+    static const char *const utf8_environment[] = {
+        "LANG=C.UTF-8", "LC_ALL=C.UTF-8"
+    };
+    AxyneMacGitRun *run;
+    AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
-    const char *text;
     if (_explorer.root == NULL) {
         [self showWorkspaceMessage:@"Open a workspace folder before using Git."];
         return;
     }
-    status = action(_explorer.root, &result, &error);
-    if (status == AXYNE_STATUS_OK && result.length != 0) {
-        text = result.output;
-    } else if (status == AXYNE_STATUS_OK) {
-        text = [emptyMessage UTF8String];
-    } else if (result.length != 0) {
-        text = result.output;
+    if (_gitProcess != NULL) {
+        [self showWorkspaceMessage:@"A Git operation is already running."];
+        return;
+    }
+    run = (AxyneMacGitRun *)calloc(1, sizeof(*run));
+    if (run == NULL || pthread_mutex_init(&run->lock, NULL) != 0) {
+        free(run);
+        [self showWorkspaceMessage:@"Unable to allocate Git operation."];
+        return;
+    }
+    run->view = self;
+    run->empty_message = empty_message;
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = "git";
+    spec.arguments = arguments;
+    spec.argument_count = argument_count;
+    spec.working_directory = _explorer.root;
+    spec.environment = utf8_environment;
+    spec.environment_count = 2;
+    spec.on_output = axyne_macos_git_output;
+    spec.on_exit = axyne_macos_git_exit;
+    spec.user_data = run;
+    status = axyne_process_start(&spec, &run->process, &error);
+    if (status != AXYNE_STATUS_OK) {
+        (void)pthread_mutex_destroy(&run->lock);
+        free(run);
+        [self showWorkspaceMessage:[NSString stringWithUTF8String:error.message]
+                                      ?: @"Unable to start Git operation."];
+        return;
+    }
+    _gitProcess = run->process;
+    _gitRun = run;
+}
+
+- (void)completeGitOperation:(AxyneMacGitCompletion *)completion
+                         run:(AxyneMacGitRun *)run
+{
+    const char *text;
+    if (completion == NULL || run == NULL) return;
+    if (completion->allocation_failed) {
+        text = "Unable to allocate Git output.";
+    } else if (completion->length != 0) {
+        text = completion->output;
+    } else if (completion->exit_code == 0) {
+        text = completion->empty_message;
     } else {
-        text = error.message;
+        text = completion->failure_message;
     }
     [_terminalOutput setString:@""];
     if (text != NULL)
         [self terminalAppend:text length:strlen(text) stream:AXYNE_PROCESS_STDOUT];
-    axyne_git_result_free(&result);
+    if (_gitRun == run) {
+        _gitRun = NULL;
+        _gitProcess = NULL;
+    }
+    axyne_process_release(completion->process);
+    free(completion->output);
+    free(completion);
     [self setNeedsDisplay:YES];
+    [self release];
 }
 
 - (void)showGitStatus:(id)sender
 {
     (void)sender;
-    [self showGitOutput:@"No Git status output." action:axyne_git_status];
+    static const char *const arguments[] = {
+        "--no-pager", "status", "--short", "--branch"
+    };
+    [self startGitOperationWithEmptyMessage:"No Git status output."
+                                  arguments:arguments
+                                     count:sizeof(arguments) / sizeof(arguments[0])];
 }
 
 - (void)showGitDiff:(id)sender
 {
     (void)sender;
-    [self showGitOutput:@"No Git differences." action:axyne_git_diff];
+    static const char *const arguments[] = {
+        "--no-pager", "diff", "--no-color"
+    };
+    [self startGitOperationWithEmptyMessage:"No Git differences."
+                                  arguments:arguments
+                                     count:sizeof(arguments) / sizeof(arguments[0])];
 }
 
 - (void)stageAllGitChanges:(id)sender
 {
     (void)sender;
-    [self showGitOutput:@"All workspace changes staged." action:axyne_git_stage_all];
+    static const char *const arguments[] = { "add", "--all" };
+    [self startGitOperationWithEmptyMessage:"All workspace changes staged."
+                                  arguments:arguments
+                                     count:sizeof(arguments) / sizeof(arguments[0])];
 }
 
 - (void)unstageAllGitChanges:(id)sender
 {
     (void)sender;
-    [self showGitOutput:@"All changes unstaged." action:axyne_git_unstage_all];
+    static const char *const arguments[] = { "reset", "--mixed" };
+    [self startGitOperationWithEmptyMessage:"All changes unstaged."
+                                  arguments:arguments
+                                     count:sizeof(arguments) / sizeof(arguments[0])];
 }
 
 - (void)findOrReplace:(BOOL)replace
@@ -1496,6 +1696,19 @@ else [_terminalInput setStringValue:@""];
 
 - (void)dealloc
 {
+    if (_gitRun != NULL) {
+        AxyneMacGitRun *run = _gitRun;
+        (void)pthread_mutex_lock(&run->lock);
+        run->cancelled = 1;
+        run->view = nil;
+        (void)pthread_mutex_unlock(&run->lock);
+        (void)axyne_process_terminate(run->process, NULL);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            axyne_macos_git_cleanup(run);
+        });
+        _gitRun = NULL;
+        _gitProcess = NULL;
+    }
     if (_terminalProcess != NULL) {
         axyne_process_release(_terminalProcess);
         _terminalProcess = NULL;
