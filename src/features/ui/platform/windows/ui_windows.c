@@ -563,6 +563,13 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
             command == AXYNE_CMD_EXPLORER_NEW_FILE ? L"New File" : L"New Folder",
             L"Name:");
         if (name != NULL) {
+            if (!axyne_explorer_is_safe_child_name(name)) {
+                MessageBoxA(window,
+                    "Use one valid file or folder name without separators, . or ..",
+                    "Axyne - Workspace", MB_OK | MB_ICONWARNING);
+                free(name); free(owned_parent);
+                return;
+            }
             path = axyne_workspace_join(parent, name);
             status = path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
                 (command == AXYNE_CMD_EXPLORER_NEW_FILE
@@ -571,6 +578,13 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
         } else status = AXYNE_STATUS_OK;
     } else if (node != NULL && command == AXYNE_CMD_EXPLORER_RENAME) {
         name = axyne_prompt_utf8(window, L"Rename", L"New name:");
+        if (name != NULL && !axyne_explorer_is_safe_child_name(name)) {
+            MessageBoxA(window,
+                "Use one valid file or folder name without separators, . or ..",
+                "Axyne - Workspace", MB_OK | MB_ICONWARNING);
+            free(name); free(old_path); free(owned_parent);
+            return;
+        }
         old_path = axyne_workspace_parent(node->path);
         path = name != NULL && old_path != NULL ? axyne_workspace_join(old_path, name) : NULL;
         status = name == NULL ? AXYNE_STATUS_OK :
