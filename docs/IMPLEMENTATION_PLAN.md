@@ -13,6 +13,7 @@
 | Server communication, account, marketplace | Excluded from current implementation | USER | CONFIRMED |
 | Local LSP, Git, terminal, debugger integrations | Start only when the user invokes them | USER + Notion feature spec | CONFIRMED |
 | Product identity | Axyne, author Native, version 0.1.0 | USER | CONFIRMED |
+| Public filesystem and watcher paths | Accept well-formed UTF-8 only; malformed path input returns `AXYNE_STATUS_INVALID_ARGUMENT` | USER | CONFIRMED |
 
 ## Provisional implementation assumptions
 
@@ -25,6 +26,7 @@
 | Settings path behavior | RFC 6901 JSON Pointer; missing reads/removals return NOT_FOUND; set replaces the root or final object key only | AGENT_PARAMETER | ASSUMED |
 | Filesystem operation behavior | Reads return a NUL-terminated allocation plus byte length; writes create or truncate; create operations fail when the target exists; rename atomically does not replace an existing destination; remove deletes files or empty directories only | AGENT_PARAMETER | ASSUMED |
 | macOS exclusive rename support | Use `renameatx_np` with `RENAME_EXCL`; if the destination volume does not support the flag, return `AXYNE_STATUS_UNSUPPORTED` rather than performing a racy fallback | AGENT_PARAMETER | ASSUMED |
+| Unrepresentable file size | If a file length cannot fit in `size_t` with room for the trailing NUL allocation, return `AXYNE_STATUS_UNSUPPORTED` before allocation | AGENT_PARAMETER | ASSUMED |
 | macOS directory names | If a listing encounters any entry whose native name is not valid UTF-8, fail the entire listing with `AXYNE_STATUS_UNSUPPORTED` and return no partial entries | AGENT_PARAMETER | ASSUMED |
 | Workspace watcher behavior | Start watches recursively on demand; callbacks run serially on its worker thread; stop waits until callbacks have drained; rename supplies the new path and supplies the old path when the OS reports it | AGENT_PARAMETER | ASSUMED |
 | macOS rename event detail | FSEvents provides a path with a rename flag but this adapter does not pair the previous path; `old_path` is NULL for macOS rename notifications | AGENT_PARAMETER | ASSUMED |

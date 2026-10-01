@@ -1,4 +1,5 @@
 #include "axyne/watcher.h"
+#include "utf8.h"
 
 #include <CoreServices/CoreServices.h>
 #include <pthread.h>
@@ -120,7 +121,8 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
 {
     AxyneWatcher *watcher;
     struct stat info;
-    if (watcher_out == NULL || utf8_directory == NULL || utf8_directory[0] == '\0' || callback == NULL) {
+    if (watcher_out == NULL || utf8_directory == NULL || utf8_directory[0] == '\0' ||
+        !axyne_workspace_utf8_is_valid(utf8_directory) || callback == NULL) {
         axyne_watch_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "directory, callback, and output are required");
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
