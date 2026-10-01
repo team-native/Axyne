@@ -40,6 +40,9 @@
 | Modified document close/exit | Ask Save / Discard / Cancel for each modified document; cancel aborts that close or exit operation. | AGENT_PARAMETER | ASSUMED |
 | Untitled save command | Save on an untitled document opens the native Save As dialog. | AGENT_PARAMETER | ASSUMED |
 | Document I/O failures | Keep the in-memory buffer and path unchanged; failed writes keep the document marked dirty. | AGENT_PARAMETER | ASSUMED |
+| Current-file search | Literal UTF-8 byte matching; optional case-insensitive matching folds ASCII A-Z only; Find Next wraps once. Replace Current and Replace All replace literal matches. | AGENT_PARAMETER | ASSUMED |
+| Workspace search and quick file | Select a root with the native folder picker; recursively match text or file names; skip binary and unreadable files; read one file at a time. Quick File matches names by case-insensitive substring and opens the selected file through the document manager. | AGENT_PARAMETER | ASSUMED |
+| Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 
 ## Shared contracts
 
@@ -59,7 +62,7 @@
 | UI-1 | Figma-based desktop shell and Scintilla host on Windows/macOS | BASE-1 | COMPLETE (Windows Release build verified; macOS build/runtime verification pending macOS host) |
 | FS-1 | Shared filesystem API and on-demand external-change notifications | BASE-1 | COMPLETE |
 | EDIT-1 | Tabs, save/recent files, editor commands and document state | UI-1, FS-1 | COMPLETE (source diff checks passed; Windows Release build blocked by host Temp access; macOS build/runtime verification pending macOS host) |
-| SEARCH-1 | Current-file/workspace search, replace, quick file and symbol navigation | FS-1, EDIT-1 | PENDING |
+| SEARCH-1 | Current-file/workspace search, replace and quick file navigation (symbol navigation is LSP-1) | FS-1, EDIT-1 | IN_PROGRESS |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | PENDING |
 | RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | PENDING |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
