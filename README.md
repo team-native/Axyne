@@ -17,3 +17,12 @@ cmake --build build
 ```
 
 Windows에서는 Win32 창을, macOS에서는 AppKit 창을 빌드합니다.
+
+제품 메타데이터는 CMake 옵션으로 조정할 수 있습니다.
+
+```sh
+cmake -S . -B build \
+  -DAXYNE_DISPLAY_NAME="Axyne" \
+  -DAXYNE_AUTHOR="Native" \
+  -DAXYNE_VERSION="0.1.0"
+```
