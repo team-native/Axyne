@@ -25,6 +25,8 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
 
 /*
  * Output and exit callbacks run serially on a process-owned worker thread.
+ * Every accepted process emits exactly one exit callback when on_exit is
+ * non-NULL. Both output streams are drained through EOF before that callback.
  * Output bytes are valid only for the duration of the callback. Terminate
  * requests OS-level termination and returns without waiting; callbacks may
  * still arrive until the child exits. Release is safe while the child is
