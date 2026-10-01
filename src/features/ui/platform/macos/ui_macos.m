@@ -50,7 +50,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)setRecentMenu:(NSMenu *)menu;
 - (void)refreshRecentMenu;
 - (BOOL)captureEditor;
-- (void)loadActiveDocument;
+- (BOOL)loadActiveDocument;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 @end
 
@@ -114,10 +114,11 @@ static void axyne_install_menu(NSApplication *application,
     return NO;
 }
 
-- (void)loadActiveDocument
+- (BOOL)loadActiveDocument
 {
     AxyneDocument *doc = [self activeDocument];
-    if (doc == NULL || _editorView == nil) return;
+    if (doc == NULL || _editorView == nil) return NO;
+    size_t previousIndex = _documents.active_index;
     _loadingEditor = YES;
     if (!_editorDocumentInitialized) {
         doc->native_editor_document = (void *)(uintptr_t)[self
@@ -126,7 +127,11 @@ static void axyne_install_menu(NSApplication *application,
     } else if (doc->native_editor_document == NULL) {
         NSInteger created = [self sendEditorMessage:SCI_CREATEDOCUMENT
             wParam:doc->length lParam:0];
-        if (created == 0) { _loadingEditor = NO; return; }
+        if (created == 0) {
+            _loadingEditor = NO;
+            (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+            return NO;
+        }
         doc->native_editor_document = (void *)(uintptr_t)created;
         doc->owns_native_editor_document = 1;
         (void)[self sendEditorMessage:SCI_SETDOCPOINTER wParam:0
@@ -142,6 +147,7 @@ static void axyne_install_menu(NSApplication *application,
     _loadingEditor = NO;
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
+    return YES;
 }
 
 - (void)updateWindowTitle
@@ -229,10 +235,14 @@ static void axyne_install_menu(NSApplication *application,
 {
     (void)sender;
     if (![self captureEditor]) return;
+    size_t previousIndex = _documents.active_index;
     size_t index;
     if (axyne_documents_new(&_documents, &index, NULL) == AXYNE_STATUS_OK) {
         (void)axyne_documents_set_active(&_documents, index, NULL);
-        [self loadActiveDocument];
+        if (![self loadActiveDocument]) {
+            (void)axyne_documents_close(&_documents, index, NULL);
+            (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+        }
     }
 }
 
@@ -240,11 +250,13 @@ static void axyne_install_menu(NSApplication *application,
 {
     if (path == nil) return;
     if (![self captureEditor]) return;
+    size_t previousCount = _documents.count;
+    size_t previousIndex = _documents.active_index;
     size_t index = 0;
     AxyneError error;
     AxyneStatus status = axyne_documents_open(&_documents,
         [path UTF8String], &index, &error);
-    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_OUT_OF_MEMORY) {
+    if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
         [alert setMessageText:@"Could not open file"];
         [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
@@ -252,7 +264,16 @@ static void axyne_install_menu(NSApplication *application,
         return;
     }
     (void)axyne_documents_set_active(&_documents, index, NULL);
-    [self loadActiveDocument];
+    if (![self loadActiveDocument]) {
+        if (_documents.count > previousCount)
+            (void)axyne_documents_close(&_documents, index, NULL);
+        (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"Could not open file"];
+        [alert setInformativeText:@"Scintilla could not create the document."];
+        [alert runModal];
+        return;
+    }
     [self refreshRecentMenu];
 }
 
