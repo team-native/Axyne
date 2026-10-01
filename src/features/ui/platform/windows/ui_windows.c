@@ -69,7 +69,7 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
                                  HINSTANCE instance)
 {
     state->scintilla_module = LoadLibraryExW(
-        L"SciLexer.dll", NULL,
+        L"Scintilla.dll", NULL,
         LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (state->scintilla_module == NULL) {
         return;
@@ -180,7 +180,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
 
     if (state->editor == NULL) {
         axyne_text(dc, state->code_font, AXYNE_MUTED, AXYNE_SIDEBAR + 24,
-                   editor_top + 24, L"Scintilla component unavailable");
+                   editor_top + 24, L"Required Scintilla component failed to load");
     }
     EndPaint(window, &paint);
 }
