@@ -1131,6 +1131,15 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     if (wrap == nil || (![wrap isEqualToString:@"yes"] && ![wrap isEqualToString:@"no"])) { if (wrap != nil) [self showWorkspaceMessage:@"Enter yes or no."]; return NO; }
     next.editor.word_wrap = [wrap isEqualToString:@"yes"];
     if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_WORD_WRAP;
+    NSString *fontFamily = [self askForText:@"Editor Preferences" label:@"Font family: blank for native default"];
+    if (fontFamily == nil) return NO;
+    if ([[fontFamily dataUsingEncoding:NSUTF8StringEncoding] length] >= AXYNE_PREFERENCE_TEXT_MAX) { [self showWorkspaceMessage:@"The font family is invalid."]; return NO; }
+    (void)snprintf(next.editor.font_family, sizeof(next.editor.font_family), "%s", [fontFamily UTF8String] ?: "");
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
+    NSString *showWhitespace = [[self askForText:@"Editor Preferences" label:@"Show whitespace: yes or no"] lowercaseString];
+    if (showWhitespace == nil || (![showWhitespace isEqualToString:@"yes"] && ![showWhitespace isEqualToString:@"no"])) { if (showWhitespace != nil) [self showWorkspaceMessage:@"Enter yes or no."]; return NO; }
+    next.editor.show_whitespace = [showWhitespace isEqualToString:@"yes"];
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE;
     for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
         AxyneKeyBinding *edited = (AxyneKeyBinding *)axyne_preferences_find_binding(&next, (AxynePreferenceAction)action);
         if (edited == NULL) continue;
