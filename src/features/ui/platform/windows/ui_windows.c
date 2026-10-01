@@ -125,6 +125,11 @@ typedef struct AxyneTerminalMessage {
 
 struct AxyneGitUiRun {
     HWND window;
+    CRITICAL_SECTION lock;
+    LONG references;
+    int owner_released;
+    int process_released;
+    int completion_posted;
     AxyneProcess *process;
     char *output;
     size_t length;
@@ -367,36 +372,101 @@ static void axyne_git_ui_output(AxyneProcess *process,
     }
 }
 
-static DWORD WINAPI axyne_git_ui_orphan_cleanup(void *opaque)
+static void axyne_git_ui_release_ref(AxyneGitUiRun *run)
 {
-    AxyneGitUiRun *run = (AxyneGitUiRun *)opaque;
-    if (run != NULL) {
-        axyne_process_release(run->process);
+    int free_run = 0;
+    if (run == NULL) return;
+    EnterCriticalSection(&run->lock);
+    if (--run->references == 0) free_run = 1;
+    LeaveCriticalSection(&run->lock);
+    if (free_run) {
+        DeleteCriticalSection(&run->lock);
         free(run->output);
         free(run);
     }
+}
+
+static void axyne_git_ui_release_owner(AxyneGitUiRun *run)
+{
+    int release = 0;
+    if (run == NULL) return;
+    EnterCriticalSection(&run->lock);
+    if (!run->owner_released) {
+        run->owner_released = 1;
+        release = 1;
+    }
+    LeaveCriticalSection(&run->lock);
+    if (release) axyne_git_ui_release_ref(run);
+}
+
+static AxyneProcess *axyne_git_ui_take_process(AxyneGitUiRun *run)
+{
+    AxyneProcess *process = NULL;
+    if (run == NULL) return NULL;
+    EnterCriticalSection(&run->lock);
+    if (!run->process_released) {
+        run->process_released = 1;
+        process = run->process;
+    }
+    LeaveCriticalSection(&run->lock);
+    return process;
+}
+
+static void axyne_git_ui_cleanup(AxyneGitUiRun *run)
+{
+    AxyneProcess *process = axyne_git_ui_take_process(run);
+    if (process != NULL) axyne_process_release_deferred(process);
+    axyne_git_ui_release_owner(run);
+}
+
+static DWORD WINAPI axyne_git_ui_orphan_cleanup(void *opaque)
+{
+    AxyneGitUiRun *run = (AxyneGitUiRun *)opaque;
+    axyne_git_ui_cleanup(run);
     return 0;
+}
+
+static void axyne_git_ui_schedule_cleanup(AxyneGitUiRun *run)
+{
+    HANDLE cleanup;
+    if (run == NULL) return;
+    cleanup = CreateThread(NULL, 0, axyne_git_ui_orphan_cleanup,
+                           run, 0, NULL);
+    if (cleanup != NULL) {
+        CloseHandle(cleanup);
+        return;
+    }
+    if (!QueueUserWorkItem(axyne_git_ui_orphan_cleanup, run, WT_EXECUTEDEFAULT))
+        axyne_git_ui_cleanup(run);
 }
 
 static void axyne_git_ui_exit(AxyneProcess *process, int exit_code,
                               void *user_data)
 {
     AxyneGitUiRun *run = (AxyneGitUiRun *)user_data;
+    HWND window = NULL;
+    int cleanup = 0;
     (void)process;
     if (run == NULL) return;
     run->exit_code = exit_code;
-    if (run->window == NULL || !PostMessageW(run->window,
-                                             AXYNE_WM_GIT_COMPLETE, 0,
-                                             (LPARAM)run)) {
-        /* The normal owner is the UI completion message. If the window has
-         * gone away, leave process_release to a separate thread because
-         * release is allowed to wait for this worker but callbacks cannot. */
-        HANDLE cleanup;
-        run->window = NULL;
-        cleanup = CreateThread(NULL, 0, axyne_git_ui_orphan_cleanup,
-                               run, 0, NULL);
-        if (cleanup != NULL) CloseHandle(cleanup);
+    EnterCriticalSection(&run->lock);
+    window = run->window;
+    if (window != NULL) {
+        ++run->references;
+        if (PostMessageW(window, AXYNE_WM_GIT_COMPLETE, 0,
+                         (LPARAM)run)) {
+            run->completion_posted = 1;
+        } else {
+            --run->references;
+            run->window = NULL;
+            cleanup = 1;
+        }
+    } else {
+        cleanup = 1;
     }
+    LeaveCriticalSection(&run->lock);
+    if (cleanup) axyne_git_ui_schedule_cleanup(run);
+    axyne_git_ui_release_ref(run);
 }
 
 static wchar_t *axyne_git_ui_wide(const char *text)
@@ -412,6 +482,7 @@ static void axyne_git_ui_complete(HWND window, AxyneWindowState *state,
     wchar_t *wide;
     char error_message[128];
     if (run == NULL || state == NULL) return;
+    if (state->git_run != run) return;
     if (run->allocation_failed) {
         text = "Unable to allocate Git output.";
     } else if (run->output_truncated) {
@@ -435,9 +506,15 @@ static void axyne_git_ui_complete(HWND window, AxyneWindowState *state,
     if (state->git_process == run->process)
         state->git_process = NULL;
     state->git_run = NULL;
-    axyne_process_release(run->process);
-    free(run->output);
-    free(run);
+    EnterCriticalSection(&run->lock);
+    run->completion_posted = 0;
+    LeaveCriticalSection(&run->lock);
+    {
+        AxyneProcess *process = axyne_git_ui_take_process(run);
+        if (process != NULL) axyne_process_release(process);
+    }
+    axyne_git_ui_release_owner(run);
+    axyne_git_ui_release_ref(run);
     InvalidateRect(window, NULL, FALSE);
 }
 
@@ -483,6 +560,8 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
                     "Axyne - Git", MB_OK | MB_ICONERROR);
         return;
     }
+    InitializeCriticalSection(&run->lock);
+    run->references = 2;
     run->window = window;
     run->empty_message = empty_message;
     memset(&spec, 0, sizeof(spec));
@@ -497,6 +576,7 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
     spec.user_data = run;
     status = axyne_process_start(&spec, &run->process, &error);
     if (status != AXYNE_STATUS_OK) {
+        DeleteCriticalSection(&run->lock);
         free(run);
         MessageBoxA(window, error.message, "Axyne - Git", MB_OK | MB_ICONERROR);
         return;
@@ -1973,7 +2053,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         InvalidateRect(window, NULL, FALSE);
         return 0;
     case AXYNE_WM_GIT_COMPLETE:
-        axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
+        if (state->git_run == (AxyneGitUiRun *)l_param)
+            axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
         if (state->closing) DestroyWindow(window);
         return 0;
     case WM_NOTIFY: {
@@ -2024,8 +2105,20 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->terminal_process = NULL;
             }
             if (state->git_process != NULL) {
-                if (state->git_run != NULL) state->git_run->window = NULL;
-                (void)axyne_process_terminate(state->git_process, NULL);
+                AxyneGitUiRun *run = state->git_run;
+                int release_message = 0;
+                if (run != NULL) {
+                    EnterCriticalSection(&run->lock);
+                    run->window = NULL;
+                    if (run->completion_posted) {
+                        run->completion_posted = 0;
+                        release_message = 1;
+                    }
+                    LeaveCriticalSection(&run->lock);
+                    (void)axyne_process_terminate(state->git_process, NULL);
+                    if (release_message) axyne_git_ui_release_ref(run);
+                    axyne_git_ui_schedule_cleanup(run);
+                }
                 state->git_process = NULL;
                 state->git_run = NULL;
             }

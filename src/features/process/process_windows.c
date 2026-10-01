@@ -15,9 +15,31 @@ typedef struct ProcessState {
     HANDLE stderr_read;
     HANDLE worker;
     CRITICAL_SECTION write_lock;
+    LONG release_requested;
+    LONG worker_finished;
+    LONG cleanup_claimed;
 } ProcessState;
 
 static wchar_t *to_wide(const char *text);
+
+static void process_destroy(AxyneProcess *process)
+{
+    ProcessState *state = (ProcessState *)process->implementation;
+    CloseHandle(state->worker); CloseHandle(state->process); CloseHandle(state->job);
+    CloseHandle(state->stdin_write); CloseHandle(state->stdout_read);
+    CloseHandle(state->stderr_read);
+    DeleteCriticalSection(&state->write_lock);
+    free(state); free(process);
+}
+
+static void process_try_deferred_destroy(AxyneProcess *process)
+{
+    ProcessState *state = (ProcessState *)process->implementation;
+    if (InterlockedCompareExchange(&state->release_requested, 0, 0) != 0 &&
+        InterlockedCompareExchange(&state->worker_finished, 0, 0) != 0 &&
+        InterlockedCompareExchange(&state->cleanup_claimed, 1, 0) == 0)
+        process_destroy(process);
+}
 
 static wchar_t fold_environment_char(wchar_t value)
 {
@@ -231,6 +253,8 @@ static DWORD WINAPI process_worker(void *opaque)
         if (!exited || !eof[0] || !eof[1]) Sleep(1);
     }
     axyne_process_dispatch_exit(process, (int)exit_code);
+    InterlockedExchange(&state->worker_finished, 1);
+    process_try_deferred_destroy(process);
     return 0;
 }
 
@@ -397,10 +421,21 @@ void axyne_process_release(AxyneProcess *process)
     ProcessState *state;
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
+    if (GetCurrentThreadId() == GetThreadId(state->worker)) {
+        InterlockedExchange(&state->release_requested, 1);
+        return;
+    }
     (void)TerminateJobObject(state->job, 1);
     WaitForSingleObject(state->worker, INFINITE);
-    CloseHandle(state->worker); CloseHandle(state->process); CloseHandle(state->job);
-    CloseHandle(state->stdin_write); CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
-    DeleteCriticalSection(&state->write_lock);
-    free(state); free(process);
+    if (InterlockedCompareExchange(&state->cleanup_claimed, 1, 0) == 0)
+        process_destroy(process);
+}
+
+void axyne_process_release_deferred(AxyneProcess *process)
+{
+    ProcessState *state;
+    if (process == NULL) return;
+    state = (ProcessState *)process->implementation;
+    InterlockedExchange(&state->release_requested, 1);
+    process_try_deferred_destroy(process);
 }

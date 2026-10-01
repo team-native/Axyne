@@ -133,6 +133,7 @@ struct AxyneMacGitRun {
     int exit_code;
     pthread_mutex_t lock;
     int cancelled;
+    int references;
 };
 
 struct AxyneMacGitCompletion {
@@ -1015,11 +1016,21 @@ static void axyne_macos_git_free(AxyneMacGitRun *run)
     free(run);
 }
 
+static void axyne_macos_git_release(AxyneMacGitRun *run)
+{
+    int free_run = 0;
+    if (run == NULL) return;
+    (void)pthread_mutex_lock(&run->lock);
+    if (--run->references == 0) free_run = 1;
+    (void)pthread_mutex_unlock(&run->lock);
+    if (free_run) axyne_macos_git_free(run);
+}
+
 static void axyne_macos_git_cleanup(AxyneMacGitRun *run)
 {
     if (run == NULL) return;
     axyne_process_release(run->process);
-    axyne_macos_git_free(run);
+    axyne_macos_git_release(run);
 }
 
 static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
@@ -1035,6 +1046,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     (void)pthread_mutex_lock(&run->lock);
     if (!run->cancelled && run->view != nil) {
         view = run->view;
+        ++run->references;
         [view retain];
     }
     (void)pthread_mutex_unlock(&run->lock);
@@ -1043,6 +1055,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     completion = (AxyneMacGitCompletion *)calloc(1, sizeof(*completion));
     if (completion == NULL) {
         [view release];
+        axyne_macos_git_release(run);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             axyne_macos_git_cleanup(run);
         });
@@ -1099,6 +1112,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         [self showWorkspaceMessage:@"Unable to allocate Git operation."];
         return;
     }
+    run->references = 1;
     run->view = self;
     run->empty_message = empty_message;
     memset(&spec, 0, sizeof(spec));
@@ -1147,7 +1161,8 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         _gitProcess = NULL;
     }
     axyne_process_release(completion->process);
-    axyne_macos_git_free(run);
+    axyne_macos_git_release(run);
+    axyne_macos_git_release(run);
     free(completion->output);
     free(completion);
     [self setNeedsDisplay:YES];

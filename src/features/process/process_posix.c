@@ -406,3 +406,8 @@ void axyne_process_release(AxyneProcess *process)
     (void)pthread_mutex_destroy(&state->write_lock);
     free(state); free(process);
 }
+
+void axyne_process_release_deferred(AxyneProcess *process)
+{
+    axyne_process_release(process);
+}
