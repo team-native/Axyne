@@ -26,7 +26,25 @@ typedef struct ProcessState {
     pthread_mutex_t child_lock;
     int child_done;
     int child_status;
+    int root_reaped_unexpectedly;
 } ProcessState;
+
+static unsigned char ascii_fold(unsigned char value)
+{
+    return value >= 'A' && value <= 'Z' ? (unsigned char)(value + ('a' - 'A')) : value;
+}
+
+static int same_environment_name(const char *left, size_t left_length,
+                                const char *right, size_t right_length)
+{
+    size_t i;
+    if (left_length != right_length) return 0;
+    for (i = 0; i < left_length; ++i) {
+        if (ascii_fold((unsigned char)left[i]) != ascii_fold((unsigned char)right[i]))
+            return 0;
+    }
+    return 1;
+}
 
 static int set_cloexec(int fd)
 {
@@ -84,8 +102,9 @@ static char **build_environment(const AxyneProcessSpec *spec)
         for (j = 0; j < spec->environment_count; ++j) {
             const char *override = spec->environment[j];
             const char *override_equals = strchr(override, '=');
-            if (override_equals != NULL && (size_t)(override_equals - override) == name_length &&
-                memcmp(environ[i], override, name_length) == 0) {
+            if (override_equals != NULL &&
+                same_environment_name(environ[i], name_length, override,
+                                      (size_t)(override_equals - override))) {
                 replaced = 1;
                 break;
             }
@@ -163,6 +182,7 @@ static void *process_worker(void *opaque)
                         child_info.si_code == CLD_DUMPED)
                         state->child_status = 128 + child_info.si_status;
                 } else {
+                    state->root_reaped_unexpectedly = 1;
                     state->child_status = 1;
                 }
             } else if (wait_result < 0 && errno != EINTR) {
@@ -355,7 +375,8 @@ AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
                                                         "Process is null");
     state = (ProcessState *)process->implementation;
     (void)pthread_mutex_lock(&state->child_lock);
-    if (kill(-state->child, SIGKILL) != 0 && errno != ESRCH) {
+    if (!state->root_reaped_unexpectedly &&
+        kill(-state->child, SIGKILL) != 0 && errno != ESRCH) {
         (void)pthread_mutex_unlock(&state->child_lock);
         return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
                                        "Unable to terminate child process group");
@@ -370,11 +391,12 @@ void axyne_process_release(AxyneProcess *process)
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
     (void)pthread_mutex_lock(&state->child_lock);
-    (void)kill(-state->child, SIGKILL);
+    if (!state->root_reaped_unexpectedly) (void)kill(-state->child, SIGKILL);
     (void)pthread_mutex_unlock(&state->child_lock);
     (void)pthread_join(state->worker, NULL);
-    /* The worker observes exit without reaping, keeping the process-group ID
-       reserved until after the final group signal. */
+    /* Normally the zombie leader reserves its process-group ID through the
+       final group signal. If a host SIGCHLD handler reaped it, do not signal
+       the potentially reused ID; waitpid below remains best-effort cleanup. */
     while (waitpid(state->child, NULL, 0) < 0 && errno == EINTR) { }
     (void)pthread_mutex_lock(&state->write_lock);
     close(state->stdin_write);
