@@ -1,0 +1,338 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include "process_internal.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+typedef struct ProcessState {
+    HANDLE process;
+    HANDLE stdin_write;
+    HANDLE stdout_read;
+    HANDLE stderr_read;
+    HANDLE worker;
+    CRITICAL_SECTION write_lock;
+} ProcessState;
+
+static wchar_t *to_wide(const char *text);
+
+static int compare_environment(const void *left, const void *right)
+{
+    return _wcsicmp(*(const wchar_t *const *)left, *(const wchar_t *const *)right);
+}
+
+static wchar_t *build_environment(const AxyneProcessSpec *spec)
+{
+    LPWCH inherited = GetEnvironmentStringsW();
+    wchar_t **entries = NULL;
+    size_t count = 0, capacity = 0, i, total = 1;
+    wchar_t *cursor, *block = NULL;
+    if (inherited == NULL) return NULL;
+    for (cursor = inherited; *cursor != L'\0'; cursor += wcslen(cursor) + 1) {
+        wchar_t *separator = wcschr(cursor + (cursor[0] == L'='), L'=');
+        size_t name_length = separator != NULL ? (size_t)(separator - cursor) : wcslen(cursor);
+        int replaced = 0;
+        for (i = 0; i < spec->environment_count; ++i) {
+            wchar_t *override = to_wide(spec->environment[i]);
+            wchar_t *equals;
+            if (override == NULL) goto done;
+            equals = wcschr(override, L'=');
+            if (equals != NULL && (size_t)(equals - override) == name_length &&
+                _wcsnicmp(cursor, override, name_length) == 0) replaced = 1;
+            free(override);
+            if (replaced) break;
+        }
+        if (!replaced) {
+            wchar_t *copy = _wcsdup(cursor);
+            if (copy == NULL) goto done;
+            if (count == capacity) {
+                size_t next = capacity == 0 ? 16 : capacity * 2;
+                wchar_t **grown = (wchar_t **)realloc(entries, next * sizeof(*entries));
+                if (grown == NULL) { free(copy); goto done; }
+                entries = grown; capacity = next;
+            }
+            entries[count++] = copy;
+        }
+    }
+    for (i = 0; i < spec->environment_count; ++i) {
+        wchar_t *copy = to_wide(spec->environment[i]);
+        if (copy == NULL) goto done;
+        if (count == capacity) {
+            size_t next = capacity == 0 ? 16 : capacity * 2;
+            wchar_t **grown = (wchar_t **)realloc(entries, next * sizeof(*entries));
+            if (grown == NULL) { free(copy); goto done; }
+            entries = grown; capacity = next;
+        }
+        entries[count++] = copy;
+    }
+    qsort(entries, count, sizeof(*entries), compare_environment);
+    for (i = 0; i < count; ++i) total += wcslen(entries[i]) + 1;
+    block = (wchar_t *)calloc(total, sizeof(wchar_t));
+    if (block != NULL) {
+        size_t offset = 0;
+        for (i = 0; i < count; ++i) {
+            size_t length = wcslen(entries[i]) + 1;
+            memcpy(block + offset, entries[i], length * sizeof(wchar_t));
+            offset += length;
+        }
+    }
+done:
+    for (i = 0; i < count; ++i) free(entries[i]);
+    free(entries);
+    FreeEnvironmentStringsW(inherited);
+    return block;
+}
+
+static wchar_t *to_wide(const char *text)
+{
+    int count;
+    wchar_t *result;
+    if (text == NULL) return NULL;
+    count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
+    if (count <= 0) return NULL;
+    result = (wchar_t *)malloc((size_t)count * sizeof(wchar_t));
+    if (result == NULL) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1,
+                            result, count) <= 0) {
+        free(result);
+        return NULL;
+    }
+    return result;
+}
+
+static wchar_t *quote_arg(const wchar_t *arg)
+{
+    size_t length = wcslen(arg), capacity = length * 2 + 3, out = 0, i;
+    wchar_t *quoted = (wchar_t *)malloc(capacity * sizeof(wchar_t));
+    size_t slashes = 0;
+    if (quoted == NULL) return NULL;
+    quoted[out++] = L'"';
+    for (i = 0; i < length; ++i) {
+        if (arg[i] == L'\\') { ++slashes; continue; }
+        if (arg[i] == L'"') {
+            while (slashes-- > 0) quoted[out++] = L'\\';
+            quoted[out++] = L'\\';
+            quoted[out++] = L'"';
+            slashes = 0;
+        } else {
+            while (slashes-- > 0) quoted[out++] = L'\\';
+            quoted[out++] = arg[i];
+            slashes = 0;
+        }
+    }
+    while (slashes > 0) { quoted[out++] = L'\\'; quoted[out++] = L'\\'; --slashes; }
+    quoted[out++] = L'"';
+    quoted[out] = L'\0';
+    return quoted;
+}
+
+static int append_command(wchar_t **command, size_t *used, size_t *capacity,
+                          const wchar_t *argument)
+{
+    wchar_t *quoted = quote_arg(argument);
+    size_t need;
+    wchar_t *grown;
+    if (quoted == NULL) return 0;
+    need = *used + wcslen(quoted) + 2;
+    if (need > *capacity) {
+        size_t next = need * 2;
+        grown = (wchar_t *)realloc(*command, next * sizeof(wchar_t));
+        if (grown == NULL) { free(quoted); return 0; }
+        *command = grown; *capacity = next;
+    }
+    if (*used != 0) (*command)[(*used)++] = L' ';
+    {
+        size_t quoted_length = wcslen(quoted);
+        memcpy(*command + *used, quoted, (quoted_length + 1) * sizeof(wchar_t));
+        *used += quoted_length;
+    }
+    free(quoted);
+    return 1;
+}
+
+static DWORD WINAPI process_worker(void *opaque)
+{
+    AxyneProcess *process = (AxyneProcess *)opaque;
+    ProcessState *state = (ProcessState *)process->implementation;
+    char buffer[4096];
+    HANDLE pipes[2] = { state->stdout_read, state->stderr_read };
+    int exited = 0;
+    int eof[2] = { 0, 0 };
+    DWORD exit_code = 1;
+    while (!exited || !eof[0] || !eof[1]) {
+        size_t i;
+        if (!exited && WaitForSingleObject(state->process, 10) == WAIT_OBJECT_0) {
+            exited = 1;
+            (void)GetExitCodeProcess(state->process, &exit_code);
+        }
+        for (i = 0; i < 2; ++i) {
+            DWORD available = 0, read_count = 0;
+            if (eof[i]) continue;
+            if (!PeekNamedPipe(pipes[i], NULL, 0, NULL, &available, NULL)) {
+                DWORD pipe_error = GetLastError();
+                if (pipe_error == ERROR_BROKEN_PIPE || pipe_error == ERROR_NO_DATA)
+                    eof[i] = 1;
+                continue;
+            }
+            if (available == 0) continue;
+            if (available > sizeof(buffer)) available = (DWORD)sizeof(buffer);
+            if (ReadFile(pipes[i], buffer, available, &read_count, NULL) && read_count > 0) {
+                axyne_process_dispatch_output(process,
+                    i == 0 ? AXYNE_PROCESS_STDOUT : AXYNE_PROCESS_STDERR,
+                    buffer, (size_t)read_count);
+            }
+            else if (GetLastError() == ERROR_BROKEN_PIPE || GetLastError() == ERROR_NO_DATA) {
+                eof[i] = 1;
+            }
+        }
+        if (!exited || !eof[0] || !eof[1]) Sleep(1);
+    }
+    axyne_process_dispatch_exit(process, (int)exit_code);
+    return 0;
+}
+
+static int make_pipe(HANDLE *read_end, HANDLE *write_end, int parent_reads)
+{
+    SECURITY_ATTRIBUTES attributes = { sizeof(attributes), NULL, TRUE };
+    HANDLE read_pipe = NULL, write_pipe = NULL;
+    if (!CreatePipe(&read_pipe, &write_pipe, &attributes, 0)) return 0;
+    if (parent_reads) {
+        if (!SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0)) {
+            CloseHandle(read_pipe); CloseHandle(write_pipe); return 0;
+        }
+        *read_end = read_pipe; *write_end = write_pipe;
+    } else {
+        if (!SetHandleInformation(write_pipe, HANDLE_FLAG_INHERIT, 0)) {
+            CloseHandle(read_pipe); CloseHandle(write_pipe); return 0;
+        }
+        *read_end = read_pipe; *write_end = write_pipe;
+    }
+    return 1;
+}
+
+AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
+                               AxyneProcess **out, AxyneError *error)
+{
+    SECURITY_ATTRIBUTES attributes = { sizeof(attributes), NULL, TRUE };
+    HANDLE in_read = NULL, in_write = NULL, out_read = NULL, out_write = NULL;
+    HANDLE err_read = NULL, err_write = NULL;
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION info;
+    AxyneProcess *process = NULL;
+    ProcessState *state = NULL;
+    wchar_t *exe = NULL, *cwd = NULL, *command = NULL, *environment = NULL;
+    size_t used = 0, capacity = 0, i;
+    AxyneStatus result = AXYNE_STATUS_IO_ERROR;
+    if (out != NULL) *out = NULL;
+    if (out == NULL) return axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Output process pointer is null");
+    if (axyne_process_validate_spec(spec, error) != AXYNE_STATUS_OK) return AXYNE_STATUS_INVALID_ARGUMENT;
+    exe = to_wide(spec->executable);
+    cwd = spec->working_directory != NULL ? to_wide(spec->working_directory) : NULL;
+    if (exe == NULL || (spec->working_directory != NULL && cwd == NULL)) {
+        result = axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Process paths must be valid UTF-8"); goto done;
+    }
+    if (!append_command(&command, &used, &capacity, exe)) goto oom;
+    for (i = 0; i < spec->argument_count; ++i) {
+        wchar_t *arg = to_wide(spec->arguments[i]);
+        int ok = arg != NULL && append_command(&command, &used, &capacity, arg);
+        free(arg);
+        if (!ok) { result = axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid process argument"); goto done; }
+    }
+    if (!CreatePipe(&in_read, &in_write, &attributes, 0) ||
+        !make_pipe(&out_read, &out_write, 1) ||
+        !make_pipe(&err_read, &err_write, 1)) goto os_error;
+    if (!SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0)) goto os_error;
+    ZeroMemory(&startup, sizeof(startup)); startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = in_read; startup.hStdOutput = out_write; startup.hStdError = err_write;
+    ZeroMemory(&info, sizeof(info));
+    environment = build_environment(spec);
+    if (environment == NULL) goto oom;
+    if (!CreateProcessW(exe, command, NULL, NULL, TRUE, CREATE_UNICODE_ENVIRONMENT,
+                        environment, cwd, &startup, &info)) goto os_error;
+    CloseHandle(in_read); in_read = NULL; CloseHandle(out_write); out_write = NULL;
+    CloseHandle(err_write); err_write = NULL;
+    state = (ProcessState *)calloc(1, sizeof(*state));
+    process = (AxyneProcess *)calloc(1, sizeof(*process));
+    if (state == NULL || process == NULL) {
+        TerminateProcess(info.hProcess, 1); WaitForSingleObject(info.hProcess, INFINITE);
+        CloseHandle(info.hProcess); CloseHandle(info.hThread);
+        free(state); free(process); state = NULL; process = NULL;
+        goto oom;
+    }
+    CloseHandle(info.hThread);
+    state->process = info.hProcess; state->stdin_write = in_write; in_write = NULL;
+    state->stdout_read = out_read; out_read = NULL; state->stderr_read = err_read; err_read = NULL;
+    InitializeCriticalSection(&state->write_lock);
+    process->implementation = state; process->on_output = spec->on_output;
+    process->on_exit = spec->on_exit; process->user_data = spec->user_data;
+    state->worker = CreateThread(NULL, 0, process_worker, process, 0, NULL);
+    if (state->worker == NULL) {
+        TerminateProcess(state->process, 1); WaitForSingleObject(state->process, INFINITE);
+        CloseHandle(state->process); CloseHandle(state->stdin_write);
+        CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
+        DeleteCriticalSection(&state->write_lock); free(state); free(process);
+        goto os_error;
+    }
+    *out = process;
+    if (error != NULL) { error->code = AXYNE_STATUS_OK; error->message[0] = '\0'; }
+    result = AXYNE_STATUS_OK;
+    goto done;
+oom:
+    result = axyne_process_set_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to allocate process state");
+    goto done;
+os_error:
+    result = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR, "Unable to create child process or pipes");
+done:
+    if (in_read != NULL) CloseHandle(in_read); if (in_write != NULL) CloseHandle(in_write);
+    if (out_read != NULL) CloseHandle(out_read); if (out_write != NULL) CloseHandle(out_write);
+    if (err_read != NULL) CloseHandle(err_read); if (err_write != NULL) CloseHandle(err_write);
+    free(exe); free(cwd); free(command); free(environment);
+    return result;
+}
+
+AxyneStatus axyne_process_write(AxyneProcess *process, const char *bytes,
+                                size_t length, AxyneError *error)
+{
+    ProcessState *state;
+    size_t offset = 0;
+    if (process == NULL || (length != 0 && bytes == NULL))
+        return axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid process write");
+    state = (ProcessState *)process->implementation;
+    EnterCriticalSection(&state->write_lock);
+    while (offset < length) {
+        DWORD written = 0, amount = (DWORD)((length - offset) > 0x7fffffffU ? 0x7fffffffU : length - offset);
+        if (!WriteFile(state->stdin_write, bytes + offset, amount, &written, NULL) || written == 0) {
+            LeaveCriticalSection(&state->write_lock);
+            return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR, "Unable to write to child standard input");
+        }
+        offset += written;
+    }
+    LeaveCriticalSection(&state->write_lock);
+    return axyne_process_set_error(error, AXYNE_STATUS_OK, "");
+}
+
+AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
+{
+    ProcessState *state;
+    if (process == NULL) return axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Process is null");
+    state = (ProcessState *)process->implementation;
+    if (!TerminateProcess(state->process, 1) && GetLastError() != ERROR_ACCESS_DENIED)
+        return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR, "Unable to terminate child process");
+    return axyne_process_set_error(error, AXYNE_STATUS_OK, "");
+}
+
+void axyne_process_release(AxyneProcess *process)
+{
+    ProcessState *state;
+    if (process == NULL) return;
+    state = (ProcessState *)process->implementation;
+    (void)TerminateProcess(state->process, 1);
+    WaitForSingleObject(state->worker, INFINITE);
+    CloseHandle(state->worker); CloseHandle(state->process);
+    CloseHandle(state->stdin_write); CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
+    DeleteCriticalSection(&state->write_lock);
+    free(state); free(process);
+}
