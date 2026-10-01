@@ -58,6 +58,7 @@ static COLORREF AXYNE_BORDER;
 static COLORREF AXYNE_TEXT;
 static COLORREF AXYNE_MUTED;
 static COLORREF AXYNE_ACCENT;
+static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
@@ -186,6 +187,9 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
     AXYNE_TEXT = axyne_theme_color(theme->text);
     AXYNE_MUTED = axyne_theme_color(theme->muted);
     AXYNE_ACCENT = axyne_theme_color(theme->accent);
+    if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
+        DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
+    AXYNE_EDIT_BACKGROUND_BRUSH = CreateSolidBrush(AXYNE_BG);
 }
 
 static void axyne_select_theme_preset(AxyneThemePreferences *theme,
@@ -277,6 +281,13 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     free(font_name);
 }
 
+static void axyne_refresh_terminal_theme(AxyneWindowState *state)
+{
+    if (state == NULL || state->terminal_output == NULL) return;
+    InvalidateRect(state->terminal_output, NULL, TRUE);
+    UpdateWindow(state->terminal_output);
+}
+
 static void axyne_apply_preferences(AxyneWindowState *state)
 {
     if (state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
@@ -286,6 +297,7 @@ static void axyne_apply_preferences(AxyneWindowState *state)
     }
     axyne_apply_theme(&state->preferences.theme);
     axyne_apply_editor_preferences(state);
+    axyne_refresh_terminal_theme(state);
 }
 
 static void axyne_load_global_preferences(AxyneWindowState *state)
@@ -847,7 +859,6 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     axyne_select_theme_preset(&next.theme, strcmp(utf8, "light") == 0 ? AXYNE_THEME_LIGHT : strcmp(utf8, "system") == 0 ? AXYNE_THEME_SYSTEM : AXYNE_THEME_DARK);
     if (workspace) {
         next.present_fields = 0;
-        memset(next.binding_present, 0, sizeof(next.binding_present));
     }
     if (workspace) next.present_fields |= AXYNE_PREFERENCE_THEME_PRESET;
     free(utf8);
@@ -2040,6 +2051,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->documents.recent_paths[command - AXYNE_CMD_RECENT_BASE]);
         return 0;
     }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)l_param == state->terminal_output) {
+            HDC dc = (HDC)w_param;
+            SetTextColor(dc, AXYNE_TEXT);
+            SetBkColor(dc, AXYNE_BG);
+            return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
+        }
+        break;
     case AXYNE_WM_EXPLORER_EVENT: {
         AxyneExplorerMessage *event_message = (AxyneExplorerMessage *)l_param;
         if (event_message != NULL) {
@@ -2126,6 +2146,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
+            if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL) {
+                DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
+                AXYNE_EDIT_BACKGROUND_BRUSH = NULL;
+            }
             if (state->watcher != NULL) {
                 axyne_watcher_stop(state->watcher);
                 axyne_watcher_release(state->watcher);
