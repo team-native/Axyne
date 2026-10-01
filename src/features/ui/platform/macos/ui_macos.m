@@ -73,6 +73,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     AxynePreferences _preferences;
     char *_globalPreferencesPath;
     char *_workspacePreferencesPath;
+    unsigned char _workspaceBindingPresent[AXYNE_ACTION_COUNT];
 }
 @end
 
@@ -710,14 +711,19 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     _watcher = watcher;
     _hasExplorerSelection = NO;
     _preferences = _globalPreferences;
+    memset(_workspaceBindingPresent, 0, sizeof(_workspaceBindingPresent));
     free(_workspacePreferencesPath);
     _workspacePreferencesPath = axyne_macos_workspace_preferences_path(path);
     if (_workspacePreferencesPath != NULL) {
         AxynePreferences workspacePreferences;
-        status = axyne_preferences_load_workspace(_workspacePreferencesPath,
-                                                  &workspacePreferences,
-                                                  &error);
+        status = axyne_preferences_load(_workspacePreferencesPath,
+                                        &workspacePreferences, &error);
         if (status == AXYNE_STATUS_OK) {
+            /* Keep the file's binding mask separate from the normalized
+             * snapshot used to calculate effective workspace preferences. */
+            memcpy(_workspaceBindingPresent, workspacePreferences.binding_present,
+                   sizeof(_workspaceBindingPresent));
+            axyne_preferences_mark_all(&workspacePreferences);
             axyne_preferences_apply_workspace(&_preferences,
                                                &workspacePreferences);
             [self applyPreferences];
@@ -1100,6 +1106,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneError error;
     AxyneStatus status;
     const char *path = workspace ? _workspacePreferencesPath : _globalPreferencesPath;
+    if (workspace)
+        memcpy(next.binding_present, _workspaceBindingPresent,
+               sizeof(next.binding_present));
     if ([theme length] == 0 || (![theme isEqualToString:@"dark"] &&
         ![theme isEqualToString:@"light"] && ![theme isEqualToString:@"system"])) {
         if (theme != nil) [self showWorkspaceMessage:@"Theme must be dark, light, or system."];
@@ -1166,6 +1175,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
     if (status != AXYNE_STATUS_OK) { [self showWorkspaceError:@"Unable to save preferences" error:&error]; return NO; }
     _preferences = next;
+    if (workspace)
+        memcpy(_workspaceBindingPresent, next.binding_present,
+               sizeof(_workspaceBindingPresent));
     if (!workspace) {
         _globalPreferences = next;
         if (_workspacePreferencesPath != NULL) {
