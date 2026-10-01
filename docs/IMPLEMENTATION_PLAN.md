@@ -14,6 +14,7 @@
 | Local LSP, Git, terminal, debugger integrations | Start only when the user invokes them | USER + Notion feature spec | CONFIRMED |
 | Product identity | Axyne, author Native, version 0.1.0 | USER | CONFIRMED |
 | Public filesystem and watcher paths | Accept well-formed UTF-8 only; malformed path input returns `AXYNE_STATUS_INVALID_ARGUMENT` | USER | CONFIRMED |
+| Explorer mutation names | File/folder creation and rename accept only one valid UTF-8 child name; separators, absolute/path-like names, `.`, and `..` are rejected before filesystem access. | USER | CONFIRMED |
 
 ## Provisional implementation assumptions
 
@@ -44,6 +45,7 @@
 | Workspace search and quick file | Select a root with the native folder picker; recursively match text or file names; skip binary and unreadable files; read one file at a time. Quick File matches names by case-insensitive substring and opens the selected file through the document manager. | AGENT_PARAMETER | ASSUMED |
 | Explorer tree ordering | Immediate children are displayed with directories first, then files, and names sorted lexicographically; the order is rebuilt after filesystem events. | AGENT_PARAMETER | ASSUMED |
 | Workspace selection lifetime | The selected workspace root and expanded tree state remain session-only; no project/workspace file is persisted. | USER + AGENT_PARAMETER | ASSUMED |
+| Windows reparse-point directories | Explorer traversal skips Windows directory reparse points and never recursively descends through them; ordinary files and directories remain traversable. | USER + AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 
 ## Shared contracts
