@@ -575,6 +575,11 @@ static void axyne_install_menu(NSApplication *application,
                 NSString *preview = [NSString stringWithUTF8String:results.items[i].preview] ?: @"";
                 [choices addItemWithTitle:[NSString stringWithFormat:@"%@:%zu  %@", path,
                     results.items[i].line, preview]];
+                NSDictionary *match = @{
+                    @"path": path,
+                    @"line": [NSNumber numberWithUnsignedLong:results.items[i].line]
+                };
+                [[choices itemAtIndex:(NSInteger)i] setRepresentedObject:match];
             }
             if (results.count > 0) {
                 NSAlert *pick = [[[NSAlert alloc] init] autorelease];
@@ -582,13 +587,14 @@ static void axyne_install_menu(NSApplication *application,
                 [pick setAccessoryView:choices]; [pick addButtonWithTitle:@"Open Match"];
                 [pick addButtonWithTitle:@"Cancel"];
                 if ([pick runModal] == NSAlertFirstButtonReturn) {
-                    size_t index = (size_t)[choices indexOfSelectedItem];
-                    if (index < results.count) {
-                        [self openPath:[NSString stringWithUTF8String:results.items[index].path]];
+                    NSDictionary *match = [[choices selectedItem] representedObject];
+                    NSString *path = [match objectForKey:@"path"];
+                    selectedLine = (size_t)[[match objectForKey:@"line"] unsignedLongValue];
+                    if (path != nil && selectedLine > 0) {
+                        [self openPath:path];
                         AxyneDocument *opened = [self activeDocument];
                         if (opened != NULL && opened->path != NULL &&
-                            strcmp(opened->path, results.items[index].path) == 0) {
-                            selectedLine = results.items[index].line;
+                            strcmp(opened->path, [path UTF8String]) == 0) {
                             NSInteger pos = [self sendEditorMessage:SCI_POSITIONFROMLINE
                                 wParam:selectedLine > 0 ? selectedLine - 1 : 0 lParam:0];
                             (void)[self sendEditorMessage:SCI_GOTOPOS wParam:(uintptr_t)pos lParam:0];
