@@ -66,6 +66,10 @@ static AxyneStatus axyne_win_error(DWORD code)
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#include <sys/stdio.h>
+#endif
+
 static AxyneStatus axyne_errno_status(int value)
 {
     if (value == ENOENT || value == ENOTDIR) return AXYNE_STATUS_NOT_FOUND;
@@ -73,6 +77,12 @@ static AxyneStatus axyne_errno_status(int value)
     if (value == ENOMEM) return AXYNE_STATUS_OUT_OF_MEMORY;
     if (value == EEXIST || value == ENOTEMPTY || value == EBUSY)
         return AXYNE_STATUS_BUSY;
+#ifdef ENOTSUP
+    if (value == ENOTSUP) return AXYNE_STATUS_UNSUPPORTED;
+#endif
+#if defined(EOPNOTSUPP) && (!defined(ENOTSUP) || EOPNOTSUPP != ENOTSUP)
+    if (value == EOPNOTSUPP) return AXYNE_STATUS_UNSUPPORTED;
+#endif
     return AXYNE_STATUS_IO_ERROR;
 }
 #endif
@@ -115,6 +125,39 @@ static int axyne_valid_path(const char *path)
 {
     return path != NULL && path[0] != '\0';
 }
+
+#if !defined(_WIN32)
+static int axyne_valid_utf8(const char *text)
+{
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p != 0) {
+        uint32_t codepoint;
+        size_t continuation;
+        if (*p <= 0x7f) { ++p; continue; }
+        if (*p >= 0xc2 && *p <= 0xdf) {
+            codepoint = (uint32_t)(*p & 0x1f); continuation = 1;
+        } else if (*p >= 0xe0 && *p <= 0xef) {
+            codepoint = (uint32_t)(*p & 0x0f); continuation = 2;
+        } else if (*p >= 0xf0 && *p <= 0xf4) {
+            codepoint = (uint32_t)(*p & 0x07); continuation = 3;
+        } else {
+            return 0;
+        }
+        ++p;
+        for (size_t i = 0; i < continuation; ++i) {
+            if (p[i] == 0 || (p[i] & 0xc0) != 0x80) return 0;
+            codepoint = (codepoint << 6) | (uint32_t)(p[i] & 0x3f);
+        }
+        if ((continuation == 1 && codepoint < 0x80) ||
+            (continuation == 2 && codepoint < 0x800) ||
+            (continuation == 3 && codepoint < 0x10000) ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
+            codepoint > 0x10ffff) return 0;
+        p += continuation;
+    }
+    return 1;
+}
+#endif
 
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error)
@@ -305,17 +348,45 @@ AxyneStatus axyne_fs_list_directory(const char *utf8_path,
             char *name, *path;
             AxyneFileEntry *grown;
             if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) continue;
-            path = axyne_join_path(utf8_path, item->d_name);
+            if (!axyne_valid_utf8(item->d_name)) {
+                closedir(directory);
+                for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }
+                free(entries);
+                return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                                   "directory contains a name that is not valid UTF-8");
+            }
             name = (char *)malloc(strlen(item->d_name) + 1);
-            if (name != NULL) strcpy(name, item->d_name);
-            if (path == NULL || name == NULL || lstat(path, &info) != 0 ||
-                (grown = (AxyneFileEntry *)realloc(entries, (count + 1) * sizeof(*entries))) == NULL) {
+            if (name == NULL) {
+                closedir(directory);
+                for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }
+                free(entries);
+                return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                   "out of memory listing directory");
+            }
+            strcpy(name, item->d_name);
+            path = axyne_join_path(utf8_path, item->d_name);
+            if (path == NULL) {
+                free(name); closedir(directory);
+                for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }
+                free(entries);
+                return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                   "out of memory listing directory");
+            }
+            if (lstat(path, &info) != 0) {
                 int saved = errno;
                 free(name); free(path); closedir(directory);
                 for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }
                 free(entries);
-                return axyne_error(error, saved == ENOMEM ? AXYNE_STATUS_OUT_OF_MEMORY : AXYNE_STATUS_IO_ERROR,
-                                   "unable to list directory entry");
+                return axyne_system_error(error, axyne_errno_status(saved),
+                                          "inspect directory entry");
+            }
+            grown = (AxyneFileEntry *)realloc(entries, (count + 1) * sizeof(*entries));
+            if (grown == NULL) {
+                free(name); free(path); closedir(directory);
+                for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }
+                free(entries);
+                return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                   "out of memory listing directory");
             }
             entries = grown;
             entries[count].name = name; entries[count].path = path;
@@ -380,10 +451,16 @@ AxyneStatus axyne_fs_rename(const char *utf8_path, const char *new_utf8_path,
       ok = MoveFileW(a, b); free(a); free(b);
       if (!ok) return axyne_system_error(error, axyne_win_error(GetLastError()), "rename"); }
 #else
-    { struct stat info;
-      if (lstat(new_utf8_path, &info) == 0) return axyne_error(error, AXYNE_STATUS_BUSY, "destination already exists");
-      if (errno != ENOENT) return axyne_system_error(error, axyne_errno_status(errno), "check rename destination");
-      if (rename(utf8_path, new_utf8_path) != 0) return axyne_system_error(error, axyne_errno_status(errno), "rename"); }
+    {
+#ifdef __APPLE__
+      if (renameatx_np(AT_FDCWD, utf8_path, AT_FDCWD, new_utf8_path,
+                       RENAME_EXCL) != 0)
+          return axyne_system_error(error, axyne_errno_status(errno), "rename");
+#else
+      return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                         "atomic no-replace rename is unavailable on this platform");
+#endif
+    }
 #endif
     return AXYNE_STATUS_OK;
 }
