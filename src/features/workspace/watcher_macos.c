@@ -1,15 +1,14 @@
 #include "axyne/watcher.h"
+#include "workspace_safety.h"
 #include "utf8.h"
 
 #include <CoreServices/CoreServices.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 struct AxyneWatcher {
@@ -19,6 +18,7 @@ struct AxyneWatcher {
     CFRunLoopRef run_loop;
     FSEventStreamRef stream;
     char *directory;
+    int directory_fd;
     AxyneWatchCallback callback;
     void *user_data;
     AxyneStatus startup_status;
@@ -134,7 +134,8 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
                                 AxyneError *error)
 {
     AxyneWatcher *watcher;
-    struct stat info;
+    AxyneError safety_error;
+    AxyneStatus safety_status;
     int directory_fd;
     if (watcher_out == NULL || utf8_directory == NULL || utf8_directory[0] == '\0' ||
         !axyne_workspace_utf8_is_valid(utf8_directory) || callback == NULL) {
@@ -142,52 +143,35 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
     *watcher_out = NULL;
-    if (lstat(utf8_directory, &info) != 0) {
-        axyne_watch_error(error, AXYNE_STATUS_NOT_FOUND, "workspace directory is unavailable");
-        return AXYNE_STATUS_NOT_FOUND;
-    }
-    if (S_ISLNK(info.st_mode)) {
-        axyne_watch_error(error, AXYNE_STATUS_UNSUPPORTED,
-                          "symbolic-link workspace roots are not supported");
-        return AXYNE_STATUS_UNSUPPORTED;
-    }
-    directory_fd = openat(AT_FDCWD, utf8_directory,
-                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    memset(&safety_error, 0, sizeof(safety_error));
+    directory_fd = axyne_workspace_open_directory_nofollow(utf8_directory,
+                                                             &safety_error);
     if (directory_fd < 0) {
-        axyne_watch_error(error, errno == ELOOP ? AXYNE_STATUS_UNSUPPORTED :
-                           AXYNE_STATUS_NOT_FOUND,
-                          errno == ELOOP ? "symbolic-link workspace roots are not supported" :
-                          "workspace directory is unavailable");
-        return errno == ELOOP ? AXYNE_STATUS_UNSUPPORTED : AXYNE_STATUS_NOT_FOUND;
+        if (error != NULL) *error = safety_error;
+        return safety_error.code;
     }
-    if (fstat(directory_fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
-        close(directory_fd);
-        axyne_watch_error(error, AXYNE_STATUS_NOT_FOUND,
-                          "workspace directory is unavailable");
-        return AXYNE_STATUS_NOT_FOUND;
-    }
-    close(directory_fd);
     watcher = (AxyneWatcher *)calloc(1, sizeof(*watcher));
     if (watcher == NULL) { axyne_watch_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); return AXYNE_STATUS_OUT_OF_MEMORY; }
     watcher->directory = (char *)malloc(strlen(utf8_directory) + 1);
-    if (watcher->directory == NULL) { free(watcher); axyne_watch_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); return AXYNE_STATUS_OUT_OF_MEMORY; }
+    if (watcher->directory == NULL) { close(directory_fd); free(watcher); axyne_watch_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); return AXYNE_STATUS_OUT_OF_MEMORY; }
     strcpy(watcher->directory, utf8_directory);
+    watcher->directory_fd = directory_fd;
     watcher->callback = callback; watcher->user_data = user_data;
     atomic_init(&watcher->stopping, 0);
     if (pthread_mutex_init(&watcher->mutex, NULL) != 0) {
-        free(watcher->directory); free(watcher);
+        close(watcher->directory_fd); free(watcher->directory); free(watcher);
         axyne_watch_error(error, AXYNE_STATUS_IO_ERROR, "unable to initialize watcher synchronization");
         return AXYNE_STATUS_IO_ERROR;
     }
     if (pthread_cond_init(&watcher->ready_condition, NULL) != 0) {
         pthread_mutex_destroy(&watcher->mutex);
-        free(watcher->directory); free(watcher);
+        close(watcher->directory_fd); free(watcher->directory); free(watcher);
         axyne_watch_error(error, AXYNE_STATUS_IO_ERROR, "unable to initialize watcher synchronization");
         return AXYNE_STATUS_IO_ERROR;
     }
     if (pthread_create(&watcher->thread, NULL, axyne_watch_thread, watcher) != 0) {
         pthread_cond_destroy(&watcher->ready_condition); pthread_mutex_destroy(&watcher->mutex);
-        free(watcher->directory); free(watcher);
+        close(watcher->directory_fd); free(watcher->directory); free(watcher);
         axyne_watch_error(error, AXYNE_STATUS_IO_ERROR, "unable to start watcher thread");
         return AXYNE_STATUS_IO_ERROR;
     }
@@ -198,7 +182,7 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
     if (watcher->startup_status != AXYNE_STATUS_OK) {
         pthread_join(watcher->thread, NULL);
         pthread_cond_destroy(&watcher->ready_condition); pthread_mutex_destroy(&watcher->mutex);
-        free(watcher->directory); free(watcher);
+        close(watcher->directory_fd); free(watcher->directory); free(watcher);
         axyne_watch_error(error, AXYNE_STATUS_IO_ERROR, "unable to start filesystem event stream");
         return AXYNE_STATUS_IO_ERROR;
     }
@@ -221,5 +205,6 @@ void axyne_watcher_release(AxyneWatcher *watcher)
     if (watcher->thread_started && !watcher->joined) axyne_watcher_stop(watcher);
     pthread_cond_destroy(&watcher->ready_condition);
     pthread_mutex_destroy(&watcher->mutex);
+    if (watcher->directory_fd >= 0) close(watcher->directory_fd);
     free(watcher->directory); free(watcher);
 }
