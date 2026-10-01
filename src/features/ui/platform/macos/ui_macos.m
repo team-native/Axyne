@@ -128,6 +128,7 @@ struct AxyneMacGitRun {
     size_t capacity;
     const char *empty_message;
     int allocation_failed;
+    int output_truncated;
     int exit_code;
     pthread_mutex_t lock;
     int cancelled;
@@ -140,9 +141,12 @@ struct AxyneMacGitCompletion {
     size_t length;
     const char *empty_message;
     int allocation_failed;
+    int output_truncated;
     int exit_code;
     char failure_message[128];
 };
+
+enum { AXYNE_GIT_UI_OUTPUT_LIMIT = 16 * 1024 * 1024 };
 
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace);
@@ -963,6 +967,7 @@ static int axyne_macos_git_append(AxyneMacGitRun *run,
     if (run == NULL || bytes == NULL || length == 0) return 1;
     if (length > SIZE_MAX - run->length - 1) return 0;
     required = run->length + length + 1;
+    if (required > AXYNE_GIT_UI_OUTPUT_LIMIT) return 0;
     if (required > run->capacity) {
         capacity = run->capacity == 0 ? 4096 : run->capacity;
         while (capacity < required) {
@@ -991,19 +996,31 @@ static void axyne_macos_git_output(AxyneProcess *process,
     AxyneMacGitRun *run = (AxyneMacGitRun *)user_data;
     (void)stream;
     if (run != NULL && bytes != NULL && !run->allocation_failed &&
-        !axyne_macos_git_append(run, bytes, length)) {
-        run->allocation_failed = 1;
-        (void)axyne_process_terminate(process, NULL);
+        !run->output_truncated) {
+        if (run->length >= AXYNE_GIT_UI_OUTPUT_LIMIT ||
+            length > AXYNE_GIT_UI_OUTPUT_LIMIT - run->length - 1) {
+            run->output_truncated = 1;
+            (void)axyne_process_terminate(process, NULL);
+        } else if (!axyne_macos_git_append(run, bytes, length)) {
+            run->allocation_failed = 1;
+            (void)axyne_process_terminate(process, NULL);
+        }
     }
+}
+
+static void axyne_macos_git_free(AxyneMacGitRun *run)
+{
+    if (run == NULL) return;
+    free(run->output);
+    (void)pthread_mutex_destroy(&run->lock);
+    free(run);
 }
 
 static void axyne_macos_git_cleanup(AxyneMacGitRun *run)
 {
     if (run == NULL) return;
     axyne_process_release(run->process);
-    free(run->output);
-    (void)pthread_mutex_destroy(&run->lock);
-    free(run);
+    axyne_macos_git_free(run);
 }
 
 static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
@@ -1035,6 +1052,8 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     completion->view = view;
     completion->process = run->process;
     completion->empty_message = run->empty_message;
+    completion->allocation_failed = run->allocation_failed;
+    completion->output_truncated = run->output_truncated;
     completion->exit_code = exit_code;
     if (exit_code != 0) {
         (void)snprintf(completion->failure_message,
@@ -1112,6 +1131,8 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     if (completion == NULL || run == NULL) return;
     if (completion->allocation_failed) {
         text = "Unable to allocate Git output.";
+    } else if (completion->output_truncated) {
+        text = "Git output exceeded the 16 MiB limit.";
     } else if (completion->length != 0) {
         text = completion->output;
     } else if (completion->exit_code == 0) {
@@ -1127,6 +1148,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         _gitProcess = NULL;
     }
     axyne_process_release(completion->process);
+    axyne_macos_git_free(run);
     free(completion->output);
     free(completion);
     [self setNeedsDisplay:YES];
