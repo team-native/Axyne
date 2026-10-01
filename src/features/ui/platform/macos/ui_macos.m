@@ -1116,8 +1116,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         axyne_process_release(_terminalProcess);
         _terminalProcess = NULL;
     }
-    if (axyne_debugger_is_active(&_debugger))
-        axyne_debugger_release(&_debugger);
+    axyne_debugger_release(&_debugger);
     _activeAction = 0;
     [_terminalStart setEnabled:YES];
     [_terminalStop setEnabled:NO];
@@ -1135,6 +1134,12 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneError error;
     (void)sender;
     if (axyne_debugger_is_active(&_debugger) || ![self captureEditor]) return;
+    if (_terminalProcess != NULL) {
+        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
     document = [self activeDocument];
     if (document == NULL || document->is_untitled || document->path == NULL ||
         document->is_dirty) {
@@ -1187,7 +1192,12 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneError error;
     AxyneStatus status;
     (void)sender;
-    if (_terminalProcess != NULL) return;
+    if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
     status = axyne_runner_process_spec(&_terminalRunner,
         axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
         &spec, &error);
