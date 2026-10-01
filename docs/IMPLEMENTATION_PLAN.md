@@ -53,6 +53,8 @@
 | Windows reparse-point directories | Explorer and its watcher enumerate/open Windows directories through the shared root-to-component handle traversal with `FILE_FLAG_OPEN_REPARSE_POINT`; it rejects a reparse-point workspace root, omits child reparse-point directories, and fails closed when handle opening, UTF-8 conversion, allocation, or handle enumeration is uncertain. A directory handle is revalidated before its entries are traversed, so a path swap cannot redirect an already-open traversal. | USER + AGENT_PARAMETER | ASSUMED |
 | macOS workspace roots | Explorer and its FSEvents watcher reject symbolic-link roots. POSIX directory listing and watcher startup use the shared root-to-component FD traversal with `openat(..., O_NOFOLLOW | O_DIRECTORY)` so intermediate symlinks are not followed during verification; directory entry metadata is read relative to the verified listing FD, and FSEvents paths are revalidated against that anchored root before callbacks are forwarded. The watcher retains the verified directory FD. | AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
+| Runner configuration lifetime | Runner recipes are session-local and stored only in memory until preferences are specified; configuring a runner copies executable, arguments, working directory, and unique environment overrides atomically. | AGENT_PARAMETER | ASSUMED |
+| Runner command semantics | Runner arguments are passed directly to the existing process API; no shell or implicit command-line parsing is used. An explicitly selected runtime is metadata for the recipe and does not trigger runtime discovery or installation. | AGENT_PARAMETER | ASSUMED |
 
 ## Shared contracts
 
@@ -65,6 +67,7 @@
 - Explicit runtime discovery searches PATH and probes the first available executable for Python, Node.js, TypeScript (`tsc`), C, C++, Java, and `javac`; each version probe has a 2-second deadline for the top-level version process. A timed-out probe's managed processes are terminated and reaped, and its runtime is skipped. On POSIX, cleanup may exceed the deadline if a descendant escapes the process group (for example with `setsid`) and holds an inherited output pipe open. Discovery continues after cleanup completes. It never installs or bundles runtimes. Discovery is opt-in and therefore remains outside basic startup.
 - Settings use JSON documents and JSON Pointer paths; consumers can read, replace, and remove arbitrary JSON values.
 - File, workspace, settings, editor, and process modules remain independently includable through public headers under include/axyne.
+- Runner configurations project directly onto the existing process specification and do not alter process lifetime, callback, or termination rules.
 
 ## Implementation units and dependencies
 
@@ -80,7 +83,7 @@
 | EXPLORER-3 | Native file/folder creation, rename, and non-recursive removal UI | FS-1, EXPLORER-2 | COMPLETE (source-level implementation and Windows compilation passed; macOS build/runtime verification requires a macOS host) |
 | EXPLORER-4 | Watcher event delivery to UI thread and tree refresh/rescan | FS-1, EXPLORER-1, EXPLORER-2 | COMPLETE (Windows callback/UI message path and AppKit main-queue path implemented; macOS runtime verification requires a macOS host) |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | COMPLETE |
-| RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | PENDING |
+| RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | IN PROGRESS (RUN-1A configuration model complete; terminal and output units pending) |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
