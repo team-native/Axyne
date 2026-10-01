@@ -1159,9 +1159,6 @@ static const char *lsp_find_separator(const char *data, size_t length,
 {
     size_t i;
     for (i = 0; i + 1 < length; ++i) {
-        if (data[i] == '\n' && data[i + 1] == '\n') {
-            *separator_length = 2; return data + i;
-        }
         if (i + 3 < length && data[i] == '\r' && data[i + 1] == '\n' &&
             data[i + 2] == '\r' && data[i + 3] == '\n') {
             *separator_length = 4; return data + i;
@@ -1174,6 +1171,8 @@ static int lsp_ascii_case_equal(const char *left, size_t length,
                                  const char *right)
 {
     size_t i;
+    size_t right_length = strlen(right);
+    if (length != right_length) return 0;
     for (i = 0; i < length; ++i) {
         unsigned char a = (unsigned char)left[i];
         unsigned char b = (unsigned char)right[i];
@@ -1208,6 +1207,10 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
             const char *line_end = memchr(line, '\n', (size_t)(header_end - line));
             const char *colon;
             size_t line_length = line_end == NULL ? (size_t)(header_end - line) : (size_t)(line_end - line);
+            if (line_end == NULL || line_end == line || line_end[-1] != '\r') {
+                client->input.length = 0;
+                return -1;
+            }
             while (line_length != 0 && (line[line_length - 1] == '\r' || line[line_length - 1] == '\n')) --line_length;
             colon = memchr(line, ':', line_length);
             if (line_length == 0 || colon == NULL || colon == line) {
