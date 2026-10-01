@@ -140,6 +140,14 @@ static char *lsp_copy(const char *value)
     return value == NULL ? NULL : lsp_copy_bytes(value, strlen(value));
 }
 
+static int lsp_replace_string(char **destination, char *value)
+{
+    if (value == NULL) return 0;
+    free(*destination);
+    *destination = value;
+    return 1;
+}
+
 size_t axyne_lsp_utf16_character(const char *line, size_t length,
                                  size_t byte_offset)
 {
@@ -644,16 +652,22 @@ static int lsp_parse_diagnostic(JsonCursor *cursor, AxyneLspDiagnostic *diagnost
             if (!json_read_uint(cursor, &severity) || severity > 4) { free(key); goto fail; }
             diagnostic->severity = (AxyneLspDiagnosticSeverity)severity;
         } else if (strcmp(key, "code") == 0) {
-            if (cursor->at < cursor->end && *cursor->at == '"') diagnostic->code = json_read_string(cursor);
+            char *value;
+            if (cursor->at < cursor->end && *cursor->at == '"') value = json_read_string(cursor);
             else {
                 const char *start = cursor->at;
                 if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
-                diagnostic->code = lsp_copy_bytes(start, (size_t)(cursor->at - start));
+                value = lsp_copy_bytes(start, (size_t)(cursor->at - start));
             }
+            if (!lsp_replace_string(&diagnostic->code, value)) { free(key); goto fail; }
         } else if (strcmp(key, "source") == 0) {
-            diagnostic->source = json_read_string(cursor);
+            if (!lsp_replace_string(&diagnostic->source, json_read_string(cursor))) {
+                free(key); goto fail;
+            }
         } else if (strcmp(key, "message") == 0) {
-            diagnostic->message = json_read_string(cursor);
+            if (!lsp_replace_string(&diagnostic->message, json_read_string(cursor))) {
+                free(key); goto fail;
+            }
         } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
         free(key);
         json_skip_space(cursor);
@@ -688,7 +702,7 @@ static int lsp_parse_diagnostics(const char *start, const char *end,
         if (key == NULL || !json_expect(&cursor, ':')) { free(key); goto fail; }
         if (strcmp(key, "uri") == 0) {
             char *value = json_read_string(&cursor);
-            free(*uri); *uri = value;
+            if (!lsp_replace_string(uri, value)) { free(key); goto fail; }
         }
         else if (strcmp(key, "diagnostics") == 0) {
             array_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
@@ -747,8 +761,8 @@ static int lsp_parse_location(JsonCursor *cursor, AxyneLspLocation *location)
         if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
         if (strcmp(key, "uri") == 0 || strcmp(key, "targetUri") == 0) {
             char *value = json_read_string(cursor);
-            if (value == NULL) { free(key); goto fail; }
-            free(location->uri); location->uri = value; got_uri = 1;
+            if (!lsp_replace_string(&location->uri, value)) { free(key); goto fail; }
+            got_uri = 1;
         } else if (strcmp(key, "range") == 0 || strcmp(key, "targetRange") == 0) {
             got_range = lsp_parse_range(cursor, &location->range);
             if (!got_range) { free(key); goto fail; }
@@ -820,10 +834,19 @@ static int lsp_parse_completion_item(JsonCursor *cursor, AxyneLspCompletionItem 
     for (;;) {
         key = json_read_string(cursor);
         if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
-        if (strcmp(key, "label") == 0) item->label = json_read_string(cursor);
-        else if (strcmp(key, "detail") == 0) item->detail = json_read_string(cursor);
-        else if (strcmp(key, "insertText") == 0) item->insert_text = json_read_string(cursor);
-        else if (strcmp(key, "kind") == 0) {
+        if (strcmp(key, "label") == 0) {
+            if (!lsp_replace_string(&item->label, json_read_string(cursor))) {
+                free(key); goto fail;
+            }
+        } else if (strcmp(key, "detail") == 0) {
+            if (!lsp_replace_string(&item->detail, json_read_string(cursor))) {
+                free(key); goto fail;
+            }
+        } else if (strcmp(key, "insertText") == 0) {
+            if (!lsp_replace_string(&item->insert_text, json_read_string(cursor))) {
+                free(key); goto fail;
+            }
+        } else if (strcmp(key, "kind") == 0) {
             if (!json_read_uint(cursor, &kind) || kind > INT_MAX) { free(key); goto fail; }
             item->kind = (int)kind;
         } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
@@ -1144,7 +1167,11 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
     for (;;) {
         key = json_read_string(&cursor);
         if (key == NULL || !json_expect(&cursor, ':')) { free(key); free(method); return 0; }
-        if (strcmp(key, "method") == 0) method = json_read_string(&cursor);
+        if (strcmp(key, "method") == 0) {
+            if (!lsp_replace_string(&method, json_read_string(&cursor))) {
+                free(key); free(method); return 0;
+            }
+        }
         else if (strcmp(key, "id") == 0) {
             if (!json_read_uint(&cursor, &id)) { free(key); free(method); return 0; }
             has_id = 1;
@@ -1308,8 +1335,7 @@ static void lsp_process_output(AxyneProcess *process, AxyneProcessStream stream,
     (void)process;
     if (client == NULL || bytes == NULL || length == 0) return;
     if (stream == AXYNE_PROCESS_STDERR) {
-        char *message = lsp_copy_bytes(bytes, length);
-        if (message != NULL) { lsp_report(client, AXYNE_STATUS_IO_ERROR, message); free(message); }
+        /* LSP servers may use stderr for logging; it is not protocol data. */
         return;
     }
     lsp_mutex_lock(&client->mutex);
@@ -1464,6 +1490,11 @@ static void lsp_cleanup_failed_start(AxyneLspClient *client)
     client->started = 0;
     lsp_mutex_unlock(&client->mutex);
     axyne_process_release(process);
+    lsp_mutex_lock(&client->mutex);
+    client->stopping = 0;
+    client->initialized = 0;
+    client->exited = 0;
+    lsp_mutex_unlock(&client->mutex);
 }
 
 AxyneStatus axyne_lsp_create(const AxyneLspConfig *config,
