@@ -3,9 +3,12 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <dispatch/dispatch.h>
 
 #include "axyne/document.h"
 #include "axyne/search.h"
+#include "axyne/explorer.h"
+#include "axyne/watcher.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -40,6 +43,10 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     NSView *_editorView;
     NSBundle *_scintillaBundle;
     AxyneDocumentSet _documents;
+    AxyneExplorer _explorer;
+    AxyneWatcher *_watcher;
+    NSInteger _explorerSelection;
+    BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
     BOOL _loadingEditor;
     BOOL _editorDocumentInitialized;
@@ -59,10 +66,48 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 - (void)findOrReplace:(BOOL)replace;
 - (void)searchFolder:(BOOL)quickFile;
+- (void)openWorkspace:(id)sender;
+- (void)newExplorerFile:(id)sender;
+- (void)newExplorerFolder:(id)sender;
+- (void)renameExplorerItem:(id)sender;
+- (void)removeExplorerItem:(id)sender;
+- (void)workspaceEvent;
+- (void)refreshExplorer;
+- (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
+- (BOOL)selectWorkspaceURL:(NSURL *)url;
+- (NSInteger)explorerNodeAtPoint:(NSPoint)point;
+- (void)performExplorerOperation:(AxyneFileKind)kind;
+- (NSString *)askForText:(NSString *)title label:(NSString *)label;
 @end
 
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace);
+
+typedef struct AxyneMacWorkspaceEvent {
+    AxyneWatchEventKind kind;
+    char *path;
+} AxyneMacWorkspaceEvent;
+
+static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
+                                       void *user_data)
+{
+    AxyneMacWorkspaceEvent *copy;
+    size_t length;
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
+    if (event == NULL || event->path == NULL || view == nil) return;
+    copy = (AxyneMacWorkspaceEvent *)calloc(1, sizeof(*copy));
+    if (copy == NULL) return;
+    length = strlen(event->path);
+    copy->path = (char *)malloc(length + 1);
+    if (copy->path == NULL) { free(copy); return; }
+    memcpy(copy->path, event->path, length + 1);
+    copy->kind = event->kind;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view workspaceEvent];
+        free(copy->path);
+        free(copy);
+    });
+}
 
 @implementation AxyneWorkspaceView
 
@@ -70,7 +115,9 @@ static void axyne_install_menu(NSApplication *application,
 {
     self = [super initWithFrame:frame];
     if (self != nil) {
-        if (axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
+        if (axyne_explorer_initialize(&_explorer, NULL) != AXYNE_STATUS_OK ||
+            axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
+            axyne_explorer_destroy(&_explorer);
             [self release];
             return nil;
         }
@@ -293,6 +340,149 @@ static void axyne_install_menu(NSApplication *application,
         [self openPath:[[panel URL] path]];
 }
 
+- (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error
+{
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:prefix ?: @"Workspace operation failed"];
+    [alert setInformativeText:error != NULL
+        ? ([NSString stringWithUTF8String:error->message] ?: @"") : @""];
+    [alert runModal];
+}
+
+- (BOOL)selectWorkspaceURL:(NSURL *)url
+{
+    const char *path;
+    AxyneWatcher *watcher = NULL;
+    AxyneError error;
+    AxyneStatus status;
+    if (url == nil) return NO;
+    path = [[url path] UTF8String];
+    if (path == NULL) return NO;
+    status = axyne_watcher_start(path, axyne_macos_watch_callback, self,
+                                 &watcher, &error);
+    if (status != AXYNE_STATUS_OK) {
+        [self showWorkspaceError:@"Unable to watch workspace" error:&error];
+        return NO;
+    }
+    status = axyne_explorer_set_root(&_explorer, path, &error);
+    if (status != AXYNE_STATUS_OK) {
+        axyne_watcher_stop(watcher); axyne_watcher_release(watcher);
+        [self showWorkspaceError:@"Unable to open workspace" error:&error];
+        return NO;
+    }
+    if (_watcher != NULL) {
+        axyne_watcher_stop(_watcher);
+        axyne_watcher_release(_watcher);
+    }
+    _watcher = watcher;
+    _hasExplorerSelection = NO;
+    [self setNeedsDisplay:YES];
+    return YES;
+}
+
+- (void)openWorkspace:(id)sender
+{
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    [panel setCanChooseDirectories:YES];
+    [panel setCanChooseFiles:NO];
+    [panel setAllowsMultipleSelection:NO];
+    if ([panel runModal] == NSModalResponseOK)
+        (void)[self selectWorkspaceURL:[panel URL]];
+}
+
+- (void)workspaceEvent
+{
+    [self refreshExplorer];
+}
+
+- (void)refreshExplorer
+{
+    AxyneError error;
+    if (_explorer.root == NULL) return;
+    if (axyne_explorer_reload(&_explorer, &error) != AXYNE_STATUS_OK) {
+        [self showWorkspaceError:@"Unable to refresh workspace" error:&error];
+        _hasExplorerSelection = NO;
+    } else if (_hasExplorerSelection &&
+               (size_t)_explorerSelection >= _explorer.count) {
+        _hasExplorerSelection = NO;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (NSInteger)explorerNodeAtPoint:(NSPoint)point
+{
+    CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + 31.0;
+    NSInteger row;
+    if (_explorer.root == NULL || point.y < top) return NSNotFound;
+    row = (NSInteger)((point.y - top) / 22.0);
+    return row >= 0 && (size_t)row < _explorer.count ? row : NSNotFound;
+}
+
+- (void)newExplorerFile:(id)sender
+{
+    (void)sender;
+    [self performExplorerOperation:AXYNE_FILE_KIND_FILE];
+}
+
+- (void)newExplorerFolder:(id)sender
+{
+    (void)sender;
+    [self performExplorerOperation:AXYNE_FILE_KIND_DIRECTORY];
+}
+
+- (void)renameExplorerItem:(id)sender
+{
+    (void)sender;
+    if (!_hasExplorerSelection) return;
+    AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
+    NSString *name = [self askForText:@"Rename" label:@"New name"];
+    if ([name length] == 0) return;
+    NSString *nodePath = [NSString stringWithUTF8String:node->path];
+    NSString *path = [nodePath stringByDeletingLastPathComponent];
+    path = [path stringByAppendingPathComponent:name];
+    AxyneError error;
+    AxyneStatus status = axyne_fs_rename(node->path, [path UTF8String], &error);
+    if (status != AXYNE_STATUS_OK)
+        [self showWorkspaceError:@"Rename failed" error:&error];
+    else { _hasExplorerSelection = NO; [self refreshExplorer]; }
+}
+
+- (void)removeExplorerItem:(id)sender
+{
+    (void)sender;
+    if (!_hasExplorerSelection) return;
+    AxyneError error;
+    AxyneStatus status = axyne_fs_remove(
+        _explorer.nodes[_explorerSelection].path, &error);
+    if (status != AXYNE_STATUS_OK)
+        [self showWorkspaceError:@"Delete failed" error:&error];
+    else { _hasExplorerSelection = NO; [self refreshExplorer]; }
+}
+
+- (void)performExplorerOperation:(AxyneFileKind)kind
+{
+    NSString *name = [self askForText:kind == AXYNE_FILE_KIND_FILE
+        ? @"New File" : @"New Folder" label:@"Name"];
+    NSString *parent = _explorer.root != NULL
+        ? [NSString stringWithUTF8String:_explorer.root] : nil;
+    if (_hasExplorerSelection && (size_t)_explorerSelection < _explorer.count) {
+        AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
+        NSString *nodePath = [NSString stringWithUTF8String:node->path];
+        parent = node->kind == AXYNE_FILE_KIND_DIRECTORY ? nodePath :
+            [nodePath stringByDeletingLastPathComponent];
+    }
+    if ([name length] == 0 || [parent length] == 0) return;
+    NSString *path = [parent stringByAppendingPathComponent:name];
+    AxyneError error;
+    AxyneStatus status = kind == AXYNE_FILE_KIND_FILE
+        ? axyne_fs_create_file([path UTF8String], &error)
+        : axyne_fs_create_directory([path UTF8String], &error);
+    if (status != AXYNE_STATUS_OK)
+        [self showWorkspaceError:@"Create failed" error:&error];
+    else [self refreshExplorer];
+}
+
 - (void)saveDocument:(id)sender
 {
     (void)sender;
@@ -446,7 +636,58 @@ static void axyne_install_menu(NSApplication *application,
             return;
         }
     }
+    if (point.x < AXYNE_SIDEBAR && point.y >= AXYNE_TOOLBAR + AXYNE_TABS) {
+        NSInteger row = [self explorerNodeAtPoint:point];
+        if (row != NSNotFound) {
+            _explorerSelection = row;
+            _hasExplorerSelection = YES;
+            AxyneExplorerNode *node = &_explorer.nodes[(size_t)row];
+            if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+                if (axyne_explorer_toggle(&_explorer, (size_t)row, NULL) != AXYNE_STATUS_OK)
+                    [self showWorkspaceError:@"Unable to read workspace folder" error:NULL];
+                [self setNeedsDisplay:YES];
+            } else {
+                [self openPath:[NSString stringWithUTF8String:node->path]];
+            }
+        } else if (_explorer.root == NULL) {
+            [self openWorkspace:nil];
+        }
+        return;
+    }
     [super mouseDown:event];
+}
+
+- (void)rightMouseDown:(NSEvent *)event
+{
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    NSInteger row = [self explorerNodeAtPoint:point];
+    if (point.x >= AXYNE_SIDEBAR || point.y < AXYNE_TOOLBAR + AXYNE_TABS) {
+        [super rightMouseDown:event];
+        return;
+    }
+    if (row != NSNotFound) {
+        _explorerSelection = row;
+        _hasExplorerSelection = YES;
+    }
+    NSMenu *menu = [[[NSMenu alloc] initWithTitle:@"Workspace"] autorelease];
+    NSMenuItem *workspace = [menu addItemWithTitle:@"Open Workspace Folder..."
+        action:@selector(openWorkspace:) keyEquivalent:@""];
+    [workspace setTarget:self];
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *file = [menu addItemWithTitle:@"New File"
+        action:@selector(newExplorerFile:) keyEquivalent:@""];
+    NSMenuItem *folder = [menu addItemWithTitle:@"New Folder"
+        action:@selector(newExplorerFolder:) keyEquivalent:@""];
+    [file setTarget:self]; [folder setTarget:self];
+    if (row != NSNotFound) {
+        NSMenuItem *rename = [menu addItemWithTitle:@"Rename"
+            action:@selector(renameExplorerItem:) keyEquivalent:@""];
+        NSMenuItem *remove = [menu addItemWithTitle:@"Delete"
+            action:@selector(removeExplorerItem:) keyEquivalent:@""];
+        [rename setTarget:self]; [remove setTarget:self];
+    }
+    [menu popUpMenuPositioningItem:nil atLocation:point inView:self];
+    [self setNeedsDisplay:YES];
 }
 
 - (BOOL)performKeyEquivalent:(NSEvent *)event
@@ -695,15 +936,26 @@ static void axyne_install_menu(NSApplication *application,
     }
     [self drawLabel:@"탐색기" at:NSMakePoint(12, AXYNE_TOOLBAR + AXYNE_TABS + 10)
                 size:11 color:muted family:@"SF Pro Text"];
-    [self drawLabel:@"⌄  axyne" at:NSMakePoint(16, AXYNE_TOOLBAR + AXYNE_TABS + 34)
-                size:12 color:text family:@"SF Pro Text"];
-    [self drawLabel:@"⌄  src" at:NSMakePoint(32, AXYNE_TOOLBAR + AXYNE_TABS + 57)
-                size:12 color:text family:@"SF Pro Text"];
-    [axyne_color(47, 52, 60) setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR + AXYNE_TABS + 66,
-                          AXYNE_SIDEBAR, 22));
-    [self drawLabel:@"C  main.c" at:NSMakePoint(52, AXYNE_TOOLBAR + AXYNE_TABS + 69)
-                size:12 color:text family:@"SF Pro Text"];
+    CGFloat explorerY = AXYNE_TOOLBAR + AXYNE_TABS + 31;
+    if (_explorer.root == NULL) {
+        [self drawLabel:@"폴더 열기..." at:NSMakePoint(16, explorerY)
+                    size:12 color:text family:@"SF Pro Text"];
+    } else {
+        for (size_t i = 0; i < _explorer.count && explorerY + 22 < bottomTop; ++i) {
+            AxyneExplorerNode *node = &_explorer.nodes[i];
+            if (_hasExplorerSelection && _explorerSelection == (NSInteger)i) {
+                [axyne_color(47, 52, 60) setFill];
+                NSRectFill(NSMakeRect(0, explorerY - 2, AXYNE_SIDEBAR, 22));
+            }
+            NSString *name = [NSString stringWithUTF8String:node->name] ?: @"(invalid name)";
+            NSString *arrow = node->kind == AXYNE_FILE_KIND_DIRECTORY
+                ? (axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›") : @"·";
+            NSString *label = [NSString stringWithFormat:@"%@ %@", arrow, name];
+            [self drawLabel:label at:NSMakePoint(16 + node->depth * 16, explorerY)
+                        size:12 color:text family:@"SF Pro Text"];
+            explorerY += 22;
+        }
+    }
     [self drawLabel:@"출력     문제 1     터미널"
                 at:NSMakePoint(12, bottomTop + 9) size:11 color:muted family:@"SF Pro Text"];
     [self drawLabel:@"✓ 빌드 준비됨"
@@ -721,6 +973,11 @@ static void axyne_install_menu(NSApplication *application,
 
 - (void)dealloc
 {
+    if (_watcher != NULL) {
+        axyne_watcher_stop(_watcher);
+        axyne_watcher_release(_watcher);
+    }
+    axyne_explorer_destroy(&_explorer);
     [_recentMenu release];
     if (_editorView != nil) {
         for (size_t i = 0; i < _documents.count; ++i) {
@@ -843,6 +1100,10 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"Close Tab"
         action:@selector(closeDocument:) keyEquivalent:@"w"];
     [closeItem setTarget:workspace];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"Open Workspace Folder…"
+        action:@selector(openWorkspace:) keyEquivalent:@""];
+    [workspaceItem setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent"
         action:nil keyEquivalent:@""];
