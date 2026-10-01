@@ -54,11 +54,28 @@ AxyneStatus axyne_fs_list_directory(const char *utf8_path,
 AxyneStatus axyne_fs_create_file(const char *utf8_path, AxyneError *error);
 AxyneStatus axyne_fs_create_directory(const char *utf8_path,
                                       AxyneError *error);
+/* The *_at operations accept a verified parent directory path and one child
+ * name.  They keep the parent directory open while operating on the child,
+ * so a path replacement cannot redirect the operation to another directory.
+ * child_name must be one valid UTF-8 name without separators, '.', or '..'. */
+AxyneStatus axyne_fs_create_file_at(const char *utf8_parent,
+                                    const char *child_name,
+                                    AxyneError *error);
+AxyneStatus axyne_fs_create_directory_at(const char *utf8_parent,
+                                         const char *child_name,
+                                         AxyneError *error);
 /* Rename atomically fails when the destination already exists. */
 AxyneStatus axyne_fs_rename(const char *utf8_path, const char *new_utf8_path,
                             AxyneError *error);
+AxyneStatus axyne_fs_rename_at(const char *utf8_parent,
+                               const char *old_name,
+                               const char *new_name,
+                               AxyneError *error);
 /* Removes a file or an empty directory; directories are not recursive. */
 AxyneStatus axyne_fs_remove(const char *utf8_path, AxyneError *error);
+AxyneStatus axyne_fs_remove_at(const char *utf8_parent,
+                               const char *child_name,
+                               AxyneError *error);
 void axyne_fs_free_directory_list(AxyneDirectoryList *list);
 void axyne_fs_free(void *allocation);
 

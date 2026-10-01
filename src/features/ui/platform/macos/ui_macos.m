@@ -445,6 +445,10 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     (void)sender;
     if (!_hasExplorerSelection) return;
     AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
+    if (_explorer.root != NULL && strcmp(node->path, _explorer.root) == 0) {
+        [self showWorkspaceMessage:@"The workspace root cannot be renamed or deleted."];
+        return;
+    }
     NSString *name = [self askForText:@"Rename" label:@"New name"];
     if ([name length] == 0) return;
     if (!axyne_explorer_is_safe_child_name([name UTF8String])) {
@@ -452,10 +456,10 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
         return;
     }
     NSString *nodePath = [NSString stringWithUTF8String:node->path];
-    NSString *path = [nodePath stringByDeletingLastPathComponent];
-    path = [path stringByAppendingPathComponent:name];
+    NSString *parent = [nodePath stringByDeletingLastPathComponent];
     AxyneError error;
-    AxyneStatus status = axyne_fs_rename(node->path, [path UTF8String], &error);
+    AxyneStatus status = axyne_fs_rename_at([parent UTF8String], node->name,
+                                            [name UTF8String], &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Rename failed" error:&error];
     else { _hasExplorerSelection = NO; [self refreshExplorer]; }
@@ -465,9 +469,16 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
 {
     (void)sender;
     if (!_hasExplorerSelection) return;
+    AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
+    if (_explorer.root != NULL && strcmp(node->path, _explorer.root) == 0) {
+        [self showWorkspaceMessage:@"The workspace root cannot be renamed or deleted."];
+        return;
+    }
+    NSString *nodePath = [NSString stringWithUTF8String:node->path];
+    NSString *parent = [nodePath stringByDeletingLastPathComponent];
     AxyneError error;
-    AxyneStatus status = axyne_fs_remove(
-        _explorer.nodes[_explorerSelection].path, &error);
+    AxyneStatus status = axyne_fs_remove_at([parent UTF8String], node->name,
+                                            &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Delete failed" error:&error];
     else { _hasExplorerSelection = NO; [self refreshExplorer]; }
@@ -490,11 +501,10 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
         [self showWorkspaceMessage:@"Use one valid file or folder name without separators, . or .."];
         return;
     }
-    NSString *path = [parent stringByAppendingPathComponent:name];
     AxyneError error;
     AxyneStatus status = kind == AXYNE_FILE_KIND_FILE
-        ? axyne_fs_create_file([path UTF8String], &error)
-        : axyne_fs_create_directory([path UTF8String], &error);
+        ? axyne_fs_create_file_at([parent UTF8String], [name UTF8String], &error)
+        : axyne_fs_create_directory_at([parent UTF8String], [name UTF8String], &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Create failed" error:&error];
     else [self refreshExplorer];
