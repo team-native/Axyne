@@ -250,29 +250,24 @@ AxyneStatus axyne_documents_save_as(AxyneDocumentSet *set, size_t index,
         return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
                           "Invalid document or file path");
     AxyneDocument *doc = &set->documents[index];
-    AxyneStatus status = axyne_fs_write_file(path, doc->contents, doc->length,
-                                             error);
-    if (status != AXYNE_STATUS_OK) {
-        doc->is_dirty = 1;
-        return status;
-    }
     char *new_path = axyne_copy(path, strlen(path));
     char *new_title = axyne_title(path);
     if (new_path == NULL || new_title == NULL) {
         free(new_path); free(new_title);
-        doc->is_dirty = 1;
         return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                          "File saved, but document metadata could not be updated");
+                          "Unable to allocate document metadata");
+    }
+    AxyneStatus status = axyne_fs_write_file(path, doc->contents, doc->length,
+                                             error);
+    if (status != AXYNE_STATUS_OK) {
+        free(new_path); free(new_title);
+        return status;
     }
     free(doc->path); free(doc->title);
     doc->path = new_path; doc->title = new_title;
     doc->is_untitled = 0;
     doc->is_dirty = 0;
-    if (!axyne_recent_add(set, path)) {
-        axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                    "File saved, but recent files could not be updated");
-        return AXYNE_STATUS_OUT_OF_MEMORY;
-    }
+    (void)axyne_recent_add(set, path);
     axyne_success(error);
     return AXYNE_STATUS_OK;
 }
@@ -291,9 +286,7 @@ AxyneStatus axyne_documents_save(AxyneDocumentSet *set, size_t index,
                                              doc->length, error);
     if (status == AXYNE_STATUS_OK) {
         doc->is_dirty = 0;
-        if (!axyne_recent_add(set, doc->path))
-            return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                              "File saved, but recent files could not be updated");
+        (void)axyne_recent_add(set, doc->path);
     } else {
         doc->is_dirty = 1;
     }
