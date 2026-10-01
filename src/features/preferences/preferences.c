@@ -128,8 +128,28 @@ static AxyneStatus axyne_get_string(AxyneSettings *settings, const char *path,
     if (json[0] != '"') { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; }
     for (size_t i = 1; json[i] != '\0'; ++i) {
         unsigned char character = (unsigned char)json[i];
-        if (character == '"' && json[i - 1] != '\\') { if (length + 1 >= capacity) { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; } value[length] = '\0'; axyne_settings_free_json(json); return AXYNE_STATUS_OK; }
-        if (character == '\\' && json[i + 1] != '\0') { ++i; character = (unsigned char)json[i]; if (character == 'n') character = '\n'; else if (character == 'r') character = '\r'; else if (character == 't') character = '\t'; else if (character == 'b') character = '\b'; else if (character == 'f') character = '\f'; else if (character != '"' && character != '\\' && character != '/') { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; } }
+        if (character == '"') { if (length + 1 >= capacity) { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; } value[length] = '\0'; axyne_settings_free_json(json); return AXYNE_STATUS_OK; }
+        if (character == '\\' && json[i + 1] != '\0') {
+            ++i; character = (unsigned char)json[i];
+            if (character == 'n') character = '\n';
+            else if (character == 'r') character = '\r';
+            else if (character == 't') character = '\t';
+            else if (character == 'b') character = '\b';
+            else if (character == 'f') character = '\f';
+            else if (character == 'u' && json[i + 4] != '\0') {
+                unsigned int code = 0;
+                for (int digit = 0; digit < 4; ++digit) {
+                    unsigned char hex = (unsigned char)json[i + 1 + digit];
+                    if (hex >= '0' && hex <= '9') code = code * 16u + (unsigned int)(hex - '0');
+                    else if (hex >= 'a' && hex <= 'f') code = code * 16u + (unsigned int)(hex - 'a' + 10);
+                    else if (hex >= 'A' && hex <= 'F') code = code * 16u + (unsigned int)(hex - 'A' + 10);
+                    else { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; }
+                }
+                i += 4;
+                if (code > 0xffu) { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; }
+                character = (unsigned char)code;
+            } else if (character != '"' && character != '\\' && character != '/') { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; }
+        } else if (character == '\\') { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; }
         if (length + 1 >= capacity) { axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT; }
         value[length++] = (char)character;
     }
@@ -146,13 +166,51 @@ static int axyne_value_present(AxyneSettings *settings, const char *path,
     return present;
 }
 
+static AxyneStatus axyne_append_json_string(char *json, size_t capacity,
+                                            size_t *length, const char *value)
+{
+    const unsigned char *cursor = (const unsigned char *)(value != NULL ? value : "");
+    if (*length + 1 >= capacity) return AXYNE_STATUS_OUT_OF_MEMORY;
+    json[(*length)++] = '"';
+    while (*cursor != '\0') {
+        const char *escape = NULL;
+        char unicode[7];
+        switch (*cursor) {
+        case '"': escape = "\\\""; break;
+        case '\\': escape = "\\\\"; break;
+        case '\b': escape = "\\b"; break;
+        case '\f': escape = "\\f"; break;
+        case '\n': escape = "\\n"; break;
+        case '\r': escape = "\\r"; break;
+        case '\t': escape = "\\t"; break;
+        default:
+            if (*cursor < 0x20u) { (void)snprintf(unicode, sizeof(unicode), "\\u%04x", *cursor); escape = unicode; }
+            break;
+        }
+        if (escape != NULL) {
+            size_t escaped_length = strlen(escape);
+            if (*length + escaped_length >= capacity) return AXYNE_STATUS_OUT_OF_MEMORY;
+            memcpy(json + *length, escape, escaped_length); *length += escaped_length;
+        } else {
+            if (*length + 1 >= capacity) return AXYNE_STATUS_OUT_OF_MEMORY;
+            json[(*length)++] = (char)*cursor;
+        }
+        ++cursor;
+    }
+    if (*length + 1 >= capacity) return AXYNE_STATUS_OUT_OF_MEMORY;
+    json[(*length)++] = '"'; json[*length] = '\0';
+    return AXYNE_STATUS_OK;
+}
+
 static AxyneStatus axyne_set_text(AxyneSettings *settings, const char *path,
                                   const char *value, AxyneError *error)
 {
-    char *json; size_t length = strlen(value); size_t capacity = length * 2 + 3; size_t out = 0;
+    char *json; size_t capacity = strlen(value != NULL ? value : "") * 6 + 3; size_t out = 0;
+    AxyneStatus status;
     json = (char *)malloc(capacity); if (json == NULL) return AXYNE_STATUS_OUT_OF_MEMORY;
-    json[out++] = '"'; for (size_t i = 0; i < length; ++i) { if (value[i] == '"' || value[i] == '\\') json[out++] = '\\'; json[out++] = value[i]; } json[out++] = '"'; json[out] = '\0';
-    AxyneStatus status = axyne_settings_set_json(settings, path, json, error); free(json); return status;
+    status = axyne_append_json_string(json, capacity, &out, value);
+    if (status == AXYNE_STATUS_OK) status = axyne_settings_set_json(settings, path, json, error);
+    free(json); return status;
 }
 
 static AxyneStatus axyne_set_uint(AxyneSettings *settings, const char *path,
@@ -276,7 +334,7 @@ static AxyneStatus axyne_save_values(const AxynePreferences *preferences,
     if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_THEME_PRESET)) { status = axyne_set_text(settings, "/theme/preset", preferences->theme.preset == AXYNE_THEME_LIGHT ? "light" : preferences->theme.preset == AXYNE_THEME_SYSTEM ? "system" : "dark", error); if (status != AXYNE_STATUS_OK) goto done; }
     { const uint32_t *colors = &preferences->theme.background; const char *names[] = {"background", "panel", "toolbar", "border", "text", "muted", "accent", "editorBackground", "editorText"}; const uint32_t bits[] = {AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL, AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER, AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED, AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND, AXYNE_PREFERENCE_THEME_EDITOR_TEXT}; for (size_t i = 0; i < 9; ++i) if (!workspace || (preferences->present_fields & bits[i])) { char path[64]; (void)snprintf(path, sizeof(path), "/theme/%s", names[i]); SET_UINT(path, colors[i]); } }
     (void)snprintf(json, sizeof(json), "["); length = 1;
-    { size_t written_bindings = 0; for (size_t i = 0; i < preferences->binding_count && i < AXYNE_PREFERENCE_BINDING_MAX; ++i) { const AxyneKeyBinding *binding = &preferences->bindings[i]; if (workspace && !preferences->binding_present[binding->action]) continue; int written = snprintf(json + length, sizeof(json) - length, "%s{\"action\":%u,\"modifiers\":%u,\"key\":\"%s\",\"enabled\":%s}", written_bindings == 0 ? "" : ",", (unsigned)binding->action, binding->modifiers, binding->key, binding->enabled ? "true" : "false"); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; ++written_bindings; } }
+    { size_t written_bindings = 0; for (size_t i = 0; i < preferences->binding_count && i < AXYNE_PREFERENCE_BINDING_MAX; ++i) { const AxyneKeyBinding *binding = &preferences->bindings[i]; if (workspace && !preferences->binding_present[binding->action]) continue; int written = snprintf(json + length, sizeof(json) - length, "%s{\"action\":%u,\"modifiers\":%u,\"key\":", written_bindings == 0 ? "" : ",", (unsigned)binding->action, binding->modifiers); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; status = axyne_append_json_string(json, sizeof(json), &length, binding->key); if (status != AXYNE_STATUS_OK) goto done; written = snprintf(json + length, sizeof(json) - length, ",\"enabled\":%s}", binding->enabled ? "true" : "false"); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; ++written_bindings; } }
     if (length + 2 > sizeof(json)) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } json[length++] = ']'; json[length] = '\0';
     status = axyne_settings_set_json(settings, "/keybindings", json, error); if (status != AXYNE_STATUS_OK) goto done;
     status = axyne_settings_save(settings, utf8_path, error);
