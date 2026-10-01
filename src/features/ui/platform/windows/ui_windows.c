@@ -331,7 +331,7 @@ static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
     if (length == 0) return 1;
     if (length > SIZE_MAX - run->length - 1) return 0;
     required = run->length + length + 1;
-    if (required > AXYNE_GIT_OUTPUT_LIMIT) return 0;
+    if (required > AXYNE_GIT_OUTPUT_LIMIT + 1) return 0;
     if (required > run->capacity) {
         capacity = run->capacity == 0 ? 4096 : run->capacity;
         while (capacity < required) {
@@ -362,7 +362,7 @@ static void axyne_git_ui_output(AxyneProcess *process,
     if (run != NULL && bytes != NULL && !run->allocation_failed &&
         !run->output_truncated) {
         if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
-            length > AXYNE_GIT_OUTPUT_LIMIT - run->length - 1) {
+            length > AXYNE_GIT_OUTPUT_LIMIT - run->length) {
             run->output_truncated = 1;
             (void)axyne_process_terminate(process, NULL);
         } else if (!axyne_git_ui_append(run, bytes, length)) {
