@@ -190,6 +190,7 @@ static DWORD WINAPI process_worker(void *opaque)
     HANDLE pipes[2] = { state->stdout_read, state->stderr_read };
     int exited = 0;
     int eof[2] = { 0, 0 };
+    int pipe_failure = 0;
     DWORD exit_code = 1;
     while (!exited || !eof[0] || !eof[1]) {
         size_t i;
@@ -204,7 +205,8 @@ static DWORD WINAPI process_worker(void *opaque)
                 DWORD pipe_error = GetLastError();
                 if (pipe_error == ERROR_BROKEN_PIPE || pipe_error == ERROR_NO_DATA)
                     eof[i] = 1;
-                continue;
+                else pipe_failure = 1;
+                break;
             }
             if (available == 0) continue;
             if (available > sizeof(buffer)) available = (DWORD)sizeof(buffer);
@@ -216,6 +218,15 @@ static DWORD WINAPI process_worker(void *opaque)
             else if (GetLastError() == ERROR_BROKEN_PIPE || GetLastError() == ERROR_NO_DATA) {
                 eof[i] = 1;
             }
+        }
+        if (pipe_failure) {
+            /* An unknown pipe failure cannot recover by polling the same
+             * handle. Terminate the managed tree and finish this worker;
+             * release() still owns final handle cleanup. */
+            (void)TerminateJobObject(state->job, 1);
+            (void)WaitForSingleObject(state->process, INFINITE);
+            (void)GetExitCodeProcess(state->process, &exit_code);
+            break;
         }
         if (!exited || !eof[0] || !eof[1]) Sleep(1);
     }
