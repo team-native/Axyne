@@ -44,6 +44,9 @@ typedef struct AxyneProcessSpec {
     void *user_data;
 } AxyneProcessSpec;
 
+/* Environment entries use NAME=VALUE. The child inherits the current process
+ * environment, then applies these overrides. Duplicate names are invalid. */
+
 AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
                                 AxyneProcess **process, AxyneError *error);
 AxyneStatus axyne_process_write(AxyneProcess *process, const char *bytes,
