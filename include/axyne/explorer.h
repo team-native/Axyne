@@ -39,6 +39,8 @@ AxyneStatus axyne_explorer_toggle(AxyneExplorer *explorer, size_t index,
                                   AxyneError *error);
 int axyne_explorer_is_expanded(const AxyneExplorer *explorer,
                                const char *utf8_path);
+/* Returns non-zero only for one safe, relative child name. */
+int axyne_explorer_is_safe_child_name(const char *utf8_name);
 
 #ifdef __cplusplus
 }
