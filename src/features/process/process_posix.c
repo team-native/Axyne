@@ -26,7 +26,7 @@ typedef struct ProcessState {
     pthread_mutex_t child_lock;
     int child_done;
     int child_status;
-    int root_reaped_unexpectedly;
+    int group_signaling_unsafe;
 } ProcessState;
 
 static unsigned char ascii_fold(unsigned char value)
@@ -182,12 +182,13 @@ static void *process_worker(void *opaque)
                         child_info.si_code == CLD_DUMPED)
                         state->child_status = 128 + child_info.si_status;
                 } else {
-                    state->root_reaped_unexpectedly = 1;
+                    state->group_signaling_unsafe = 1;
                     state->child_status = 1;
                 }
             } else if (wait_result < 0 && errno != EINTR) {
                 child_done = 1;
                 state->child_done = 1;
+                state->group_signaling_unsafe = 1;
                 state->child_status = 1;
             }
             (void)pthread_mutex_unlock(&state->child_lock);
@@ -375,7 +376,7 @@ AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
                                                         "Process is null");
     state = (ProcessState *)process->implementation;
     (void)pthread_mutex_lock(&state->child_lock);
-    if (!state->root_reaped_unexpectedly &&
+    if (!state->group_signaling_unsafe &&
         kill(-state->child, SIGKILL) != 0 && errno != ESRCH) {
         (void)pthread_mutex_unlock(&state->child_lock);
         return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
@@ -391,7 +392,7 @@ void axyne_process_release(AxyneProcess *process)
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
     (void)pthread_mutex_lock(&state->child_lock);
-    if (!state->root_reaped_unexpectedly) (void)kill(-state->child, SIGKILL);
+    if (!state->group_signaling_unsafe) (void)kill(-state->child, SIGKILL);
     (void)pthread_mutex_unlock(&state->child_lock);
     (void)pthread_join(state->worker, NULL);
     /* Normally the zombie leader reserves its process-group ID through the
