@@ -40,6 +40,9 @@ Scintilla를 Release 구성으로 빌드하고 `Scintilla.dll`과
 패키지 파일 이름에 아키텍처가 포함됩니다. 필요한 경우 다음 CMake 옵션으로
 macOS 값을 바꿀 수 있습니다.
 
+패키징은 Release 구성만 지원합니다. 멀티 구성 생성기에서는 `cpack -C Release`를
+사용해야 하며, Debug 패키징 요청은 거부됩니다.
+
 ```sh
 cmake -S . -B build \
   -DCMAKE_OSX_ARCHITECTURES="arm64" \
