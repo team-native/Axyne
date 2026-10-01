@@ -25,6 +25,7 @@ typedef struct ProcessState {
     pthread_mutex_t write_lock;
     pthread_mutex_t child_lock;
     int child_done;
+    int child_status;
 } ProcessState;
 
 static int set_cloexec(int fd)
@@ -120,7 +121,7 @@ static void *process_worker(void *opaque)
     AxyneProcess *process = (AxyneProcess *)opaque;
     ProcessState *state = (ProcessState *)process->implementation;
     int descriptors[2] = { state->stdout_read, state->stderr_read };
-    int eof[2] = { 0, 0 }, child_done = 0, child_status = 0;
+    int eof[2] = { 0, 0 }, child_done = 0;
     char buffer[4096];
     while (!child_done || !eof[0] || !eof[1]) {
         size_t stream;
@@ -146,15 +147,28 @@ static void *process_worker(void *opaque)
             }
         }
         if (!child_done) {
-            pid_t waited;
+            siginfo_t child_info;
+            int wait_result;
+            memset(&child_info, 0, sizeof(child_info));
             (void)pthread_mutex_lock(&state->child_lock);
-            waited = waitpid(state->child, &child_status, WNOHANG);
-            if (waited == state->child || (waited < 0 && errno == ECHILD)) {
+            wait_result = waitid(P_PID, (id_t)state->child, &child_info,
+                                 WEXITED | WNOHANG | WNOWAIT);
+            if ((wait_result == 0 && child_info.si_pid == state->child) ||
+                (wait_result < 0 && errno == ECHILD)) {
                 child_done = 1;
                 state->child_done = 1;
-            } else if (waited < 0 && errno != EINTR) {
+                if (wait_result == 0) {
+                    state->child_status = child_info.si_status;
+                    if (child_info.si_code == CLD_KILLED ||
+                        child_info.si_code == CLD_DUMPED)
+                        state->child_status = 128 + child_info.si_status;
+                } else {
+                    state->child_status = 1;
+                }
+            } else if (wait_result < 0 && errno != EINTR) {
                 child_done = 1;
                 state->child_done = 1;
+                state->child_status = 1;
             }
             (void)pthread_mutex_unlock(&state->child_lock);
         }
@@ -163,10 +177,7 @@ static void *process_worker(void *opaque)
             (void)nanosleep(&pause, NULL);
         }
     }
-    if (WIFEXITED(child_status)) child_status = WEXITSTATUS(child_status);
-    else if (WIFSIGNALED(child_status)) child_status = 128 + WTERMSIG(child_status);
-    else child_status = 1;
-    axyne_process_dispatch_exit(process, child_status);
+    axyne_process_dispatch_exit(process, state->child_status);
     return NULL;
 }
 
@@ -362,6 +373,9 @@ void axyne_process_release(AxyneProcess *process)
     (void)kill(-state->child, SIGKILL);
     (void)pthread_mutex_unlock(&state->child_lock);
     (void)pthread_join(state->worker, NULL);
+    /* The worker observes exit without reaping, keeping the process-group ID
+       reserved until after the final group signal. */
+    while (waitpid(state->child, NULL, 0) < 0 && errno == EINTR) { }
     (void)pthread_mutex_lock(&state->write_lock);
     close(state->stdin_write);
     (void)pthread_mutex_unlock(&state->write_lock);
