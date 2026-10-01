@@ -243,13 +243,27 @@ static int lsp_uri_append_path(LspBuffer *buffer, const char *path)
 {
     static const char hex[] = "0123456789ABCDEF";
     size_t i;
+#ifdef _WIN32
+    int unc_path = path[0] == '\\' && path[1] == '\\';
+    if (unc_path) {
+        if (!lsp_buffer_append(buffer, "file://", 7)) return 0;
+        i = 2;
+    } else {
+        if (!lsp_buffer_append(buffer, "file:///", 8)) return 0;
+        i = 0;
+    }
+#else
     if (!lsp_buffer_append(buffer, "file://", 7)) return 0;
-    if (path[0] != '/' && !(isalpha((unsigned char)path[0]) && path[1] == ':')) {
+    if (path[0] != '/') {
         if (!lsp_buffer_put(buffer, '/')) return 0;
     }
-    for (i = 0; path[i] != '\0'; ++i) {
+    i = 0;
+#endif
+    for (; path[i] != '\0'; ++i) {
         unsigned char c = (unsigned char)path[i];
+#ifdef _WIN32
         if (c == '\\') c = '/';
+#endif
         if (lsp_is_unreserved(c) || c == '/' || c == ':') {
             if (!lsp_buffer_put(buffer, (char)c)) return 0;
         } else {
@@ -811,6 +825,8 @@ static int lsp_grow(void **items, size_t *capacity, size_t item_size)
     *items = grown; *capacity = next; return 1;
 }
 
+static LspRequestKind lsp_take_request(AxyneLspClient *client, uint64_t id);
+
 static int lsp_add_request(AxyneLspClient *client, uint64_t id, LspRequestKind kind)
 {
     if (client->request_count == client->request_capacity &&
@@ -818,6 +834,22 @@ static int lsp_add_request(AxyneLspClient *client, uint64_t id, LspRequestKind k
         return 0;
     client->requests[client->request_count++] = (LspRequest){ id, kind };
     return 1;
+}
+
+static void lsp_remove_queued_for_uri_locked(AxyneLspClient *client,
+                                             const char *uri)
+{
+    size_t i = 0;
+    while (i < client->queued_count) {
+        if (strcmp(client->queued[i].uri, uri) == 0) {
+            uint64_t id = client->queued[i].id;
+            free(client->queued[i].uri);
+            client->queued[i] = client->queued[--client->queued_count];
+            (void)lsp_take_request(client, id);
+        } else {
+            ++i;
+        }
+    }
 }
 
 static LspRequestKind lsp_take_request(AxyneLspClient *client, uint64_t id)
@@ -1034,7 +1066,7 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
             event->kind = LSP_EVENT_DIAGNOSTICS;
             event->document_path = lsp_copy(document == NULL ? uri : document->path);
         }
-        free(uri); free(method); return event->kind != 0;
+        free(uri); free(method); return 1;
     }
     if (has_id) request_kind = lsp_take_request(client, id);
     if (request_kind == LSP_REQUEST_INITIALIZE && !has_error) {
@@ -1062,7 +1094,7 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
         }
     }
     free(method);
-    return event->kind != 0;
+    return 1;
 }
 
 static const char *lsp_find_separator(const char *data, size_t length,
@@ -1088,7 +1120,13 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
     if (client->input.length == 0) return 0;
     separator = lsp_find_separator(client->input.data, client->input.length,
                                     &separator_length);
-    if (separator == NULL) return 0;
+    if (separator == NULL) {
+        if (client->input.length > AXYNE_LSP_MAX_MESSAGE) {
+            client->input.length = 0;
+            return -1;
+        }
+        return 0;
+    }
     header_length = (size_t)(separator - client->input.data);
     content_length = SIZE_MAX;
     {
@@ -1100,12 +1138,20 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
             while (line_length != 0 && (line[line_length - 1] == '\r' || line[line_length - 1] == '\n')) --line_length;
             if (line_length >= 15 && strncmp(line, "Content-Length:", 15) == 0) {
                 JsonCursor value = { line + 15, line + line_length };
-                if (!json_read_size(&value, &content_length)) return -1;
+                if (!json_read_size(&value, &content_length)) {
+                    client->input.length = 0;
+                    return -1;
+                }
             }
             line = line_end == NULL ? header_end : line_end + 1;
         }
     }
-    if (content_length == SIZE_MAX || content_length > AXYNE_LSP_MAX_MESSAGE) return -1;
+    if (content_length == SIZE_MAX || content_length > AXYNE_LSP_MAX_MESSAGE) {
+        memmove(client->input.data, client->input.data + header_length + separator_length,
+                client->input.length - header_length - separator_length);
+        client->input.length -= header_length + separator_length;
+        return -1;
+    }
     i = header_length + separator_length;
     if (client->input.length < i || client->input.length - i < content_length) return 0;
     memset(event, 0, sizeof(*event));
@@ -1113,7 +1159,7 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
         memmove(client->input.data, client->input.data + i + content_length,
                 client->input.length - i - content_length);
         client->input.length -= i + content_length;
-        return 1;
+        return -1;
     }
     memmove(client->input.data, client->input.data + i + content_length,
             client->input.length - i - content_length);
@@ -1139,8 +1185,18 @@ static void lsp_process_output(AxyneProcess *process, AxyneProcessStream stream,
     }
     for (;;) {
         int frame = lsp_process_frames_locked(client, &event);
-        if (frame <= 0) { lsp_mutex_unlock(&client->mutex); return; }
+        if (frame == 0) { lsp_mutex_unlock(&client->mutex); return; }
         lsp_mutex_unlock(&client->mutex);
+        if (frame < 0) {
+            lsp_report(client, AXYNE_STATUS_IO_ERROR,
+                       "Malformed LSP JSON-RPC message or framing");
+            lsp_mutex_lock(&client->mutex);
+            if (client->stopping) {
+                lsp_mutex_unlock(&client->mutex);
+                return;
+            }
+            continue;
+        }
         if (event.kind != 0) lsp_dispatch_event(client, &event);
         lsp_mutex_lock(&client->mutex);
     }
@@ -1252,9 +1308,29 @@ static AxyneStatus lsp_start_with_callbacks_locked(AxyneLspClient *client,
     status = axyne_process_start(&spec, &client->process, error);
     if (status != AXYNE_STATUS_OK) return status;
     client->started = 1;
-    if (!lsp_send_initialize_locked(client))
+    if (!lsp_send_initialize_locked(client)) {
+        /* The caller releases the process after dropping this mutex. */
+        client->stopping = 1;
+        client->initialized = 0;
+        client->exited = 1;
         return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send LSP initialize request");
+    }
     return lsp_error(error, AXYNE_STATUS_OK, "");
+}
+
+static void lsp_cleanup_failed_start(AxyneLspClient *client)
+{
+    AxyneProcess *process;
+    lsp_mutex_lock(&client->mutex);
+    if (!client->stopping || !client->exited || client->process == NULL) {
+        lsp_mutex_unlock(&client->mutex);
+        return;
+    }
+    process = client->process;
+    client->process = NULL;
+    client->started = 0;
+    lsp_mutex_unlock(&client->mutex);
+    axyne_process_release(process);
 }
 
 AxyneStatus axyne_lsp_create(const AxyneLspConfig *config,
@@ -1315,6 +1391,7 @@ AxyneStatus axyne_lsp_start(AxyneLspClient *client, AxyneError *error)
     lsp_mutex_lock(&client->mutex);
     status = lsp_start_with_callbacks_locked(client, error);
     lsp_mutex_unlock(&client->mutex);
+    if (status != AXYNE_STATUS_OK) lsp_cleanup_failed_start(client);
     return status;
 }
 
@@ -1366,6 +1443,7 @@ AxyneStatus axyne_lsp_did_open(AxyneLspClient *client,
         size_t index = (size_t)(entry - client->documents); lsp_remove_document_locked(client, index);
     }
     lsp_mutex_unlock(&client->mutex);
+    if (status != AXYNE_STATUS_OK) lsp_cleanup_failed_start(client);
     return status;
 }
 
@@ -1399,6 +1477,7 @@ AxyneStatus axyne_lsp_did_close(AxyneLspClient *client,
     if (client->initialized && entry->open_sent && !lsp_send_close_locked(client, entry)) {
         lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send didClose");
     }
+    lsp_remove_queued_for_uri_locked(client, entry->uri);
     index = (size_t)(entry - client->documents); lsp_remove_document_locked(client, index);
     lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_OK, "");
 }
@@ -1419,7 +1498,11 @@ static AxyneStatus lsp_request(AxyneLspClient *client, const AxyneDocument *docu
     entry = lsp_find_document(client, document->path);
     if (entry == NULL) { lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_NOT_FOUND, "Document is not open in LSP"); }
     status = lsp_start_with_callbacks_locked(client, error);
-    if (status != AXYNE_STATUS_OK) { lsp_mutex_unlock(&client->mutex); return status; }
+    if (status != AXYNE_STATUS_OK) {
+        lsp_mutex_unlock(&client->mutex);
+        lsp_cleanup_failed_start(client);
+        return status;
+    }
     request.id = client->next_id++; request.kind = kind; request.uri = lsp_copy(entry->uri); request.position = position;
     if (request.uri == NULL || !lsp_add_request(client, request.id, kind)) {
         free(request.uri); lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to queue LSP request");
