@@ -962,13 +962,10 @@ AxyneStatus axyne_fs_list_directory(const char *utf8_path,
         struct dirent *item;
         AxyneFileEntry *entries = NULL;
         size_t count = 0;
-        directory_fd = openat(AT_FDCWD, utf8_path,
-                              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        directory_fd = axyne_workspace_open_directory_nofollow(utf8_path,
+                                                                error);
         if (directory_fd < 0) {
-            if (errno == ELOOP)
-                return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
-                                   "symbolic-link directories are not supported");
-            return axyne_system_error(error, axyne_errno_status(errno), "list directory");
+            return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
         }
         directory = fdopendir(directory_fd);
         if (directory == NULL) {
@@ -1007,7 +1004,8 @@ AxyneStatus axyne_fs_list_directory(const char *utf8_path,
                 return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
                                    "out of memory listing directory");
             }
-            if (lstat(path, &info) != 0) {
+            if (fstatat(directory_fd, item->d_name, &info,
+                        AT_SYMLINK_NOFOLLOW) != 0) {
                 int saved = errno;
                 free(name); free(path); closedir(directory);
                 for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }

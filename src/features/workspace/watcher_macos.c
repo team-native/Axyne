@@ -45,6 +45,28 @@ static void axyne_emit_event(AxyneWatcher *watcher, AxyneWatchEventKind kind,
     watcher->callback(&event, watcher->user_data);
 }
 
+/* FSEvents is path based, while the selected workspace is secured by the
+ * verified directory FD retained by this watcher.  Re-verify the textual
+ * root before forwarding an event so a replaced intermediate component cannot
+ * turn an event into an observation of a different directory tree. */
+static int axyne_watch_event_path_is_safe(AxyneWatcher *watcher,
+                                          const char *path)
+{
+    int verified_root;
+    size_t root_length;
+    if (watcher == NULL || watcher->directory == NULL || path == NULL)
+        return 0;
+    verified_root = axyne_workspace_open_directory_nofollow(
+        watcher->directory, NULL);
+    if (verified_root < 0) return 0;
+    close(verified_root);
+    root_length = strlen(watcher->directory);
+    if (root_length == 1 && watcher->directory[0] == '/')
+        return path[0] == '/';
+    return strncmp(path, watcher->directory, root_length) == 0 &&
+           (path[root_length] == '\0' || path[root_length] == '/');
+}
+
 static void axyne_fsevents_callback(ConstFSEventStreamRef stream,
                                     void *client_info, size_t event_count,
                                     void *event_paths,
@@ -63,6 +85,12 @@ static void axyne_fsevents_callback(ConstFSEventStreamRef stream,
             kFSEventStreamEventFlagKernelDropped |
             kFSEventStreamEventFlagEventIdsWrapped |
             kFSEventStreamEventFlagRootChanged;
+        if (!(f & rescan_flags) &&
+            !axyne_watch_event_path_is_safe(watcher, paths[i])) {
+            axyne_emit_event(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                             watcher->directory);
+            continue;
+        }
         if (f & rescan_flags) {
             axyne_emit_event(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
                              watcher->directory);
