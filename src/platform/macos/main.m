@@ -21,7 +21,7 @@
         backing:NSBackingStoreBuffered
         defer:NO];
     [self.window center];
-    [self.window setTitle:@"Axyne"];
+    [self.window setTitle:[NSString stringWithUTF8String:axyne_app_name()]];
     [self.window makeKeyAndOrderFront:nil];
 }
 
@@ -54,4 +54,3 @@ int main(int argc, const char *argv[])
     axyne_app_shutdown(&app);
     return 0;
 }
-
