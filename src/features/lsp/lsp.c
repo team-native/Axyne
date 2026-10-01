@@ -637,30 +637,37 @@ static int lsp_parse_diagnostic(JsonCursor *cursor, AxyneLspDiagnostic *diagnost
     if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
     for (;;) {
         key = json_read_string(cursor);
-        if (key == NULL || !json_expect(cursor, ':')) { free(key); return 0; }
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
         if (strcmp(key, "range") == 0) {
-            if (!lsp_parse_range(cursor, &diagnostic->range)) { free(key); return 0; }
+            if (!lsp_parse_range(cursor, &diagnostic->range)) { free(key); goto fail; }
         } else if (strcmp(key, "severity") == 0) {
-            if (!json_read_uint(cursor, &severity) || severity > 4) { free(key); return 0; }
+            if (!json_read_uint(cursor, &severity) || severity > 4) { free(key); goto fail; }
             diagnostic->severity = (AxyneLspDiagnosticSeverity)severity;
         } else if (strcmp(key, "code") == 0) {
             if (cursor->at < cursor->end && *cursor->at == '"') diagnostic->code = json_read_string(cursor);
             else {
                 const char *start = cursor->at;
-                if (!json_skip_value(cursor, 0)) { free(key); return 0; }
+                if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
                 diagnostic->code = lsp_copy_bytes(start, (size_t)(cursor->at - start));
             }
         } else if (strcmp(key, "source") == 0) {
             diagnostic->source = json_read_string(cursor);
         } else if (strcmp(key, "message") == 0) {
             diagnostic->message = json_read_string(cursor);
-        } else if (!json_skip_value(cursor, 0)) { free(key); return 0; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
         free(key);
         json_skip_space(cursor);
         if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
-        if (!json_expect(cursor, ',')) return 0;
+        if (!json_expect(cursor, ',')) goto fail;
     }
-    return diagnostic->message != NULL;
+    if (diagnostic->message != NULL) return 1;
+
+fail:
+    free(diagnostic->code);
+    free(diagnostic->source);
+    free(diagnostic->message);
+    memset(diagnostic, 0, sizeof(*diagnostic));
+    return 0;
 }
 
 static int lsp_parse_diagnostics(const char *start, const char *end,
@@ -678,41 +685,53 @@ static int lsp_parse_diagnostics(const char *start, const char *end,
     if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; return 0; }
     for (;;) {
         key = json_read_string(&cursor);
-        if (key == NULL || !json_expect(&cursor, ':')) { free(key); return 0; }
-        if (strcmp(key, "uri") == 0) *uri = json_read_string(&cursor);
+        if (key == NULL || !json_expect(&cursor, ':')) { free(key); goto fail; }
+        if (strcmp(key, "uri") == 0) {
+            char *value = json_read_string(&cursor);
+            free(*uri); *uri = value;
+        }
         else if (strcmp(key, "diagnostics") == 0) {
-            array_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+            array_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
             array_end = cursor.at;
-        } else if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+        } else if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
         free(key);
         json_skip_space(&cursor);
         if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; break; }
-        if (!json_expect(&cursor, ',')) return 0;
+        if (!json_expect(&cursor, ',')) goto fail;
     }
-    if (*uri == NULL || array_start == NULL || array_start >= array_end) return *uri != NULL;
+    if (*uri == NULL || array_start == NULL || array_start >= array_end) {
+        if (*uri != NULL) return 1;
+        goto fail;
+    }
     cursor.at = array_start;
-    if (!json_expect(&cursor, '[')) return 0;
+    if (!json_expect(&cursor, '[')) goto fail;
     json_skip_space(&cursor);
     if (cursor.at < cursor.end && *cursor.at == ']') { ++cursor.at; return 1; }
     for (;;) {
         if (*count == capacity) {
             size_t next = capacity == 0 ? 4 : capacity * 2;
             AxyneLspDiagnostic *grown;
-            if (next < capacity) return 0;
+            if (next < capacity || next > SIZE_MAX / sizeof(**diagnostics)) goto fail;
             grown = (AxyneLspDiagnostic *)realloc(*diagnostics, next * sizeof(**diagnostics));
-            if (grown == NULL) return 0;
+            if (grown == NULL) goto fail;
             *diagnostics = grown; capacity = next;
         }
-        if (!lsp_parse_diagnostic(&cursor, &(*diagnostics)[*count])) return 0;
+        if (!lsp_parse_diagnostic(&cursor, &(*diagnostics)[*count])) goto fail;
         ++*count;
         json_skip_space(&cursor);
         if (cursor.at < cursor.end && *cursor.at == ']') { ++cursor.at; break; }
-        if (!json_expect(&cursor, ',')) return 0;
+        if (!json_expect(&cursor, ',')) goto fail;
     }
     for (i = 0; i < *count; ++i) {
-        if ((*diagnostics)[i].message == NULL) return 0;
+        if ((*diagnostics)[i].message == NULL) goto fail;
     }
     return 1;
+
+fail:
+    free(*uri); *uri = NULL;
+    lsp_free_diagnostics(*diagnostics, *count);
+    *diagnostics = NULL; *count = 0;
+    return 0;
 }
 
 static int lsp_parse_location(JsonCursor *cursor, AxyneLspLocation *location)
@@ -725,21 +744,26 @@ static int lsp_parse_location(JsonCursor *cursor, AxyneLspLocation *location)
     if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
     for (;;) {
         key = json_read_string(cursor);
-        if (key == NULL || !json_expect(cursor, ':')) { free(key); return 0; }
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
         if (strcmp(key, "uri") == 0 || strcmp(key, "targetUri") == 0) {
             char *value = json_read_string(cursor);
-            if (value == NULL) { free(key); return 0; }
+            if (value == NULL) { free(key); goto fail; }
             free(location->uri); location->uri = value; got_uri = 1;
         } else if (strcmp(key, "range") == 0 || strcmp(key, "targetRange") == 0) {
             got_range = lsp_parse_range(cursor, &location->range);
-            if (!got_range) { free(key); return 0; }
-        } else if (!json_skip_value(cursor, 0)) { free(key); return 0; }
+            if (!got_range) { free(key); goto fail; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
         free(key);
         json_skip_space(cursor);
         if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
-        if (!json_expect(cursor, ',')) return 0;
+        if (!json_expect(cursor, ',')) goto fail;
     }
-    return got_uri && got_range;
+    if (got_uri && got_range) return 1;
+
+fail:
+    free(location->uri);
+    memset(location, 0, sizeof(*location));
+    return 0;
 }
 
 static int lsp_parse_locations(const char *start, const char *end,
@@ -752,7 +776,8 @@ static int lsp_parse_locations(const char *start, const char *end,
     if (cursor.at >= cursor.end || (cursor.at[0] == 'n' && json_skip_value(&cursor, 0))) return 1;
     if (*cursor.at == '{') {
         *locations = (AxyneLspLocation *)calloc(1, sizeof(**locations));
-        if (*locations == NULL || !lsp_parse_location(&cursor, *locations)) {
+        if (*locations == NULL) return 0;
+        if (!lsp_parse_location(&cursor, *locations)) {
             lsp_free_locations(*locations, 1); *locations = NULL; return 0;
         }
         *count = 1; return 1;
@@ -763,18 +788,25 @@ static int lsp_parse_locations(const char *start, const char *end,
     for (;;) {
         if (*count == capacity) {
             size_t next = capacity == 0 ? 4 : capacity * 2;
-            AxyneLspLocation *grown = (AxyneLspLocation *)realloc(
+            AxyneLspLocation *grown;
+            if (next < capacity || next > SIZE_MAX / sizeof(**locations)) goto fail;
+            grown = (AxyneLspLocation *)realloc(
                 *locations, next * sizeof(**locations));
-            if (grown == NULL) return 0;
+            if (grown == NULL) goto fail;
             *locations = grown; capacity = next;
         }
-        if (!lsp_parse_location(&cursor, &(*locations)[*count])) return 0;
+        if (!lsp_parse_location(&cursor, &(*locations)[*count])) goto fail;
         ++*count;
         json_skip_space(&cursor);
         if (cursor.at < cursor.end && *cursor.at == ']') { ++cursor.at; break; }
-        if (!json_expect(&cursor, ',')) return 0;
+        if (!json_expect(&cursor, ',')) goto fail;
     }
     return 1;
+
+fail:
+    lsp_free_locations(*locations, *count);
+    *locations = NULL; *count = 0;
+    return 0;
 }
 
 static int lsp_parse_completion_item(JsonCursor *cursor, AxyneLspCompletionItem *item)
@@ -787,20 +819,27 @@ static int lsp_parse_completion_item(JsonCursor *cursor, AxyneLspCompletionItem 
     if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
     for (;;) {
         key = json_read_string(cursor);
-        if (key == NULL || !json_expect(cursor, ':')) { free(key); return 0; }
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
         if (strcmp(key, "label") == 0) item->label = json_read_string(cursor);
         else if (strcmp(key, "detail") == 0) item->detail = json_read_string(cursor);
         else if (strcmp(key, "insertText") == 0) item->insert_text = json_read_string(cursor);
         else if (strcmp(key, "kind") == 0) {
-            if (!json_read_uint(cursor, &kind) || kind > INT_MAX) { free(key); return 0; }
+            if (!json_read_uint(cursor, &kind) || kind > INT_MAX) { free(key); goto fail; }
             item->kind = (int)kind;
-        } else if (!json_skip_value(cursor, 0)) { free(key); return 0; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
         free(key);
         json_skip_space(cursor);
         if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
-        if (!json_expect(cursor, ',')) return 0;
+        if (!json_expect(cursor, ',')) goto fail;
     }
-    return item->label != NULL;
+    if (item->label != NULL) return 1;
+
+fail:
+    free(item->label);
+    free(item->detail);
+    free(item->insert_text);
+    memset(item, 0, sizeof(*item));
+    return 0;
 }
 
 static int lsp_parse_completion(const char *start, const char *end,
@@ -820,34 +859,41 @@ static int lsp_parse_completion(const char *start, const char *end,
         if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; return 1; }
         for (;;) {
             key = json_read_string(&cursor);
-            if (key == NULL || !json_expect(&cursor, ':')) { free(key); return 0; }
+            if (key == NULL || !json_expect(&cursor, ':')) { free(key); goto fail; }
             if (strcmp(key, "items") == 0) {
-                array_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+                array_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
                 array_end = cursor.at;
-            } else if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+            } else if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
             free(key); json_skip_space(&cursor);
             if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; break; }
-            if (!json_expect(&cursor, ',')) return 0;
+            if (!json_expect(&cursor, ',')) goto fail;
         }
     }
     if (array_start == NULL || array_end == NULL) return 1;
-    cursor.at = array_start; if (!json_expect(&cursor, '[')) return 0;
+    cursor.at = array_start; if (!json_expect(&cursor, '[')) goto fail;
     json_skip_space(&cursor);
     if (cursor.at < cursor.end && *cursor.at == ']') { ++cursor.at; return 1; }
     for (;;) {
         if (*count == capacity) {
             size_t next = capacity == 0 ? 4 : capacity * 2;
-            AxyneLspCompletionItem *grown = (AxyneLspCompletionItem *)realloc(
+            AxyneLspCompletionItem *grown;
+            if (next < capacity || next > SIZE_MAX / sizeof(**items)) goto fail;
+            grown = (AxyneLspCompletionItem *)realloc(
                 *items, next * sizeof(**items));
-            if (grown == NULL) return 0;
+            if (grown == NULL) goto fail;
             *items = grown; capacity = next;
         }
-        if (!lsp_parse_completion_item(&cursor, &(*items)[*count])) return 0;
+        if (!lsp_parse_completion_item(&cursor, &(*items)[*count])) goto fail;
         ++*count; json_skip_space(&cursor);
         if (cursor.at < cursor.end && *cursor.at == ']') { ++cursor.at; break; }
-        if (!json_expect(&cursor, ',')) return 0;
+        if (!json_expect(&cursor, ',')) goto fail;
     }
     return 1;
+
+fail:
+    lsp_free_completions(*items, *count);
+    *items = NULL; *count = 0;
+    return 0;
 }
 
 static void lsp_document_dispose(LspDocument *document)
