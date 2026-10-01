@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -201,32 +202,112 @@ AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
 AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
                                 size_t length, AxyneError *error)
 {
-    FILE *file;
-    size_t written;
     if (!axyne_valid_path(utf8_path) || (contents == NULL && length != 0))
         return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                            "path and file contents are required");
 #ifdef _WIN32
     {
         wchar_t *wide = axyne_wide(utf8_path);
+        wchar_t *temporary;
+        size_t path_length;
+        unsigned int attempt;
+        HANDLE handle = INVALID_HANDLE_VALUE;
+        size_t offset = 0;
+        DWORD failure = ERROR_SUCCESS;
+        DWORD attributes;
         if (wide == NULL)
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
-        if (_wfopen_s(&file, wide, L"wb") != 0) file = NULL;
-        free(wide);
+        path_length = wcslen(wide);
+        temporary = (wchar_t *)malloc((path_length + 48) * sizeof(*temporary));
+        if (temporary == NULL) { free(wide); return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); }
+        for (attempt = 0; attempt < 128; ++attempt) {
+            (void)swprintf(temporary, path_length + 48, L"%ls.axyne-%08lx-%08x.tmp",
+                           wide, (unsigned long)GetCurrentProcessId(), (unsigned int)GetTickCount() + attempt);
+            handle = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                                 FILE_ATTRIBUTE_TEMPORARY, NULL);
+            if (handle != INVALID_HANDLE_VALUE || GetLastError() != ERROR_FILE_EXISTS)
+                break;
+        }
+        if (handle == INVALID_HANDLE_VALUE) failure = GetLastError();
+        if (handle != INVALID_HANDLE_VALUE) {
+            while (offset < length) {
+                DWORD chunk = length - offset > MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
+                DWORD written = 0;
+                if (!WriteFile(handle, contents + offset, chunk, &written, NULL) || written == 0) {
+                    failure = GetLastError(); if (failure == ERROR_SUCCESS) failure = ERROR_WRITE_FAULT; break;
+                }
+                offset += written;
+            }
+            if (failure == ERROR_SUCCESS && !FlushFileBuffers(handle)) failure = GetLastError();
+            if (!CloseHandle(handle) && failure == ERROR_SUCCESS) failure = GetLastError();
+            if (failure == ERROR_SUCCESS) {
+                attributes = GetFileAttributesW(wide);
+                if (attributes == INVALID_FILE_ATTRIBUTES) {
+                    DWORD code = GetLastError();
+                    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+                        if (!MoveFileExW(temporary, wide, MOVEFILE_WRITE_THROUGH)) failure = GetLastError();
+                    } else failure = code;
+                } else if (!ReplaceFileW(wide, temporary, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL)) {
+                    failure = GetLastError();
+                }
+            }
+            if (failure != ERROR_SUCCESS) DeleteFileW(temporary);
+        }
+        free(temporary); free(wide);
+        if (failure != ERROR_SUCCESS)
+            return axyne_system_error(error, axyne_win_error(failure), "atomic write");
     }
 #else
-    file = fopen(utf8_path, "wb");
-#endif
-    if (file == NULL) {
-        return axyne_system_error(error, axyne_current_open_error(), "open");
-    }
-    written = length == 0 ? 0 : fwrite(contents, 1, length, file);
     {
-        int close_result = fclose(file);
-        if (written != length || close_result != 0)
-        return axyne_error(error, AXYNE_STATUS_IO_ERROR, "unable to write file");
+        size_t n = strlen(utf8_path);
+        char *temporary;
+        int fd;
+        FILE *file;
+        struct stat original;
+        int existed = lstat(utf8_path, &original) == 0;
+        int saved = errno;
+        int ok = 1;
+        if (existed && !S_ISREG(original.st_mode))
+            return axyne_error(error, AXYNE_STATUS_UNSUPPORTED, "destination is not a regular file");
+        if (!existed && saved != ENOENT)
+            return axyne_system_error(error, axyne_errno_status(saved), "inspect destination");
+        if (n > SIZE_MAX - sizeof(".axyne-tmp-XXXXXX"))
+            return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "path is too long");
+        temporary = (char *)malloc(n + sizeof(".axyne-tmp-XXXXXX"));
+        if (temporary == NULL) return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
+        memcpy(temporary, utf8_path, n);
+        memcpy(temporary + n, ".axyne-tmp-XXXXXX", sizeof(".axyne-tmp-XXXXXX"));
+        fd = mkstemp(temporary);
+        if (fd < 0) { saved = errno; free(temporary); return axyne_system_error(error, axyne_errno_status(saved), "create temporary file"); }
+        file = fdopen(fd, "wb");
+        if (file == NULL) { saved = errno; close(fd); unlink(temporary); free(temporary); return axyne_system_error(error, axyne_errno_status(saved), "open temporary file"); }
+        if (ok && length != 0 && fwrite(contents, 1, length, file) != length) ok = 0;
+        if (ok && fflush(file) != 0) ok = 0;
+        /* Apply ordinary permissions only after writing: writes may clear
+         * special bits, which are intentionally not copied to the replacement. */
+        if (ok && existed && fchmod(fileno(file), original.st_mode & 0777) != 0) ok = 0;
+        if (ok && fsync(fileno(file)) != 0) ok = 0;
+        if (fclose(file) != 0) ok = 0;
+        if (ok) {
+            if (existed) ok = rename(temporary, utf8_path) == 0;
+            else {
+#ifdef __APPLE__
+                ok = renamex_np(temporary, utf8_path, RENAME_EXCL) == 0;
+#else
+                ok = link(temporary, utf8_path) == 0;
+                if (ok) {
+                    /* The destination is committed. Cleanup is best-effort;
+                     * failure may leave an extra temporary hard link behind. */
+                    (void)unlink(temporary);
+                }
+#endif
+            }
+        }
+        if (!ok) { saved = errno; (void)unlink(temporary); free(temporary); return axyne_system_error(error, axyne_errno_status(saved), "atomic write"); }
+        free(temporary);
     }
+#endif
     return AXYNE_STATUS_OK;
 }
 
