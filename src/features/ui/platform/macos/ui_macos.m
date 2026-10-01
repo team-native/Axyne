@@ -14,7 +14,8 @@ enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_SETDOCPOINTER = 2358, SCI_CREATEDOCUMENT = 2375,
        SCI_RELEASEDOCUMENT = 2377, SCI_GETCURRENTPOS = 2008,
        SCI_SETSEL = 2160, SCI_REPLACESEL = 2170,
-       SCI_POSITIONFROMLINE = 2167, SCI_GOTOPOS = 2025 };
+       SCI_POSITIONFROMLINE = 2167, SCI_GOTOPOS = 2025,
+       SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
 
 @interface NSObject (AxyneScintillaMessages)
 - (NSInteger)message:(unsigned int)message wParam:(uintptr_t)wParam
@@ -503,7 +504,26 @@ static void axyne_install_menu(NSApplication *application,
         if (axyne_search_replace_all(text, length, query, strlen(query),
                 [r UTF8String], strlen([r UTF8String]), 0, &output,
                 &outputLength, &count, NULL) == AXYNE_STATUS_OK) {
-            (void)[self sendEditorMessage:SCI_SETTEXT wParam:0 lParam:(intptr_t)output];
+            if (count > 0) {
+                (void)[self sendEditorMessage:SCI_BEGINUNDOACTION wParam:0 lParam:0];
+                size_t queryLength = strlen(query), replacementLength = strlen([r UTF8String]);
+                size_t searchStart = 0, previousSourceEnd = 0, previousLiveEnd = 0;
+                size_t match = 0; BOOL first = YES;
+                while (axyne_search_find(text, length, query, queryLength,
+                                         searchStart, 0, &match) && match >= searchStart) {
+                    size_t liveAt = first ? match : previousLiveEnd +
+                        (match - previousSourceEnd);
+                    (void)[self sendEditorMessage:SCI_SETSEL wParam:liveAt
+                        lParam:liveAt + queryLength];
+                    (void)[self sendEditorMessage:SCI_REPLACESEL wParam:0
+                        lParam:(intptr_t)[r UTF8String]];
+                    previousSourceEnd = match + queryLength;
+                    previousLiveEnd = liveAt + replacementLength;
+                    searchStart = previousSourceEnd;
+                    first = NO;
+                }
+                (void)[self sendEditorMessage:SCI_ENDUNDOACTION wParam:0 lParam:0];
+            }
             free(output);
         }
         free(text); return;
@@ -565,10 +585,14 @@ static void axyne_install_menu(NSApplication *application,
                     size_t index = (size_t)[choices indexOfSelectedItem];
                     if (index < results.count) {
                         [self openPath:[NSString stringWithUTF8String:results.items[index].path]];
-                        selectedLine = results.items[index].line;
-                        NSInteger pos = [self sendEditorMessage:SCI_POSITIONFROMLINE
-                            wParam:selectedLine > 0 ? selectedLine - 1 : 0 lParam:0];
-                        (void)[self sendEditorMessage:SCI_GOTOPOS wParam:(uintptr_t)pos lParam:0];
+                        AxyneDocument *opened = [self activeDocument];
+                        if (opened != NULL && opened->path != NULL &&
+                            strcmp(opened->path, results.items[index].path) == 0) {
+                            selectedLine = results.items[index].line;
+                            NSInteger pos = [self sendEditorMessage:SCI_POSITIONFROMLINE
+                                wParam:selectedLine > 0 ? selectedLine - 1 : 0 lParam:0];
+                            (void)[self sendEditorMessage:SCI_GOTOPOS wParam:(uintptr_t)pos lParam:0];
+                        }
                     }
                 }
             }
