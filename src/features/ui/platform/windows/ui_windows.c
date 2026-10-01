@@ -229,7 +229,6 @@ static char *axyne_global_preferences_path(void)
     if (swprintf_s(directory, MAX_PATH, L"%ls\\Axyne", app_data) < 0 ||
         swprintf_s(path, MAX_PATH, L"%ls\\preferences.json", directory) < 0)
         return NULL;
-    (void)CreateDirectoryW(directory, NULL);
     return axyne_utf8(path);
 }
 
@@ -243,7 +242,6 @@ static char *axyne_workspace_preferences_path(const char *root)
         swprintf_s(path, 32768, L"%ls\\preferences.json", directory) < 0) {
         free(wide_root); return NULL;
     }
-    (void)CreateDirectoryW(directory, NULL);
     free(wide_root);
     return axyne_utf8(path);
 }
