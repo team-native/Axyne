@@ -14,6 +14,17 @@ AxyneStatus axyne_settings_load(const char *utf8_path,
                                 AxyneError *error);
 AxyneStatus axyne_settings_save(const AxyneSettings *settings,
                                 const char *utf8_path, AxyneError *error);
+AxyneStatus axyne_settings_get_json(const AxyneSettings *settings,
+                                    const char *json_pointer,
+                                    char **json_value, AxyneError *error);
+AxyneStatus axyne_settings_set_json(AxyneSettings *settings,
+                                    const char *json_pointer,
+                                    const char *json_value,
+                                    AxyneError *error);
+AxyneStatus axyne_settings_remove(AxyneSettings *settings,
+                                 const char *json_pointer,
+                                 AxyneError *error);
+void axyne_settings_free_json(char *json_value);
 void axyne_settings_destroy(AxyneSettings *settings);
 
 #ifdef __cplusplus

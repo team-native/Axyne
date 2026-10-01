@@ -29,14 +29,15 @@
 - Windows UI and process adapters use Win32; macOS UI uses Objective-C/AppKit and process adapters use POSIX APIs.
 - CMake is the single build entry point and selects platform sources by target OS.
 - Optional services (LSP, Git, terminal, debugger, runtime discovery) are not initialized by app startup.
-- Process requests carry executable, argument vector, working directory, environment overrides, and stdout/stderr/exit callbacks.
+- Process requests carry executable, argument vector, working directory, environment overrides, and stdout/stderr/exit callbacks. Callbacks are serialized on a process worker thread; release requests termination and waits for callbacks to drain.
+- Settings use JSON documents and JSON Pointer paths; consumers can read, replace, and remove arbitrary JSON values.
 - File, workspace, settings, editor, and process modules remain independently includable through public headers under include/axyne.
 
 ## Implementation units and dependencies
 
 | ID | Unit | Dependencies | Status |
 |---|---|---|---|
-| BASE-1 | Shared C APIs and module/build boundaries | Existing CMake/application skeleton | IN_PROGRESS |
+| BASE-1 | Shared C APIs and module/build boundaries | Existing CMake/application skeleton | COMPLETE |
 | UI-1 | Figma-based desktop shell and Scintilla host on Windows/macOS | BASE-1 | PENDING |
 | FS-1 | Workspace, file tree, file operations, external-change notifications | BASE-1 | PENDING |
 | EDIT-1 | Tabs, save/recent files, editor commands and document state | UI-1, FS-1 | PENDING |
