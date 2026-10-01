@@ -2,12 +2,15 @@
 #include "utf8.h"
 
 #include <CoreServices/CoreServices.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 struct AxyneWatcher {
     pthread_t thread;
@@ -132,16 +135,38 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
 {
     AxyneWatcher *watcher;
     struct stat info;
+    int directory_fd;
     if (watcher_out == NULL || utf8_directory == NULL || utf8_directory[0] == '\0' ||
         !axyne_workspace_utf8_is_valid(utf8_directory) || callback == NULL) {
         axyne_watch_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "directory, callback, and output are required");
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
     *watcher_out = NULL;
-    if (stat(utf8_directory, &info) != 0 || !S_ISDIR(info.st_mode)) {
+    if (lstat(utf8_directory, &info) != 0) {
         axyne_watch_error(error, AXYNE_STATUS_NOT_FOUND, "workspace directory is unavailable");
         return AXYNE_STATUS_NOT_FOUND;
     }
+    if (S_ISLNK(info.st_mode)) {
+        axyne_watch_error(error, AXYNE_STATUS_UNSUPPORTED,
+                          "symbolic-link workspace roots are not supported");
+        return AXYNE_STATUS_UNSUPPORTED;
+    }
+    directory_fd = openat(AT_FDCWD, utf8_directory,
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory_fd < 0) {
+        axyne_watch_error(error, errno == ELOOP ? AXYNE_STATUS_UNSUPPORTED :
+                           AXYNE_STATUS_NOT_FOUND,
+                          errno == ELOOP ? "symbolic-link workspace roots are not supported" :
+                          "workspace directory is unavailable");
+        return errno == ELOOP ? AXYNE_STATUS_UNSUPPORTED : AXYNE_STATUS_NOT_FOUND;
+    }
+    if (fstat(directory_fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
+        close(directory_fd);
+        axyne_watch_error(error, AXYNE_STATUS_NOT_FOUND,
+                          "workspace directory is unavailable");
+        return AXYNE_STATUS_NOT_FOUND;
+    }
+    close(directory_fd);
     watcher = (AxyneWatcher *)calloc(1, sizeof(*watcher));
     if (watcher == NULL) { axyne_watch_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); return AXYNE_STATUS_OUT_OF_MEMORY; }
     watcher->directory = (char *)malloc(strlen(utf8_directory) + 1);

@@ -955,12 +955,26 @@ AxyneStatus axyne_fs_list_directory(const char *utf8_path,
     }
 #else
     {
-        DIR *directory = opendir(utf8_path);
+        int directory_fd;
+        DIR *directory;
         struct dirent *item;
         AxyneFileEntry *entries = NULL;
         size_t count = 0;
-        if (directory == NULL)
+        directory_fd = openat(AT_FDCWD, utf8_path,
+                              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (directory_fd < 0) {
+            if (errno == ELOOP)
+                return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                                   "symbolic-link directories are not supported");
             return axyne_system_error(error, axyne_errno_status(errno), "list directory");
+        }
+        directory = fdopendir(directory_fd);
+        if (directory == NULL) {
+            int saved = errno;
+            close(directory_fd);
+            return axyne_system_error(error, axyne_errno_status(saved),
+                                      "list directory");
+        }
         errno = 0;
         while ((item = readdir(directory)) != NULL) {
             struct stat info;
