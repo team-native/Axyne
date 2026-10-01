@@ -13,6 +13,7 @@
 | Server communication, account, marketplace | Excluded from current implementation | USER | CONFIRMED |
 | Local LSP, Git, terminal, debugger integrations | Start only when the user invokes them | USER + Notion feature spec | CONFIRMED |
 | Product identity | Axyne, author Native, version 0.1.0 | USER | CONFIRMED |
+| Public filesystem and watcher paths | Accept well-formed UTF-8 only; malformed path input returns `AXYNE_STATUS_INVALID_ARGUMENT` | USER | CONFIRMED |
 
 ## Provisional implementation assumptions
 
@@ -25,6 +26,13 @@
 | Settings path behavior | RFC 6901 JSON Pointer; missing reads/removals return NOT_FOUND; set replaces the root or final object key only | AGENT_PARAMETER | ASSUMED |
 | Process callback ordering | Accepted processes drain both output streams through EOF before one exit callback | AGENT_PARAMETER | ASSUMED |
 | Error output behavior | Error pointers are optional; success clears errors; failure code matches the returned status | AGENT_PARAMETER | ASSUMED |
+| Filesystem operation behavior | Reads return a NUL-terminated allocation plus byte length; writes create or truncate; create operations fail when the target exists; rename atomically does not replace an existing destination; remove deletes files or empty directories only | AGENT_PARAMETER | ASSUMED |
+| macOS exclusive rename support | Use `renameatx_np` with `RENAME_EXCL`; if the destination volume does not support the flag, return `AXYNE_STATUS_UNSUPPORTED` rather than performing a racy fallback | AGENT_PARAMETER | ASSUMED |
+| Unrepresentable file size | If a file length cannot fit in `size_t` with room for the trailing NUL allocation, return `AXYNE_STATUS_UNSUPPORTED` before allocation | AGENT_PARAMETER | ASSUMED |
+| macOS directory names | If a listing encounters any entry whose native name is not valid UTF-8, fail the entire listing with `AXYNE_STATUS_UNSUPPORTED` and return no partial entries | AGENT_PARAMETER | ASSUMED |
+| Workspace watcher behavior | Start watches recursively on demand; callbacks run serially on its worker thread; stop waits until callbacks have drained; rename supplies the new path and supplies the old path when the OS reports it | AGENT_PARAMETER | ASSUMED |
+| Watcher event loss recovery | On an OS event-loss/rescan indication, emit `AXYNE_WATCH_RESCAN_REQUIRED` with the watched root; the consumer must rescan it, and the watcher does not implement automatic recovery | USER | CONFIRMED |
+| macOS rename event detail | FSEvents provides a path with a rename flag but this adapter does not pair the previous path; `old_path` is NULL for macOS rename notifications | AGENT_PARAMETER | ASSUMED |
 | Optional tool integrations | Discover installed binaries and never bundle language runtimes | USER | CONFIRMED |
 | Scintilla packaging for the initial UI shell | Fetch official Scintilla 5.5.2 at immutable commit `a1c86144eed9e3d2187e3a8b391d11ca909f00d2` at configure time. Build its upstream Win32 project with MSBuild or Cocoa project with `xcodebuild`, and stage the resulting component plus `License.txt` beside/in the app bundle. Do not substitute another editor or download at runtime. | AGENT_PARAMETER | ASSUMED |
 
@@ -44,7 +52,7 @@
 |---|---|---|---|
 | BASE-1 | Shared C APIs and module/build boundaries | Existing CMake/application skeleton | COMPLETE |
 | UI-1 | Figma-based desktop shell and Scintilla host on Windows/macOS | BASE-1 | COMPLETE (Windows Release build verified; macOS build/runtime verification pending macOS host) |
-| FS-1 | Workspace, file tree, file operations, external-change notifications | BASE-1 | PENDING |
+| FS-1 | Shared filesystem API and on-demand external-change notifications | BASE-1 | COMPLETE |
 | EDIT-1 | Tabs, save/recent files, editor commands and document state | UI-1, FS-1 | PENDING |
 | SEARCH-1 | Current-file/workspace search, replace, quick file and symbol navigation | FS-1, EDIT-1 | PENDING |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | PENDING |
