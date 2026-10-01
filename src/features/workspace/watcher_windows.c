@@ -95,6 +95,7 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
                                    FILE_NOTIFY_CHANGE_CREATION,
                                    &bytes, NULL, NULL)) {
             read_error = GetLastError();
+            free(pending_old); pending_old = NULL;
             if (!InterlockedCompareExchange(&watcher->stopping, 0, 0) &&
                 read_error != ERROR_OPERATION_ABORTED) {
                 axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
@@ -104,6 +105,7 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
             break;
         }
         if (bytes == 0) {
+            free(pending_old); pending_old = NULL;
             axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
                        watcher->utf8_directory, NULL);
             continue;
