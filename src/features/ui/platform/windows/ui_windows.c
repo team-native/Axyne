@@ -795,7 +795,9 @@ static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int referen
     current = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION, current, 0);
     line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, position.line, 0);
-    position.character = (size_t)(current - line_start);
+    position.character = axyne_lsp_utf16_character(
+        doc->contents + (size_t)line_start, (size_t)(current - line_start),
+        (size_t)(current - line_start));
     status = references ? axyne_lsp_references(state->lsp, doc, position,
                                                 &request_id, &error) :
         axyne_lsp_definition(state->lsp, doc, position, &request_id, &error);
