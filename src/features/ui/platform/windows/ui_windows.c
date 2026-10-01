@@ -258,8 +258,11 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     if (status == AXYNE_STATUS_OK)
         status = axyne_process_start(&spec, &state->terminal_process, &error);
     if (status != AXYNE_STATUS_OK) {
+        state->last_exit_failed = 0;
+        state->has_exit_status = 0;
         axyne_terminal_append(state->terminal_output, error.message,
                               strlen(error.message), AXYNE_PROCESS_STDERR);
+        InvalidateRect(window, NULL, FALSE);
         return;
     }
     EnableWindow(state->terminal_start, FALSE);
@@ -602,6 +605,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
             "Build or run could not be started.\n";
         axyne_terminal_append(state->terminal_output, message, strlen(message),
                               AXYNE_PROCESS_STDERR);
+        InvalidateRect(window, NULL, FALSE);
     } else {
         SetWindowTextA(state->terminal_output, run ? "[run]\r\n" : "[build]\r\n");
         state->active_action = run ? 2 : 1;
