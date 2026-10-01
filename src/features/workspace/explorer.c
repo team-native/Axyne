@@ -85,26 +85,52 @@ int axyne_explorer_is_safe_child_name(const char *utf8_name)
 }
 
 #ifdef _WIN32
-static int axyne_explorer_is_reparse_directory(const char *path)
+/* Returns 1 for a reparse directory, 0 for a normal directory, and -1 when
+ * the safety check itself cannot be completed. */
+static int axyne_explorer_check_reparse_directory(const char *path,
+                                                  AxyneError *error)
 {
     int count;
     wchar_t *wide;
     DWORD attributes;
+    DWORD win_error;
     count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                                 NULL, 0);
-    if (count <= 0) return 0;
+    if (count <= 0) {
+        axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                             "invalid UTF-8 path");
+        return -1;
+    }
     wide = (wchar_t *)malloc((size_t)count * sizeof(*wide));
-    if (wide == NULL) return 0;
+    if (wide == NULL) {
+        axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                             "out of memory checking directory attributes");
+        return -1;
+    }
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                             wide, count) <= 0) {
         free(wide);
-        return 0;
+        axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                             "invalid UTF-8 path");
+        return -1;
     }
     attributes = GetFileAttributesW(wide);
+    win_error = GetLastError();
     free(wide);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        axyne_explorer_error(error,
+            win_error == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED :
+            win_error == ERROR_FILE_NOT_FOUND || win_error == ERROR_PATH_NOT_FOUND
+                ? AXYNE_STATUS_NOT_FOUND : AXYNE_STATUS_IO_ERROR,
+            "unable to inspect directory attributes");
+        return -1;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        axyne_explorer_error(error, AXYNE_STATUS_UNSUPPORTED,
+                             "reparse-point directories are not traversed");
+        return 1;
+    }
+    return 0;
 }
 #endif
 
@@ -190,9 +216,17 @@ static AxyneStatus axyne_explorer_append_directory(AxyneExplorer *explorer,
           axyne_explorer_compare_entries);
     for (i = 0; i < list.count; ++i) {
 #ifdef _WIN32
-        if (list.entries[i].kind == AXYNE_FILE_KIND_DIRECTORY &&
-            axyne_explorer_is_reparse_directory(list.entries[i].path))
-            continue;
+        if (list.entries[i].kind == AXYNE_FILE_KIND_DIRECTORY) {
+            AxyneError reparse_error;
+            int reparse = axyne_explorer_check_reparse_directory(
+                list.entries[i].path, &reparse_error);
+            if (reparse > 0) continue;
+            if (reparse < 0) {
+                axyne_fs_free_directory_list(&list);
+                if (error != NULL) *error = reparse_error;
+                return reparse_error.code;
+            }
+        }
 #endif
         if (!axyne_explorer_append(explorer, &list.entries[i], depth)) {
             axyne_fs_free_directory_list(&list);
@@ -251,6 +285,17 @@ AxyneStatus axyne_explorer_set_root(AxyneExplorer *explorer,
                              "workspace root is required");
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
+#ifdef _WIN32
+    {
+        AxyneError reparse_error;
+        int reparse = axyne_explorer_check_reparse_directory(utf8_path,
+                                                               &reparse_error);
+        if (reparse != 0) {
+            if (error != NULL) *error = reparse_error;
+            return reparse_error.code;
+        }
+    }
+#endif
     copy = axyne_explorer_strdup(utf8_path);
     if (copy == NULL) {
         axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
