@@ -11,7 +11,8 @@ typedef struct AxyneSettings AxyneSettings;
 
 /*
  * json_pointer follows RFC 6901 (including ~0 and ~1 escaping). The empty
- * pointer addresses the complete document. get returns NOT_FOUND for a
+ * pointer addresses the complete document. A malformed pointer returns
+ * AXYNE_STATUS_INVALID_ARGUMENT. get returns NOT_FOUND for a
  * missing target. set replaces the root or a final object member (creating
  * that member when its parent exists); array indices must already exist and
  * the '-' append token is unsupported. remove returns NOT_FOUND for a missing
