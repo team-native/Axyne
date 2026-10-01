@@ -74,6 +74,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)workspaceEvent;
 - (void)refreshExplorer;
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
+- (void)showWorkspaceMessage:(NSString *)message;
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
 - (void)performExplorerOperation:(AxyneFileKind)kind;
@@ -349,6 +350,13 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     [alert runModal];
 }
 
+- (void)showWorkspaceMessage:(NSString *)message
+{
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:message ?: @"Workspace operation failed"];
+    [alert runModal];
+}
+
 - (BOOL)selectWorkspaceURL:(NSURL *)url
 {
     const char *path;
@@ -439,6 +447,10 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
     NSString *name = [self askForText:@"Rename" label:@"New name"];
     if ([name length] == 0) return;
+    if (!axyne_explorer_is_safe_child_name([name UTF8String])) {
+        [self showWorkspaceMessage:@"Use one valid file or folder name without separators, . or .."];
+        return;
+    }
     NSString *nodePath = [NSString stringWithUTF8String:node->path];
     NSString *path = [nodePath stringByDeletingLastPathComponent];
     path = [path stringByAppendingPathComponent:name];
@@ -474,6 +486,10 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
             [nodePath stringByDeletingLastPathComponent];
     }
     if ([name length] == 0 || [parent length] == 0) return;
+    if (!axyne_explorer_is_safe_child_name([name UTF8String])) {
+        [self showWorkspaceMessage:@"Use one valid file or folder name without separators, . or .."];
+        return;
+    }
     NSString *path = [parent stringByAppendingPathComponent:name];
     AxyneError error;
     AxyneStatus status = kind == AXYNE_FILE_KIND_FILE
