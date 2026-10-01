@@ -384,8 +384,8 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [_terminalOutput setEditable:NO];
         [_terminalOutput setSelectable:YES];
         [_terminalOutput setFont:[NSFont fontWithName:@"Menlo" size:11]];
-        [_terminalOutput setTextColor:axyne_color(199, 201, 206)];
-        [_terminalOutput setBackgroundColor:axyne_color(22, 23, 26)];
+        [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
+        [_terminalOutput setBackgroundColor:axyne_preference_color(_preferences.theme.background)];
         [self addSubview:_terminalOutput];
         _terminalInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
         [_terminalInput setPlaceholderString:@"Terminal input"];
@@ -1341,7 +1341,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     [storage appendAttributedString:[[[NSAttributedString alloc]
         initWithString:text attributes:@{ NSFontAttributeName:
             [NSFont fontWithName:@"Menlo" size:11],
-            NSForegroundColorAttributeName:axyne_color(199, 201, 206) }]
+            NSForegroundColorAttributeName:axyne_preference_color(_preferences.theme.text) }]
         autorelease]];
     if ([storage length] > 1024 * 1024)
         [storage deleteCharactersInRange:NSMakeRange(0, [storage length] - 1024 * 1024)];
@@ -1634,14 +1634,14 @@ else [_terminalInput setStringValue:@""];
     NSRectFill(bounds);
     [toolbar setFill];
     NSRectFill(NSMakeRect(0, 0, width, AXYNE_TOOLBAR));
-    [axyne_color(23, 25, 28) setFill];
+    [toolbar setFill];
     NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, width, AXYNE_TABS));
     [panel setFill];
     NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR + AXYNE_TABS,
                           AXYNE_SIDEBAR, bottomTop - AXYNE_TOOLBAR - AXYNE_TABS));
     [toolbar setFill];
     NSRectFill(NSMakeRect(0, bottomTop, width, AXYNE_BOTTOM));
-    [axyne_color(25, 27, 30) setFill];
+    [background setFill];
     NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR - 1, AXYNE_TOOLBAR + AXYNE_TABS,
@@ -1689,7 +1689,7 @@ else [_terminalInput setStringValue:@""];
         for (size_t i = 0; i < _explorer.count && explorerY + 22 < bottomTop; ++i) {
             AxyneExplorerNode *node = &_explorer.nodes[i];
             if (_hasExplorerSelection && _explorerSelection == (NSInteger)i) {
-                [axyne_color(47, 52, 60) setFill];
+                [border setFill];
                 NSRectFill(NSMakeRect(0, explorerY - 2, AXYNE_SIDEBAR, 22));
             }
             NSString *name = [NSString stringWithUTF8String:node->name] ?: @"(invalid name)";
