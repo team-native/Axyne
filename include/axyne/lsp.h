@@ -18,6 +18,11 @@ typedef struct AxyneLspPosition {
     size_t character;
 } AxyneLspPosition;
 
+/* Converts a Scintilla UTF-8 byte offset within a line to an LSP UTF-16
+ * character offset. Invalid or incomplete UTF-8 bytes count as one unit. */
+size_t axyne_lsp_utf16_character(const char *line, size_t length,
+                                 size_t byte_offset);
+
 typedef struct AxyneLspRange {
     AxyneLspPosition start;
     AxyneLspPosition end;
