@@ -11,6 +11,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/git.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -102,7 +103,14 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (BOOL)configureRunner;
 - (void)buildDocument:(id)sender;
 - (void)runDocument:(id)sender;
+- (void)showGitStatus:(id)sender;
+- (void)showGitDiff:(id)sender;
+- (void)stageAllGitChanges:(id)sender;
+- (void)unstageAllGitChanges:(id)sender;
 @end
+
+typedef AxyneStatus (*AxyneGitAction)(const char *, AxyneGitResult *,
+                                      AxyneError *);
 
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace);
@@ -914,6 +922,57 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     return [alert runModal] == NSAlertFirstButtonReturn ? [field stringValue] : nil;
 }
 
+- (void)showGitOutput:(NSString *)emptyMessage action:(AxyneGitAction)action
+{
+    AxyneGitResult result = {0};
+    AxyneError error;
+    AxyneStatus status;
+    const char *text;
+    if (_explorer.root == NULL) {
+        [self showWorkspaceMessage:@"Open a workspace folder before using Git."];
+        return;
+    }
+    status = action(_explorer.root, &result, &error);
+    if (status == AXYNE_STATUS_OK && result.length != 0) {
+        text = result.output;
+    } else if (status == AXYNE_STATUS_OK) {
+        text = [emptyMessage UTF8String];
+    } else if (result.length != 0) {
+        text = result.output;
+    } else {
+        text = error.message;
+    }
+    [_terminalOutput setString:@""];
+    if (text != NULL)
+        [self terminalAppend:text length:strlen(text) stream:AXYNE_PROCESS_STDOUT];
+    axyne_git_result_free(&result);
+    [self setNeedsDisplay:YES];
+}
+
+- (void)showGitStatus:(id)sender
+{
+    (void)sender;
+    [self showGitOutput:@"No Git status output." action:axyne_git_status];
+}
+
+- (void)showGitDiff:(id)sender
+{
+    (void)sender;
+    [self showGitOutput:@"No Git differences." action:axyne_git_diff];
+}
+
+- (void)stageAllGitChanges:(id)sender
+{
+    (void)sender;
+    [self showGitOutput:@"All workspace changes staged." action:axyne_git_stage_all];
+}
+
+- (void)unstageAllGitChanges:(id)sender
+{
+    (void)sender;
+    [self showGitOutput:@"All changes unstaged." action:axyne_git_unstage_all];
+}
+
 - (void)findOrReplace:(BOOL)replace
 {
     NSString *q = [self askForText:replace ? @"Replace" : @"Find" label:@"Find text"];
@@ -1579,6 +1638,17 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"Open Workspace Folder…"
         action:@selector(openWorkspace:) keyEquivalent:@""];
     [workspaceItem setTarget:workspace];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *gitStatus = [fileMenu addItemWithTitle:@"Git Status"
+        action:@selector(showGitStatus:) keyEquivalent:@""];
+    NSMenuItem *gitDiff = [fileMenu addItemWithTitle:@"Git Diff"
+        action:@selector(showGitDiff:) keyEquivalent:@""];
+    NSMenuItem *gitStage = [fileMenu addItemWithTitle:@"Git Stage All"
+        action:@selector(stageAllGitChanges:) keyEquivalent:@""];
+    NSMenuItem *gitUnstage = [fileMenu addItemWithTitle:@"Git Unstage All"
+        action:@selector(unstageAllGitChanges:) keyEquivalent:@""];
+    [gitStatus setTarget:workspace]; [gitDiff setTarget:workspace];
+    [gitStage setTarget:workspace]; [gitUnstage setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent"
         action:nil keyEquivalent:@""];

@@ -15,6 +15,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/git.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -97,7 +98,9 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_QUICK_FILE, AXYNE_CMD_WORKSPACE,
        AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
        AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE,
-       AXYNE_CMD_BUILD, AXYNE_CMD_RUN, AXYNE_CMD_CONFIGURE_RUNNER };
+       AXYNE_CMD_BUILD, AXYNE_CMD_RUN, AXYNE_CMD_CONFIGURE_RUNNER,
+       AXYNE_CMD_GIT_STATUS, AXYNE_CMD_GIT_DIFF, AXYNE_CMD_GIT_STAGE_ALL,
+       AXYNE_CMD_GIT_UNSTAGE_ALL };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -296,6 +299,36 @@ static void axyne_terminal_send(AxyneWindowState *state)
                               strlen(error.message), AXYNE_PROCESS_STDERR);
     else SetWindowTextA(state->terminal_input, "");
     free(text);
+}
+
+typedef AxyneStatus (*AxyneGitAction)(const char *, AxyneGitResult *,
+                                      AxyneError *);
+
+static void axyne_git_show_output(HWND window, AxyneWindowState *state,
+                                  const char *title, AxyneGitAction action)
+{
+    AxyneGitResult result = {0};
+    AxyneError error;
+    AxyneStatus status;
+    const char *text;
+    if (state->explorer.root == NULL) {
+        MessageBoxA(window, "Open a workspace folder before using Git.",
+                    "Axyne - Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    status = action(state->explorer.root, &result, &error);
+    if (status == AXYNE_STATUS_OK && result.length != 0) {
+        text = result.output;
+    } else if (status == AXYNE_STATUS_OK) {
+        text = title;
+    } else if (result.length != 0) {
+        text = result.output;
+    } else {
+        text = error.message;
+    }
+    if (state->terminal_output != NULL) SetWindowTextA(state->terminal_output, text);
+    axyne_git_result_free(&result);
+    InvalidateRect(window, NULL, FALSE);
 }
 
 static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
@@ -1314,6 +1347,11 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STATUS, L"Git Status");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_DIFF, L"Git Diff");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STAGE_ALL, L"Git Stage All");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_UNSTAGE_ALL, L"Git Unstage All");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     for (size_t i = 0; i < state->documents.recent_count; ++i) {
         wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
         if (path != NULL) {
@@ -1521,7 +1559,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, editor_top + 12, L"탐색기");
     axyne_paint_explorer(dc, state, editor_top, bottom_top);
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, bottom_top + 9,
-               L"출력    문제 1    터미널");
+               L"출력    문제 1    터미널 / Git");
     {
         wchar_t status[96];
         if (state->last_exit_failed) {
@@ -1702,6 +1740,18 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_REPLACE) axyne_find(window, state, 1, 0);
         else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
         else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
+        else if (command == AXYNE_CMD_GIT_STATUS)
+            axyne_git_show_output(window, state, "No Git status output.",
+                                  axyne_git_status);
+        else if (command == AXYNE_CMD_GIT_DIFF)
+            axyne_git_show_output(window, state, "No Git differences.",
+                                  axyne_git_diff);
+        else if (command == AXYNE_CMD_GIT_STAGE_ALL)
+            axyne_git_show_output(window, state, "All workspace changes staged.",
+                                  axyne_git_stage_all);
+        else if (command == AXYNE_CMD_GIT_UNSTAGE_ALL)
+            axyne_git_show_output(window, state, "All changes unstaged.",
+                                  axyne_git_unstage_all);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
             axyne_workspace_operation(window, state, command);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
