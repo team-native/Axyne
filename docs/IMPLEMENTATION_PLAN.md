@@ -21,6 +21,8 @@
 | Local LSP availability | Implement the external-process LSP client as a local IDE capability, without a plugin manager or server service | AGENT_PARAMETER | ASSUMED |
 | Installer delivery | Build native platform packages from the same CMake application output; keep user data preservation explicit | AGENT_PARAMETER | ASSUMED |
 | Local Git integration | Invoke the installed git executable; do not embed Git | AGENT_PARAMETER | ASSUMED |
+| Process environment overrides | Inherit the parent environment, apply unique NAME=VALUE entries, reject duplicate names | AGENT_PARAMETER | ASSUMED |
+| Settings path behavior | RFC 6901 JSON Pointer; missing reads/removals return NOT_FOUND; set replaces the root or final object key only | AGENT_PARAMETER | ASSUMED |
 | Optional tool integrations | Discover installed binaries and never bundle language runtimes | USER | CONFIRMED |
 
 ## Shared contracts
@@ -48,9 +50,10 @@
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
 | PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | PENDING |
-| PACK-1 | Installer, uninstaller, update checks and release notes | BASE-1 | PENDING |
+| PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | PENDING |
 | AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
 
 ## Excluded from this goal
 
 Plugin sessions/manager and plugin marketplace, account/login, API/server implementations, and marketplace/developer web UI.
+Remote update checks and remote release-note retrieval are also excluded because they require server communication.
