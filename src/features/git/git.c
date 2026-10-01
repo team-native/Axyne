@@ -19,6 +19,7 @@ typedef struct AxyneGitRun {
     char *output;
     size_t length;
     size_t capacity;
+    int allocation_failed;
 #ifdef _WIN32
     HANDLE finished;
 #else
@@ -72,7 +73,11 @@ static void axyne_git_output(AxyneProcess *process, AxyneProcessStream stream,
     AxyneGitRun *run = (AxyneGitRun *)user_data;
     (void)process;
     (void)stream;
-    if (run != NULL && bytes != NULL) (void)axyne_git_append(run, bytes, length);
+    if (run != NULL && bytes != NULL && !run->allocation_failed &&
+        !axyne_git_append(run, bytes, length)) {
+        run->allocation_failed = 1;
+        (void)axyne_process_terminate(process, NULL);
+    }
 }
 
 static void axyne_git_exit(AxyneProcess *process, int exit_code, void *user_data)
@@ -164,6 +169,11 @@ static AxyneStatus axyne_git_run(const char *workspace,
     }
     axyne_git_wait(&run);
     axyne_process_release(process);
+    if (run.allocation_failed) {
+        axyne_git_run_cleanup(&run);
+        return axyne_git_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                               "Unable to allocate Git output");
+    }
     result->output = run.output;
     result->length = run.length;
     run.output = NULL;
