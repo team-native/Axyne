@@ -76,8 +76,8 @@ typedef struct AxynePreferences {
     AxyneThemePreferences theme;
     AxyneKeyBinding bindings[AXYNE_PREFERENCE_BINDING_MAX];
     size_t binding_count;
-    /* Fields present in the source profile. Global profiles normalize this
-     * to all fields; workspace profiles use it to preserve partial overlays. */
+    /* Fields present in the source profile. Loaded workspace profiles are
+     * normalized to all fields before they are applied as snapshots. */
     uint32_t present_fields;
     unsigned char binding_present[AXYNE_ACTION_COUNT];
 } AxynePreferences;
@@ -107,8 +107,8 @@ enum {
  * choose a native font when font_family is empty. */
 void axyne_preferences_defaults(AxynePreferences *preferences);
 
-/* Global and workspace documents share the same schema. A workspace profile
- * is a complete snapshot which can be overlaid on global preferences. */
+/* Global and workspace documents share the same schema. A valid workspace
+ * profile is a complete snapshot which replaces the effective profile. */
 AxyneStatus axyne_preferences_load(const char *utf8_path,
                                    AxynePreferences *preferences,
                                    AxyneError *error);

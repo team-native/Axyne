@@ -51,13 +51,13 @@ enum {
 };
 
 static const wchar_t AXYNE_WINDOW_CLASS[] = L"AxyneWindow";
-static COLORREF AXYNE_BG = RGB(22, 23, 26);
-static COLORREF AXYNE_PANEL = RGB(31, 33, 38);
-static COLORREF AXYNE_TOOLBAR_BG = RGB(28, 30, 34);
-static COLORREF AXYNE_BORDER = RGB(41, 44, 50);
-static COLORREF AXYNE_TEXT = RGB(199, 201, 206);
-static COLORREF AXYNE_MUTED = RGB(115, 119, 128);
-static COLORREF AXYNE_ACCENT = RGB(182, 122, 246);
+static COLORREF AXYNE_BG;
+static COLORREF AXYNE_PANEL;
+static COLORREF AXYNE_TOOLBAR_BG;
+static COLORREF AXYNE_BORDER;
+static COLORREF AXYNE_TEXT;
+static COLORREF AXYNE_MUTED;
+static COLORREF AXYNE_ACCENT;
 
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
@@ -268,7 +268,7 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     SendMessageA(state->editor, SCI_STYLESETSIZE, 32, (LPARAM)font_size);
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)editor_font);
-    SendMessageA(state->editor, SCI_STYLESETFORE, 33, (LPARAM)AXYNE_MUTED);
+    SendMessageA(state->editor, SCI_STYLESETFORE, 33, (LPARAM)axyne_theme_color(state->preferences.theme.muted));
     SendMessageA(state->editor, SCI_STYLESETBACK, 33, (LPARAM)axyne_theme_color(state->preferences.theme.editor_background));
     SendMessageA(state->editor, SCI_SETINDENT, state->preferences.editor.tab_width, 0);
     SendMessageA(state->editor, SCI_SETUSETABS, state->preferences.editor.insert_spaces ? 0 : 1, 0);
@@ -1721,13 +1721,9 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     SendMessageA(state->editor, SCI_SETWRAPMODE, 0, 0);
     SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, 44);
     SendMessageA(state->editor, SCI_STYLECLEARALL, 0, 0);
-    SendMessageA(state->editor, SCI_STYLESETFORE, 32, RGB(203, 206, 214));
-    SendMessageA(state->editor, SCI_STYLESETBACK, 32, RGB(26, 28, 32));
     SendMessageA(state->editor, SCI_STYLESETSIZE, 32, 11);
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)"Cascadia Mono");
-    SendMessageA(state->editor, SCI_STYLESETFORE, 33, RGB(115, 119, 128));
-    SendMessageA(state->editor, SCI_STYLESETBACK, 33, RGB(26, 28, 32));
 }
 
 static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
@@ -1746,7 +1742,7 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
         wchar_t label[512];
         int x = 16 + (int)node->depth * 16;
         if (state->explorer_has_selection && state->explorer_selection == i)
-            axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, RGB(47, 52, 60));
+            axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, AXYNE_BORDER);
         (void)swprintf_s(label, 512, L"%lc %ls", node->kind == AXYNE_FILE_KIND_DIRECTORY
             ? (axyne_explorer_is_expanded(&state->explorer, node->path) ? L'⌄' : L'›') : L'·',
             name != NULL ? name : L"(invalid name)");
@@ -1806,14 +1802,14 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
 
     axyne_fill(dc, 0, 0, width, height, AXYNE_BG);
-    axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, RGB(19, 20, 23));
+    axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, AXYNE_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU, width, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
                AXYNE_TOOLBAR_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR, width, editor_top,
-               RGB(23, 25, 28));
+               AXYNE_TOOLBAR_BG);
     axyne_fill(dc, 0, editor_top, AXYNE_SIDEBAR, bottom_top, AXYNE_PANEL);
-    axyne_fill(dc, 0, bottom_top, width, status_top, RGB(28, 30, 34));
-    axyne_fill(dc, 0, status_top, width, height, RGB(25, 27, 30));
+    axyne_fill(dc, 0, bottom_top, width, status_top, AXYNE_TOOLBAR_BG);
+    axyne_fill(dc, 0, status_top, width, height, AXYNE_BG);
     axyne_fill(dc, AXYNE_SIDEBAR - 1, editor_top, AXYNE_SIDEBAR, status_top,
                AXYNE_BORDER);
     axyne_fill(dc, 0, bottom_top, width, bottom_top + 1, AXYNE_BORDER);
@@ -1823,7 +1819,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, 39,
                L"▱   ▣    ↶   ↷       ▷  Debug · x64 (MSVC)       빌드  Ctrl+B");
     axyne_fill(dc, width - 360, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 6,
-               width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30, RGB(22, 23, 26));
+               width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30, AXYNE_BG);
     axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 346,
                AXYNE_TOP_MENU + AXYNE_TOOLBAR + 11, L"⌕  파일 이동, > 명령 실행");
     axyne_fill(dc, AXYNE_SIDEBAR + 20,
@@ -1835,7 +1831,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         int tab_right = tab_left + 184;
         if (i == state->documents.active_index) {
             axyne_fill(dc, tab_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
-                       tab_right, editor_top, RGB(31, 33, 38));
+                       tab_right, editor_top, AXYNE_PANEL);
             axyne_fill(dc, tab_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
                        tab_left + 1, editor_top, AXYNE_ACCENT);
         }
@@ -1871,7 +1867,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             (void)swprintf_s(status, 96, L"✓ 빌드 준비됨");
         }
         axyne_text(dc, state->ui_font,
-                   state->last_exit_failed ? RGB(220, 100, 100) : AXYNE_MUTED,
+                   state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED,
                    12, status_top + 6, status);
     }
     axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 250, status_top + 6,
