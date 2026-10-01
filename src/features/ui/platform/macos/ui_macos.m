@@ -13,6 +13,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/git.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -145,8 +146,6 @@ struct AxyneMacGitCompletion {
     int exit_code;
     char failure_message[128];
 };
-
-enum { AXYNE_GIT_UI_OUTPUT_LIMIT = 16 * 1024 * 1024 };
 
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace);
@@ -967,7 +966,7 @@ static int axyne_macos_git_append(AxyneMacGitRun *run,
     if (run == NULL || bytes == NULL || length == 0) return 1;
     if (length > SIZE_MAX - run->length - 1) return 0;
     required = run->length + length + 1;
-    if (required > AXYNE_GIT_UI_OUTPUT_LIMIT) return 0;
+    if (required > AXYNE_GIT_OUTPUT_LIMIT) return 0;
     if (required > run->capacity) {
         capacity = run->capacity == 0 ? 4096 : run->capacity;
         while (capacity < required) {
@@ -997,8 +996,8 @@ static void axyne_macos_git_output(AxyneProcess *process,
     (void)stream;
     if (run != NULL && bytes != NULL && !run->allocation_failed &&
         !run->output_truncated) {
-        if (run->length >= AXYNE_GIT_UI_OUTPUT_LIMIT ||
-            length > AXYNE_GIT_UI_OUTPUT_LIMIT - run->length - 1) {
+        if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
+            length > AXYNE_GIT_OUTPUT_LIMIT - run->length - 1) {
             run->output_truncated = 1;
             (void)axyne_process_terminate(process, NULL);
         } else if (!axyne_macos_git_append(run, bytes, length)) {

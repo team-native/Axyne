@@ -15,6 +15,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/git.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -130,10 +131,9 @@ struct AxyneGitUiRun {
     size_t capacity;
     const char *empty_message;
     int allocation_failed;
+    int output_truncated;
     int exit_code;
 };
-
-enum { AXYNE_GIT_UI_OUTPUT_LIMIT = 16 * 1024 * 1024 };
 
 static AxyneDocument *axyne_active(AxyneWindowState *state);
 static int axyne_capture_editor(AxyneWindowState *state);
@@ -326,7 +326,7 @@ static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
     if (length == 0) return 1;
     if (length > SIZE_MAX - run->length - 1) return 0;
     required = run->length + length + 1;
-    if (required > AXYNE_GIT_UI_OUTPUT_LIMIT) return 0;
+    if (required > AXYNE_GIT_OUTPUT_LIMIT) return 0;
     if (required > run->capacity) {
         capacity = run->capacity == 0 ? 4096 : run->capacity;
         while (capacity < required) {
@@ -355,9 +355,15 @@ static void axyne_git_ui_output(AxyneProcess *process,
     AxyneGitUiRun *run = (AxyneGitUiRun *)user_data;
     (void)stream;
     if (run != NULL && bytes != NULL && !run->allocation_failed &&
-        !axyne_git_ui_append(run, bytes, length)) {
-        run->allocation_failed = 1;
-        (void)axyne_process_terminate(process, NULL);
+        !run->output_truncated) {
+        if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
+            length > AXYNE_GIT_OUTPUT_LIMIT - run->length - 1) {
+            run->output_truncated = 1;
+            (void)axyne_process_terminate(process, NULL);
+        } else if (!axyne_git_ui_append(run, bytes, length)) {
+            run->allocation_failed = 1;
+            (void)axyne_process_terminate(process, NULL);
+        }
     }
 }
 
@@ -408,6 +414,8 @@ static void axyne_git_ui_complete(HWND window, AxyneWindowState *state,
     if (run == NULL || state == NULL) return;
     if (run->allocation_failed) {
         text = "Unable to allocate Git output.";
+    } else if (run->output_truncated) {
+        text = "Git output exceeded the 16 MiB limit.";
     } else if (run->length != 0) {
         text = run->output;
     } else if (run->exit_code == 0) {
