@@ -23,6 +23,15 @@ typedef void (*AxyneProcessOutputFn)(AxyneProcess *process,
 typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
                                    void *user_data);
 
+/*
+ * Output and exit callbacks run serially on a process-owned worker thread.
+ * Output bytes are valid only for the duration of the callback. Terminate
+ * requests OS-level termination and returns without waiting; callbacks may
+ * still arrive until the child exits. Release is safe while the child is
+ * running: it requests termination and blocks until the child and callbacks
+ * have finished. Do not call release from one of this process's callbacks.
+ */
+
 typedef struct AxyneProcessSpec {
     const char *executable;
     const char *const *arguments;
