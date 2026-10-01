@@ -96,13 +96,24 @@
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
 | PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | PENDING |
-| PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | PENDING |
+| PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | COMPLETE (CMake install manifest and CPack configuration implemented; native package generation remains host-tool dependent) |
 | AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
 
 ## Excluded from this goal
 
 Plugin sessions/manager and plugin marketplace, account/login, API/server implementations, and marketplace/developer web UI.
 Remote update checks and remote release-note retrieval are also excluded because they require server communication.
+
+## PACK-1 implementation assumptions
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Windows installer generator | CPack NSIS; the generated NSIS installer includes CPack's standard uninstaller and a Start Menu link to Axyne | AGENT_PARAMETER | ASSUMED |
+| macOS installer generators | CPack ProductBuild `.pkg` and DragNDrop `.dmg`; both place Axyne in `/Applications` when installed through their normal flow | AGENT_PARAMETER | ASSUMED |
+| macOS uninstaller delivery | Ship `Uninstall Axyne.command` beside the app in the macOS package. It locates the adjacent app first, falls back to `/Applications/Axyne.app`, asks for confirmation, and requests administrator authorization before removal. | AGENT_PARAMETER | ASSUMED |
+| Offline version metadata | Install a generated `version.json` containing product name, semantic version, author, release-note filename, and an `offline` marker. Windows stores it under `share/axyne`; macOS stores it in the app's Resources directory. | AGENT_PARAMETER | ASSUMED |
+| Bundled release notes | Install `docs/RELEASE_NOTES.md` beside Windows package metadata and inside the macOS app Resources directory; the same file is also used as CPack's package readme. | AGENT_PARAMETER | ASSUMED |
+| Packaging scope | Package the existing CMake target and its already-staged Scintilla runtime dependencies. Do not add server, account, plugin, marketplace, remote-update, or runtime-bundling behavior. | USER + AGENT_PARAMETER | ASSUMED |
 
 ## UI-1 implementation boundary and status
 
