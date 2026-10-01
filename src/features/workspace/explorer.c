@@ -6,11 +6,14 @@
 static void axyne_explorer_error(AxyneError *error, AxyneStatus code,
                                  const char *message)
 {
+    size_t length;
     if (error == NULL) return;
     error->code = code;
     if (message == NULL) message = "";
-    strncpy(error->message, message, sizeof(error->message) - 1);
-    error->message[sizeof(error->message) - 1] = '\0';
+    length = strlen(message);
+    if (length >= sizeof(error->message)) length = sizeof(error->message) - 1;
+    memcpy(error->message, message, length);
+    error->message[length] = '\0';
 }
 
 static void axyne_explorer_ok(AxyneError *error)

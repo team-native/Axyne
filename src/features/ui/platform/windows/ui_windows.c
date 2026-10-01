@@ -1136,6 +1136,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case AXYNE_WM_EXPLORER_EVENT: {
         AxyneExplorerMessage *event_message = (AxyneExplorerMessage *)l_param;
         if (event_message != NULL) {
+            state->explorer_has_selection = 0;
             axyne_workspace_refresh(window, state);
             axyne_workspace_message_destroy(event_message);
         }
