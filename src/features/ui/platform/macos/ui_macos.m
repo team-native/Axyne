@@ -72,7 +72,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)renameExplorerItem:(id)sender;
 - (void)removeExplorerItem:(id)sender;
 - (void)workspaceEvent;
-- (void)refreshExplorer;
+- (BOOL)refreshExplorer;
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
 - (void)showWorkspaceMessage:(NSString *)message;
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
@@ -404,17 +404,20 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     [self refreshExplorer];
 }
 
-- (void)refreshExplorer
+- (BOOL)refreshExplorer
 {
     AxyneError error;
-    if (_explorer.root == NULL) return;
+    if (_explorer.root == NULL) return NO;
     if (axyne_explorer_reload(&_explorer, &error) != AXYNE_STATUS_OK) {
         [self showWorkspaceError:@"Unable to refresh workspace" error:&error];
+        [self setNeedsDisplay:YES];
+        return NO;
     } else if (_hasExplorerSelection &&
                (size_t)_explorerSelection >= _explorer.count) {
         _hasExplorerSelection = NO;
     }
     [self setNeedsDisplay:YES];
+    return YES;
 }
 
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
@@ -460,7 +463,7 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
                                             [name UTF8String], &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Rename failed" error:&error];
-    else { _hasExplorerSelection = NO; [self refreshExplorer]; }
+    else if ([self refreshExplorer]) _hasExplorerSelection = NO;
 }
 
 - (void)removeExplorerItem:(id)sender
@@ -479,7 +482,7 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
                                             &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Delete failed" error:&error];
-    else { _hasExplorerSelection = NO; [self refreshExplorer]; }
+    else if ([self refreshExplorer]) _hasExplorerSelection = NO;
 }
 
 - (void)performExplorerOperation:(AxyneFileKind)kind
