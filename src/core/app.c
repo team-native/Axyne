@@ -1,5 +1,6 @@
 #include "axyne/app.h"
 #include "axyne/build_config.h"
+#include <stddef.h>
 
 static const char AXYNE_APP_NAME[] = AXYNE_CONFIG_DISPLAY_NAME;
 static const char AXYNE_APP_VERSION[] = AXYNE_CONFIG_VERSION;
