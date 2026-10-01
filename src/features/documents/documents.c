@@ -173,9 +173,7 @@ AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *path,
             strcmp(set->documents[i].path, path) == 0) {
             set->active_index = i;
             if (index != NULL) *index = i;
-            if (!axyne_recent_add(set, path))
-                return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                                  "Opened file, but could not update recent files");
+            (void)axyne_recent_add(set, path);
             axyne_success(error);
             return AXYNE_STATUS_OK;
         }
@@ -199,12 +197,7 @@ AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *path,
         free(doc.path); free(doc.title); free(doc.contents);
         return status;
     }
-    if (!axyne_recent_add(set, path)) {
-        /* The document itself remains usable if only recent-list allocation fails. */
-        axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                    "Opened file, but could not update recent files");
-        return AXYNE_STATUS_OUT_OF_MEMORY;
-    }
+    (void)axyne_recent_add(set, path);
     axyne_success(error);
     return AXYNE_STATUS_OK;
 }

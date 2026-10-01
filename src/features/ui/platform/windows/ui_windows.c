@@ -180,7 +180,7 @@ static int axyne_save_active(HWND window, AxyneWindowState *state)
     return 1;
 }
 
-static void axyne_show_document(AxyneWindowState *state, size_t index);
+static int axyne_show_document(AxyneWindowState *state, size_t index);
 
 static int axyne_confirm_document_close(HWND window, AxyneWindowState *state,
                                        size_t index)
@@ -203,9 +203,10 @@ static int axyne_confirm_document_close(HWND window, AxyneWindowState *state,
     return 1;
 }
 
-static void axyne_show_document(AxyneWindowState *state, size_t index)
+static int axyne_show_document(AxyneWindowState *state, size_t index)
 {
-    if (index >= state->documents.count) return;
+    if (index >= state->documents.count) return 0;
+    size_t previous_index = state->documents.active_index;
     (void)axyne_documents_set_active(&state->documents, index, NULL);
     AxyneDocument *doc = axyne_active(state);
     if (state->editor != NULL && doc != NULL) {
@@ -217,7 +218,12 @@ static void axyne_show_document(AxyneWindowState *state, size_t index)
         } else if (doc->native_editor_document == NULL) {
             LRESULT created = SendMessageA(state->editor, SCI_CREATEDOCUMENT,
                                             (WPARAM)doc->length, 0);
-            if (created == 0) { state->loading_editor = 0; return; }
+            if (created == 0) {
+                state->loading_editor = 0;
+                (void)axyne_documents_set_active(&state->documents,
+                                                   previous_index, NULL);
+                return 0;
+            }
             doc->native_editor_document = (void *)(uintptr_t)created;
             doc->owns_native_editor_document = 1;
             SendMessageA(state->editor, SCI_SETDOCPOINTER, 0,
@@ -232,15 +238,22 @@ static void axyne_show_document(AxyneWindowState *state, size_t index)
         }
         state->loading_editor = 0;
     }
+    return 1;
 }
 
 static void axyne_new_document(HWND window, AxyneWindowState *state)
 {
     if (!axyne_capture_editor(state)) return;
+    size_t previous_index = state->documents.active_index;
     AxyneError error;
     size_t index;
     if (axyne_documents_new(&state->documents, &index, &error) == AXYNE_STATUS_OK) {
-        axyne_show_document(state, index);
+        if (!axyne_show_document(state, index)) {
+            (void)axyne_documents_close(&state->documents, index, NULL);
+            (void)axyne_documents_set_active(&state->documents,
+                                               previous_index, NULL);
+            return;
+        }
         axyne_update_title(window, state);
     }
 }
@@ -252,17 +265,27 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
     if (known_path == NULL && !axyne_choose_path(window, 0, &path)) return;
     const char *chosen = known_path != NULL ? known_path : path;
     if (!axyne_capture_editor(state)) return;
+    size_t previous_count = state->documents.count;
+    size_t previous_index = state->documents.active_index;
     size_t index = 0;
     AxyneError error;
     AxyneStatus status = axyne_documents_open(&state->documents, chosen,
                                                &index, &error);
     free(path);
-    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_OUT_OF_MEMORY) {
+    if (status != AXYNE_STATUS_OK) {
         MessageBoxA(window, error.message, "Axyne - Open failed",
                     MB_OK | MB_ICONERROR);
         return;
     }
-    axyne_show_document(state, index);
+    if (!axyne_show_document(state, index)) {
+        if (state->documents.count > previous_count) {
+            (void)axyne_documents_close(&state->documents, index, NULL);
+        }
+        (void)axyne_documents_set_active(&state->documents, previous_index, NULL);
+        MessageBoxA(window, "Scintilla could not create the document",
+                    "Axyne - Open failed", MB_OK | MB_ICONERROR);
+        return;
+    }
     axyne_update_title(window, state);
 }
 
