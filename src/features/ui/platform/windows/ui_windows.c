@@ -873,6 +873,21 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     next.editor.word_wrap = _wcsicmp(value, L"yes") == 0;
     if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_WORD_WRAP;
+    (void)swprintf_s(value, 128, L"%hs", next.editor.font_family);
+    if (!axyne_prompt(owner, L"Editor Preferences",
+                      L"Font family (blank for native default)", value, 128)) return 0;
+    utf8 = axyne_utf8(value);
+    if (utf8 == NULL || strlen(utf8) >= AXYNE_PREFERENCE_TEXT_MAX) {
+        free(utf8); MessageBoxA(owner, "The font family is invalid.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0;
+    }
+    (void)snprintf(next.editor.font_family, sizeof(next.editor.font_family), "%s", utf8);
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
+    free(utf8);
+    (void)swprintf_s(value, 128, L"%ls", next.editor.show_whitespace ? L"yes" : L"no");
+    if (!axyne_prompt(owner, L"Editor Preferences", L"Show whitespace (yes or no)", value, 128)) return 0;
+    if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    next.editor.show_whitespace = _wcsicmp(value, L"yes") == 0;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE;
     for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
         const AxyneKeyBinding *current = axyne_preferences_find_binding(&next, (AxynePreferenceAction)action);
         wchar_t binding_value[128]; char *binding_utf8;
