@@ -28,10 +28,15 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * Every accepted process emits exactly one exit callback when on_exit is
  * non-NULL. Both output streams are drained through EOF before that callback.
  * Output bytes are valid only for the duration of the callback. Terminate
- * requests OS-level termination and returns without waiting; callbacks may
- * still arrive until the child exits. Release is safe while the child is
- * running: it requests termination and blocks until the child and callbacks
- * have finished. Do not call release from one of this process's callbacks.
+ * requests forced termination of the process tree and returns without waiting;
+ * callbacks may still arrive until the root exits and inherited output pipes
+ * reach EOF. Release is safe while the child is running: it force-terminates
+ * the process tree and blocks until the root and callbacks have finished. On
+ * Windows the root is assigned to a kill-on-close Job Object before it is
+ * resumed; on macOS/POSIX it starts in a dedicated process group before exec.
+ * Startup fails if the Windows job cannot be assigned. POSIX descendants that
+ * deliberately leave the process group (for example with setsid) are outside
+ * the tree that this API can terminate. Do not call release from a callback.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.

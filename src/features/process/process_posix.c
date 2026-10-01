@@ -216,6 +216,9 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     }
     if (child == 0) {
         int saved_errno;
+        if (setpgid(0, 0) != 0) {
+            saved_errno = errno; (void)write(exec_error[1], &saved_errno, sizeof(saved_errno)); _exit(127);
+        }
         close(input[1]); close(output[0]); close(errors[0]); close(exec_error[0]);
         if (dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0 ||
             dup2(errors[1], STDERR_FILENO) < 0 ||
@@ -225,6 +228,15 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         close(input[0]); close(output[1]); close(errors[1]);
         execve(executable, arguments, environment);
         saved_errno = errno; (void)write(exec_error[1], &saved_errno, sizeof(saved_errno)); _exit(127);
+    }
+    /* The child creates its group before exec; the parent closes the race
+       before the process handle can be returned to the caller. */
+    if (setpgid(child, child) != 0 &&
+        !(errno == EACCES && getpgid(child) == child)) {
+        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
+                                         "Unable to create child process group");
+        goto cleanup;
     }
     close(input[0]); input[0] = -1; close(output[1]); output[1] = -1;
     close(errors[1]); errors[1] = -1; close(exec_error[1]); exec_error[1] = -1;
@@ -239,7 +251,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         goto cleanup;
     }
     if (!set_nonblocking(output[0]) || !set_nonblocking(errors[0])) {
-        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
         status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
                                          "Unable to configure process output pipes");
         goto cleanup;
@@ -248,7 +260,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     state->stdout_read = output[0]; output[0] = -1;
     state->stderr_read = errors[0]; errors[0] = -1;
     if (pthread_mutex_init(&state->write_lock, NULL) != 0) {
-        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
         close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
         state->stdin_write = state->stdout_read = state->stderr_read = -1;
         status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
@@ -256,7 +268,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         goto cleanup;
     }
     if (pthread_mutex_init(&state->child_lock, NULL) != 0) {
-        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
         pthread_mutex_destroy(&state->write_lock);
         close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
         state->stdin_write = state->stdout_read = state->stderr_read = -1;
@@ -267,7 +279,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     process->implementation = state; process->on_output = spec->on_output;
     process->on_exit = spec->on_exit; process->user_data = spec->user_data;
     if (pthread_create(&state->worker, NULL, process_worker, process) != 0) {
-        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
         pthread_mutex_destroy(&state->child_lock);
         pthread_mutex_destroy(&state->write_lock);
         close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
@@ -332,10 +344,10 @@ AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
                                                         "Process is null");
     state = (ProcessState *)process->implementation;
     (void)pthread_mutex_lock(&state->child_lock);
-    if (!state->child_done && kill(state->child, SIGTERM) != 0 && errno != ESRCH) {
+    if (kill(-state->child, SIGKILL) != 0 && errno != ESRCH) {
         (void)pthread_mutex_unlock(&state->child_lock);
         return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
-                                       "Unable to terminate child process");
+                                       "Unable to terminate child process group");
     }
     (void)pthread_mutex_unlock(&state->child_lock);
     return axyne_process_set_error(error, AXYNE_STATUS_OK, "");
@@ -347,7 +359,7 @@ void axyne_process_release(AxyneProcess *process)
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
     (void)pthread_mutex_lock(&state->child_lock);
-    if (!state->child_done) (void)kill(state->child, SIGKILL);
+    (void)kill(-state->child, SIGKILL);
     (void)pthread_mutex_unlock(&state->child_lock);
     (void)pthread_join(state->worker, NULL);
     (void)pthread_mutex_lock(&state->write_lock);
