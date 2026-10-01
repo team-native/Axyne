@@ -1,0 +1,46 @@
+name: Build CI
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -A x64 -DAXYNE_AUTHOR=Native
+
+      - name: Configure macOS
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAXYNE_AUTHOR=Native
+
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release --parallel
+
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        run: cmake --build build --config Release --parallel
+
