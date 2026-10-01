@@ -19,9 +19,37 @@ typedef struct ProcessState {
 
 static wchar_t *to_wide(const char *text);
 
+static wchar_t fold_environment_char(wchar_t value)
+{
+    if (value >= L'A' && value <= L'Z') return value + (L'a' - L'A');
+    return value;
+}
+
+static int compare_environment_names(const wchar_t *left, size_t left_length,
+                                    const wchar_t *right, size_t right_length)
+{
+    size_t i, length = left_length < right_length ? left_length : right_length;
+    for (i = 0; i < length; ++i) {
+        wchar_t left_char = fold_environment_char(left[i]);
+        wchar_t right_char = fold_environment_char(right[i]);
+        if (left_char != right_char) return left_char < right_char ? -1 : 1;
+    }
+    if (left_length == right_length) return 0;
+    return left_length < right_length ? -1 : 1;
+}
+
 static int compare_environment(const void *left, const void *right)
 {
-    return _wcsicmp(*(const wchar_t *const *)left, *(const wchar_t *const *)right);
+    const wchar_t *left_entry = *(const wchar_t *const *)left;
+    const wchar_t *right_entry = *(const wchar_t *const *)right;
+    const wchar_t *left_equals = wcschr(left_entry + (left_entry[0] == L'='), L'=');
+    const wchar_t *right_equals = wcschr(right_entry + (right_entry[0] == L'='), L'=');
+    size_t left_length = left_equals != NULL ? (size_t)(left_equals - left_entry) : wcslen(left_entry);
+    size_t right_length = right_equals != NULL ? (size_t)(right_equals - right_entry) : wcslen(right_entry);
+    int result = compare_environment_names(left_entry, left_length,
+                                           right_entry, right_length);
+    if (result != 0) return result;
+    return wcscmp(left_entry + left_length, right_entry + right_length);
 }
 
 static wchar_t *build_environment(const AxyneProcessSpec *spec)
@@ -41,7 +69,8 @@ static wchar_t *build_environment(const AxyneProcessSpec *spec)
             if (override == NULL) goto done;
             equals = wcschr(override, L'=');
             if (equals != NULL && (size_t)(equals - override) == name_length &&
-                _wcsnicmp(cursor, override, name_length) == 0) replaced = 1;
+                compare_environment_names(cursor, name_length, override,
+                                          name_length) == 0) replaced = 1;
             free(override);
             if (replaced) break;
         }
