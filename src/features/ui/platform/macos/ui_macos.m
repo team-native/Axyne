@@ -727,9 +727,10 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
             axyne_preferences_apply_workspace(&_preferences,
                                                &workspacePreferences);
             [self applyPreferences];
-        } else if (status != AXYNE_STATUS_NOT_FOUND)
+        } else if (status != AXYNE_STATUS_NOT_FOUND) {
             [self showWorkspaceError:@"Unable to load workspace preferences" error:&error];
-        else [self applyPreferences];
+            [self applyPreferences];
+        } else [self applyPreferences];
     }
     [self setNeedsDisplay:YES];
     return YES;
@@ -1095,7 +1096,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
 
 - (BOOL)showPreferences:(BOOL)workspace
 {
-    AxynePreferences next = _preferences;
+    AxynePreferences next = workspace ? _preferences : _globalPreferences;
     NSString *theme = [[self askForText:workspace ? @"Workspace Settings" : @"Preferences"
                                    label:@"Theme: dark, light, or system"] lowercaseString];
     NSString *fontSize;
@@ -1143,10 +1144,10 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
                                       label:[NSString stringWithFormat:@"%@ (current: %s); enter key, disable, restore, or skip",
                                                [NSString stringWithUTF8String:axyne_preferences_action_name((AxynePreferenceAction)action)], edited->key]];
         if (value == nil) return NO;
-        value = [value lowercaseString];
-        if ([value length] == 0 || [value isEqualToString:@"skip"]) continue;
-        if ([value isEqualToString:@"disable"]) edited->enabled = 0;
-        else if ([value isEqualToString:@"restore"]) {
+        NSString *command = [value lowercaseString];
+        if ([value length] == 0 || [command isEqualToString:@"skip"]) continue;
+        if ([command isEqualToString:@"disable"]) edited->enabled = 0;
+        else if ([command isEqualToString:@"restore"]) {
             AxynePreferences defaults;
             axyne_preferences_defaults(&defaults);
             const AxyneKeyBinding *restored = axyne_preferences_find_binding(&defaults, (AxynePreferenceAction)action);
@@ -1163,7 +1164,18 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
     if (status != AXYNE_STATUS_OK) { [self showWorkspaceError:@"Unable to save preferences" error:&error]; return NO; }
     _preferences = next;
-    if (!workspace) _globalPreferences = next;
+    if (!workspace) {
+        _globalPreferences = next;
+        if (_workspacePreferencesPath != NULL) {
+            AxynePreferences workspacePreferences;
+            AxyneStatus workspaceStatus = axyne_preferences_load_workspace(
+                _workspacePreferencesPath, &workspacePreferences, &error);
+            if (workspaceStatus == AXYNE_STATUS_OK)
+                axyne_preferences_apply_workspace(&_preferences, &workspacePreferences);
+            else if (workspaceStatus != AXYNE_STATUS_NOT_FOUND)
+                [self showWorkspaceError:@"Unable to reload workspace preferences" error:&error];
+        }
+    }
     [self applyPreferences];
     return YES;
 }
