@@ -76,7 +76,32 @@ typedef struct AxynePreferences {
     AxyneThemePreferences theme;
     AxyneKeyBinding bindings[AXYNE_PREFERENCE_BINDING_MAX];
     size_t binding_count;
+    /* Fields present in the source profile. Global profiles normalize this
+     * to all fields; workspace profiles use it to preserve partial overlays. */
+    uint32_t present_fields;
+    unsigned char binding_present[AXYNE_ACTION_COUNT];
 } AxynePreferences;
+
+enum {
+    AXYNE_PREFERENCE_EDITOR_TAB_WIDTH = 1u << 0,
+    AXYNE_PREFERENCE_EDITOR_FONT_SIZE = 1u << 1,
+    AXYNE_PREFERENCE_EDITOR_INSERT_SPACES = 1u << 2,
+    AXYNE_PREFERENCE_EDITOR_WORD_WRAP = 1u << 3,
+    AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE = 1u << 4,
+    AXYNE_PREFERENCE_EDITOR_FONT_FAMILY = 1u << 5,
+    AXYNE_PREFERENCE_THEME_PRESET = 1u << 6,
+    AXYNE_PREFERENCE_THEME_BACKGROUND = 1u << 7,
+    AXYNE_PREFERENCE_THEME_PANEL = 1u << 8,
+    AXYNE_PREFERENCE_THEME_TOOLBAR = 1u << 9,
+    AXYNE_PREFERENCE_THEME_BORDER = 1u << 10,
+    AXYNE_PREFERENCE_THEME_TEXT = 1u << 11,
+    AXYNE_PREFERENCE_THEME_MUTED = 1u << 12,
+    AXYNE_PREFERENCE_THEME_ACCENT = 1u << 13,
+    AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND = 1u << 14,
+    AXYNE_PREFERENCE_THEME_EDITOR_TEXT = 1u << 15
+};
+
+#define AXYNE_PREFERENCE_ALL_FIELDS ((uint32_t)((1u << 16) - 1u))
 
 /* Defaults are intentionally small and reversible; platform adapters may
  * choose a native font when font_family is empty. */
@@ -105,6 +130,10 @@ AxyneStatus axyne_preferences_save_workspace(
 
 void axyne_preferences_apply_workspace(AxynePreferences *effective,
                                        const AxynePreferences *workspace);
+
+void axyne_preferences_mark_all(AxynePreferences *preferences);
+void axyne_preferences_mark_binding(AxynePreferences *preferences,
+                                     AxynePreferenceAction action);
 
 const AxyneKeyBinding *axyne_preferences_find_binding(
     const AxynePreferences *preferences, AxynePreferenceAction action);

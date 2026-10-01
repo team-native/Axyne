@@ -44,6 +44,14 @@ static void axyne_add_binding(AxynePreferences *preferences,
     axyne_copy_text(binding->key, sizeof(binding->key), key);
 }
 
+static int axyne_binding_index(const AxynePreferences *preferences,
+                               AxynePreferenceAction action)
+{
+    for (size_t i = 0; i < preferences->binding_count; ++i)
+        if (preferences->bindings[i].action == action) return (int)i;
+    return -1;
+}
+
 void axyne_preferences_defaults(AxynePreferences *preferences)
 {
     if (preferences == NULL) return;
@@ -65,6 +73,22 @@ void axyne_preferences_defaults(AxynePreferences *preferences)
     axyne_add_binding(preferences, AXYNE_ACTION_QUICK_FILE, AXYNE_KEY_MODIFIER_COMMAND, "P");
     axyne_add_binding(preferences, AXYNE_ACTION_BUILD, AXYNE_KEY_MODIFIER_COMMAND, "B");
     axyne_add_binding(preferences, AXYNE_ACTION_RUN, 0, "F5");
+    axyne_preferences_mark_all(preferences);
+}
+
+void axyne_preferences_mark_all(AxynePreferences *preferences)
+{
+    if (preferences == NULL) return;
+    preferences->present_fields = AXYNE_PREFERENCE_ALL_FIELDS;
+    memset(preferences->binding_present, 1,
+           sizeof(preferences->binding_present));
+}
+
+void axyne_preferences_mark_binding(AxynePreferences *preferences,
+                                     AxynePreferenceAction action)
+{
+    if (preferences != NULL && action >= 0 && action < AXYNE_ACTION_COUNT)
+        preferences->binding_present[action] = 1;
 }
 
 static AxyneStatus axyne_get_json(AxyneSettings *settings, const char *path,
@@ -112,6 +136,16 @@ static AxyneStatus axyne_get_string(AxyneSettings *settings, const char *path,
     axyne_settings_free_json(json); return AXYNE_STATUS_INVALID_ARGUMENT;
 }
 
+static int axyne_value_present(AxyneSettings *settings, const char *path,
+                               AxyneError *error)
+{
+    char *json = NULL;
+    AxyneStatus status = axyne_get_json(settings, path, &json, error);
+    int present = status == AXYNE_STATUS_OK && json != NULL;
+    axyne_settings_free_json(json);
+    return present;
+}
+
 static AxyneStatus axyne_set_text(AxyneSettings *settings, const char *path,
                                   const char *value, AxyneError *error)
 {
@@ -137,28 +171,74 @@ static AxyneStatus axyne_load_values(AxyneSettings *settings,
                                      AxynePreferences *preferences,
                                      AxyneError *error)
 {
-    unsigned int number; int boolean; char text[AXYNE_PREFERENCE_TEXT_MAX]; char path[64]; AxyneStatus status;
-#define GET_UINT(path_value, destination) do { status = axyne_get_uint(settings, path_value, &number, error); if (status != AXYNE_STATUS_OK) return status; if (number != 0) *(destination) = number; } while (0)
-#define GET_BOOL(path_value, destination) do { status = axyne_get_bool(settings, path_value, &boolean, error); if (status != AXYNE_STATUS_OK) return status; *(destination) = boolean; } while (0)
-    GET_UINT("/editor/tabWidth", &preferences->editor.tab_width);
-    GET_UINT("/editor/fontSize", &preferences->editor.font_size);
-    GET_BOOL("/editor/insertSpaces", &preferences->editor.insert_spaces);
-    GET_BOOL("/editor/wordWrap", &preferences->editor.word_wrap);
-    GET_BOOL("/editor/showWhitespace", &preferences->editor.show_whitespace);
-    text[0] = '\0'; status = axyne_get_string(settings, "/editor/fontFamily", text, sizeof(text), error); if (status != AXYNE_STATUS_OK) return status; if (text[0] != '\0') axyne_copy_text(preferences->editor.font_family, sizeof(preferences->editor.font_family), text);
-    text[0] = '\0';
-    status = axyne_get_string(settings, "/theme/preset", text, sizeof(text), error); if (status != AXYNE_STATUS_OK) return status;
-    if (strcmp(text, "light") == 0) axyne_theme_defaults(&preferences->theme, AXYNE_THEME_LIGHT); else if (strcmp(text, "system") == 0) axyne_theme_defaults(&preferences->theme, AXYNE_THEME_SYSTEM); else if (text[0] != '\0' && strcmp(text, "dark") != 0) return AXYNE_STATUS_INVALID_ARGUMENT;
-    for (size_t color = 0; color < 9; ++color) { const char *names[] = {"background", "panel", "toolbar", "border", "text", "muted", "accent", "editorBackground", "editorText"}; (void)snprintf(path, sizeof(path), "/theme/%s", names[color]); status = axyne_get_uint(settings, path, &number, error); if (status != AXYNE_STATUS_OK) return status; if (number != 0) ((uint32_t *)&preferences->theme.background)[color] = (uint32_t)number; }
+    unsigned int number; int boolean; char text[AXYNE_PREFERENCE_TEXT_MAX];
+    char path[64]; AxyneStatus status;
+#define GET_UINT(path_value, destination, bit) do { \
+        if (axyne_value_present(settings, path_value, error)) { \
+            status = axyne_get_uint(settings, path_value, &number, error); \
+            if (status != AXYNE_STATUS_OK) return status; \
+            *(destination) = number; preferences->present_fields |= (bit); \
+        } \
+    } while (0)
+#define GET_BOOL(path_value, destination, bit) do { \
+        if (axyne_value_present(settings, path_value, error)) { \
+            status = axyne_get_bool(settings, path_value, &boolean, error); \
+            if (status != AXYNE_STATUS_OK) return status; \
+            *(destination) = boolean; preferences->present_fields |= (bit); \
+        } \
+    } while (0)
+    GET_UINT("/editor/tabWidth", &preferences->editor.tab_width, AXYNE_PREFERENCE_EDITOR_TAB_WIDTH);
+    GET_UINT("/editor/fontSize", &preferences->editor.font_size, AXYNE_PREFERENCE_EDITOR_FONT_SIZE);
+    GET_BOOL("/editor/insertSpaces", &preferences->editor.insert_spaces, AXYNE_PREFERENCE_EDITOR_INSERT_SPACES);
+    GET_BOOL("/editor/wordWrap", &preferences->editor.word_wrap, AXYNE_PREFERENCE_EDITOR_WORD_WRAP);
+    GET_BOOL("/editor/showWhitespace", &preferences->editor.show_whitespace, AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE);
+    if (axyne_value_present(settings, "/editor/fontFamily", error)) {
+        status = axyne_get_string(settings, "/editor/fontFamily", text, sizeof(text), error);
+        if (status != AXYNE_STATUS_OK) return status;
+        axyne_copy_text(preferences->editor.font_family,
+                        sizeof(preferences->editor.font_family), text);
+        preferences->present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
+    }
+    if (axyne_value_present(settings, "/theme/preset", error)) {
+        status = axyne_get_string(settings, "/theme/preset", text, sizeof(text), error);
+        if (status != AXYNE_STATUS_OK) return status;
+        if (strcmp(text, "light") == 0) axyne_theme_defaults(&preferences->theme, AXYNE_THEME_LIGHT);
+        else if (strcmp(text, "system") == 0) axyne_theme_defaults(&preferences->theme, AXYNE_THEME_SYSTEM);
+        else if (strcmp(text, "dark") != 0) return AXYNE_STATUS_INVALID_ARGUMENT;
+        preferences->present_fields |= AXYNE_PREFERENCE_THEME_PRESET;
+    }
     {
-        size_t count = 0; preferences->binding_count = 0;
-        while (count < AXYNE_PREFERENCE_BINDING_MAX) {
-            int action; AxyneKeyBinding *binding = &preferences->bindings[count];
-            (void)snprintf(path, sizeof(path), "/keybindings/%u/action", (unsigned)count); { char *action_json = NULL; status = axyne_settings_get_json(settings, path, &action_json, error); if (status == AXYNE_STATUS_NOT_FOUND) { if (error != NULL) { error->code = AXYNE_STATUS_OK; error->message[0] = '\0'; } if (count == 0) preferences->binding_count = 0; break; } if (status != AXYNE_STATUS_OK) return status; axyne_settings_free_json(action_json); } status = axyne_get_uint(settings, path, &number, error); if (status != AXYNE_STATUS_OK) return status; action = (int)number; if (action < 0 || action >= AXYNE_ACTION_COUNT) return AXYNE_STATUS_INVALID_ARGUMENT;
-            (void)snprintf(path, sizeof(path), "/keybindings/%u/modifiers", (unsigned)count); status = axyne_get_uint(settings, path, &number, error); if (status != AXYNE_STATUS_OK) return status; binding->modifiers = number;
-            (void)snprintf(path, sizeof(path), "/keybindings/%u/key", (unsigned)count); status = axyne_get_string(settings, path, binding->key, sizeof(binding->key), error); if (status != AXYNE_STATUS_OK) return status;
-            (void)snprintf(path, sizeof(path), "/keybindings/%u/enabled", (unsigned)count); status = axyne_get_bool(settings, path, &binding->enabled, error); if (status != AXYNE_STATUS_OK) return status;
-            binding->action = (AxynePreferenceAction)action; ++count; preferences->binding_count = count;
+        const char *names[] = {"background", "panel", "toolbar", "border", "text", "muted", "accent", "editorBackground", "editorText"};
+        const uint32_t bits[] = {AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL, AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER, AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED, AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND, AXYNE_PREFERENCE_THEME_EDITOR_TEXT};
+        uint32_t *colors = &preferences->theme.background;
+        for (size_t i = 0; i < 9; ++i) {
+            (void)snprintf(path, sizeof(path), "/theme/%s", names[i]);
+            GET_UINT(path, &colors[i], bits[i]);
+        }
+    }
+    for (size_t count = 0; count < AXYNE_PREFERENCE_BINDING_MAX; ++count) {
+        AxyneKeyBinding *binding; int action; char key_path[64];
+        (void)snprintf(path, sizeof(path), "/keybindings/%u/action", (unsigned)count);
+        if (!axyne_value_present(settings, path, error)) break;
+        status = axyne_get_uint(settings, path, &number, error);
+        if (status != AXYNE_STATUS_OK || number >= AXYNE_ACTION_COUNT)
+            return status != AXYNE_STATUS_OK ? status : AXYNE_STATUS_INVALID_ARGUMENT;
+        action = (int)number;
+        action = axyne_binding_index(preferences, (AxynePreferenceAction)action);
+        if (action < 0) return AXYNE_STATUS_INVALID_ARGUMENT;
+        binding = &preferences->bindings[action];
+        axyne_preferences_mark_binding(preferences, binding->action);
+        (void)snprintf(path, sizeof(path), "/keybindings/%u/modifiers", (unsigned)count);
+        GET_UINT(path, &binding->modifiers, 0);
+        (void)snprintf(key_path, sizeof(key_path), "/keybindings/%u/key", (unsigned)count);
+        if (axyne_value_present(settings, key_path, error)) {
+            status = axyne_get_string(settings, key_path, binding->key, sizeof(binding->key), error);
+            if (status != AXYNE_STATUS_OK) return status;
+        }
+        (void)snprintf(path, sizeof(path), "/keybindings/%u/enabled", (unsigned)count);
+        if (axyne_value_present(settings, path, error)) {
+            status = axyne_get_bool(settings, path, &binding->enabled, error);
+            if (status != AXYNE_STATUS_OK) return status;
         }
     }
 #undef GET_UINT
@@ -171,11 +251,14 @@ AxyneStatus axyne_preferences_load(const char *utf8_path, AxynePreferences *pref
     AxyneSettings *settings = NULL; AxyneStatus status;
     if (utf8_path == NULL || preferences == NULL) return AXYNE_STATUS_INVALID_ARGUMENT;
     axyne_preferences_defaults(preferences); status = axyne_settings_load(utf8_path, &settings, error); if (status != AXYNE_STATUS_OK) return status;
+    preferences->present_fields = 0;
+    memset(preferences->binding_present, 0, sizeof(preferences->binding_present));
     status = axyne_load_values(settings, preferences, error); axyne_settings_destroy(settings); return status;
 }
 
 static AxyneStatus axyne_save_values(const AxynePreferences *preferences,
-                                     const char *utf8_path, AxyneError *error)
+                                     const char *utf8_path, int workspace,
+                                     AxyneError *error)
 {
     AxyneSettings *settings = NULL; AxyneStatus status; char json[8192]; size_t length = 0;
     if (axyne_settings_create(&settings, error) != AXYNE_STATUS_OK) return error != NULL ? error->code : AXYNE_STATUS_OUT_OF_MEMORY;
@@ -184,12 +267,16 @@ static AxyneStatus axyne_save_values(const AxynePreferences *preferences,
     status = axyne_settings_set_json(settings, "/editor", "{}", error); if (status != AXYNE_STATUS_OK) goto done;
     status = axyne_settings_set_json(settings, "/theme", "{}", error); if (status != AXYNE_STATUS_OK) goto done;
     status = axyne_settings_set_json(settings, "/keybindings", "[]", error); if (status != AXYNE_STATUS_OK) goto done;
-    SET_UINT("/editor/tabWidth", preferences->editor.tab_width); SET_UINT("/editor/fontSize", preferences->editor.font_size); SET_BOOL("/editor/insertSpaces", preferences->editor.insert_spaces); SET_BOOL("/editor/wordWrap", preferences->editor.word_wrap); SET_BOOL("/editor/showWhitespace", preferences->editor.show_whitespace);
-    status = axyne_set_text(settings, "/editor/fontFamily", preferences->editor.font_family, error); if (status != AXYNE_STATUS_OK) goto done;
-    status = axyne_set_text(settings, "/theme/preset", preferences->theme.preset == AXYNE_THEME_LIGHT ? "light" : preferences->theme.preset == AXYNE_THEME_SYSTEM ? "system" : "dark", error); if (status != AXYNE_STATUS_OK) goto done;
-    { const uint32_t *colors = &preferences->theme.background; const char *names[] = {"background", "panel", "toolbar", "border", "text", "muted", "accent", "editorBackground", "editorText"}; for (size_t i = 0; i < 9; ++i) { char path[64]; (void)snprintf(path, sizeof(path), "/theme/%s", names[i]); SET_UINT(path, colors[i]); } }
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_TAB_WIDTH)) SET_UINT("/editor/tabWidth", preferences->editor.tab_width);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_SIZE)) SET_UINT("/editor/fontSize", preferences->editor.font_size);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_INSERT_SPACES)) SET_BOOL("/editor/insertSpaces", preferences->editor.insert_spaces);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_WORD_WRAP)) SET_BOOL("/editor/wordWrap", preferences->editor.word_wrap);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE)) SET_BOOL("/editor/showWhitespace", preferences->editor.show_whitespace);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_FAMILY)) { status = axyne_set_text(settings, "/editor/fontFamily", preferences->editor.font_family, error); if (status != AXYNE_STATUS_OK) goto done; }
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_THEME_PRESET)) { status = axyne_set_text(settings, "/theme/preset", preferences->theme.preset == AXYNE_THEME_LIGHT ? "light" : preferences->theme.preset == AXYNE_THEME_SYSTEM ? "system" : "dark", error); if (status != AXYNE_STATUS_OK) goto done; }
+    { const uint32_t *colors = &preferences->theme.background; const char *names[] = {"background", "panel", "toolbar", "border", "text", "muted", "accent", "editorBackground", "editorText"}; const uint32_t bits[] = {AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL, AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER, AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED, AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND, AXYNE_PREFERENCE_THEME_EDITOR_TEXT}; for (size_t i = 0; i < 9; ++i) if (!workspace || (preferences->present_fields & bits[i])) { char path[64]; (void)snprintf(path, sizeof(path), "/theme/%s", names[i]); SET_UINT(path, colors[i]); } }
     (void)snprintf(json, sizeof(json), "["); length = 1;
-    for (size_t i = 0; i < preferences->binding_count && i < AXYNE_PREFERENCE_BINDING_MAX; ++i) { int written = snprintf(json + length, sizeof(json) - length, "%s{\"action\":%u,\"modifiers\":%u,\"key\":\"%s\",\"enabled\":%s}", i == 0 ? "" : ",", (unsigned)preferences->bindings[i].action, preferences->bindings[i].modifiers, preferences->bindings[i].key, preferences->bindings[i].enabled ? "true" : "false"); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; }
+    { size_t written_bindings = 0; for (size_t i = 0; i < preferences->binding_count && i < AXYNE_PREFERENCE_BINDING_MAX; ++i) { const AxyneKeyBinding *binding = &preferences->bindings[i]; if (workspace && !preferences->binding_present[binding->action]) continue; int written = snprintf(json + length, sizeof(json) - length, "%s{\"action\":%u,\"modifiers\":%u,\"key\":\"%s\",\"enabled\":%s}", written_bindings == 0 ? "" : ",", (unsigned)binding->action, binding->modifiers, binding->key, binding->enabled ? "true" : "false"); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; ++written_bindings; } }
     if (length + 2 > sizeof(json)) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } json[length++] = ']'; json[length] = '\0';
     status = axyne_settings_set_json(settings, "/keybindings", json, error); if (status != AXYNE_STATUS_OK) goto done;
     status = axyne_settings_save(settings, utf8_path, error);
@@ -199,15 +286,24 @@ done:
     axyne_settings_destroy(settings); return status;
 }
 
-AxyneStatus axyne_preferences_save(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { if (preferences == NULL || utf8_path == NULL) return AXYNE_STATUS_INVALID_ARGUMENT; return axyne_save_values(preferences, utf8_path, error); }
+AxyneStatus axyne_preferences_save(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { if (preferences == NULL || utf8_path == NULL) return AXYNE_STATUS_INVALID_ARGUMENT; return axyne_save_values(preferences, utf8_path, 0, error); }
 AxyneStatus axyne_preferences_load_global(const char *utf8_path, AxynePreferences *preferences, AxyneError *error) { return axyne_preferences_load(utf8_path, preferences, error); }
 AxyneStatus axyne_preferences_save_global(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { return axyne_preferences_save(preferences, utf8_path, error); }
 AxyneStatus axyne_preferences_load_workspace(const char *utf8_path, AxynePreferences *preferences, AxyneError *error) { return axyne_preferences_load(utf8_path, preferences, error); }
-AxyneStatus axyne_preferences_save_workspace(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { return axyne_preferences_save(preferences, utf8_path, error); }
+AxyneStatus axyne_preferences_save_workspace(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { if (preferences == NULL || utf8_path == NULL) return AXYNE_STATUS_INVALID_ARGUMENT; return axyne_save_values(preferences, utf8_path, 1, error); }
 
 void axyne_preferences_apply_workspace(AxynePreferences *effective, const AxynePreferences *workspace)
 {
-    if (effective != NULL && workspace != NULL) *effective = *workspace;
+    if (effective == NULL || workspace == NULL) return;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_TAB_WIDTH) effective->editor.tab_width = workspace->editor.tab_width;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_SIZE) effective->editor.font_size = workspace->editor.font_size;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_INSERT_SPACES) effective->editor.insert_spaces = workspace->editor.insert_spaces;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_WORD_WRAP) effective->editor.word_wrap = workspace->editor.word_wrap;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE) effective->editor.show_whitespace = workspace->editor.show_whitespace;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_FAMILY) axyne_copy_text(effective->editor.font_family, sizeof(effective->editor.font_family), workspace->editor.font_family);
+    if (workspace->present_fields & AXYNE_PREFERENCE_THEME_PRESET) effective->theme.preset = workspace->theme.preset;
+    { const uint32_t bits[] = {AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL, AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER, AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED, AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND, AXYNE_PREFERENCE_THEME_EDITOR_TEXT}; uint32_t *target = &effective->theme.background; const uint32_t *source = &workspace->theme.background; for (size_t i = 0; i < 9; ++i) if (workspace->present_fields & bits[i]) target[i] = source[i]; }
+    for (size_t i = 0; i < workspace->binding_count; ++i) if (workspace->binding_present[workspace->bindings[i].action]) { int index = axyne_binding_index(effective, workspace->bindings[i].action); if (index >= 0) effective->bindings[index] = workspace->bindings[i]; }
 }
 
 const AxyneKeyBinding *axyne_preferences_find_binding(const AxynePreferences *preferences, AxynePreferenceAction action)
