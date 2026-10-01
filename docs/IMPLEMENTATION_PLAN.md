@@ -62,7 +62,7 @@
 | UI-1 | Figma-based desktop shell and Scintilla host on Windows/macOS | BASE-1 | COMPLETE (Windows Release build verified; macOS build/runtime verification pending macOS host) |
 | FS-1 | Shared filesystem API and on-demand external-change notifications | BASE-1 | COMPLETE |
 | EDIT-1 | Tabs, save/recent files, editor commands and document state | UI-1, FS-1 | COMPLETE (source diff checks passed; Windows Release build blocked by host Temp access; macOS build/runtime verification pending macOS host) |
-| SEARCH-1 | Current-file/workspace search, replace and quick file navigation (symbol navigation is LSP-1) | FS-1, EDIT-1 | IN_PROGRESS |
+| SEARCH-1 | Current-file/workspace search, replace and quick file navigation (symbol navigation is LSP-1) | FS-1, EDIT-1 | COMPLETE (native Windows/AppKit shortcuts, dialogs, replace, workspace hits and quick-file opening integrated; Windows Release build blocked by MSBuild duplicate Path/PATH environment keys; macOS build/runtime verification pending macOS host) |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | PENDING |
 | RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | PENDING |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
