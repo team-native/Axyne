@@ -140,6 +140,61 @@ static char *lsp_copy(const char *value)
     return value == NULL ? NULL : lsp_copy_bytes(value, strlen(value));
 }
 
+size_t axyne_lsp_utf16_character(const char *line, size_t length,
+                                 size_t byte_offset)
+{
+    size_t character = 0;
+    size_t at = 0;
+    if (line == NULL) return 0;
+    if (byte_offset > length) byte_offset = length;
+    while (at < byte_offset) {
+        unsigned char first = (unsigned char)line[at];
+        size_t width = 1;
+        unsigned codepoint = first;
+
+        if (first >= 0xc2 && first <= 0xdf && at + 1 < byte_offset &&
+            ((unsigned char)line[at + 1] & 0xc0) == 0x80) {
+            width = 2;
+            codepoint = ((unsigned)(first & 0x1f) << 6) |
+                        ((unsigned char)line[at + 1] & 0x3f);
+        } else if (first >= 0xe0 && first <= 0xef && at + 2 < byte_offset &&
+                   ((unsigned char)line[at + 1] & 0xc0) == 0x80 &&
+                   ((unsigned char)line[at + 2] & 0xc0) == 0x80) {
+            width = 3;
+            codepoint = ((unsigned)(first & 0x0f) << 12) |
+                        (((unsigned char)line[at + 1] & 0x3f) << 6) |
+                        ((unsigned char)line[at + 2] & 0x3f);
+            if (codepoint < 0x800 || (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+                width = 1;
+                codepoint = first;
+            }
+        } else if (first >= 0xf0 && first <= 0xf4 && at + 3 < byte_offset &&
+                   ((unsigned char)line[at + 1] & 0xc0) == 0x80 &&
+                   ((unsigned char)line[at + 2] & 0xc0) == 0x80 &&
+                   ((unsigned char)line[at + 3] & 0xc0) == 0x80) {
+            width = 4;
+            codepoint = ((unsigned)(first & 0x07) << 18) |
+                        (((unsigned char)line[at + 1] & 0x3f) << 12) |
+                        (((unsigned char)line[at + 2] & 0x3f) << 6) |
+                        ((unsigned char)line[at + 3] & 0x3f);
+            if (codepoint < 0x10000 || codepoint > 0x10ffff) {
+                width = 1;
+                codepoint = first;
+            }
+        }
+        if (width > byte_offset - at) width = 1;
+        if (codepoint > 0xffff) {
+            if (character > SIZE_MAX - 2) return SIZE_MAX;
+            character += 2;
+        } else {
+            if (character == SIZE_MAX) return SIZE_MAX;
+            ++character;
+        }
+        at += width;
+    }
+    return character;
+}
+
 static AxyneStatus lsp_error(AxyneError *error, AxyneStatus status,
                              const char *message)
 {
@@ -470,6 +525,8 @@ static int json_read_size(JsonCursor *cursor, size_t *value)
 {
     uint64_t number;
     if (!json_read_uint(cursor, &number) || number > SIZE_MAX) return 0;
+    json_skip_space(cursor);
+    if (cursor->at != cursor->end) return 0;
     *value = (size_t)number;
     return 1;
 }
@@ -1113,9 +1170,24 @@ static const char *lsp_find_separator(const char *data, size_t length,
     return NULL;
 }
 
+static int lsp_ascii_case_equal(const char *left, size_t length,
+                                 const char *right)
+{
+    size_t i;
+    for (i = 0; i < length; ++i) {
+        unsigned char a = (unsigned char)left[i];
+        unsigned char b = (unsigned char)right[i];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
+        if (a != b) return 0;
+    }
+    return right[length] == '\0';
+}
+
 static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
 {
     size_t header_length, content_length, separator_length, i;
+    size_t content_length_headers = 0;
     const char *separator;
     if (client->input.length == 0) return 0;
     separator = lsp_find_separator(client->input.data, client->input.length,
@@ -1134,11 +1206,23 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
         const char *header_end = client->input.data + header_length;
         while (line < header_end) {
             const char *line_end = memchr(line, '\n', (size_t)(header_end - line));
+            const char *colon;
             size_t line_length = line_end == NULL ? (size_t)(header_end - line) : (size_t)(line_end - line);
             while (line_length != 0 && (line[line_length - 1] == '\r' || line[line_length - 1] == '\n')) --line_length;
-            if (line_length >= 15 && strncmp(line, "Content-Length:", 15) == 0) {
-                JsonCursor value = { line + 15, line + line_length };
-                if (!json_read_size(&value, &content_length)) {
+            colon = memchr(line, ':', line_length);
+            if (line_length == 0 || colon == NULL || colon == line) {
+                client->input.length = 0;
+                return -1;
+            }
+            for (i = 0; i < (size_t)(colon - line); ++i) {
+                if (line[i] == ' ' || line[i] == '\t') {
+                    client->input.length = 0;
+                    return -1;
+                }
+            }
+            if (lsp_ascii_case_equal(line, (size_t)(colon - line), "Content-Length")) {
+                JsonCursor value = { colon + 1, line + line_length };
+                if (++content_length_headers != 1 || !json_read_size(&value, &content_length)) {
                     client->input.length = 0;
                     return -1;
                 }

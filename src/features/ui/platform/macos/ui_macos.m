@@ -452,7 +452,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:(uintptr_t)current lParam:0];
     lineStart = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)line lParam:0];
     position.line = (size_t)line;
-    position.character = (size_t)(current - lineStart);
+    position.character = axyne_lsp_utf16_character(
+        doc->contents + (size_t)lineStart, (size_t)(current - lineStart),
+        (size_t)(current - lineStart));
     status = references ? axyne_lsp_references(_lsp, doc, position, &requestID, &error) :
         axyne_lsp_definition(_lsp, doc, position, &requestID, &error);
     if (status != AXYNE_STATUS_OK)
