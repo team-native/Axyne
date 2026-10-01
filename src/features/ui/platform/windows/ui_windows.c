@@ -619,6 +619,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
 static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
                         wchar_t *value, size_t capacity)
 {
+    enum { AXYNE_PROMPT_EDIT_ID = 1001 };
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
         WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
         440, 142, owner, NULL, GetModuleHandleW(NULL), NULL);
@@ -627,7 +628,7 @@ static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
                   dialog, NULL, GetModuleHandleW(NULL), NULL);
     HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 400, 24,
-        dialog, (HMENU)1, GetModuleHandleW(NULL), NULL);
+        dialog, (HMENU)AXYNE_PROMPT_EDIT_ID, GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         250, 75, 76, 26, dialog, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -636,7 +637,8 @@ static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
     EnableWindow(owner, FALSE); ShowWindow(dialog, SW_SHOW); SetFocus(edit);
     MSG msg; int accepted = 0;
     while (IsWindow(dialog) && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (msg.message == WM_COMMAND && (LOWORD(msg.wParam) == IDOK ||
+        if (msg.message == WM_COMMAND && HIWORD(msg.wParam) == BN_CLICKED &&
+            (LOWORD(msg.wParam) == IDOK ||
                                            LOWORD(msg.wParam) == IDCANCEL)) {
             accepted = LOWORD(msg.wParam) == IDOK;
             if (accepted && value != NULL) GetWindowTextW(edit, value, (int)capacity);
