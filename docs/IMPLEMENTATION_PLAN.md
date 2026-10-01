@@ -42,6 +42,8 @@
 | Document I/O failures | Keep the in-memory buffer and path unchanged; failed writes keep the document marked dirty. | AGENT_PARAMETER | ASSUMED |
 | Current-file search | Literal UTF-8 byte matching; optional case-insensitive matching folds ASCII A-Z only; Find Next wraps once. Replace Current and Replace All replace literal matches. | AGENT_PARAMETER | ASSUMED |
 | Workspace search and quick file | Select a root with the native folder picker; recursively match text or file names; skip binary and unreadable files; read one file at a time. Quick File matches names by case-insensitive substring and opens the selected file through the document manager. | AGENT_PARAMETER | ASSUMED |
+| Explorer tree ordering | Immediate children are displayed with directories first, then files, and names sorted lexicographically; the order is rebuilt after filesystem events. | AGENT_PARAMETER | ASSUMED |
+| Workspace selection lifetime | The selected workspace root and expanded tree state remain session-only; no project/workspace file is persisted. | USER + AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 
 ## Shared contracts
@@ -63,6 +65,10 @@
 | FS-1 | Shared filesystem API and on-demand external-change notifications | BASE-1 | COMPLETE |
 | EDIT-1 | Tabs, save/recent files, editor commands and document state | UI-1, FS-1 | COMPLETE (source diff checks passed; Windows Release build blocked by host Temp access; macOS build/runtime verification pending macOS host) |
 | SEARCH-1 | Current-file/workspace search, replace and quick file navigation (symbol navigation is LSP-1) | FS-1, EDIT-1 | COMPLETE (native Windows/AppKit shortcuts, dialogs, selectable workspace hits, quick-file opening and undoable replace-all integrated; Windows Release build verified in build-search1; macOS build/runtime verification pending macOS host) |
+| EXPLORER-1 | Shared workspace root and immediate-child tree model | FS-1 | COMPLETE (Windows source compilation and diff checks passed; macOS source-level validation only) |
+| EXPLORER-2 | Native Windows/AppKit tree display, expansion, and document opening | UI-1, EDIT-1, EXPLORER-1 | COMPLETE (Windows source compilation and diff checks passed; macOS build/runtime verification requires a macOS host) |
+| EXPLORER-3 | Native file/folder creation, rename, and non-recursive removal UI | FS-1, EXPLORER-2 | COMPLETE (source-level implementation and Windows compilation passed; macOS build/runtime verification requires a macOS host) |
+| EXPLORER-4 | Watcher event delivery to UI thread and tree refresh/rescan | FS-1, EXPLORER-1, EXPLORER-2 | COMPLETE (Windows callback/UI message path and AppKit main-queue path implemented; macOS runtime verification requires a macOS host) |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | PENDING |
 | RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | PENDING |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
@@ -81,6 +87,7 @@ Remote update checks and remote release-note retrieval are also excluded because
 
 - Implemented the native Win32 shell and the native AppKit shell using the Figma main-window layout. macOS keeps the standard AppKit title bar and menu bar; the Figma Windows titlebar is not imitated on macOS.
 - The shell is presentation-only: explorer rows, tabs, toolbar labels, output tabs, and status text are static. File operations, document tabs/saving, search, terminal/process handling, and settings are not implemented in UI-1.
+- Workspace Explorer is implemented after UI-1 as EXPLORER-1 through EXPLORER-4. It selects one session-only root with each platform's native folder picker, renders the real immediate-child tree with directory-first name ordering, opens files through EDIT-1, and routes watcher callbacks to the platform UI thread before rebuilding the tree. Context-menu actions create files/folders, rename entries, and remove files or empty directories through FS-1; recursive deletion and persistent workspace files remain excluded.
 - Windows loads the official Scintilla control from the staged `Scintilla.dll` at window creation and hosts it in the central editor region. macOS loads the official Cocoa `Scintilla.framework` from the app bundle and hosts `ScintillaView`. Neither platform substitutes a different text editor.
 - Scintilla is not loaded or initialized by the shared core. CMake fetches the official source at configure time (network required unless the exact source is already cached), builds it through its upstream Win32 MSBuild or Cocoa Xcode project, and stages the binary and upstream license notice with the application. No user environment variables, runtime downloads, or marketplace are involved. The pinned upstream source is Scintilla 5.5.2 commit `a1c86144eed9e3d2187e3a8b391d11ca909f00d2`; upstream license is `License.txt` (Neil Hodgson permissive license; copyright and permission notice must accompany redistribution).
 - Windows uses the OS title bar and system window controls, with an in-client dark menu/toolbar/tabs and a 248 px explorer column. The first shell targets a 1440 × 900 window and has a 158 px lower panel and 26 px status strip, adapting the editor area to resize events.
