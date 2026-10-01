@@ -55,6 +55,7 @@
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 | Runner configuration lifetime | Runner recipes are session-local and stored only in memory until preferences are specified; configuring a runner copies executable, arguments, working directory, and unique environment overrides atomically. | AGENT_PARAMETER | ASSUMED |
 | Runner command semantics | Runner arguments are passed directly to the existing process API; no shell or implicit command-line parsing is used. An explicitly selected runtime is metadata for the recipe and does not trigger runtime discovery or installation. | AGENT_PARAMETER | ASSUMED |
+| Terminal session startup | The terminal controls are created with the native window but no child process starts during application startup; the user explicitly starts a session. The initial shell recipe is `cmd.exe` on Windows and `/bin/sh` on macOS, and can later be replaced by runner configuration UI. | AGENT_PARAMETER | ASSUMED |
 
 ## Shared contracts
 
@@ -68,6 +69,7 @@
 - Settings use JSON documents and JSON Pointer paths; consumers can read, replace, and remove arbitrary JSON values.
 - File, workspace, settings, editor, and process modules remain independently includable through public headers under include/axyne.
 - Runner configurations project directly onto the existing process specification and do not alter process lifetime, callback, or termination rules.
+- Terminal output callbacks are marshalled onto the native UI thread; stdout and stderr remain visible in one bounded output view with stderr marked. Stop requests termination, Send writes one line, and window teardown releases the process handle after callbacks have drained.
 
 ## Implementation units and dependencies
 
@@ -84,6 +86,9 @@
 | EXPLORER-4 | Watcher event delivery to UI thread and tree refresh/rescan | FS-1, EXPLORER-1, EXPLORER-2 | COMPLETE (Windows callback/UI message path and AppKit main-queue path implemented; macOS runtime verification requires a macOS host) |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | COMPLETE |
 | RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | IN PROGRESS (RUN-1A configuration model complete; terminal and output units pending) |
+| RUN-1A | Session-local runner configuration model and process-spec projection | PROC-1 | COMPLETE (Windows Release build and diff checks passed) |
+| RUN-1B | Lazy native terminal session, input, stop, and output display | PROC-1, RUN-1A, UI-1 | IN PROGRESS |
+| RUN-1C | Active-document/project build and run output integration | PROC-1, RUN-1A, RUN-1B, EDIT-1 | PENDING |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
