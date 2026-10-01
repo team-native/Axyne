@@ -49,7 +49,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)notification:(SCNotification *)notification;
 - (void)setRecentMenu:(NSMenu *)menu;
 - (void)refreshRecentMenu;
-- (void)captureEditor;
+- (BOOL)captureEditor;
 - (void)loadActiveDocument;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 @end
@@ -85,25 +85,33 @@ static void axyne_install_menu(NSApplication *application,
     return [_editorView message:message wParam:wParam lParam:lParam];
 }
 
-- (void)captureEditorSnapshot
+- (BOOL)captureEditorSnapshot
 {
     AxyneDocument *doc = [self activeDocument];
-    if (doc == NULL || _editorView == nil) return;
+    if (doc == NULL || _editorView == nil) return YES;
     NSInteger length = [self sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
-    if (length < 0 || (uint64_t)length >= SIZE_MAX) return;
+    if (length < 0 || (uint64_t)length >= SIZE_MAX) return NO;
     char *text = malloc((size_t)length + 1);
-    if (text == NULL) return;
+    if (text == NULL) return NO;
     (void)[self sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)length + 1
                             lParam:(intptr_t)text];
-    (void)axyne_documents_set_contents(&_documents, _documents.active_index,
-                                       text, (size_t)length, NULL);
+    AxyneStatus status = axyne_documents_set_contents(&_documents,
+        _documents.active_index, text, (size_t)length, NULL);
     free(text);
+    return status == AXYNE_STATUS_OK;
 }
 
-- (void)captureEditor
+- (BOOL)captureEditor
 {
-    if ([self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0)
-        [self captureEditorSnapshot];
+    AxyneDocument *doc = [self activeDocument];
+    if (doc == NULL || ([self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] == 0 &&
+                        !doc->is_dirty)) return YES;
+    if ([self captureEditorSnapshot]) return YES;
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:@"Could not capture editor contents"];
+    [alert setInformativeText:@"The operation was cancelled. Your edits remain open in the editor."];
+    [alert runModal];
+    return NO;
 }
 
 - (void)loadActiveDocument
@@ -157,7 +165,6 @@ static void axyne_install_menu(NSApplication *application,
             [self updateWindowTitle];
         }
     } else if (notification->nmhdr.code == SCN_SAVEPOINTREACHED) {
-        [self captureEditorSnapshot];
         (void)axyne_documents_mark_clean(&_documents,
             _documents.active_index, NULL);
         [self setNeedsDisplay:YES];
@@ -172,7 +179,7 @@ static void axyne_install_menu(NSApplication *application,
 
 - (BOOL)saveActiveToPath:(NSString *)path
 {
-    [self captureEditor];
+    if (![self captureEditor]) return NO;
     const char *utf8Path = [path UTF8String];
     AxyneError error;
     AxyneStatus status = axyne_documents_save_as(&_documents,
@@ -200,7 +207,7 @@ static void axyne_install_menu(NSApplication *application,
         if ([panel runModal] != NSModalResponseOK) return NO;
         return [self saveActiveToPath:[[panel URL] path]];
     }
-    [self captureEditor];
+    if (![self captureEditor]) return NO;
     AxyneError error;
     AxyneStatus status = axyne_documents_save(&_documents,
         _documents.active_index, &error);
@@ -221,7 +228,7 @@ static void axyne_install_menu(NSApplication *application,
 - (void)newDocument:(id)sender
 {
     (void)sender;
-    [self captureEditor];
+    if (![self captureEditor]) return;
     size_t index;
     if (axyne_documents_new(&_documents, &index, NULL) == AXYNE_STATUS_OK) {
         (void)axyne_documents_set_active(&_documents, index, NULL);
@@ -232,7 +239,7 @@ static void axyne_install_menu(NSApplication *application,
 - (void)openPath:(NSString *)path
 {
     if (path == nil) return;
-    [self captureEditor];
+    if (![self captureEditor]) return;
     size_t index = 0;
     AxyneError error;
     AxyneStatus status = axyne_documents_open(&_documents,
@@ -320,7 +327,7 @@ static void axyne_install_menu(NSApplication *application,
     [alert addButtonWithTitle:@"Cancel"];
     NSInteger result = [alert runModal];
     if (result == NSAlertFirstButtonReturn) {
-        [self captureEditor];
+        if (![self captureEditor]) return NO;
         (void)axyne_documents_set_active(&_documents, index, NULL);
         [self loadActiveDocument];
         return [self saveActive];
@@ -332,7 +339,7 @@ static void axyne_install_menu(NSApplication *application,
 {
     (void)sender;
     size_t index = _documents.active_index;
-    [self captureEditor];
+    if (![self captureEditor]) return;
     if (![self confirmCloseDocumentAtIndex:index]) return;
     AxyneDocument *doc = &_documents.documents[index];
     if (doc->owns_native_editor_document)
@@ -345,7 +352,7 @@ static void axyne_install_menu(NSApplication *application,
 
 - (BOOL)confirmCloseAll
 {
-    [self captureEditor];
+    if (![self captureEditor]) return NO;
     for (size_t i = 0; i < _documents.count; ++i)
         if (![self confirmCloseDocumentAtIndex:i]) return NO;
     return YES;
@@ -394,7 +401,7 @@ static void axyne_install_menu(NSApplication *application,
         CGFloat offset = point.x - AXYNE_SIDEBAR - 12;
         size_t index = (size_t)(offset / 184);
         if (index < _documents.count) {
-            [self captureEditor];
+            if (![self captureEditor]) return;
             if (fmod(offset, 184) >= 160) {
                 if ([self confirmCloseDocumentAtIndex:index]) {
                     AxyneDocument *doc = &_documents.documents[index];

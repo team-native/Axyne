@@ -126,33 +126,38 @@ static int axyne_choose_path(HWND window, int save, char **path)
     return *path != NULL;
 }
 
-static void axyne_capture_editor_internal(AxyneWindowState *state, int force)
+static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
 {
     AxyneDocument *doc = axyne_active(state);
-    if (doc == NULL || state->editor == NULL) return;
-    if (!force && !SendMessageA(state->editor, SCI_GETMODIFY, 0, 0)) return;
+    if (doc == NULL || state->editor == NULL) return 1;
+    if (!force && !doc->is_dirty &&
+        !SendMessageA(state->editor, SCI_GETMODIFY, 0, 0)) return 1;
     LRESULT length = SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
-    if (length < 0 || (uint64_t)length >= SIZE_MAX) return;
+    if (length < 0 || (uint64_t)length >= SIZE_MAX) return 0;
     char *text = (char *)malloc((size_t)length + 1);
-    if (text == NULL) return;
+    if (text == NULL) return 0;
     SendMessageA(state->editor, SCI_GETTEXT, (WPARAM)((size_t)length + 1),
                  (LPARAM)text);
     AxyneError error;
-    (void)axyne_documents_set_contents(&state->documents,
+    AxyneStatus status = axyne_documents_set_contents(&state->documents,
         state->documents.active_index, text, (size_t)length, &error);
     free(text);
+    return status == AXYNE_STATUS_OK;
 }
 
-static void axyne_capture_editor(AxyneWindowState *state)
+static int axyne_capture_editor(AxyneWindowState *state)
 {
-    axyne_capture_editor_internal(state, 0);
+    if (axyne_capture_editor_internal(state, 0)) return 1;
+    MessageBoxA(state->editor, "Unable to capture the current editor contents. The operation was cancelled.",
+                "Axyne - Editor capture failed", MB_OK | MB_ICONERROR);
+    return 0;
 }
 
 static int axyne_save_active(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
     if (doc == NULL) return 0;
-    axyne_capture_editor(state);
+    if (!axyne_capture_editor(state)) return 0;
     char *path = NULL;
     AxyneStatus status;
     AxyneError error;
@@ -191,7 +196,7 @@ static int axyne_confirm_document_close(HWND window, AxyneWindowState *state,
         MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON1);
     if (answer == IDCANCEL) return 0;
     if (answer == IDYES) {
-        axyne_capture_editor(state);
+        if (!axyne_capture_editor(state)) return 0;
         axyne_show_document(state, index);
         return axyne_save_active(window, state);
     }
@@ -231,7 +236,7 @@ static void axyne_show_document(AxyneWindowState *state, size_t index)
 
 static void axyne_new_document(HWND window, AxyneWindowState *state)
 {
-    axyne_capture_editor(state);
+    if (!axyne_capture_editor(state)) return;
     AxyneError error;
     size_t index;
     if (axyne_documents_new(&state->documents, &index, &error) == AXYNE_STATUS_OK) {
@@ -246,7 +251,7 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
     char *path = NULL;
     if (known_path == NULL && !axyne_choose_path(window, 0, &path)) return;
     const char *chosen = known_path != NULL ? known_path : path;
-    axyne_capture_editor(state);
+    if (!axyne_capture_editor(state)) return;
     size_t index = 0;
     AxyneError error;
     AxyneStatus status = axyne_documents_open(&state->documents, chosen,
@@ -263,7 +268,7 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
 
 static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
 {
-    axyne_capture_editor(state);
+    if (!axyne_capture_editor(state)) return;
     if (index >= state->documents.count ||
         !axyne_confirm_document_close(window, state, index)) return;
     AxyneDocument *doc = &state->documents.documents[index];
@@ -527,7 +532,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             int left = AXYNE_SIDEBAR + 12;
             for (size_t i = 0; i < state->documents.count; ++i) {
                 if (x >= left && x < left + 184) {
-                    axyne_capture_editor(state);
+                    if (!axyne_capture_editor(state)) return 0;
                     if (x >= left + 160) axyne_close_tab(window, state, i);
                     else {
                         axyne_show_document(state, i);
@@ -548,7 +553,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_SAVE_AS) {
             char *path = NULL;
             if (axyne_choose_path(window, 1, &path)) {
-                axyne_capture_editor(state);
+                if (!axyne_capture_editor(state)) {
+                    free(path);
+                    return 0;
+                }
                 AxyneError error;
                 AxyneStatus status = axyne_documents_save_as(&state->documents,
                     state->documents.active_index, path, &error);
@@ -579,7 +587,6 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
         } else if (header != NULL && header->code == SCN_SAVEPOINTREACHED &&
                    !state->loading_editor) {
-            axyne_capture_editor_internal(state, 1);
             (void)axyne_documents_mark_clean(&state->documents,
                 state->documents.active_index, NULL);
             axyne_update_title(window, state);
@@ -592,7 +599,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 0;
     }
     case WM_CLOSE:
-        axyne_capture_editor(state);
+        if (!axyne_capture_editor(state)) return 0;
         for (size_t i = 0; i < state->documents.count; ++i) {
             if (!axyne_confirm_document_close(window, state, i)) return 0;
         }
