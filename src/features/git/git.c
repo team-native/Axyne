@@ -20,6 +20,7 @@ typedef struct AxyneGitRun {
     size_t length;
     size_t capacity;
     int allocation_failed;
+    int output_truncated;
 #ifdef _WIN32
     HANDLE finished;
 #else
@@ -74,9 +75,15 @@ static void axyne_git_output(AxyneProcess *process, AxyneProcessStream stream,
     (void)process;
     (void)stream;
     if (run != NULL && bytes != NULL && !run->allocation_failed &&
-        !axyne_git_append(run, bytes, length)) {
-        run->allocation_failed = 1;
-        (void)axyne_process_terminate(process, NULL);
+        !run->output_truncated) {
+        if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
+            length > AXYNE_GIT_OUTPUT_LIMIT - run->length - 1) {
+            run->output_truncated = 1;
+            (void)axyne_process_terminate(process, NULL);
+        } else if (!axyne_git_append(run, bytes, length)) {
+            run->allocation_failed = 1;
+            (void)axyne_process_terminate(process, NULL);
+        }
     }
 }
 
@@ -136,6 +143,7 @@ static AxyneStatus axyne_git_run(const char *workspace,
     result->output = NULL;
     result->length = 0;
     result->exit_code = -1;
+    result->output_truncated = 0;
     memset(&run, 0, sizeof(run));
     run.result = result;
 #ifdef _WIN32
@@ -176,8 +184,11 @@ static AxyneStatus axyne_git_run(const char *workspace,
     }
     result->output = run.output;
     result->length = run.length;
+    result->output_truncated = run.output_truncated;
     run.output = NULL;
     axyne_git_run_cleanup(&run);
+    if (result->output_truncated)
+        return axyne_git_error(error, AXYNE_STATUS_OK, "");
     if (result->exit_code != 0) {
         char message[128];
         (void)snprintf(message, sizeof(message),
@@ -247,4 +258,5 @@ void axyne_git_result_free(AxyneGitResult *result)
     result->output = NULL;
     result->length = 0;
     result->exit_code = 0;
+    result->output_truncated = 0;
 }

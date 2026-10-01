@@ -13,7 +13,12 @@ typedef struct AxyneGitResult {
     char *output;
     size_t length;
     int exit_code;
+    /* Nonzero when output is a bounded prefix; this is not an API error. */
+    int output_truncated;
 } AxyneGitResult;
+
+/* Git output is bounded for every caller, including asynchronous UIs. */
+#define AXYNE_GIT_OUTPUT_LIMIT (16u * 1024u * 1024u)
 
 /* Git is invoked only when one of these functions is called. The installed
  * executable is resolved through the normal process PATH and is never
