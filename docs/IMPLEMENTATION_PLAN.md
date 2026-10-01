@@ -26,6 +26,7 @@
 | Process callback ordering | Accepted processes drain both output streams through EOF before one exit callback; callbacks are serial on a process-owned worker | AGENT_PARAMETER | ASSUMED |
 | Process request lifetimes | Start consumes executable, working-directory, argument, and environment strings before returning; user_data remains borrowed until release returns | AGENT_PARAMETER | ASSUMED |
 | Process tree termination | Windows Job Object with kill-on-close assigned before resume; POSIX dedicated process group; terminate/release force-kill the managed tree | AGENT_PARAMETER | ASSUMED |
+| Runtime probe timeout | Each runtime version probe has a 2-second deadline; timed-out trees are terminated/reaped and that runtime is skipped | AGENT_PARAMETER | ASSUMED |
 | Error output behavior | Error pointers are optional; success clears errors; failure code matches the returned status | AGENT_PARAMETER | ASSUMED |
 | Optional tool integrations | Discover installed binaries and never bundle language runtimes | USER | CONFIRMED |
 
@@ -37,7 +38,7 @@
 - Optional services (LSP, Git, terminal, debugger, runtime discovery) are not initialized by app startup.
 - Process requests carry executable, argument vector, working directory, environment overrides, and stdout/stderr/exit callbacks. Callbacks are serialized on a process worker thread; release requests termination and waits for callbacks to drain.
 - The process API uses CreateProcessW and inherited pipes on Windows, and fork/execve with POSIX pipes and a worker thread on macOS. Windows starts the root suspended, assigns it to a kill-on-close Job Object, then resumes it; POSIX establishes a dedicated process group in both child and parent before returning the handle. Terminate and release forcibly terminate that managed tree, so descendants cannot keep stdout/stderr open indefinitely. A POSIX descendant that deliberately leaves its group (for example by calling `setsid`) is not controlled; Windows startup fails if job assignment is disallowed. Input strings are consumed before start returns, user_data is borrowed through release, output is drained through EOF, then on_exit runs once. Process APIs do not invoke a shell implicitly.
-- Explicit runtime discovery searches PATH and probes the first available executable for Python, Node.js, TypeScript (`tsc`), C, C++, Java, and `javac`; it never installs or bundles runtimes. Discovery is opt-in and therefore remains outside basic startup.
+- Explicit runtime discovery searches PATH and probes the first available executable for Python, Node.js, TypeScript (`tsc`), C, C++, Java, and `javac`; each version probe is limited to 2 seconds. A timed-out probe's process tree is terminated and reaped, its runtime is skipped, and discovery continues. It never installs or bundles runtimes. Discovery is opt-in and therefore remains outside basic startup.
 - Settings use JSON documents and JSON Pointer paths; consumers can read, replace, and remove arbitrary JSON values.
 - File, workspace, settings, editor, and process modules remain independently includable through public headers under include/axyne.
 
