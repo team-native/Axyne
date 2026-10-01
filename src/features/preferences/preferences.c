@@ -55,15 +55,15 @@ void axyne_preferences_defaults(AxynePreferences *preferences)
     preferences->editor.show_whitespace = 0;
     preferences->editor.font_family[0] = '\0';
     axyne_theme_defaults(&preferences->theme, AXYNE_THEME_DARK);
-    axyne_add_binding(preferences, AXYNE_ACTION_NEW, AXYNE_KEY_MODIFIER_CONTROL, "N");
-    axyne_add_binding(preferences, AXYNE_ACTION_OPEN, AXYNE_KEY_MODIFIER_CONTROL, "O");
-    axyne_add_binding(preferences, AXYNE_ACTION_SAVE, AXYNE_KEY_MODIFIER_CONTROL, "S");
-    axyne_add_binding(preferences, AXYNE_ACTION_CLOSE, AXYNE_KEY_MODIFIER_CONTROL, "W");
-    axyne_add_binding(preferences, AXYNE_ACTION_FIND, AXYNE_KEY_MODIFIER_CONTROL, "F");
-    axyne_add_binding(preferences, AXYNE_ACTION_REPLACE, AXYNE_KEY_MODIFIER_CONTROL, "H");
-    axyne_add_binding(preferences, AXYNE_ACTION_SEARCH_WORKSPACE, AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_SHIFT, "F");
-    axyne_add_binding(preferences, AXYNE_ACTION_QUICK_FILE, AXYNE_KEY_MODIFIER_CONTROL, "P");
-    axyne_add_binding(preferences, AXYNE_ACTION_BUILD, AXYNE_KEY_MODIFIER_CONTROL, "B");
+    axyne_add_binding(preferences, AXYNE_ACTION_NEW, AXYNE_KEY_MODIFIER_COMMAND, "N");
+    axyne_add_binding(preferences, AXYNE_ACTION_OPEN, AXYNE_KEY_MODIFIER_COMMAND, "O");
+    axyne_add_binding(preferences, AXYNE_ACTION_SAVE, AXYNE_KEY_MODIFIER_COMMAND, "S");
+    axyne_add_binding(preferences, AXYNE_ACTION_CLOSE, AXYNE_KEY_MODIFIER_COMMAND, "W");
+    axyne_add_binding(preferences, AXYNE_ACTION_FIND, AXYNE_KEY_MODIFIER_COMMAND, "F");
+    axyne_add_binding(preferences, AXYNE_ACTION_REPLACE, AXYNE_KEY_MODIFIER_COMMAND, "H");
+    axyne_add_binding(preferences, AXYNE_ACTION_SEARCH_WORKSPACE, AXYNE_KEY_MODIFIER_COMMAND | AXYNE_KEY_MODIFIER_SHIFT, "F");
+    axyne_add_binding(preferences, AXYNE_ACTION_QUICK_FILE, AXYNE_KEY_MODIFIER_COMMAND, "P");
+    axyne_add_binding(preferences, AXYNE_ACTION_BUILD, AXYNE_KEY_MODIFIER_COMMAND, "B");
     axyne_add_binding(preferences, AXYNE_ACTION_RUN, 0, "F5");
 }
 

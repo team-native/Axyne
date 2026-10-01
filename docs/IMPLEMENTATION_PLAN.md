@@ -99,7 +99,7 @@
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
-| PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | IN PROGRESS (shared settings/preferences model implemented; native adapters pending) |
+| PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | COMPLETE (shared JSON/preferences model and native Windows/AppKit integration implemented; Windows source compilation and diff checks passed; macOS build/runtime verification pending macOS host) |
 | PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | PENDING |
 | AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
 
@@ -111,7 +111,7 @@ Remote update checks and remote release-note retrieval are also excluded because
 ## UI-1 implementation boundary and status
 
 - Implemented the native Win32 shell and the native AppKit shell using the Figma main-window layout. macOS keeps the standard AppKit title bar and menu bar; the Figma Windows titlebar is not imitated on macOS.
-- The shell is presentation-only: explorer rows, tabs, toolbar labels, output tabs, and status text are static. File operations, document tabs/saving, search, terminal/process handling, and settings are not implemented in UI-1.
+- The shell's original UI-1 boundary was presentation-only for settings; PREF-1 adds native global/workspace preference loading and editing after the shell is initialized. File operations, document tabs/saving, search, terminal/process handling, and settings persistence remain outside the shared UI-1 core.
 - Workspace Explorer is implemented after UI-1 as EXPLORER-1 through EXPLORER-4. It selects one session-only root with each platform's native folder picker, renders the real immediate-child tree with directory-first name ordering, opens files through EDIT-1, and routes watcher callbacks to the platform UI thread before rebuilding the tree. Context-menu actions create files/folders, rename entries, and remove files or empty directories through handle-relative FS-1 operations; recursive deletion, workspace-root mutation, and persistent workspace files remain excluded.
 - Windows loads the official Scintilla control from the staged `Scintilla.dll` at window creation and hosts it in the central editor region. macOS loads the official Cocoa `Scintilla.framework` from the app bundle and hosts `ScintillaView`. Neither platform substitutes a different text editor.
 - Scintilla is not loaded or initialized by the shared core. CMake fetches the official source at configure time (network required unless the exact source is already cached), builds it through its upstream Win32 MSBuild or Cocoa Xcode project, and stages the binary and upstream license notice with the application. No user environment variables, runtime downloads, or marketplace are involved. The pinned upstream source is Scintilla 5.5.2 commit `a1c86144eed9e3d2187e3a8b391d11ca909f00d2`; upstream license is `License.txt` (Neil Hodgson permissive license; copyright and permission notice must accompany redistribution).
