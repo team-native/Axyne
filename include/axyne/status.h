@@ -21,6 +21,11 @@ typedef struct AxyneError {
     char message[512];
 } AxyneError;
 
+/* For every API accepting AxyneError *error, NULL is allowed. On success,
+ * a non-NULL error is reset to AXYNE_STATUS_OK with an empty message. On
+ * failure, error->code equals the returned AxyneStatus and message is a
+ * NUL-terminated UTF-8 description (possibly empty if unavailable). */
+
 #ifdef __cplusplus
 }
 #endif
