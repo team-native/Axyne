@@ -58,6 +58,10 @@
 | Build/Run runner configuration UI | The native Windows and macOS shells expose one session-local Build/Run runner recipe. Executable, arguments (one per line), optional working directory, and environment overrides (NAME=VALUE per line) are edited directly and passed to the existing runner/process APIs. | AGENT_PARAMETER | ASSUMED |
 | Build/Run saved-document gate | Build and Run require the active document to be saved and clean. The existing Save/Save As flow is invoked when needed; cancel or failure leaves the action unstarted and reports that the document must be saved. | AGENT_PARAMETER | ASSUMED |
 | Terminal session startup | The terminal controls are created with the native window but no child process starts during application startup; the user explicitly starts a session. The initial shell recipe is `cmd.exe` on Windows and `/bin/sh` on macOS, and can later be replaced by runner configuration UI. | AGENT_PARAMETER | ASSUMED |
+| PREF-1 configuration locations | Global preferences use `%APPDATA%\\Axyne\\preferences.json` on Windows and `~/Library/Application Support/Axyne/preferences.json` on macOS. Workspace preferences use `<workspace>/.axyne/preferences.json`; the directory is local and does not involve servers, accounts, plugins, or marketplace services. | AGENT_PARAMETER | ASSUMED |
+| PREF-1 defaults | New profiles start with a dark theme, 4-space indentation rendered as spaces, 11 pt editor text, word wrap and whitespace markers disabled, and the existing native command shortcuts. The empty font-family value lets each native adapter keep its platform font fallback. | AGENT_PARAMETER | ASSUMED |
+| PREF-1 workspace overlay | A workspace preference file is a complete profile snapshot loaded after the global profile and replaces the effective profile for that workspace. Saving is explicit from native preferences UI; opening a workspace does not write files. | AGENT_PARAMETER | ASSUMED |
+| PREF-1 themes and bindings | Dark, light, and system theme presets use built-in palettes. Key bindings are stored as action/modifier/key records and are applied by native command dispatch; custom colors, plugin commands, and marketplace-provided bindings are excluded. | AGENT_PARAMETER | ASSUMED |
 
 ## Shared contracts
 
@@ -95,7 +99,7 @@
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
-| PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | PENDING |
+| PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | IN PROGRESS (shared settings/preferences model implemented; native adapters pending) |
 | PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | PENDING |
 | AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
 
