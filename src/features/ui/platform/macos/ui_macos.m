@@ -1100,6 +1100,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         _hasExitStatus = NO;
         [self terminalAppend:error.message length:strlen(error.message)
                        stream:AXYNE_PROCESS_STDERR];
+        [self setNeedsDisplay:YES];
         return;
     }
     [_terminalStart setEnabled:NO];
@@ -1268,8 +1269,11 @@ else [_terminalInput setStringValue:@""];
     if (status == AXYNE_STATUS_OK)
         status = axyne_process_start(&processSpec, &_terminalProcess, &error);
     if (status != AXYNE_STATUS_OK) {
+        _lastExitFailed = NO;
+        _hasExitStatus = NO;
         [self terminalAppend:error.message length:strlen(error.message)
                        stream:AXYNE_PROCESS_STDERR];
+        [self setNeedsDisplay:YES];
     } else {
         [_terminalOutput setString:(run ? @"[run]\n" : @"[build]\n")];
         _activeAction = run ? 2 : 1;
