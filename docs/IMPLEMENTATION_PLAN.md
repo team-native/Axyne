@@ -47,6 +47,7 @@
 | Explorer tree ordering | Immediate children are displayed with directories first, then files, and names sorted lexicographically; the order is rebuilt after filesystem events. | AGENT_PARAMETER | ASSUMED |
 | Workspace selection lifetime | The selected workspace root and expanded tree state remain session-only; no project/workspace file is persisted. | USER + AGENT_PARAMETER | ASSUMED |
 | Windows reparse-point directories | Explorer enumerates Windows directories through handles opened with `FILE_FLAG_OPEN_REPARSE_POINT`; it rejects a reparse-point workspace root, omits child reparse-point directories, and fails closed when handle opening, UTF-8 conversion, allocation, or handle enumeration is uncertain. A directory handle is revalidated before its entries are traversed, so a path swap cannot redirect an already-open traversal. | USER + AGENT_PARAMETER | ASSUMED |
+| macOS workspace roots | Explorer and its FSEvents watcher reject symbolic-link roots. POSIX directory listing opens each requested directory with `openat(..., O_NOFOLLOW | O_DIRECTORY)` so a root replacement cannot cause the tree to follow a symlink target. | AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 
 ## Shared contracts
