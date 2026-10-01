@@ -24,6 +24,10 @@
 | Local LSP availability | Implement the external-process LSP client as a local IDE capability, without a plugin manager or server service | AGENT_PARAMETER | ASSUMED |
 | Installer delivery | Build native platform packages from the same CMake application output; keep user data preservation explicit | AGENT_PARAMETER | ASSUMED |
 | Local Git integration | Invoke the installed git executable; do not embed Git | AGENT_PARAMETER | ASSUMED |
+| VCS-1 Git command scope | Provide status, working-tree diff, stage-all, and unstage-all through the existing File menu and lower output surface; defer commit, branch switching, history, remote, and hosting workflows | AGENT_PARAMETER | ASSUMED |
+| VCS-1 lazy loading | Do not inspect or start Git during application startup or workspace selection; start one external Git process only after a Git menu action | USER + AGENT_PARAMETER | ASSUMED |
+| VCS-1 command execution | Run the selected local Git command synchronously on the UI action until the external process exits, then replace the lower output contents with the result | AGENT_PARAMETER | ASSUMED |
+| VCS-1 workspace selection | Use the currently selected workspace root as Git's working directory; show an informational message when no workspace is open | AGENT_PARAMETER | ASSUMED |
 | Process environment overrides | Inherit the parent environment, replace matching names and reject duplicate overrides using ASCII case-insensitive comparison on every supported OS | AGENT_PARAMETER | ASSUMED |
 | Settings path behavior | RFC 6901 JSON Pointer; missing reads/removals return NOT_FOUND; set replaces the root or final object key only | AGENT_PARAMETER | ASSUMED |
 | Process callback ordering | Accepted processes drain both output streams through EOF before one exit callback; callbacks are serial on a process-owned worker | AGENT_PARAMETER | ASSUMED |
@@ -73,6 +77,7 @@
 - Runner configurations project directly onto the existing process specification and do not alter process lifetime, callback, or termination rules.
 - Build and Run invoke the configured action runner directly; a native message explains when configuration is missing or a terminal session is already active. Process exit status is appended to output and reflected in the native status indication, with non-zero exits marked as failures.
 - Terminal output callbacks are marshalled onto the native UI thread; stdout and stderr remain visible in one bounded output view with stderr marked. Stop requests termination, Send writes one line, and window teardown releases the process handle after callbacks have drained.
+- The VCS-1 Git service resolves `git` through the inherited process PATH and captures both output streams without invoking a shell. It runs only after an explicit Git menu action, uses the selected workspace root as its working directory, and returns the process exit code plus captured output. The initial local command set is `status --short --branch`, `--no-pager diff --no-color`, `add --all`, and `reset --mixed`; no remote, account, credential, hosting, commit, branch, or history flow is included.
 
 ## Implementation units and dependencies
 
@@ -93,7 +98,7 @@
 | RUN-1B | Lazy native terminal session, input, stop, and output display | PROC-1, RUN-1A, UI-1 | COMPLETE (Windows Release build passed; macOS build/runtime pending macOS host) |
 | RUN-1C | Active-document/project build and run output integration | PROC-1, RUN-1A, RUN-1B, EDIT-1 | COMPLETE (RUN-1 fix pass source validation passed; Windows Release build unverified because this host has no native compiler; macOS build/runtime pending macOS host) |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
-| VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
+| VCS-1 | Lazy local Git integration | PROC-1, FS-1 | COMPLETE (shared external-Git service, Windows/AppKit menu actions, `git diff --check`, and Windows Release build passed) |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
 | PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | PENDING |
 | PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | PENDING |
