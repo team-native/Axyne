@@ -192,6 +192,8 @@ AxyneStatus axyne_explorer_set_root(AxyneExplorer *explorer,
                                     AxyneError *error)
 {
     char *copy;
+    char *previous_root;
+    AxyneStatus status;
     if (explorer == NULL || utf8_path == NULL || utf8_path[0] == '\0') {
         axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                              "workspace root is required");
@@ -203,9 +205,16 @@ AxyneStatus axyne_explorer_set_root(AxyneExplorer *explorer,
                              "out of memory");
         return AXYNE_STATUS_OUT_OF_MEMORY;
     }
-    free(explorer->root);
+    previous_root = explorer->root;
     explorer->root = copy;
-    return axyne_explorer_reload(explorer, error);
+    status = axyne_explorer_reload(explorer, error);
+    if (status != AXYNE_STATUS_OK) {
+        explorer->root = previous_root;
+        free(copy);
+        return status;
+    }
+    free(previous_root);
+    return AXYNE_STATUS_OK;
 }
 
 AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
