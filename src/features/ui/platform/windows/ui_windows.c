@@ -265,7 +265,13 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
-    if (state->terminal_process != NULL) return;
+    if (state->terminal_process != NULL ||
+        axyne_debugger_is_active(&state->debugger)) {
+        const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\r\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
     status = axyne_runner_process_spec(&state->terminal_runner,
         axyne_terminal_output, axyne_terminal_exit, state, &spec, &error);
     if (status == AXYNE_STATUS_OK)
@@ -316,6 +322,12 @@ static void axyne_debugger_start(HWND window, AxyneWindowState *state)
     AxyneDocument *document;
     AxyneError error;
     if (axyne_debugger_is_active(&state->debugger)) return;
+    if (state->terminal_process != NULL) {
+        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\r\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
     if (!axyne_capture_editor(state)) return;
     document = axyne_active(state);
     if (document == NULL || document->is_untitled || document->path == NULL ||
@@ -1858,8 +1870,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_process_release(state->terminal_process);
             state->terminal_process = NULL;
         }
-        if (axyne_debugger_is_active(&state->debugger))
-            axyne_debugger_release(&state->debugger);
+        axyne_debugger_release(&state->debugger);
         state->active_action = 0;
         EnableWindow(state->terminal_start, TRUE);
         EnableWindow(state->terminal_stop, FALSE);

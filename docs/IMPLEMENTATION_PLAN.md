@@ -94,7 +94,7 @@
 | RUN-1C | Active-document/project build and run output integration | PROC-1, RUN-1A, RUN-1B, EDIT-1 | COMPLETE (RUN-1 fix pass source validation passed; Windows Release build unverified because this host has no native compiler; macOS build/runtime pending macOS host) |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
-| DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | COMPLETE (shared debugger API, lazy native Windows/AppKit controls, MI2 command mapping, and source-line breakpoint toggles implemented; diff checks passed; native builds require platform hosts/toolchains) |
+| DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | COMPLETE (shared debugger API, lazy native Windows/AppKit controls, MI2 command mapping, source-line breakpoint toggles, breakpoint-number tracking, startup replay, and safe terminal/debugger session isolation implemented; diff checks passed; native build unverified because this host has no C compiler/toolchain) |
 | PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | PENDING |
 | PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | COMPLETE (CMake install manifest and CPack configuration implemented; native package generation remains host-tool dependent) |
 | AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
@@ -112,12 +112,13 @@ Remote update checks and remote release-note retrieval are also excluded because
 | Default debugger command | `gdb --interpreter=mi2` on macOS/POSIX and `gdb.exe --interpreter=mi2` on Windows; executable and arguments remain session-local and may be replaced through the debugger API later | AGENT_PARAMETER under GRANT/GUESS | ASSUMED |
 | Debug target | Launch is lazy and requires the active document to be saved and clean; its UTF-8 path is appended as the debugger target argument | AGENT_PARAMETER under GRANT/GUESS | ASSUMED |
 | Debug controls | Pause, continue, and step-over send `-exec-interrupt`, `-exec-continue`, and `-exec-next`; the shared API also exposes step-into and step-out | AGENT_PARAMETER under GRANT/GUESS | ASSUMED |
-| Breakpoint interaction | The native Breakpoint control toggles the active editor line and stores path/line state in memory; when a session is active it sends an MI breakpoint command immediately | AGENT_PARAMETER under GRANT/GUESS | ASSUMED |
+| Breakpoint interaction | The native Breakpoint control toggles the active editor line and stores path/line state in memory; when a session is active it sends a quoted path:line MI insert or the stored GDB breakpoint-number delete immediately. Enabled stored breakpoints are replayed after debugger startup, and local state changes only after the process write succeeds. | AGENT_PARAMETER under GRANT/GUESS | ASSUMED |
 | Debugger UI boundary | Controls share the existing lower output panel and process callback marshalling; no debugger server, plugin, account, marketplace, or remote transport is added | USER + AGENT_PARAMETER | ASSUMED |
+| Terminal/debugger concurrency | Terminal and debugger sessions are mutually exclusive. A start request made while the other session is active is rejected with a clear lower-panel status message; this keeps the shared callback lifecycle process-safe without adding a server or session broker. | AGENT_PARAMETER under GRANT/GUESS | ASSUMED |
 
 ## DBG-1 implementation boundary and validation
 
-- Added an independently includable debugger module that owns a session-local runner recipe, process handle, MI2 command mapping, and path/line breakpoint list. It uses the existing process and runner contracts and does not initialize a child at application startup.
+- Added an independently includable debugger module that owns a session-local runner recipe, process handle, MI2 command mapping, and path/line breakpoint list. It uses the existing process and runner contracts and does not initialize a child at application startup. Breakpoint MI responses retain GDB numbers for later deletion; the debugger clears its active process pointer on GDB exit and releases the completed handle from the UI callback.
 - Windows and macOS shells create debugger controls with the existing native window and output abstractions. Starting the debugger appends the saved active document path, routes output into the bounded output view, and releases the process after the existing exit callback reaches the UI thread.
 - Validation: `git diff --check` passed. No MSVC/Windows SDK compiler, Apple Clang, or macOS SDK is available in this environment, so native Windows and macOS builds/runtime checks remain unverified here.
 
