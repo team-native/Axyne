@@ -46,6 +46,8 @@ typedef struct AxyneDebugger {
     char *mi_buffer;
     size_t mi_buffer_length;
     size_t mi_buffer_capacity;
+    void *mutex;
+    int releasing;
 } AxyneDebugger;
 
 AxyneStatus axyne_debugger_initialize(AxyneDebugger *debugger,
