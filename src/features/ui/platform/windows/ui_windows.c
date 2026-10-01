@@ -128,6 +128,11 @@ typedef struct AxyneTerminalMessage {
     AxyneProcessStream stream;
 } AxyneTerminalMessage;
 
+typedef struct AxyneTerminalExitMessage {
+    AxyneProcess *process;
+    int exit_code;
+} AxyneTerminalExitMessage;
+
 static AxyneDocument *axyne_active(AxyneWindowState *state);
 static int axyne_capture_editor(AxyneWindowState *state);
 static int axyne_save_active(HWND window, AxyneWindowState *state);
@@ -225,11 +230,16 @@ static void axyne_terminal_exit(AxyneProcess *process, int exit_code,
                                 void *user_data)
 {
     AxyneWindowState *state = (AxyneWindowState *)user_data;
-    (void)process;
+    AxyneTerminalExitMessage *message;
     if (state != NULL) {
-        PostMessageA(state->terminal_output != NULL
-                         ? GetParent(state->terminal_output) : NULL,
-                     AXYNE_WM_TERMINAL_EXIT, (WPARAM)exit_code, 0);
+        message = (AxyneTerminalExitMessage *)malloc(sizeof(*message));
+        if (message == NULL) return;
+        message->process = process;
+        message->exit_code = exit_code;
+        if (!PostMessageA(state->terminal_output != NULL
+                              ? GetParent(state->terminal_output) : NULL,
+                          AXYNE_WM_TERMINAL_EXIT, 0, (LPARAM)message))
+            free(message);
     }
 }
 
@@ -1853,8 +1863,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     }
-    case AXYNE_WM_TERMINAL_EXIT:
-        state->last_exit_code = (int)w_param;
+    case AXYNE_WM_TERMINAL_EXIT: {
+        AxyneTerminalExitMessage *exit_message =
+            (AxyneTerminalExitMessage *)l_param;
+        if (exit_message == NULL) return 0;
+        state->last_exit_code = exit_message->exit_code;
         state->last_exit_failed = state->last_exit_code != 0;
         state->has_exit_status = 1;
         {
@@ -1866,11 +1879,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_terminal_append(state->terminal_output, message,
                                   strlen(message), AXYNE_PROCESS_STDOUT);
         }
-        if (state->terminal_process != NULL) {
+        if (state->terminal_process == exit_message->process) {
             axyne_process_release(state->terminal_process);
             state->terminal_process = NULL;
         }
         axyne_debugger_release(&state->debugger);
+        free(exit_message);
         state->active_action = 0;
         EnableWindow(state->terminal_start, TRUE);
         EnableWindow(state->terminal_stop, FALSE);
@@ -1881,6 +1895,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_breakpoint, FALSE);
         InvalidateRect(window, NULL, FALSE);
         return 0;
+    }
     case WM_NOTIFY: {
         NMHDR *header = (NMHDR *)l_param;
         if (header != NULL && header->code == SCN_MODIFIED &&
