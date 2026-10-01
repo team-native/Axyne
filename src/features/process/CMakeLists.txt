@@ -8,6 +8,7 @@ endif()
 
 add_library(axyne_process STATIC
     "${CMAKE_CURRENT_LIST_DIR}/process.c"
+    "${CMAKE_CURRENT_LIST_DIR}/runtime.c"
     "${CMAKE_CURRENT_LIST_DIR}/${AXYNE_PROCESS_PLATFORM_SOURCE}"
 )
 target_link_libraries(axyne_process PUBLIC axyne_core)

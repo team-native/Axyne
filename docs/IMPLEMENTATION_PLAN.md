@@ -24,9 +24,10 @@
 | Local LSP availability | Implement the external-process LSP client as a local IDE capability, without a plugin manager or server service | AGENT_PARAMETER | ASSUMED |
 | Installer delivery | Build native platform packages from the same CMake application output; keep user data preservation explicit | AGENT_PARAMETER | ASSUMED |
 | Local Git integration | Invoke the installed git executable; do not embed Git | AGENT_PARAMETER | ASSUMED |
-| Process environment overrides | Inherit the parent environment, apply unique NAME=VALUE entries, reject duplicate names | AGENT_PARAMETER | ASSUMED |
+| Process environment overrides | Inherit the parent environment, apply NAME=VALUE entries, reject names duplicated by ASCII case-insensitive comparison | AGENT_PARAMETER | ASSUMED |
 | Settings path behavior | RFC 6901 JSON Pointer; missing reads/removals return NOT_FOUND; set replaces the root or final object key only | AGENT_PARAMETER | ASSUMED |
-| Process callback ordering | Accepted processes drain both output streams through EOF before one exit callback | AGENT_PARAMETER | ASSUMED |
+| Process callback ordering | Accepted processes drain both output streams through EOF before one exit callback; callbacks are serial on a process-owned worker | AGENT_PARAMETER | ASSUMED |
+| Process request lifetimes | Start consumes executable, working-directory, argument, and environment strings before returning; user_data remains borrowed until release returns | AGENT_PARAMETER | ASSUMED |
 | Error output behavior | Error pointers are optional; success clears errors; failure code matches the returned status | AGENT_PARAMETER | ASSUMED |
 | Filesystem operation behavior | Reads return a NUL-terminated allocation plus byte length; writes stage, flush, close, and atomically replace or exclusively create; failed writes preserve the prior destination; concurrent successful writes to the same existing file are last-writer-wins; on POSIX, replacement preserves only ordinary rwx permission bits (0777), intentionally clears setuid/setgid/sticky bits for safety, and applies permissions after file data is written and flushed; failed best-effort cleanup after exclusive hard-link creation may leave an orphan temporary hard link without changing the successful write result; create operations fail when the target exists; rename atomically does not replace an existing destination; remove deletes files or empty directories only | AGENT_PARAMETER | ASSUMED |
 | macOS exclusive rename support | Use `renameatx_np` with `RENAME_EXCL`; if the destination volume does not support the flag, return `AXYNE_STATUS_UNSUPPORTED` rather than performing a racy fallback | AGENT_PARAMETER | ASSUMED |
@@ -57,6 +58,8 @@
 - CMake is the single build entry point and selects platform sources by target OS.
 - Optional services (LSP, Git, terminal, debugger, runtime discovery) are not initialized by app startup.
 - Process requests carry executable, argument vector, working directory, environment overrides, and stdout/stderr/exit callbacks. Callbacks are serialized on a process worker thread; release requests termination and waits for callbacks to drain.
+- The process API uses CreateProcessW and inherited pipes on Windows, and fork/execve with POSIX pipes and a worker thread on macOS. Input strings are consumed before start returns, user_data is borrowed through release, output is drained through EOF, then on_exit runs once. Process APIs do not invoke a shell implicitly.
+- Explicit runtime discovery searches PATH and probes the first available executable for Python, Node.js, TypeScript (`tsc`), C, C++, Java, and `javac`; it never installs or bundles runtimes. Discovery is opt-in and therefore remains outside basic startup.
 - Settings use JSON documents and JSON Pointer paths; consumers can read, replace, and remove arbitrary JSON values.
 - File, workspace, settings, editor, and process modules remain independently includable through public headers under include/axyne.
 
@@ -73,7 +76,7 @@
 | EXPLORER-2 | Native Windows/AppKit tree display, expansion, and document opening | UI-1, EDIT-1, EXPLORER-1 | COMPLETE (Windows source compilation and diff checks passed; macOS build/runtime verification requires a macOS host) |
 | EXPLORER-3 | Native file/folder creation, rename, and non-recursive removal UI | FS-1, EXPLORER-2 | COMPLETE (source-level implementation and Windows compilation passed; macOS build/runtime verification requires a macOS host) |
 | EXPLORER-4 | Watcher event delivery to UI thread and tree refresh/rescan | FS-1, EXPLORER-1, EXPLORER-2 | COMPLETE (Windows callback/UI message path and AppKit main-queue path implemented; macOS runtime verification requires a macOS host) |
-| PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | PENDING |
+| PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | COMPLETE |
 | RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | PENDING |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
