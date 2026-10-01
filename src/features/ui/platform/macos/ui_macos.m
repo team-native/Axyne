@@ -53,6 +53,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     BOOL _loadingEditor;
     BOOL _editorDocumentInitialized;
     AxyneRunnerConfig _terminalRunner;
+    AxyneRunnerConfig _actionRunner;
     AxyneProcess *_terminalProcess;
     NSTextView *_terminalOutput;
     NSTextField *_terminalInput;
@@ -94,6 +95,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)terminalAppend:(const char *)bytes length:(size_t)length
                 stream:(AxyneProcessStream)stream;
 - (void)terminalExited:(int)exitCode;
+- (void)buildDocument:(id)sender;
+- (void)runDocument:(id)sender;
 @end
 
 static void axyne_install_menu(NSApplication *application,
@@ -186,7 +189,8 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
             AxyneRunnerSpec spec = {0};
             spec.executable = "/bin/sh";
             if (axyne_runner_initialize(&_terminalRunner, NULL) != AXYNE_STATUS_OK ||
-                axyne_runner_configure(&_terminalRunner, &spec, NULL) != AXYNE_STATUS_OK) {
+                axyne_runner_configure(&_terminalRunner, &spec, NULL) != AXYNE_STATUS_OK ||
+                axyne_runner_initialize(&_actionRunner, NULL) != AXYNE_STATUS_OK) {
                 axyne_documents_destroy(&_documents);
                 axyne_explorer_destroy(&_explorer);
                 [self release];
@@ -1039,7 +1043,72 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     if (axyne_process_write(_terminalProcess, [data bytes], [data length], &error) != AXYNE_STATUS_OK)
         [self terminalAppend:error.message length:strlen(error.message)
                        stream:AXYNE_PROCESS_STDERR];
-    else [_terminalInput setStringValue:@""];
+else [_terminalInput setStringValue:@""];
+}
+
+- (void)startAction:(BOOL)run
+{
+    AxyneDocument *doc = [self activeDocument];
+    AxyneRunnerSpec runnerSpec = {0};
+    AxyneProcessSpec processSpec;
+    AxyneError error;
+    AxyneStatus status;
+    NSString *source;
+    NSString *directory;
+    NSString *output;
+    const char *arguments[4];
+    if (_terminalProcess != NULL) return;
+    if (![self captureEditor]) return;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty) {
+        const char *message = "Save the active document before building or running.\n";
+        [self terminalAppend:message length:strlen(message) stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    source = [NSString stringWithUTF8String:doc->path];
+    directory = [source stringByDeletingLastPathComponent];
+    output = [source stringByDeletingPathExtension];
+    if ([output length] == 0 || [output isEqualToString:source])
+        output = [source stringByAppendingString:@".out"];
+    if (run) {
+        runnerSpec.executable = [output UTF8String];
+        runnerSpec.working_directory = [directory UTF8String];
+    } else {
+        arguments[0] = "-std=c17";
+        arguments[1] = [source UTF8String];
+        arguments[2] = "-o";
+        arguments[3] = [output UTF8String];
+        runnerSpec.executable = "cc";
+        runnerSpec.arguments = arguments;
+        runnerSpec.argument_count = 4;
+        runnerSpec.working_directory = [directory UTF8String];
+    }
+    status = axyne_runner_configure(&_actionRunner, &runnerSpec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_runner_process_spec(&_actionRunner,
+            axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
+            &processSpec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_process_start(&processSpec, &_terminalProcess, &error);
+    if (status != AXYNE_STATUS_OK) {
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+    } else {
+        [_terminalOutput setString:(run ? @"[run]\n" : @"[build]\n")];
+        [_terminalStart setEnabled:NO];
+        [_terminalStop setEnabled:YES];
+    }
+}
+
+- (void)buildDocument:(id)sender
+{
+    (void)sender;
+    [self startAction:NO];
+}
+
+- (void)runDocument:(id)sender
+{
+    (void)sender;
+    [self startAction:YES];
 }
 
 - (void)layout
@@ -1335,7 +1404,16 @@ static void axyne_install_menu(NSApplication *application,
     for (NSString *title in titles) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
-        [item setSubmenu:[[NSMenu alloc] initWithTitle:title]];
+        NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
+        if ([title isEqualToString:@"Build"]) {
+            NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
+                action:@selector(buildDocument:) keyEquivalent:@"b"];
+            NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
+                action:@selector(runDocument:) keyEquivalent:@"r"];
+            [build setTarget:workspace]; [run setTarget:workspace];
+        }
+        [item setSubmenu:submenu];
+        [submenu release];
         [mainMenu addItem:item];
         [item release];
     }

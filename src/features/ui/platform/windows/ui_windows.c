@@ -67,6 +67,7 @@ typedef struct AxyneWindowState {
     int loading_editor;
     int editor_document_initialized;
     AxyneRunnerConfig terminal_runner;
+    AxyneRunnerConfig action_runner;
     AxyneProcess *terminal_process;
     HWND terminal_output;
     HWND terminal_input;
@@ -90,7 +91,8 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_FIND = 1100, AXYNE_CMD_REPLACE, AXYNE_CMD_SEARCH_FOLDER,
        AXYNE_CMD_QUICK_FILE, AXYNE_CMD_WORKSPACE,
        AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
-       AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE };
+       AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE,
+       AXYNE_CMD_BUILD, AXYNE_CMD_RUN };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -107,6 +109,10 @@ typedef struct AxyneTerminalMessage {
     size_t length;
     AxyneProcessStream stream;
 } AxyneTerminalMessage;
+
+static AxyneDocument *axyne_active(AxyneWindowState *state);
+static int axyne_capture_editor(AxyneWindowState *state);
+static char *axyne_workspace_parent(const char *path);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -217,6 +223,8 @@ static int axyne_terminal_configure_default(AxyneWindowState *state)
     AxyneRunnerSpec spec;
     if (axyne_runner_initialize(&state->terminal_runner, NULL) != AXYNE_STATUS_OK)
         return 0;
+    if (axyne_runner_initialize(&state->action_runner, NULL) != AXYNE_STATUS_OK)
+        return 0;
     length = GetSystemDirectoryW(system_directory, MAX_PATH);
     if (length == 0 || length + 10 >= MAX_PATH) return 0;
     memcpy(command_path, system_directory, ((size_t)length + 1) * sizeof(wchar_t));
@@ -304,6 +312,108 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
     if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
         WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     (void)axyne_terminal_configure_default(state);
+}
+
+static char *axyne_action_output_path(const char *source)
+{
+    const char *slash;
+    const char *dot;
+    size_t length;
+    char *output;
+    if (source == NULL) return NULL;
+    slash = strrchr(source, '\\');
+    dot = strrchr(source, '.');
+    if (dot == NULL || (slash != NULL && dot < slash)) dot = source + strlen(source);
+    length = (size_t)(dot - source);
+    output = (char *)malloc(length + 5);
+    if (output == NULL) return NULL;
+    memcpy(output, source, length);
+    memcpy(output + length, ".exe", 5);
+    return output;
+}
+
+static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
+{
+    AxyneDocument *doc = axyne_active(state);
+    AxyneRunnerSpec runner_spec;
+    AxyneProcessSpec process_spec;
+    AxyneError error;
+    AxyneStatus status;
+    char *parent = NULL;
+    char *output = NULL;
+    char *output_argument = NULL;
+    const char *build_arguments[4];
+    if (state->terminal_process != NULL) return;
+    if (!axyne_capture_editor(state)) return;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) {
+        const char *message = "Save the active document before building or running.\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
+    if (doc->is_dirty) {
+        const char *message = "Save the active document before building or running.\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
+    parent = axyne_workspace_parent(doc->path);
+    output = axyne_action_output_path(doc->path);
+    if (parent == NULL || output == NULL) {
+        free(parent); free(output);
+        {
+            const char *message = "Unable to determine the output path.\n";
+            axyne_terminal_append(state->terminal_output, message, strlen(message),
+                                  AXYNE_PROCESS_STDERR);
+        }
+        return;
+    }
+    memset(&runner_spec, 0, sizeof(runner_spec));
+    if (run) {
+        runner_spec.executable = output;
+        runner_spec.working_directory = parent;
+    } else {
+        output_argument = (char *)malloc(strlen(output) + 5);
+        if (output_argument != NULL) {
+            (void)snprintf(output_argument, strlen(output) + 5, "/Fe:%s", output);
+            build_arguments[0] = "/nologo";
+            build_arguments[1] = "/TC";
+            build_arguments[2] = doc->path;
+            build_arguments[3] = output_argument;
+            runner_spec.executable = "cl.exe";
+            runner_spec.arguments = build_arguments;
+            runner_spec.argument_count = 4;
+            runner_spec.working_directory = parent;
+        }
+    }
+    if (output_argument == NULL && !run) {
+        error.code = AXYNE_STATUS_OUT_OF_MEMORY;
+        (void)snprintf(error.message, sizeof(error.message),
+                       "Unable to create the compiler command.");
+        status = AXYNE_STATUS_OUT_OF_MEMORY;
+    } else {
+        status = axyne_runner_configure(&state->action_runner, &runner_spec, &error);
+    }
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_runner_process_spec(&state->action_runner,
+            axyne_terminal_output, axyne_terminal_exit, state,
+            &process_spec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_process_start(&process_spec, &state->terminal_process, &error);
+    if (status != AXYNE_STATUS_OK) {
+        const char *message = error.message[0] != '\0' ? error.message :
+            "Build or run could not be started.\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+    } else {
+        SetWindowTextA(state->terminal_output, run ? "[run]\r\n" : "[build]\r\n");
+        EnableWindow(state->terminal_start, FALSE);
+        EnableWindow(state->terminal_stop, TRUE);
+    }
+    free(output_argument);
+    free(output);
+    free(parent);
+    (void)window;
 }
 
 static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
@@ -992,6 +1102,9 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE, L"Open Workspace Folder...");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_BUILD, L"Build\tCtrl+B");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_RUN, L"Run\tF5");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_FIND, L"Find\tCtrl+F");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_REPLACE, L"Replace\tCtrl+H");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
@@ -1263,7 +1376,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (w_param == 'F') { axyne_find(window, state, 0, 0); return 0; }
             if (w_param == 'H') { axyne_find(window, state, 1, 0); return 0; }
             if (w_param == 'P') { axyne_search_folder(window, state, 1); return 0; }
+            if (w_param == 'B') { axyne_start_action(window, state, 0); return 0; }
         }
+        if (w_param == VK_F5) { axyne_start_action(window, state, 1); return 0; }
         break;
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(l_param);
@@ -1336,7 +1451,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_COMMAND: {
         UINT command = LOWORD(w_param);
-        if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
+        if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
+        else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
+        else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
         else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
         else if (command == AXYNE_CMD_NEW) axyne_new_document(window, state);
@@ -1444,6 +1561,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->terminal_process = NULL;
             }
             axyne_runner_destroy(&state->terminal_runner);
+            axyne_runner_destroy(&state->action_runner);
             if (state->watcher != NULL) {
                 axyne_watcher_stop(state->watcher);
                 axyne_watcher_release(state->watcher);
