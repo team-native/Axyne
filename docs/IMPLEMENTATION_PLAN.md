@@ -23,6 +23,9 @@
 | Local Git integration | Invoke the installed git executable; do not embed Git | AGENT_PARAMETER | ASSUMED |
 | Process environment overrides | Inherit the parent environment, apply unique NAME=VALUE entries, reject duplicate names | AGENT_PARAMETER | ASSUMED |
 | Settings path behavior | RFC 6901 JSON Pointer; missing reads/removals return NOT_FOUND; set replaces the root or final object key only | AGENT_PARAMETER | ASSUMED |
+| Filesystem operation behavior | Reads return a NUL-terminated allocation plus byte length; writes create or truncate; create operations fail when the target exists; rename does not replace an existing destination; remove deletes files or empty directories only | AGENT_PARAMETER | ASSUMED |
+| Workspace watcher behavior | Start watches recursively on demand; callbacks run serially on its worker thread; stop waits until callbacks have drained; rename supplies the new path and supplies the old path when the OS reports it | AGENT_PARAMETER | ASSUMED |
+| macOS rename event detail | FSEvents provides a path with a rename flag but this adapter does not pair the previous path; `old_path` is NULL for macOS rename notifications | AGENT_PARAMETER | ASSUMED |
 | Optional tool integrations | Discover installed binaries and never bundle language runtimes | USER | CONFIRMED |
 
 ## Shared contracts
@@ -41,7 +44,7 @@
 |---|---|---|---|
 | BASE-1 | Shared C APIs and module/build boundaries | Existing CMake/application skeleton | COMPLETE |
 | UI-1 | Figma-based desktop shell and Scintilla host on Windows/macOS | BASE-1 | PENDING |
-| FS-1 | Workspace, file tree, file operations, external-change notifications | BASE-1 | PENDING |
+| FS-1 | Shared filesystem API and on-demand external-change notifications | BASE-1 | COMPLETE |
 | EDIT-1 | Tabs, save/recent files, editor commands and document state | UI-1, FS-1 | PENDING |
 | SEARCH-1 | Current-file/workspace search, replace, quick file and symbol navigation | FS-1, EDIT-1 | PENDING |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | PENDING |
