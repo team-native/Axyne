@@ -1,4 +1,5 @@
 #include "axyne/filesystem.h"
+#include "utf8.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -123,47 +124,20 @@ static AxyneStatus axyne_system_error(AxyneError *error, AxyneStatus status,
 
 static int axyne_valid_path(const char *path)
 {
-    return path != NULL && path[0] != '\0';
+    return path != NULL && path[0] != '\0' &&
+           axyne_workspace_utf8_is_valid(path);
 }
-
-#if !defined(_WIN32)
-static int axyne_valid_utf8(const char *text)
-{
-    const unsigned char *p = (const unsigned char *)text;
-    while (*p != 0) {
-        uint32_t codepoint;
-        size_t continuation;
-        if (*p <= 0x7f) { ++p; continue; }
-        if (*p >= 0xc2 && *p <= 0xdf) {
-            codepoint = (uint32_t)(*p & 0x1f); continuation = 1;
-        } else if (*p >= 0xe0 && *p <= 0xef) {
-            codepoint = (uint32_t)(*p & 0x0f); continuation = 2;
-        } else if (*p >= 0xf0 && *p <= 0xf4) {
-            codepoint = (uint32_t)(*p & 0x07); continuation = 3;
-        } else {
-            return 0;
-        }
-        ++p;
-        for (size_t i = 0; i < continuation; ++i) {
-            if (p[i] == 0 || (p[i] & 0xc0) != 0x80) return 0;
-            codepoint = (codepoint << 6) | (uint32_t)(p[i] & 0x3f);
-        }
-        if ((continuation == 1 && codepoint < 0x80) ||
-            (continuation == 2 && codepoint < 0x800) ||
-            (continuation == 3 && codepoint < 0x10000) ||
-            (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
-            codepoint > 0x10ffff) return 0;
-        p += continuation;
-    }
-    return 1;
-}
-#endif
 
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error)
 {
     FILE *file;
-    long size;
+#ifdef _WIN32
+    __int64 file_size;
+#else
+    off_t file_size;
+#endif
+    size_t expected_size;
     char *buffer;
     size_t read_size;
     if (contents == NULL || length == NULL || !axyne_valid_path(utf8_path))
@@ -186,20 +160,33 @@ AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
     if (file == NULL) {
         return axyne_system_error(error, axyne_current_open_error(), "open");
     }
-    if (fseek(file, 0, SEEK_END) != 0 || (size = ftell(file)) < 0 ||
-        fseek(file, 0, SEEK_SET) != 0 || (uintmax_t)size > SIZE_MAX - 1) {
+#ifdef _WIN32
+    if (_fseeki64(file, 0, SEEK_END) != 0 ||
+        (file_size = _ftelli64(file)) < 0 ||
+        _fseeki64(file, 0, SEEK_SET) != 0) {
+#else
+    if (fseeko(file, 0, SEEK_END) != 0 ||
+        (file_size = ftello(file)) < 0 ||
+        fseeko(file, 0, SEEK_SET) != 0) {
+#endif
         fclose(file);
         return axyne_error(error, AXYNE_STATUS_IO_ERROR,
                            "unable to determine file size");
     }
-    buffer = (char *)malloc((size_t)size + 1);
+    if ((uintmax_t)file_size > (uintmax_t)SIZE_MAX - 1u) {
+        fclose(file);
+        return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                           "file is too large for addressable memory");
+    }
+    expected_size = (size_t)file_size;
+    buffer = (char *)malloc(expected_size + 1u);
     if (buffer == NULL) {
         fclose(file);
         return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
                            "unable to allocate file buffer");
     }
-    read_size = fread(buffer, 1, (size_t)size, file);
-    if (read_size != (size_t)size || ferror(file)) {
+    read_size = fread(buffer, 1, expected_size, file);
+    if (read_size != expected_size || ferror(file)) {
         free(buffer);
         fclose(file);
         return axyne_error(error, AXYNE_STATUS_IO_ERROR, "unable to read file");
@@ -348,7 +335,7 @@ AxyneStatus axyne_fs_list_directory(const char *utf8_path,
             char *name, *path;
             AxyneFileEntry *grown;
             if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) continue;
-            if (!axyne_valid_utf8(item->d_name)) {
+            if (!axyne_workspace_utf8_is_valid(item->d_name)) {
                 closedir(directory);
                 for (size_t i = 0; i < count; ++i) { free(entries[i].name); free(entries[i].path); }
                 free(entries);

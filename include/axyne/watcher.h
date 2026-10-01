@@ -26,10 +26,12 @@ typedef struct AxyneWatchEvent {
 typedef void (*AxyneWatchCallback)(const AxyneWatchEvent *event,
                                    void *user_data);
 
-/* Recursively watches a directory tree until stopped. Callbacks run serially on the
- * watcher-owned thread. Event strings are valid only during the callback.
- * stop waits for the thread and guarantees no later callbacks. Do not call
- * stop from the callback itself. The watcher must be stopped before release.
+/* utf8_directory must be well-formed UTF-8 or start returns
+ * AXYNE_STATUS_INVALID_ARGUMENT. Recursively watches a directory tree until
+ * stopped. Callbacks run serially on the watcher-owned thread. Event strings
+ * are valid only during the callback. stop waits for the thread and guarantees
+ * no later callbacks. Do not call stop from the callback itself. The watcher
+ * must be stopped before release.
  */
 AxyneStatus axyne_watcher_start(const char *utf8_directory,
                                 AxyneWatchCallback callback,

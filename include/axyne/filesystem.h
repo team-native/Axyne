@@ -25,9 +25,12 @@ typedef struct AxyneDirectoryList {
     size_t count;
 } AxyneDirectoryList;
 
-/* All paths are UTF-8. Reads are binary-safe; the returned allocation has an
- * extra trailing NUL for convenience, while length excludes that terminator.
- * Release returned buffers with axyne_fs_free. */
+/* All paths must be well-formed UTF-8; malformed paths return
+ * AXYNE_STATUS_INVALID_ARGUMENT. Reads are binary-safe; the returned
+ * allocation has an extra trailing NUL for convenience, while length excludes
+ * that terminator. A file too large to represent and allocate using size_t
+ * returns AXYNE_STATUS_UNSUPPORTED. Release returned buffers with
+ * axyne_fs_free. */
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error);
 /* Creates or truncates the destination and writes exactly length bytes. */
