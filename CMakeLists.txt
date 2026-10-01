@@ -125,8 +125,8 @@ elseif(APPLE)
         COMMAND xcodebuild
             -project "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla/Scintilla.xcodeproj"
             -target Scintilla -configuration Release -sdk macosx
-            ARCHS=arm64
-            MACOSX_DEPLOYMENT_TARGET=12.0
+            "ARCHS=${CMAKE_OSX_ARCHITECTURES}"
+            "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
             "CONFIGURATION_BUILD_DIR=${AXYNE_SCINTILLA_OUTPUT_DIR}"
         WORKING_DIRECTORY "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla"
         DEPENDS
@@ -262,6 +262,11 @@ if(WIN32 OR APPLE)
     set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
     set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md")
     set(AXYNE_PACKAGING_CONFIGURED_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(AXYNE_PACKAGING_MULTI_CONFIG TRUE)
+    else()
+        set(AXYNE_PACKAGING_MULTI_CONFIG FALSE)
+    endif()
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/CPackProjectConfig.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/CPackProjectConfig.cmake"
