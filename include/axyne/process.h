@@ -36,7 +36,8 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * resumed; on macOS/POSIX it starts in a dedicated process group before exec.
  * Startup fails if the Windows job cannot be assigned. POSIX descendants that
  * deliberately leave the process group (for example with setsid) are outside
- * the tree that this API can terminate. Do not call release from a callback.
+ * the tree that this API can terminate and may keep inherited output pipes
+ * open, causing release to wait for them. Do not call release from a callback.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.
