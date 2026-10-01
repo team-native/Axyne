@@ -37,7 +37,12 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * Startup fails if the Windows job cannot be assigned. POSIX descendants that
  * deliberately leave the process group (for example with setsid) are outside
  * the tree that this API can terminate and may keep inherited output pipes
- * open, causing release to wait for them. Do not call release from a callback.
+ * open, causing release to wait for them. On POSIX, the root remains an
+ * unreaped zombie until release so its process-group ID stays reserved while
+ * the group is signaled. If a host SIGCHLD handler reaps the root first, the
+ * API detects ECHILD and skips later group signals to avoid signaling a reused
+ * ID; termination of remaining descendants is then not guaranteed. Do not
+ * call release from a callback.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.
@@ -56,8 +61,9 @@ typedef struct AxyneProcessSpec {
 } AxyneProcessSpec;
 
 /* Environment entries use NAME=VALUE. The child inherits the current process
- * environment, then applies these overrides. Duplicate names are invalid when
- * they match using ASCII case-insensitive comparison on every supported OS. */
+ * environment, then applies these overrides. An override replaces an inherited
+ * entry when names match using ASCII case-insensitive comparison, including on
+ * POSIX. Duplicate override names are invalid under the same comparison. */
 
 AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
                                 AxyneProcess **process, AxyneError *error);
