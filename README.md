@@ -32,3 +32,16 @@ cmake -S . -B build \
   -DAXYNE_AUTHOR="Native" \
   -DAXYNE_VERSION="0.1.0"
 ```
+
+패키지 기본값도 명시적으로 고정되어 있습니다. Windows 패키지는 upstream
+Scintilla를 Release 구성으로 빌드하고 `Scintilla.dll`과
+`Scintilla-LICENSE.txt`를 `axyne.exe` 옆에 설치합니다. macOS 패키지는
+기본적으로 `arm64` 아키텍처와 macOS 12.0 이상을 대상으로 하며, 생성되는
+패키지 파일 이름에 아키텍처가 포함됩니다. 필요한 경우 다음 CMake 옵션으로
+macOS 값을 바꿀 수 있습니다.
+
+```sh
+cmake -S . -B build \
+  -DCMAKE_OSX_ARCHITECTURES="arm64" \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET="12.0"
+```
