@@ -73,3 +73,12 @@ target_compile_definitions(axyne PRIVATE
     AXYNE_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     AXYNE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
+
+# Each optional feature owns its CMakeLists.txt so feature branches can add
+# modules without editing the shared root build file.
+file(GLOB AXYNE_FEATURE_MODULES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*/CMakeLists.txt"
+)
+foreach(AXYNE_FEATURE_MODULE IN LISTS AXYNE_FEATURE_MODULES)
+    include("${AXYNE_FEATURE_MODULE}")
+endforeach()
