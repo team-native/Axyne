@@ -427,6 +427,12 @@ static void axyne_runner_copy_lines_wide(char **values, size_t count,
 
 static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
 {
+    enum {
+        AXYNE_RUNNER_EXECUTABLE_EDIT = 1001,
+        AXYNE_RUNNER_ARGUMENTS_EDIT = 1002,
+        AXYNE_RUNNER_WORKING_DIRECTORY_EDIT = 1003,
+        AXYNE_RUNNER_ENVIRONMENT_EDIT = 1004
+    };
     wchar_t executable[32768] = L"";
     wchar_t arguments[32768] = L"";
     wchar_t working_directory[32768] = L"";
@@ -455,24 +461,27 @@ static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
         12, 12, 120, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
     executable_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", executable,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        140, 10, 470, 24, dialog, (HMENU)1, GetModuleHandleW(NULL), NULL);
+        140, 10, 470, 24, dialog, (HMENU)AXYNE_RUNNER_EXECUTABLE_EDIT,
+        GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"STATIC", L"Arguments (one per line)", WS_CHILD | WS_VISIBLE,
         12, 45, 180, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
     arguments_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", arguments,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-        WS_VSCROLL, 12, 66, 598, 78, dialog, (HMENU)2,
+        WS_VSCROLL, 12, 66, 598, 78, dialog, (HMENU)AXYNE_RUNNER_ARGUMENTS_EDIT,
         GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"STATIC", L"Working directory (optional)", WS_CHILD | WS_VISIBLE,
         12, 155, 200, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
     working_directory_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
         working_directory, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        12, 176, 598, 24, dialog, (HMENU)3, GetModuleHandleW(NULL), NULL);
+        12, 176, 598, 24, dialog, (HMENU)AXYNE_RUNNER_WORKING_DIRECTORY_EDIT,
+        GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"STATIC", L"Environment overrides (NAME=VALUE per line)",
         WS_CHILD | WS_VISIBLE, 12, 211, 320, 20, dialog, NULL,
         GetModuleHandleW(NULL), NULL);
     environment_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", environment,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-        WS_VSCROLL, 12, 232, 598, 78, dialog, (HMENU)4,
+        WS_VSCROLL, 12, 232, 598, 78, dialog,
+        (HMENU)AXYNE_RUNNER_ENVIRONMENT_EDIT,
         GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
         BS_DEFPUSHBUTTON, 440, 325, 78, 28, dialog, (HMENU)IDOK,
@@ -587,6 +596,8 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     if (status == AXYNE_STATUS_OK)
         status = axyne_process_start(&process_spec, &state->terminal_process, &error);
     if (status != AXYNE_STATUS_OK) {
+        state->last_exit_failed = 0;
+        state->has_exit_status = 0;
         const char *message = error.message[0] != '\0' ? error.message :
             "Build or run could not be started.\n";
         axyne_terminal_append(state->terminal_output, message, strlen(message),

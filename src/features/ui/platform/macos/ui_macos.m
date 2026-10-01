@@ -1096,6 +1096,8 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     if (status == AXYNE_STATUS_OK)
         status = axyne_process_start(&spec, &_terminalProcess, &error);
     if (status != AXYNE_STATUS_OK) {
+        _lastExitFailed = NO;
+        _hasExitStatus = NO;
         [self terminalAppend:error.message length:strlen(error.message)
                        stream:AXYNE_PROCESS_STDERR];
         return;
