@@ -11,12 +11,16 @@
 typedef struct AxyneDebuggerSync {
     CRITICAL_SECTION mutex;
     CONDITION_VARIABLE condition;
+    DWORD callback_thread;
+    int callback_active;
 } AxyneDebuggerSync;
 #else
 #include <pthread.h>
 typedef struct AxyneDebuggerSync {
     pthread_mutex_t mutex;
     pthread_cond_t condition;
+    pthread_t callback_thread;
+    int callback_active;
 } AxyneDebuggerSync;
 #endif
 
@@ -93,10 +97,24 @@ static void debugger_wait_for_release(const AxyneDebugger *debugger)
     }
 }
 
+static int debugger_is_callback_thread_locked(const AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync;
+    if (debugger == NULL || debugger->mutex == NULL) return 0;
+    sync = (AxyneDebuggerSync *)debugger->mutex;
+    if (!sync->callback_active) return 0;
+#if defined(_WIN32)
+    return sync->callback_thread == GetCurrentThreadId();
+#else
+    return pthread_equal(sync->callback_thread, pthread_self()) != 0;
+#endif
+}
+
 static void debugger_api_lock(const AxyneDebugger *debugger)
 {
     debugger_mutex_lock(debugger);
-    debugger_wait_for_release(debugger);
+    if (!debugger_is_callback_thread_locked(debugger))
+        debugger_wait_for_release(debugger);
 }
 
 static void debugger_signal_release(const AxyneDebugger *debugger)
@@ -137,6 +155,28 @@ static void debugger_clear_error(AxyneError *error)
     if (error == NULL) return;
     error->code = AXYNE_STATUS_OK;
     error->message[0] = '\0';
+}
+
+static void debugger_callback_begin_locked(AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync = (AxyneDebuggerSync *)debugger->mutex;
+    if (sync == NULL) return;
+    sync->callback_active = 1;
+#if defined(_WIN32)
+    sync->callback_thread = GetCurrentThreadId();
+#else
+    sync->callback_thread = pthread_self();
+#endif
+}
+
+static void debugger_callback_end(AxyneDebugger *debugger)
+{
+    AxyneDebuggerSync *sync;
+    if (debugger == NULL || debugger->mutex == NULL) return;
+    debugger_mutex_lock(debugger);
+    sync = (AxyneDebuggerSync *)debugger->mutex;
+    sync->callback_active = 0;
+    debugger_mutex_unlock(debugger);
 }
 
 static const char *debugger_command_text(AxyneDebuggerCommand command)
@@ -236,9 +276,12 @@ static void debugger_process_output(AxyneProcess *process,
         debugger_parse_output(debugger, bytes, length);
     on_output = debugger->on_output;
     callback_data = debugger->user_data;
+    if (on_output != NULL) debugger_callback_begin_locked(debugger);
     debugger_mutex_unlock(debugger);
-    if (on_output != NULL)
+    if (on_output != NULL) {
         on_output(process, stream, bytes, length, callback_data);
+        debugger_callback_end(debugger);
+    }
 }
 
 static void debugger_process_exit(AxyneProcess *process, int exit_code,
@@ -255,8 +298,12 @@ static void debugger_process_exit(AxyneProcess *process, int exit_code,
     }
     on_exit = debugger->on_exit;
     callback_data = debugger->user_data;
+    if (on_exit != NULL) debugger_callback_begin_locked(debugger);
     debugger_mutex_unlock(debugger);
-    if (on_exit != NULL) on_exit(process, exit_code, callback_data);
+    if (on_exit != NULL) {
+        on_exit(process, exit_code, callback_data);
+        debugger_callback_end(debugger);
+    }
 }
 
 AxyneStatus axyne_debugger_initialize(AxyneDebugger *debugger,
@@ -393,8 +440,10 @@ AxyneStatus axyne_debugger_start(AxyneDebugger *debugger,
 {
     const char **arguments = NULL;
     AxyneProcessSpec process_spec;
+    AxyneProcess *failed_process;
     size_t count;
     size_t i;
+    size_t j;
     AxyneStatus status;
     if (debugger == NULL || document == NULL || document->path == NULL ||
         document->is_untitled || document->is_dirty) {
@@ -441,11 +490,29 @@ AxyneStatus axyne_debugger_start(AxyneDebugger *debugger,
         debugger->mi_buffer_length = 0;
         for (i = 0; i < debugger->breakpoint_count; ++i) {
             debugger_free_breakpoint_number(&debugger->breakpoints[i]);
-            if (debugger->breakpoints[i].enabled &&
-                debugger_send_breakpoint_insert(debugger,
-                    &debugger->breakpoints[i], error) != AXYNE_STATUS_OK) {
-                axyne_process_terminate(debugger->process, NULL);
-                status = error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
+            if (!debugger->breakpoints[i].enabled) continue;
+            status = debugger_send_breakpoint_insert(debugger,
+                &debugger->breakpoints[i], error);
+            if (status != AXYNE_STATUS_OK) {
+                failed_process = debugger->process;
+                debugger->releasing = 1;
+                debugger->process = NULL;
+                debugger->exited_process = NULL;
+                debugger->on_output = NULL;
+                debugger->on_exit = NULL;
+                debugger->user_data = NULL;
+                debugger->next_token = 0;
+                debugger->mi_buffer_length = 0;
+                for (j = 0; j < debugger->breakpoint_count; ++j)
+                    debugger_free_breakpoint_number(&debugger->breakpoints[j]);
+                debugger_mutex_unlock(debugger);
+                if (failed_process != NULL) {
+                    (void)axyne_process_terminate(failed_process, NULL);
+                    axyne_process_release(failed_process);
+                }
+                debugger_mutex_lock(debugger);
+                debugger->releasing = 0;
+                debugger_signal_release(debugger);
                 debugger_mutex_unlock(debugger);
                 return status;
             }
