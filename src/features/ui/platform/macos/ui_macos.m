@@ -105,7 +105,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)sendTerminal:(id)sender;
 - (void)terminalAppend:(const char *)bytes length:(size_t)length
                 stream:(AxyneProcessStream)stream;
-- (void)terminalExited:(int)exitCode;
+- (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode;
 - (BOOL)configureRunner;
 - (void)buildDocument:(id)sender;
 - (void)runDocument:(id)sender;
@@ -158,11 +158,10 @@ static void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code,
                                       void *user_data)
 {
     AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
-    (void)process;
     if (view == nil) return;
     [view retain];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [view terminalExited:exit_code];
+        [view terminalExited:process exitCode:exit_code];
         [view release];
     });
 }
@@ -1102,7 +1101,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     [_terminalOutput scrollRangeToVisible:NSMakeRange([storage length], 0)];
 }
 
-- (void)terminalExited:(int)exitCode
+- (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode
 {
     char message[96];
     _lastExitCode = exitCode;
@@ -1112,7 +1111,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         _lastExitFailed ? "[failed: exit %d]\n" : "[exit %d]\n", exitCode);
     [self terminalAppend:message length:strlen(message)
                    stream:AXYNE_PROCESS_STDOUT];
-    if (_terminalProcess != NULL) {
+    if (_terminalProcess == process) {
         axyne_process_release(_terminalProcess);
         _terminalProcess = NULL;
     }
