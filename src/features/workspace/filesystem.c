@@ -1,4 +1,5 @@
 #include "axyne/filesystem.h"
+#include "workspace_safety.h"
 #include "utf8.h"
 
 #include <errno.h>
@@ -288,8 +289,9 @@ static AxyneStatus axyne_windows_open_component(
     }
 }
 
-static AxyneStatus axyne_windows_parent(const char *utf8_parent,
-                                        HANDLE *parent, AxyneError *error)
+AxyneStatus axyne_workspace_open_directory_nofollow(const char *utf8_parent,
+                                                     HANDLE *parent,
+                                                     AxyneError *error)
 {
     AxyneNtCreateFileFn create_file;
     AxyneNtSetInformationFileFn set_information;
@@ -407,7 +409,7 @@ static AxyneStatus axyne_windows_create_at(const char *utf8_parent,
     if (!axyne_nt_functions(&create_file, &set_information, &to_dos))
         return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
                            "handle-relative Windows operations are unavailable");
-    status = axyne_windows_parent(utf8_parent, &parent, error);
+    status = axyne_workspace_open_directory_nofollow(utf8_parent, &parent, error);
     if (status != AXYNE_STATUS_OK) return status;
     status = axyne_windows_child_name(child_name, &wide, &name, error);
     if (status != AXYNE_STATUS_OK) { CloseHandle(parent); return status; }
@@ -441,7 +443,7 @@ static AxyneStatus axyne_windows_open_child(
     AxyneObjectAttributes attributes;
     AxyneIoStatusBlock io;
     AxyneNtStatus native_status;
-    AxyneStatus status = axyne_windows_parent(utf8_parent, parent, error);
+    AxyneStatus status = axyne_workspace_open_directory_nofollow(utf8_parent, parent, error);
     if (status != AXYNE_STATUS_OK) return status;
     status = axyne_windows_child_name(utf8_name, wide, name, error);
     if (status != AXYNE_STATUS_OK) { CloseHandle(*parent); return status; }
@@ -555,8 +557,8 @@ static int axyne_posix_component_valid(const char *component, size_t length)
     return 1;
 }
 
-static int axyne_posix_open_parent(const char *utf8_parent,
-                                   AxyneError *error)
+int axyne_workspace_open_directory_nofollow(const char *utf8_parent,
+                                            AxyneError *error)
 {
     int current;
     size_t length, position, start;
@@ -620,7 +622,7 @@ static AxyneStatus axyne_posix_create_at(const char *utf8_parent,
     if (!axyne_valid_child_name(child_name))
         return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                            "child name must be one valid name");
-    parent = axyne_posix_open_parent(utf8_parent, error);
+    parent = axyne_workspace_open_directory_nofollow(utf8_parent, error);
     if (parent < 0) return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
     if (directory) {
         int result = mkdirat(parent, child_name, 0777);
@@ -645,7 +647,7 @@ static AxyneStatus axyne_posix_rename_at(const char *utf8_parent,
     if (!axyne_valid_child_name(old_name) || !axyne_valid_child_name(new_name))
         return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                            "source and destination names must be valid");
-    parent = axyne_posix_open_parent(utf8_parent, error);
+    parent = axyne_workspace_open_directory_nofollow(utf8_parent, error);
     if (parent < 0) return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
 #ifdef __APPLE__
     result = renameatx_np(parent, old_name, parent, new_name, RENAME_EXCL);
@@ -667,7 +669,7 @@ static AxyneStatus axyne_posix_remove_at(const char *utf8_parent,
     if (!axyne_valid_child_name(child_name))
         return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                            "child name must be one valid name");
-    parent = axyne_posix_open_parent(utf8_parent, error);
+    parent = axyne_workspace_open_directory_nofollow(utf8_parent, error);
     if (parent < 0) return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
     if (fstatat(parent, child_name, &info, AT_SYMLINK_NOFOLLOW) != 0) {
         int saved = errno; close(parent);
