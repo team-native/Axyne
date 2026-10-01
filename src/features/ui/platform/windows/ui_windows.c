@@ -125,6 +125,13 @@ typedef struct AxyneLspStatusMessage {
     char *text;
 } AxyneLspStatusMessage;
 
+static void axyne_free_lsp_status_message(AxyneLspStatusMessage *message)
+{
+    if (message == NULL) return;
+    free(message->text);
+    free(message);
+}
+
 static void axyne_lsp_status(AxyneWindowState *state, const char *text)
 {
     AxyneLspStatusMessage *message;
@@ -133,8 +140,10 @@ static void axyne_lsp_status(AxyneWindowState *state, const char *text)
     if (message == NULL) return;
     message->text = _strdup(text);
     if (message->text == NULL) { free(message); return; }
-    PostMessageW(GetParent(state->editor), AXYNE_WM_LSP_STATUS, 0,
-                 (LPARAM)message);
+    if (!PostMessageW(GetParent(state->editor), AXYNE_WM_LSP_STATUS, 0,
+                      (LPARAM)message)) {
+        axyne_free_lsp_status_message(message);
+    }
 }
 
 static void axyne_lsp_diagnostics(AxyneLspClient *client, const char *path,
@@ -1920,8 +1929,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (message != NULL) {
             (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "%s",
                            message->text == NULL ? "LSP" : message->text);
-            free(message->text);
-            free(message);
+            axyne_free_lsp_status_message(message);
             InvalidateRect(window, NULL, FALSE);
         }
         return 0;
@@ -1971,6 +1979,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->lsp != NULL) {
                 axyne_lsp_destroy(state->lsp);
                 state->lsp = NULL;
+            }
+            {
+                MSG pending_message;
+                while (PeekMessageW(&pending_message, window,
+                                    AXYNE_WM_LSP_STATUS,
+                                    AXYNE_WM_LSP_STATUS, PM_REMOVE)) {
+                    axyne_free_lsp_status_message(
+                        (AxyneLspStatusMessage *)pending_message.lParam);
+                }
             }
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
