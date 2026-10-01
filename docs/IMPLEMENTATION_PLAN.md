@@ -31,7 +31,7 @@
 | macOS exclusive rename support | Use `renameatx_np` with `RENAME_EXCL`; if the destination volume does not support the flag, return `AXYNE_STATUS_UNSUPPORTED` rather than performing a racy fallback | AGENT_PARAMETER | ASSUMED |
 | Unrepresentable file size | If a file length cannot fit in `size_t` with room for the trailing NUL allocation, return `AXYNE_STATUS_UNSUPPORTED` before allocation | AGENT_PARAMETER | ASSUMED |
 | macOS directory names | If a listing encounters any entry whose native name is not valid UTF-8, fail the entire listing with `AXYNE_STATUS_UNSUPPORTED` and return no partial entries | AGENT_PARAMETER | ASSUMED |
-| Workspace watcher behavior | Start watches recursively on demand; callbacks run serially on its worker thread; stop waits until callbacks have drained; rename supplies the new path and supplies the old path when the OS reports it | AGENT_PARAMETER | ASSUMED |
+| Workspace watcher behavior | Start watches recursively on demand; callbacks run serially on its worker thread; stop waits until callbacks have drained; rename supplies the new path and supplies the old path when the OS reports it; pending rename pairing is discarded at every rescan boundary | AGENT_PARAMETER | ASSUMED |
 | Watcher event loss recovery | On an OS event-loss/rescan indication, emit `AXYNE_WATCH_RESCAN_REQUIRED` with the watched root; the consumer must rescan it, and the watcher does not implement automatic recovery | USER | CONFIRMED |
 | macOS rename event detail | FSEvents provides a path with a rename flag but this adapter does not pair the previous path; `old_path` is NULL for macOS rename notifications | AGENT_PARAMETER | ASSUMED |
 | Optional tool integrations | Discover installed binaries and never bundle language runtimes | USER | CONFIRMED |
@@ -45,7 +45,7 @@
 | Workspace search and quick file | Select a root with the native folder picker; recursively match text or file names; skip binary and unreadable files; read one file at a time. Quick File matches names by case-insensitive substring and opens the selected file through the document manager. | AGENT_PARAMETER | ASSUMED |
 | Explorer tree ordering | Immediate children are displayed with directories first, then files, and names sorted lexicographically; the order is rebuilt after filesystem events. | AGENT_PARAMETER | ASSUMED |
 | Workspace selection lifetime | The selected workspace root and expanded tree state remain session-only; no project/workspace file is persisted. | USER + AGENT_PARAMETER | ASSUMED |
-| Windows reparse-point directories | Explorer traversal skips Windows directory reparse points and never recursively descends through them; ordinary files and directories remain traversable. | USER + AGENT_PARAMETER | ASSUMED |
+| Windows reparse-point directories | Explorer rejects a selected reparse-point workspace root, skips child reparse-point directories, and fails the reload when UTF-8 conversion, allocation, or attribute inspection is uncertain; ordinary files and directories remain traversable. | USER + AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 
 ## Shared contracts
