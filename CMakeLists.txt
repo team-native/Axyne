@@ -3,6 +3,10 @@ cmake_minimum_required(VERSION 3.21)
 set(AXYNE_DISPLAY_NAME "Axyne" CACHE STRING "Application display name")
 set(AXYNE_AUTHOR "Native" CACHE STRING "Application author or organization")
 set(AXYNE_VERSION "0.1.0" CACHE STRING "Application version")
+set(AXYNE_SCINTILLA_DLL "" CACHE FILEPATH
+    "Optional path to the official Scintilla Win32 SciLexer.dll")
+set(AXYNE_SCINTILLA_FRAMEWORK "" CACHE PATH
+    "Optional path to the official macOS Scintilla.framework bundle")
 
 project(Axyne VERSION ${AXYNE_VERSION} LANGUAGES C)
 
@@ -45,6 +49,14 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/axyne_version.rc"
     )
     target_link_libraries(axyne PRIVATE axyne_core user32)
+    if(AXYNE_SCINTILLA_DLL)
+        add_custom_command(TARGET axyne POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${AXYNE_SCINTILLA_DLL}"
+                "$<TARGET_FILE_DIR:axyne>/SciLexer.dll"
+            VERBATIM
+        )
+    endif()
 elseif(APPLE)
     enable_language(OBJC)
     add_executable(axyne
@@ -59,6 +71,16 @@ elseif(APPLE)
         MACOSX_BUNDLE_COPYRIGHT "Copyright (C) ${AXYNE_AUTHOR}"
     )
     target_link_libraries(axyne PRIVATE axyne_core "-framework AppKit")
+    if(AXYNE_SCINTILLA_FRAMEWORK)
+        add_custom_command(TARGET axyne POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${AXYNE_SCINTILLA_FRAMEWORK}"
+                "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Scintilla.framework"
+            VERBATIM
+        )
+    endif()
 else()
     add_executable(axyne
         src/platform/unsupported/main.c
