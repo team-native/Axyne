@@ -84,6 +84,7 @@ typedef struct AxyneWindowState {
     int last_exit_code;
     int last_exit_failed;
     int has_exit_status;
+    AxynePreferences global_preferences;
     AxynePreferences preferences;
     char *global_preferences_path;
     char *workspace_preferences_path;
@@ -136,6 +137,8 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index);
 static void axyne_find(HWND window, AxyneWindowState *state, int replace,
                        int replace_all);
 static void axyne_search_folder(HWND window, AxyneWindowState *state, int files);
+static void axyne_workspace_show_error(HWND window, const char *prefix,
+                                       const AxyneError *error);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -204,6 +207,18 @@ static void axyne_select_theme_preset(AxyneThemePreferences *theme,
     }
 }
 
+static int axyne_windows_prefers_dark(void)
+{
+    HKEY key; DWORD value = 1; DWORD size = sizeof(value);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_READ, &key) != ERROR_SUCCESS) return 1;
+    (void)RegQueryValueExW(key, L"AppsUseLightTheme", NULL, NULL,
+                           (LPBYTE)&value, &size);
+    RegCloseKey(key);
+    return value == 0;
+}
+
 static char *axyne_global_preferences_path(void)
 {
     wchar_t app_data[MAX_PATH];
@@ -266,6 +281,11 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
 
 static void axyne_apply_preferences(AxyneWindowState *state)
 {
+    if (state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
+        axyne_select_theme_preset(&state->preferences.theme,
+            axyne_windows_prefers_dark() ? AXYNE_THEME_DARK : AXYNE_THEME_LIGHT);
+        state->preferences.theme.preset = AXYNE_THEME_SYSTEM;
+    }
     axyne_apply_theme(&state->preferences.theme);
     axyne_apply_editor_preferences(state);
 }
@@ -273,11 +293,15 @@ static void axyne_apply_preferences(AxyneWindowState *state)
 static void axyne_load_global_preferences(AxyneWindowState *state)
 {
     AxyneError error;
-    axyne_preferences_defaults(&state->preferences);
+    AxyneStatus status;
+    axyne_preferences_defaults(&state->global_preferences);
     state->global_preferences_path = axyne_global_preferences_path();
-    if (state->global_preferences_path != NULL)
-        (void)axyne_preferences_load_global(state->global_preferences_path,
-                                             &state->preferences, &error);
+    status = state->global_preferences_path == NULL ? AXYNE_STATUS_NOT_FOUND :
+        axyne_preferences_load_global(state->global_preferences_path,
+                                      &state->global_preferences, &error);
+    state->preferences = state->global_preferences;
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
+        MessageBoxA(NULL, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR);
 }
 
 static void axyne_load_workspace_preferences(AxyneWindowState *state,
@@ -285,14 +309,22 @@ static void axyne_load_workspace_preferences(AxyneWindowState *state,
 {
     AxynePreferences workspace;
     AxyneError error;
+    AxyneStatus status;
+    state->preferences = state->global_preferences;
     free(state->workspace_preferences_path);
     state->workspace_preferences_path = axyne_workspace_preferences_path(root);
-    if (state->workspace_preferences_path == NULL) return;
-    if (axyne_preferences_load_workspace(state->workspace_preferences_path,
-                                         &workspace, &error) == AXYNE_STATUS_OK) {
+    if (state->workspace_preferences_path == NULL) {
+        axyne_apply_preferences(state);
+        return;
+    }
+    status = axyne_preferences_load_workspace(state->workspace_preferences_path,
+                                               &workspace, &error);
+    if (status == AXYNE_STATUS_OK) {
         axyne_preferences_apply_workspace(&state->preferences, &workspace);
         axyne_apply_preferences(state);
-    }
+    } else if (status != AXYNE_STATUS_NOT_FOUND)
+        axyne_workspace_show_error(NULL, "Unable to load workspace preferences", &error);
+    else axyne_apply_preferences(state);
 }
 
 static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
@@ -814,30 +846,69 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
         free(utf8); MessageBoxA(owner, "Theme must be dark, light, or system.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0;
     }
     axyne_select_theme_preset(&next.theme, strcmp(utf8, "light") == 0 ? AXYNE_THEME_LIGHT : strcmp(utf8, "system") == 0 ? AXYNE_THEME_SYSTEM : AXYNE_THEME_DARK);
+    if (workspace) {
+        next.present_fields = 0;
+        memset(next.binding_present, 0, sizeof(next.binding_present));
+    }
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_THEME_PRESET;
     free(utf8);
     (void)swprintf_s(value, 128, L"%u", next.editor.font_size);
     if (!axyne_prompt(owner, L"Editor Preferences", L"Font size (6-72)", value, 128)) return 0;
     parsed = wcstoul(value, &end, 10);
     if (*value == L'\0' || *end != L'\0' || parsed < 6 || parsed > 72) { MessageBoxA(owner, "Font size must be between 6 and 72.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     next.editor.font_size = (unsigned int)parsed;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_SIZE;
     (void)swprintf_s(value, 128, L"%u", next.editor.tab_width);
     if (!axyne_prompt(owner, L"Editor Preferences", L"Tab width (1-16)", value, 128)) return 0;
     parsed = wcstoul(value, &end, 10);
     if (*value == L'\0' || *end != L'\0' || parsed < 1 || parsed > 16) { MessageBoxA(owner, "Tab width must be between 1 and 16.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     next.editor.tab_width = (unsigned int)parsed;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_TAB_WIDTH;
     (void)swprintf_s(value, 128, L"%ls", next.editor.insert_spaces ? L"yes" : L"no");
     if (!axyne_prompt(owner, L"Editor Preferences", L"Insert spaces instead of tabs (yes or no)", value, 128)) return 0;
     if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     next.editor.insert_spaces = _wcsicmp(value, L"yes") == 0;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_INSERT_SPACES;
     (void)swprintf_s(value, 128, L"%ls", next.editor.word_wrap ? L"yes" : L"no");
     if (!axyne_prompt(owner, L"Editor Preferences", L"Word wrap (yes or no)", value, 128)) return 0;
     if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     next.editor.word_wrap = _wcsicmp(value, L"yes") == 0;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_WORD_WRAP;
+    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
+        const AxyneKeyBinding *current = axyne_preferences_find_binding(&next, (AxynePreferenceAction)action);
+        wchar_t binding_value[128]; char *binding_utf8;
+        if (current == NULL) continue;
+        (void)swprintf_s(binding_value, 128, L"%hs", current->key);
+        if (!axyne_prompt(owner, L"Key Bindings",
+                          L"Enter key, disable, restore, or skip",
+                          binding_value, 128)) return 0;
+        if (binding_value[0] == L'\0' || _wcsicmp(binding_value, L"skip") == 0) continue;
+        {
+            AxyneKeyBinding *edited = (AxyneKeyBinding *)current;
+            if (_wcsicmp(binding_value, L"disable") == 0) edited->enabled = 0;
+            else if (_wcsicmp(binding_value, L"restore") == 0) {
+                AxynePreferences defaults;
+                axyne_preferences_defaults(&defaults);
+                edited = (AxyneKeyBinding *)axyne_preferences_find_binding(&defaults, (AxynePreferenceAction)action);
+                next.bindings[current - next.bindings] = *edited;
+            } else {
+                binding_utf8 = axyne_utf8(binding_value);
+                if (binding_utf8 == NULL || binding_utf8[0] == '\0' || strlen(binding_utf8) >= AXYNE_PREFERENCE_KEY_MAX) {
+                    free(binding_utf8); MessageBoxA(owner, "The key binding is invalid.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0;
+                }
+                (void)snprintf(((AxyneKeyBinding *)current)->key, AXYNE_PREFERENCE_KEY_MAX, "%s", binding_utf8);
+                ((AxyneKeyBinding *)current)->enabled = 1;
+                free(binding_utf8);
+            }
+        }
+        if (workspace) axyne_preferences_mark_binding(&next, (AxynePreferenceAction)action);
+    }
     path = workspace ? state->workspace_preferences_path : state->global_preferences_path;
     if (path == NULL) { MessageBoxA(owner, "The preference path is unavailable.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
     if (status != AXYNE_STATUS_OK) { MessageBoxA(owner, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     state->preferences = next;
+    if (!workspace) state->global_preferences = next;
     axyne_apply_preferences(state);
     InvalidateRect(owner, NULL, FALSE);
     return 1;
@@ -1820,6 +1891,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_SIZE:
         axyne_layout(window, state);
         return 0;
+    case WM_SETTINGCHANGE:
+        if (state != NULL && state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
+            axyne_apply_preferences(state);
+            InvalidateRect(window, NULL, FALSE);
+        }
+        break;
     case WM_KEYDOWN:
         if (axyne_handle_key(window, state, w_param)) return 0;
         break;
