@@ -156,6 +156,40 @@ target_compile_definitions(axyne PRIVATE
     AXYNE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
+if(WIN32 OR APPLE)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/version.json.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/version.json"
+        @ONLY
+    )
+
+    if(WIN32)
+        install(TARGETS axyne
+            RUNTIME DESTINATION .
+        )
+        install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/version.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
+            "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            DESTINATION share/axyne
+        )
+    elseif(APPLE)
+        install(TARGETS axyne
+            BUNDLE DESTINATION .
+        )
+        install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/version.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
+            "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            DESTINATION "Axyne.app/Contents/Resources"
+        )
+        install(PROGRAMS
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Uninstall Axyne.command"
+            DESTINATION .
+        )
+    endif()
+endif()
+
 # Each optional feature owns its CMakeLists.txt so feature branches can add
 # modules without editing the shared root build file.
 file(GLOB AXYNE_FEATURE_MODULES CONFIGURE_DEPENDS
@@ -164,3 +198,32 @@ file(GLOB AXYNE_FEATURE_MODULES CONFIGURE_DEPENDS
 foreach(AXYNE_FEATURE_MODULE IN LISTS AXYNE_FEATURE_MODULES)
     include("${AXYNE_FEATURE_MODULE}")
 endforeach()
+
+if(WIN32 OR APPLE)
+    set(CPACK_PACKAGE_NAME "${AXYNE_DISPLAY_NAME}")
+    set(CPACK_PACKAGE_VENDOR "${AXYNE_AUTHOR}")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "${AXYNE_DISPLAY_NAME}")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "A native offline desktop IDE for Windows and macOS")
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+    set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md")
+
+    if(WIN32)
+        set(CPACK_GENERATOR "NSIS")
+        set(CPACK_NSIS_DISPLAY_NAME "${AXYNE_DISPLAY_NAME} ${PROJECT_VERSION}")
+        set(CPACK_NSIS_PACKAGE_NAME "${AXYNE_DISPLAY_NAME}")
+        set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+        set(CPACK_NSIS_MODIFY_PATH OFF)
+        set(CPACK_NSIS_MENU_LINKS "axyne.exe" "Axyne")
+    elseif(APPLE)
+        set(CPACK_GENERATOR "productbuild;DragNDrop")
+        set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications")
+        set(CPACK_PRODUCTBUILD_IDENTIFIER "com.axyne.ide")
+        set(CPACK_PRODUCTBUILD_INSTALL_PATH "/Applications")
+        set(CPACK_DMG_VOLUME_NAME "${AXYNE_DISPLAY_NAME} ${PROJECT_VERSION}")
+    endif()
+
+    include(CPack)
+endif()
