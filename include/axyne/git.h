@@ -17,7 +17,8 @@ typedef struct AxyneGitResult {
     int output_truncated;
 } AxyneGitResult;
 
-/* Git output is bounded for every caller, including asynchronous UIs. */
+/* Git output is bounded to this many payload bytes for every caller,
+ * including asynchronous UIs; the returned buffer also includes its NUL. */
 #define AXYNE_GIT_OUTPUT_LIMIT (16u * 1024u * 1024u)
 
 /* Git is invoked only when one of these functions is called. The installed

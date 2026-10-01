@@ -72,12 +72,17 @@ static void axyne_git_output(AxyneProcess *process, AxyneProcessStream stream,
                              const char *bytes, size_t length, void *user_data)
 {
     AxyneGitRun *run = (AxyneGitRun *)user_data;
+    size_t accepted;
     (void)process;
     (void)stream;
     if (run != NULL && bytes != NULL && !run->allocation_failed &&
         !run->output_truncated) {
-        if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
-            length > AXYNE_GIT_OUTPUT_LIMIT - run->length - 1) {
+        accepted = run->length < AXYNE_GIT_OUTPUT_LIMIT
+            ? AXYNE_GIT_OUTPUT_LIMIT - run->length : 0;
+        if (length > accepted) {
+            if (accepted != 0 && !axyne_git_append(run, bytes, accepted)) {
+                run->allocation_failed = 1;
+            }
             run->output_truncated = 1;
             (void)axyne_process_terminate(process, NULL);
         } else if (!axyne_git_append(run, bytes, length)) {
