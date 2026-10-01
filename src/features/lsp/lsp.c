@@ -529,12 +529,16 @@ static int json_read_uint(JsonCursor *cursor, uint64_t *value)
     return 1;
 }
 
-static int json_read_size(JsonCursor *cursor, size_t *value)
+static int json_read_size(JsonCursor *cursor, size_t *value, int require_end)
 {
     uint64_t number;
     if (!json_read_uint(cursor, &number) || number > SIZE_MAX) return 0;
     json_skip_space(cursor);
-    if (cursor->at != cursor->end) return 0;
+    if (require_end) {
+        if (cursor->at != cursor->end) return 0;
+    } else if (cursor->at < cursor->end && *cursor->at != ',' && *cursor->at != '}') {
+        return 0;
+    }
     *value = (size_t)number;
     return 1;
 }
@@ -601,9 +605,9 @@ static int lsp_parse_position(JsonCursor *cursor, AxyneLspPosition *position)
     for (;;) {
         key = json_read_string(cursor);
         if (key == NULL || !json_expect(cursor, ':')) { free(key); return 0; }
-        if (strcmp(key, "line") == 0) got_line = json_read_size(cursor, &position->line);
+        if (strcmp(key, "line") == 0) got_line = json_read_size(cursor, &position->line, 0);
         else if (strcmp(key, "character") == 0)
-            got_character = json_read_size(cursor, &position->character);
+            got_character = json_read_size(cursor, &position->character, 0);
         else if (!json_skip_value(cursor, 0)) { free(key); return 0; }
         free(key);
         if (!got_line && cursor->at >= cursor->end) return 0;
@@ -1209,7 +1213,7 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
             free(client->queued[i].uri);
         }
         client->queued_count = 0;
-        free(method); return 0;
+        free(method); return 1;
     }
     if (!has_error && result_start != NULL &&
         (request_kind == LSP_REQUEST_DEFINITION || request_kind == LSP_REQUEST_REFERENCES)) {
@@ -1298,7 +1302,7 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
             }
             if (lsp_ascii_case_equal(line, (size_t)(colon - line), "Content-Length")) {
                 JsonCursor value = { colon + 1, line + line_length };
-                if (++content_length_headers != 1 || !json_read_size(&value, &content_length)) {
+                if (++content_length_headers != 1 || !json_read_size(&value, &content_length, 1)) {
                     client->input.length = 0;
                     return -1;
                 }
