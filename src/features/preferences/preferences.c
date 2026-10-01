@@ -399,7 +399,11 @@ void axyne_preferences_apply_workspace(AxynePreferences *effective, const AxyneP
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_WORD_WRAP) effective->editor.word_wrap = workspace->editor.word_wrap;
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE) effective->editor.show_whitespace = workspace->editor.show_whitespace;
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_FAMILY) axyne_copy_text(effective->editor.font_family, sizeof(effective->editor.font_family), workspace->editor.font_family);
-    if (workspace->present_fields & AXYNE_PREFERENCE_THEME_PRESET) effective->theme.preset = workspace->theme.preset;
+    if (workspace->present_fields & AXYNE_PREFERENCE_THEME_PRESET)
+        /* A workspace preset changes the effective palette as well as the
+         * selected enum. Explicit workspace colors below still override the
+         * generated palette one field at a time. */
+        axyne_theme_defaults(&effective->theme, workspace->theme.preset);
     { const uint32_t bits[] = {AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL, AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER, AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED, AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND, AXYNE_PREFERENCE_THEME_EDITOR_TEXT}; uint32_t *target = &effective->theme.background; const uint32_t *source = &workspace->theme.background; for (size_t i = 0; i < 9; ++i) if (workspace->present_fields & bits[i]) target[i] = source[i]; }
     for (size_t i = 0; i < workspace->binding_count; ++i) if (workspace->binding_present[workspace->bindings[i].action]) { int index = axyne_binding_index(effective, workspace->bindings[i].action); if (index >= 0) effective->bindings[index] = workspace->bindings[i]; }
 }
