@@ -9,6 +9,15 @@ extern "C" {
 
 typedef struct AxyneSettings AxyneSettings;
 
+/*
+ * json_pointer follows RFC 6901 (including ~0 and ~1 escaping). The empty
+ * pointer addresses the complete document. get returns NOT_FOUND for a
+ * missing target. set replaces the root or a final object member (creating
+ * that member when its parent exists); array indices must already exist and
+ * the '-' append token is unsupported. remove returns NOT_FOUND for a missing
+ * target and rejects removal of the root document.
+ */
+
 AxyneStatus axyne_settings_load(const char *utf8_path,
                                 AxyneSettings **settings,
                                 AxyneError *error);
