@@ -387,7 +387,12 @@ done:
 AxyneStatus axyne_preferences_save(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { if (preferences == NULL || utf8_path == NULL) return AXYNE_STATUS_INVALID_ARGUMENT; return axyne_save_values(preferences, utf8_path, 0, error); }
 AxyneStatus axyne_preferences_load_global(const char *utf8_path, AxynePreferences *preferences, AxyneError *error) { return axyne_preferences_load(utf8_path, preferences, error); }
 AxyneStatus axyne_preferences_save_global(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { return axyne_preferences_save(preferences, utf8_path, error); }
-AxyneStatus axyne_preferences_load_workspace(const char *utf8_path, AxynePreferences *preferences, AxyneError *error) { return axyne_preferences_load(utf8_path, preferences, error); }
+AxyneStatus axyne_preferences_load_workspace(const char *utf8_path, AxynePreferences *preferences, AxyneError *error)
+{
+    AxyneStatus status = axyne_preferences_load(utf8_path, preferences, error);
+    if (status == AXYNE_STATUS_OK) axyne_preferences_mark_all(preferences);
+    return status;
+}
 AxyneStatus axyne_preferences_save_workspace(const AxynePreferences *preferences, const char *utf8_path, AxyneError *error) { if (preferences == NULL || utf8_path == NULL) return AXYNE_STATUS_INVALID_ARGUMENT; return axyne_save_values(preferences, utf8_path, 1, error); }
 
 void axyne_preferences_apply_workspace(AxynePreferences *effective, const AxynePreferences *workspace)
