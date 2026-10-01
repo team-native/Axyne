@@ -45,7 +45,7 @@
 | Workspace search and quick file | Select a root with the native folder picker; recursively match text or file names; skip binary and unreadable files; read one file at a time. Quick File matches names by case-insensitive substring and opens the selected file through the document manager. | AGENT_PARAMETER | ASSUMED |
 | Explorer tree ordering | Immediate children are displayed with directories first, then files, and names sorted lexicographically; the order is rebuilt after filesystem events. | AGENT_PARAMETER | ASSUMED |
 | Workspace selection lifetime | The selected workspace root and expanded tree state remain session-only; no project/workspace file is persisted. | USER + AGENT_PARAMETER | ASSUMED |
-| Windows reparse-point directories | Explorer rejects a selected reparse-point workspace root, skips child reparse-point directories, and fails the reload when UTF-8 conversion, allocation, or attribute inspection is uncertain; ordinary files and directories remain traversable. | USER + AGENT_PARAMETER | ASSUMED |
+| Windows reparse-point directories | Explorer enumerates Windows directories through handles opened with `FILE_FLAG_OPEN_REPARSE_POINT`; it rejects a reparse-point workspace root, omits child reparse-point directories, and fails closed when handle opening, UTF-8 conversion, allocation, or handle enumeration is uncertain. A directory handle is revalidated before its entries are traversed, so a path swap cannot redirect an already-open traversal. | USER + AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
 
 ## Shared contracts
