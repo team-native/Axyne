@@ -393,6 +393,7 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
 
 - (void)workspaceEvent
 {
+    _hasExplorerSelection = NO;
     [self refreshExplorer];
 }
 
