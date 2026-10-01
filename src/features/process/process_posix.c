@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -247,6 +248,8 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     state->stderr_read = errors[0]; errors[0] = -1;
     if (pthread_mutex_init(&state->write_lock, NULL) != 0) {
         (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
+        state->stdin_write = state->stdout_read = state->stderr_read = -1;
         status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
                                          "Unable to initialize process synchronization");
         goto cleanup;
@@ -256,6 +259,8 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     if (pthread_create(&state->worker, NULL, process_worker, process) != 0) {
         (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
         pthread_mutex_destroy(&state->write_lock);
+        close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
+        state->stdin_write = state->stdout_read = state->stderr_read = -1;
         status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
                                          "Unable to start process output worker");
         goto cleanup;
@@ -288,7 +293,9 @@ AxyneStatus axyne_process_write(AxyneProcess *process, const char *bytes,
     (void)pthread_sigmask(SIG_BLOCK, &blocked, &old_mask);
     (void)sigpending(&pending); had_pending = sigismember(&pending, SIGPIPE) == 1;
     while (offset < length) {
-        ssize_t written = write(state->stdin_write, bytes + offset, length - offset);
+        size_t remaining = length - offset;
+        size_t amount = remaining > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : remaining;
+        ssize_t written = write(state->stdin_write, bytes + offset, amount);
         if (written > 0) offset += (size_t)written;
         else if (written < 0 && errno == EINTR) continue;
         else {
