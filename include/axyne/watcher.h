@@ -13,7 +13,8 @@ typedef enum AxyneWatchEventKind {
     AXYNE_WATCH_CREATED = 0,
     AXYNE_WATCH_CHANGED,
     AXYNE_WATCH_DELETED,
-    AXYNE_WATCH_RENAMED
+    AXYNE_WATCH_RENAMED,
+    AXYNE_WATCH_RESCAN_REQUIRED
 } AxyneWatchEventKind;
 
 typedef struct AxyneWatchEvent {
@@ -31,7 +32,10 @@ typedef void (*AxyneWatchCallback)(const AxyneWatchEvent *event,
  * stopped. Callbacks run serially on the watcher-owned thread. Event strings
  * are valid only during the callback. stop waits for the thread and guarantees
  * no later callbacks. Do not call stop from the callback itself. The watcher
- * must be stopped before release.
+ * must be stopped before release. AXYNE_WATCH_RESCAN_REQUIRED uses path for
+ * the watched root and tells the consumer to rescan that root to restore its
+ * view. The watcher does not perform the rescan or guarantee automatic
+ * recovery after event loss.
  */
 AxyneStatus axyne_watcher_start(const char *utf8_directory,
                                 AxyneWatchCallback callback,
