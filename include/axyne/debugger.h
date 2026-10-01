@@ -27,6 +27,8 @@ typedef struct AxyneDebuggerBreakpoint {
     char *path;
     size_t line;
     int enabled;
+    char *number;
+    unsigned long pending_token;
 } AxyneDebuggerBreakpoint;
 
 typedef struct AxyneDebugger {
@@ -39,6 +41,11 @@ typedef struct AxyneDebugger {
     AxyneDebuggerBreakpoint *breakpoints;
     size_t breakpoint_count;
     size_t breakpoint_capacity;
+    AxyneProcess *exited_process;
+    unsigned long next_token;
+    char *mi_buffer;
+    size_t mi_buffer_length;
+    size_t mi_buffer_capacity;
 } AxyneDebugger;
 
 AxyneStatus axyne_debugger_initialize(AxyneDebugger *debugger,

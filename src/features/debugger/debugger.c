@@ -1,6 +1,7 @@
 #include "axyne/debugger.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +43,106 @@ static const char *debugger_command_text(AxyneDebuggerCommand command)
     case AXYNE_DEBUGGER_STEP_OUT: return "-exec-finish";
     }
     return NULL;
+}
+
+static void debugger_free_breakpoint_number(AxyneDebuggerBreakpoint *breakpoint)
+{
+    free(breakpoint->number);
+    breakpoint->number = NULL;
+    breakpoint->pending_token = 0;
+}
+
+static AxyneDebuggerBreakpoint *debugger_breakpoint_for_token(
+    AxyneDebugger *debugger, unsigned long token)
+{
+    size_t i;
+    for (i = 0; i < debugger->breakpoint_count; ++i) {
+        if (debugger->breakpoints[i].pending_token == token)
+            return &debugger->breakpoints[i];
+    }
+    return NULL;
+}
+
+static void debugger_parse_breakpoint_response(AxyneDebugger *debugger,
+                                               const char *line)
+{
+    unsigned long token;
+    unsigned long number;
+    char number_text[32];
+    AxyneDebuggerBreakpoint *breakpoint;
+    if (sscanf(line, "%lu^done,bkpt={number=\"%lu\"", &token,
+               &number) != 2)
+        return;
+    breakpoint = debugger_breakpoint_for_token(debugger, token);
+    if (breakpoint == NULL) return;
+    (void)snprintf(number_text, sizeof(number_text), "%lu", number);
+    free(breakpoint->number);
+    breakpoint->number = debugger_copy(number_text);
+    breakpoint->pending_token = 0;
+}
+
+static void debugger_parse_output(AxyneDebugger *debugger,
+                                  const char *bytes, size_t length)
+{
+    size_t i;
+    if (length == 0) return;
+    if (debugger->mi_buffer_length > SIZE_MAX - length - 1) return;
+    if (debugger->mi_buffer_length + length + 1 > debugger->mi_buffer_capacity) {
+        size_t capacity = debugger->mi_buffer_capacity == 0 ? 1024 :
+            debugger->mi_buffer_capacity;
+        while (capacity < debugger->mi_buffer_length + length + 1) {
+            if (capacity > SIZE_MAX / 2) return;
+            capacity *= 2;
+        }
+        {
+            char *grown = (char *)realloc(debugger->mi_buffer, capacity);
+            if (grown == NULL) return;
+            debugger->mi_buffer = grown;
+        }
+        debugger->mi_buffer_capacity = capacity;
+    }
+    memcpy(debugger->mi_buffer + debugger->mi_buffer_length, bytes, length);
+    debugger->mi_buffer_length += length;
+    debugger->mi_buffer[debugger->mi_buffer_length] = '\0';
+    for (i = 0; i < debugger->mi_buffer_length; ++i) {
+        if (debugger->mi_buffer[i] == '\n') {
+            debugger->mi_buffer[i] = '\0';
+            debugger_parse_breakpoint_response(debugger, debugger->mi_buffer);
+            memmove(debugger->mi_buffer, debugger->mi_buffer + i + 1,
+                    debugger->mi_buffer_length - i);
+            debugger->mi_buffer_length -= i + 1;
+            i = (size_t)-1;
+        }
+    }
+}
+
+static void debugger_process_output(AxyneProcess *process,
+                                    AxyneProcessStream stream,
+                                    const char *bytes, size_t length,
+                                    void *user_data)
+{
+    AxyneDebugger *debugger = (AxyneDebugger *)user_data;
+    if (debugger == NULL) return;
+    debugger_parse_output(debugger, bytes, length);
+    if (debugger->on_output != NULL)
+        debugger->on_output(process, stream, bytes, length,
+                            debugger->user_data);
+}
+
+static void debugger_process_exit(AxyneProcess *process, int exit_code,
+                                  void *user_data)
+{
+    AxyneDebugger *debugger = (AxyneDebugger *)user_data;
+    AxyneProcessExitFn on_exit;
+    void *callback_data;
+    if (debugger == NULL) return;
+    if (debugger->process == process) {
+        debugger->process = NULL;
+        debugger->exited_process = process;
+    }
+    on_exit = debugger->on_exit;
+    callback_data = debugger->user_data;
+    if (on_exit != NULL) on_exit(process, exit_code, callback_data);
 }
 
 AxyneStatus axyne_debugger_initialize(AxyneDebugger *debugger,
@@ -103,6 +204,59 @@ static AxyneStatus debugger_send(AxyneDebugger *debugger, const char *command,
     return status;
 }
 
+static AxyneStatus debugger_send_breakpoint_insert(AxyneDebugger *debugger,
+                                                   AxyneDebuggerBreakpoint *breakpoint,
+                                                   AxyneError *error)
+{
+    size_t i;
+    size_t escaped_length = 0;
+    size_t length;
+    unsigned long token;
+    char *command;
+    char *cursor;
+    AxyneStatus status;
+    for (i = 0; breakpoint->path[i] != '\0'; ++i)
+        escaped_length += (breakpoint->path[i] == '\\' ||
+                           breakpoint->path[i] == '"') ? 2 : 1;
+    length = escaped_length + 64;
+    command = (char *)malloc(length);
+    if (command == NULL) {
+        debugger_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                       "unable to allocate breakpoint command");
+        return AXYNE_STATUS_OUT_OF_MEMORY;
+    }
+    token = debugger->next_token++;
+    breakpoint->pending_token = token;
+    (void)snprintf(command, length, "%lu-break-insert \"", token);
+    cursor = command + strlen(command);
+    for (i = 0; breakpoint->path[i] != '\0'; ++i) {
+        if (breakpoint->path[i] == '\\' || breakpoint->path[i] == '"')
+            *cursor++ = '\\';
+        *cursor++ = breakpoint->path[i];
+    }
+    (void)snprintf(cursor, length - (size_t)(cursor - command), "\":%zu",
+                   breakpoint->line);
+    status = debugger_send(debugger, command, error);
+    free(command);
+    if (status != AXYNE_STATUS_OK) breakpoint->pending_token = 0;
+    return status;
+}
+
+static AxyneStatus debugger_send_breakpoint_delete(AxyneDebugger *debugger,
+                                                   AxyneDebuggerBreakpoint *breakpoint,
+                                                   AxyneError *error)
+{
+    char command[96];
+    if (breakpoint->number == NULL) {
+        debugger_error(error, AXYNE_STATUS_BUSY,
+                       "breakpoint number is not available yet");
+        return AXYNE_STATUS_BUSY;
+    }
+    (void)snprintf(command, sizeof(command), "-break-delete %s",
+                   breakpoint->number);
+    return debugger_send(debugger, command, error);
+}
+
 AxyneStatus axyne_debugger_start(AxyneDebugger *debugger,
                                  const AxyneDocument *document,
                                  AxyneProcessOutputFn on_output,
@@ -117,7 +271,7 @@ AxyneStatus axyne_debugger_start(AxyneDebugger *debugger,
     AxyneStatus status;
     if (debugger == NULL || document == NULL || document->path == NULL ||
         document->is_untitled || debugger->runner.executable == NULL ||
-        debugger->process != NULL) {
+        debugger->process != NULL || debugger->exited_process != NULL) {
         debugger_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                        "saved document and inactive debugger are required");
         return AXYNE_STATUS_INVALID_ARGUMENT;
@@ -139,15 +293,26 @@ AxyneStatus axyne_debugger_start(AxyneDebugger *debugger,
     process_spec.working_directory = debugger->runner.working_directory;
     process_spec.environment = (const char *const *)debugger->runner.environment;
     process_spec.environment_count = debugger->runner.environment_count;
-    process_spec.on_output = on_output;
-    process_spec.on_exit = on_exit;
-    process_spec.user_data = user_data;
+    process_spec.on_output = debugger_process_output;
+    process_spec.on_exit = debugger_process_exit;
+    process_spec.user_data = debugger;
+    debugger->on_output = on_output;
+    debugger->on_exit = on_exit;
+    debugger->user_data = user_data;
     status = axyne_process_start(&process_spec, &debugger->process, error);
     free(arguments);
     if (status == AXYNE_STATUS_OK) {
-        debugger->on_output = on_output;
-        debugger->on_exit = on_exit;
-        debugger->user_data = user_data;
+        debugger->next_token = 1;
+        debugger->mi_buffer_length = 0;
+        for (i = 0; i < debugger->breakpoint_count; ++i) {
+            debugger_free_breakpoint_number(&debugger->breakpoints[i]);
+            if (debugger->breakpoints[i].enabled &&
+                debugger_send_breakpoint_insert(debugger,
+                    &debugger->breakpoints[i], error) != AXYNE_STATUS_OK) {
+                axyne_process_terminate(debugger->process, NULL);
+                return error != NULL ? error->code : AXYNE_STATUS_IO_ERROR;
+            }
+        }
     }
     return status;
 }
@@ -170,7 +335,6 @@ AxyneStatus axyne_debugger_toggle_breakpoint(AxyneDebugger *debugger,
                                              AxyneError *error)
 {
     size_t i;
-    char command[1024];
     AxyneDebuggerBreakpoint *grown;
     if (debugger == NULL || path == NULL || path[0] == '\0' || line == 0) {
         debugger_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
@@ -180,13 +344,24 @@ AxyneStatus axyne_debugger_toggle_breakpoint(AxyneDebugger *debugger,
     for (i = 0; i < debugger->breakpoint_count; ++i) {
         AxyneDebuggerBreakpoint *breakpoint = &debugger->breakpoints[i];
         if (breakpoint->line == line && strcmp(breakpoint->path, path) == 0) {
-            breakpoint->enabled = !breakpoint->enabled;
             if (debugger->process != NULL) {
-                (void)snprintf(command, sizeof(command), "%s %zu",
-                    breakpoint->enabled ? "-break-insert" : "-break-delete",
-                    line);
-                return debugger_send(debugger, command, error);
+                if (breakpoint->enabled) {
+                    AxyneStatus status = debugger_send_breakpoint_delete(
+                        debugger, breakpoint, error);
+                    if (status == AXYNE_STATUS_OK) {
+                        breakpoint->enabled = 0;
+                        debugger_free_breakpoint_number(breakpoint);
+                    }
+                    return status;
+                }
+                {
+                    AxyneStatus status = debugger_send_breakpoint_insert(
+                        debugger, breakpoint, error);
+                    if (status == AXYNE_STATUS_OK) breakpoint->enabled = 1;
+                    return status;
+                }
             }
+            breakpoint->enabled = !breakpoint->enabled;
             debugger_clear_error(error);
             return AXYNE_STATUS_OK;
         }
@@ -211,12 +386,23 @@ AxyneStatus axyne_debugger_toggle_breakpoint(AxyneDebugger *debugger,
         return AXYNE_STATUS_OUT_OF_MEMORY;
     }
     debugger->breakpoints[debugger->breakpoint_count].line = line;
-    debugger->breakpoints[debugger->breakpoint_count].enabled = 1;
+    debugger->breakpoints[debugger->breakpoint_count].enabled = 0;
+    debugger->breakpoints[debugger->breakpoint_count].number = NULL;
+    debugger->breakpoints[debugger->breakpoint_count].pending_token = 0;
     ++debugger->breakpoint_count;
     if (debugger->process != NULL) {
-        (void)snprintf(command, sizeof(command), "-break-insert %zu", line);
-        return debugger_send(debugger, command, error);
+        AxyneDebuggerBreakpoint *breakpoint =
+            &debugger->breakpoints[debugger->breakpoint_count - 1];
+        AxyneStatus status = debugger_send_breakpoint_insert(debugger,
+                                                              breakpoint, error);
+        if (status == AXYNE_STATUS_OK) breakpoint->enabled = 1;
+        else {
+            free(breakpoint->path);
+            --debugger->breakpoint_count;
+        }
+        return status;
     }
+    debugger->breakpoints[debugger->breakpoint_count - 1].enabled = 1;
     debugger_clear_error(error);
     return AXYNE_STATUS_OK;
 }
@@ -229,9 +415,15 @@ void axyne_debugger_stop(AxyneDebugger *debugger)
 
 void axyne_debugger_release(AxyneDebugger *debugger)
 {
-    if (debugger == NULL || debugger->process == NULL) return;
-    axyne_process_release(debugger->process);
-    debugger->process = NULL;
+    if (debugger == NULL) return;
+    if (debugger->process != NULL) {
+        axyne_process_release(debugger->process);
+        debugger->process = NULL;
+    }
+    if (debugger->exited_process != NULL) {
+        axyne_process_release(debugger->exited_process);
+        debugger->exited_process = NULL;
+    }
 }
 
 int axyne_debugger_is_active(const AxyneDebugger *debugger)
@@ -246,7 +438,11 @@ void axyne_debugger_destroy(AxyneDebugger *debugger)
     axyne_debugger_release(debugger);
     axyne_runner_destroy(&debugger->runner);
     for (i = 0; i < debugger->breakpoint_count; ++i)
+    {
         free(debugger->breakpoints[i].path);
+        free(debugger->breakpoints[i].number);
+    }
     free(debugger->breakpoints);
+    free(debugger->mi_buffer);
     memset(debugger, 0, sizeof(*debugger));
 }
