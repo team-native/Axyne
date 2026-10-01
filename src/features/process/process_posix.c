@@ -23,6 +23,7 @@ typedef struct ProcessState {
     int stderr_read;
     pthread_t worker;
     pthread_mutex_t write_lock;
+    pthread_mutex_t child_lock;
     int child_done;
 } ProcessState;
 
@@ -146,7 +147,7 @@ static void *process_worker(void *opaque)
         }
         if (!child_done) {
             pid_t waited;
-            (void)pthread_mutex_lock(&state->write_lock);
+            (void)pthread_mutex_lock(&state->child_lock);
             waited = waitpid(state->child, &child_status, WNOHANG);
             if (waited == state->child || (waited < 0 && errno == ECHILD)) {
                 child_done = 1;
@@ -155,7 +156,7 @@ static void *process_worker(void *opaque)
                 child_done = 1;
                 state->child_done = 1;
             }
-            (void)pthread_mutex_unlock(&state->write_lock);
+            (void)pthread_mutex_unlock(&state->child_lock);
         }
         if (!child_done || !eof[0] || !eof[1]) {
             struct timespec pause = { 0, 1000000L };
@@ -254,10 +255,20 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
                                          "Unable to initialize process synchronization");
         goto cleanup;
     }
+    if (pthread_mutex_init(&state->child_lock, NULL) != 0) {
+        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        pthread_mutex_destroy(&state->write_lock);
+        close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
+        state->stdin_write = state->stdout_read = state->stderr_read = -1;
+        status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
+                                         "Unable to initialize process synchronization");
+        goto cleanup;
+    }
     process->implementation = state; process->on_output = spec->on_output;
     process->on_exit = spec->on_exit; process->user_data = spec->user_data;
     if (pthread_create(&state->worker, NULL, process_worker, process) != 0) {
         (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
+        pthread_mutex_destroy(&state->child_lock);
         pthread_mutex_destroy(&state->write_lock);
         close(state->stdin_write); close(state->stdout_read); close(state->stderr_read);
         state->stdin_write = state->stdout_read = state->stderr_read = -1;
@@ -320,13 +331,13 @@ AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
     if (process == NULL) return axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                                         "Process is null");
     state = (ProcessState *)process->implementation;
-    (void)pthread_mutex_lock(&state->write_lock);
+    (void)pthread_mutex_lock(&state->child_lock);
     if (!state->child_done && kill(state->child, SIGTERM) != 0 && errno != ESRCH) {
-        (void)pthread_mutex_unlock(&state->write_lock);
+        (void)pthread_mutex_unlock(&state->child_lock);
         return axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
                                        "Unable to terminate child process");
     }
-    (void)pthread_mutex_unlock(&state->write_lock);
+    (void)pthread_mutex_unlock(&state->child_lock);
     return axyne_process_set_error(error, AXYNE_STATUS_OK, "");
 }
 
@@ -335,11 +346,14 @@ void axyne_process_release(AxyneProcess *process)
     ProcessState *state;
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
-    (void)pthread_mutex_lock(&state->write_lock);
+    (void)pthread_mutex_lock(&state->child_lock);
     if (!state->child_done) (void)kill(state->child, SIGKILL);
-    (void)pthread_mutex_unlock(&state->write_lock);
+    (void)pthread_mutex_unlock(&state->child_lock);
     (void)pthread_join(state->worker, NULL);
+    (void)pthread_mutex_lock(&state->write_lock);
     close(state->stdin_write);
+    (void)pthread_mutex_unlock(&state->write_lock);
+    (void)pthread_mutex_destroy(&state->child_lock);
     (void)pthread_mutex_destroy(&state->write_lock);
     free(state); free(process);
 }
