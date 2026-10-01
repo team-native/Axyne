@@ -1,5 +1,6 @@
 #include "axyne/preferences.h"
 
+#include "axyne/filesystem.h"
 #include "axyne/settings.h"
 
 #include <stdio.h>
@@ -11,6 +12,43 @@ static void axyne_copy_text(char *destination, size_t capacity,
 {
     if (capacity == 0) return;
     (void)snprintf(destination, capacity, "%s", source != NULL ? source : "");
+}
+
+static AxyneStatus axyne_preferences_ensure_parent_directory(
+    const char *utf8_path, AxyneError *error)
+{
+    char *parent;
+    const char *separator;
+    size_t length;
+    AxyneDirectoryList entries = {0};
+    AxyneStatus status;
+
+    separator = strrchr(utf8_path, '/');
+    {
+        const char *backslash = strrchr(utf8_path, '\\');
+        if (backslash != NULL && (separator == NULL || backslash > separator))
+            separator = backslash;
+    }
+    if (separator == NULL) return AXYNE_STATUS_OK;
+    length = (size_t)(separator - utf8_path);
+    if (length == 0) return AXYNE_STATUS_OK;
+    parent = (char *)malloc(length + 1);
+    if (parent == NULL) return AXYNE_STATUS_OUT_OF_MEMORY;
+    memcpy(parent, utf8_path, length);
+    parent[length] = '\0';
+    status = axyne_fs_list_directory(parent, &entries, error);
+    if (status == AXYNE_STATUS_OK) {
+        axyne_fs_free_directory_list(&entries);
+        free(parent);
+        return AXYNE_STATUS_OK;
+    }
+    if (status != AXYNE_STATUS_NOT_FOUND) {
+        free(parent);
+        return status;
+    }
+    status = axyne_fs_create_directory(parent, error);
+    free(parent);
+    return status;
 }
 
 static void axyne_theme_defaults(AxyneThemePreferences *theme,
@@ -337,7 +375,9 @@ static AxyneStatus axyne_save_values(const AxynePreferences *preferences,
     { size_t written_bindings = 0; for (size_t i = 0; i < preferences->binding_count && i < AXYNE_PREFERENCE_BINDING_MAX; ++i) { const AxyneKeyBinding *binding = &preferences->bindings[i]; if (workspace && !preferences->binding_present[binding->action]) continue; int written = snprintf(json + length, sizeof(json) - length, "%s{\"action\":%u,\"modifiers\":%u,\"key\":", written_bindings == 0 ? "" : ",", (unsigned)binding->action, binding->modifiers); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; status = axyne_append_json_string(json, sizeof(json), &length, binding->key); if (status != AXYNE_STATUS_OK) goto done; written = snprintf(json + length, sizeof(json) - length, ",\"enabled\":%s}", binding->enabled ? "true" : "false"); if (written < 0 || (size_t)written >= sizeof(json) - length) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } length += (size_t)written; ++written_bindings; } }
     if (length + 2 > sizeof(json)) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; } json[length++] = ']'; json[length] = '\0';
     status = axyne_settings_set_json(settings, "/keybindings", json, error); if (status != AXYNE_STATUS_OK) goto done;
-    status = axyne_settings_save(settings, utf8_path, error);
+    status = axyne_preferences_ensure_parent_directory(utf8_path, error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_settings_save(settings, utf8_path, error);
 done:
 #undef SET_UINT
 #undef SET_BOOL

@@ -119,9 +119,6 @@ static char *axyne_macos_global_preferences_path(void)
     NSString *path;
     if (base == nil) return NULL;
     directory = [base stringByAppendingPathComponent:@"Axyne"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil error:nil];
     path = [directory stringByAppendingPathComponent:@"preferences.json"];
     return strdup([path UTF8String]);
 }
@@ -133,9 +130,6 @@ static char *axyne_macos_workspace_preferences_path(const char *root)
     rootPath = [NSString stringWithUTF8String:root];
     if (rootPath == nil) return NULL;
     directory = [rootPath stringByAppendingPathComponent:@".axyne"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil error:nil];
     path = [directory stringByAppendingPathComponent:@"preferences.json"];
     return strdup([path UTF8String]);
 }
