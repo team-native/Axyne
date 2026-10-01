@@ -6,15 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
-#include <pthread.h>
-#endif
-
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wchar.h>
 #else
+#include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -142,6 +140,7 @@ static char *probe_version(const char *executable, const char *argument,
     const char *script_arguments[4];
     AxyneStatus status;
     char *version = NULL;
+    int timed_out = 0;
 #ifdef _WIN32
     InitializeCriticalSection(&result.lock);
     InitializeConditionVariable(&result.changed);
@@ -201,23 +200,50 @@ static char *probe_version(const char *executable, const char *argument,
     }
     if (process == NULL || status != AXYNE_STATUS_OK) goto finish;
 #ifdef _WIN32
+    {
+        ULONGLONG deadline = GetTickCount64() + 2000;
     EnterCriticalSection(&result.lock);
-    while (!result.done) SleepConditionVariableCS(&result.changed, &result.lock, INFINITE);
+        while (!result.done) {
+            ULONGLONG now = GetTickCount64();
+            DWORD remaining;
+            if (now >= deadline) { timed_out = 1; break; }
+            remaining = (DWORD)(deadline - now);
+            if (!SleepConditionVariableCS(&result.changed, &result.lock, remaining) &&
+                GetLastError() == ERROR_TIMEOUT && !result.done) {
+                timed_out = 1;
+                break;
+            }
+        }
     LeaveCriticalSection(&result.lock);
+    }
 #else
-    pthread_mutex_lock(&result.lock);
-    while (!result.done) pthread_cond_wait(&result.changed, &result.lock);
-    pthread_mutex_unlock(&result.lock);
+    {
+        struct timespec deadline;
+        int wait_result = 0;
+        if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+            timed_out = 1;
+        } else {
+            deadline.tv_sec += 2;
+            pthread_mutex_lock(&result.lock);
+            while (!result.done && wait_result == 0)
+                wait_result = pthread_cond_timedwait(&result.changed, &result.lock, &deadline);
+            timed_out = !result.done;
+            pthread_mutex_unlock(&result.lock);
+        }
+    }
 #endif
 finish:
-    if (process != NULL) axyne_process_release(process);
+    if (process != NULL) {
+        if (timed_out) (void)axyne_process_terminate(process, NULL);
+        axyne_process_release(process);
+    }
 #ifdef _WIN32
     DeleteCriticalSection(&result.lock);
 #else
     pthread_cond_destroy(&result.changed);
     pthread_mutex_destroy(&result.lock);
 #endif
-    if (result.length != 0) {
+    if (!timed_out && result.length != 0) {
         size_t start = 0, end = result.length;
         while (start < end && (result.output[start] == '\r' || result.output[start] == '\n' || result.output[start] == ' ')) ++start;
         while (end > start && (result.output[end - 1] == '\r' || result.output[end - 1] == '\n' || result.output[end - 1] == ' ')) --end;
