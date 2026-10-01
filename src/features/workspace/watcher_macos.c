@@ -63,6 +63,8 @@ static int axyne_watch_event_path_is_safe(AxyneWatcher *watcher,
     root_length = strlen(watcher->directory);
     if (root_length == 1 && watcher->directory[0] == '/')
         return path[0] == '/';
+    while (root_length > 1 && watcher->directory[root_length - 1] == '/')
+        --root_length;
     return strncmp(path, watcher->directory, root_length) == 0 &&
            (path[root_length] == '\0' || path[root_length] == '/');
 }
