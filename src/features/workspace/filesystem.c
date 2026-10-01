@@ -213,47 +213,155 @@ static AxyneStatus axyne_nt_error(AxyneNtStatus status,
     return axyne_system_error(error, axyne_win_error(code), operation);
 }
 
+static AxyneStatus axyne_windows_verify_directory(HANDLE handle,
+                                                   AxyneError *error)
+{
+    FILE_ATTRIBUTE_TAG_INFO attributes;
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
+                                      &attributes, sizeof(attributes)))
+        return axyne_system_error(error, axyne_win_error(GetLastError()),
+                                  "inspect directory");
+    if ((attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "path component is not a directory");
+    if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return axyne_error(error, AXYNE_STATUS_PERMISSION_DENIED,
+                           "reparse-point path component is not allowed");
+    return AXYNE_STATUS_OK;
+}
+
+static int axyne_windows_component_valid(const wchar_t *component,
+                                          size_t length)
+{
+    size_t i;
+    if (component == NULL || length == 0 ||
+        (length == 1 && component[0] == L'.') ||
+        (length == 2 && component[0] == L'.' && component[1] == L'.'))
+        return 0;
+    for (i = 0; i < length; ++i)
+        if (component[i] == L'\\' || component[i] == L'/' ||
+            component[i] == L':') return 0;
+    return 1;
+}
+
+static AxyneStatus axyne_windows_open_component(
+    HANDLE parent, const wchar_t *component, size_t length, HANDLE *child,
+    AxyneNtCreateFileFn create_file, AxyneError *error)
+{
+    AxyneUnicodeString name;
+    AxyneObjectAttributes attributes;
+    AxyneIoStatusBlock io;
+    AxyneNtStatus native_status;
+    if (!axyne_windows_component_valid(component, length))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "path contains an invalid component");
+    if (length > (size_t)USHRT_MAX / sizeof(wchar_t))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "path component is too long");
+    name.Length = (USHORT)(length * sizeof(wchar_t));
+    name.MaximumLength = name.Length;
+    name.Buffer = (PWSTR)component;
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.Length = sizeof(attributes);
+    attributes.RootDirectory = parent;
+    attributes.ObjectName = &name;
+    attributes.Attributes = AXYNE_OBJ_CASE_INSENSITIVE;
+    memset(&io, 0, sizeof(io));
+    native_status = create_file(child,
+        FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY |
+        FILE_DELETE_CHILD | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+        &attributes, &io, NULL, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, AXYNE_FILE_OPEN,
+        AXYNE_FILE_DIRECTORY_FILE | AXYNE_FILE_SYNCHRONOUS_IO_NONALERT |
+            AXYNE_FILE_OPEN_REPARSE_POINT, NULL, 0);
+    if (native_status < 0) {
+        AxyneRtlNtStatusToDosErrorFn to_dos =
+            (AxyneRtlNtStatusToDosErrorFn)GetProcAddress(
+                GetModuleHandleW(L"ntdll.dll"), "RtlNtStatusToDosError");
+        return axyne_nt_error(native_status, to_dos, error,
+                              "open path component");
+    }
+    {
+        AxyneStatus status = axyne_windows_verify_directory(*child, error);
+        if (status != AXYNE_STATUS_OK) CloseHandle(*child);
+        return status;
+    }
+}
+
 static AxyneStatus axyne_windows_parent(const char *utf8_parent,
                                         HANDLE *parent, AxyneError *error)
 {
-    wchar_t *wide;
-    HANDLE handle;
-    FILE_ATTRIBUTE_TAG_INFO attributes;
+    AxyneNtCreateFileFn create_file;
+    AxyneNtSetInformationFileFn set_information;
+    AxyneRtlNtStatusToDosErrorFn to_dos;
+    wchar_t *wide = NULL, *root = NULL;
+    size_t length, root_length, position, component_start;
+    HANDLE current = INVALID_HANDLE_VALUE, next = INVALID_HANDLE_VALUE;
+    AxyneStatus status;
+    (void)set_information;
+    (void)to_dos;
     if (!axyne_valid_path(utf8_parent) || parent == NULL)
         return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                            "parent directory is required");
+    if (!axyne_nt_functions(&create_file, &set_information, &to_dos))
+        return axyne_error(error, AXYNE_STATUS_UNSUPPORTED,
+                           "handle-relative Windows operations are unavailable");
     wide = axyne_wide(utf8_parent);
     if (wide == NULL)
         return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                            "parent directory is not valid UTF-8");
-    handle = CreateFileW(wide,
+    length = wcslen(wide);
+    if (length >= 3 && wide[1] == L':' &&
+        (wide[2] == L'\\' || wide[2] == L'/')) {
+        root_length = 3;
+    } else if (length >= 5 && wide[0] == L'\\' && wide[1] == L'\\') {
+        position = 2;
+        while (position < length && wide[position] != L'\\' &&
+               wide[position] != L'/') ++position;
+        if (position == length) { free(wide); return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "UNC path is incomplete"); }
+        ++position;
+        component_start = position;
+        while (position < length && wide[position] != L'\\' &&
+               wide[position] != L'/') ++position;
+        if (position == component_start) { free(wide); return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "UNC path is incomplete"); }
+        root_length = position < length ? position + 1 : position;
+    } else {
+        free(wide);
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "parent path must be absolute");
+    }
+    root = (wchar_t *)malloc((root_length + 1) * sizeof(*root));
+    if (root == NULL) { free(wide); return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory opening parent"); }
+    memcpy(root, wide, root_length * sizeof(*root));
+    root[root_length] = L'\0';
+    current = CreateFileW(root,
         FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY |
         FILE_DELETE_CHILD | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         NULL);
-    free(wide);
-    if (handle == INVALID_HANDLE_VALUE)
-        return axyne_system_error(error, axyne_win_error(GetLastError()),
-                                  "open parent directory");
-    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
-                                      &attributes, sizeof(attributes))) {
-        DWORD code = GetLastError();
-        CloseHandle(handle);
+    free(root);
+    if (current == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError(); free(wide);
         return axyne_system_error(error, axyne_win_error(code),
-                                  "inspect parent directory");
+                                  "open parent root");
     }
-    if ((attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        CloseHandle(handle);
-        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
-                           "parent is not a directory");
+    status = axyne_windows_verify_directory(current, error);
+    if (status != AXYNE_STATUS_OK) { CloseHandle(current); free(wide); return status; }
+    position = root_length;
+    while (position < length) {
+        while (position < length && (wide[position] == L'\\' || wide[position] == L'/')) ++position;
+        if (position == length) break;
+        component_start = position;
+        while (position < length && wide[position] != L'\\' && wide[position] != L'/') ++position;
+        status = axyne_windows_open_component(current, wide + component_start,
+                                               position - component_start, &next,
+                                               create_file, error);
+        if (status != AXYNE_STATUS_OK) { CloseHandle(current); free(wide); return status; }
+        CloseHandle(current); current = next; next = INVALID_HANDLE_VALUE;
     }
-    if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        CloseHandle(handle);
-        return axyne_error(error, AXYNE_STATUS_PERMISSION_DENIED,
-                           "reparse-point parent is not allowed");
-    }
-    *parent = handle;
+    free(wide);
+    *parent = current;
     return AXYNE_STATUS_OK;
 }
 
@@ -435,30 +543,73 @@ static AxyneStatus axyne_windows_remove_at(const char *utf8_parent,
     return AXYNE_STATUS_OK;
 }
 #else
+static int axyne_posix_component_valid(const char *component, size_t length)
+{
+    size_t i;
+    if (component == NULL || length == 0 ||
+        (length == 1 && component[0] == '.') ||
+        (length == 2 && component[0] == '.' && component[1] == '.'))
+        return 0;
+    for (i = 0; i < length; ++i)
+        if (component[i] == '/') return 0;
+    return 1;
+}
+
 static int axyne_posix_open_parent(const char *utf8_parent,
                                    AxyneError *error)
 {
-    int fd;
-    struct stat info;
-    if (!axyne_valid_path(utf8_parent)) {
+    int current;
+    size_t length, position, start;
+    if (!axyne_valid_path(utf8_parent) || utf8_parent[0] != '/') {
         axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
-                    "parent directory is required");
+                    "parent directory must be absolute");
         return -1;
     }
-    fd = open(utf8_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
+    current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (current < 0) {
         axyne_system_error(error, axyne_errno_status(errno),
-                           "open parent directory");
+                           "open parent root");
         return -1;
     }
-    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
-        int saved = errno;
-        close(fd);
-        axyne_system_error(error, saved == 0 ? EINVAL : saved,
-                           "inspect parent directory");
-        return -1;
+    length = strlen(utf8_parent);
+    position = 1;
+    while (position < length) {
+        int next;
+        char *component;
+        int saved;
+        while (position < length && utf8_parent[position] == '/') ++position;
+        if (position == length) break;
+        start = position;
+        while (position < length && utf8_parent[position] != '/') ++position;
+        if (!axyne_posix_component_valid(utf8_parent + start,
+                                         position - start)) {
+            close(current);
+            axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                        "parent path contains an invalid component");
+            return -1;
+        }
+        component = (char *)malloc(position - start + 1);
+        if (component == NULL) {
+            close(current);
+            axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                        "out of memory opening parent");
+            return -1;
+        }
+        memcpy(component, utf8_parent + start, position - start);
+        component[position - start] = '\0';
+        next = openat(current, component,
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        saved = errno;
+        free(component);
+        if (next < 0) {
+            close(current);
+            return axyne_system_error(error, axyne_errno_status(saved),
+                                      "open parent component");
+        }
+        close(current);
+        current = next;
     }
-    return fd;
+    return current;
 }
 
 static AxyneStatus axyne_posix_create_at(const char *utf8_parent,
