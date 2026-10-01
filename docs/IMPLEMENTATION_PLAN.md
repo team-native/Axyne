@@ -88,10 +88,10 @@
 | EXPLORER-3 | Native file/folder creation, rename, and non-recursive removal UI | FS-1, EXPLORER-2 | COMPLETE (source-level implementation and Windows compilation passed; macOS build/runtime verification requires a macOS host) |
 | EXPLORER-4 | Watcher event delivery to UI thread and tree refresh/rescan | FS-1, EXPLORER-1, EXPLORER-2 | COMPLETE (Windows callback/UI message path and AppKit main-queue path implemented; macOS runtime verification requires a macOS host) |
 | PROC-1 | Cross-platform process API and runtime discovery | BASE-1 | COMPLETE |
-| RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | COMPLETE (RUN-1A through RUN-1C implemented; Windows Release build passed; macOS build/runtime pending macOS host) |
+| RUN-1 | User-configurable runners, terminal sessions, build/run output | PROC-1, EDIT-1 | COMPLETE (RUN-1 fix pass implemented; source diff validation passed; Windows Release build unverified because this host has no native compiler; macOS build/runtime pending macOS host) |
 | RUN-1A | Session-local runner configuration model and process-spec projection | PROC-1 | COMPLETE (Windows Release build and diff checks passed) |
 | RUN-1B | Lazy native terminal session, input, stop, and output display | PROC-1, RUN-1A, UI-1 | COMPLETE (Windows Release build passed; macOS build/runtime pending macOS host) |
-| RUN-1C | Active-document/project build and run output integration | PROC-1, RUN-1A, RUN-1B, EDIT-1 | COMPLETE (Windows Release build passed; macOS build/runtime pending macOS host) |
+| RUN-1C | Active-document/project build and run output integration | PROC-1, RUN-1A, RUN-1B, EDIT-1 | COMPLETE (RUN-1 fix pass source validation passed; Windows Release build unverified because this host has no native compiler; macOS build/runtime pending macOS host) |
 | LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | PENDING |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
