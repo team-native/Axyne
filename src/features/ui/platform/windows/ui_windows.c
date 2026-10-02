@@ -4230,6 +4230,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
                 AXYNE_EDIT_BACKGROUND_BRUSH = NULL;
             }
+            if (AXYNE_POPUP_BRUSH != NULL) {
+                DeleteObject(AXYNE_POPUP_BRUSH);
+                AXYNE_POPUP_BRUSH = NULL;
+            }
             if (state->watcher != NULL) {
                 axyne_watcher_stop(state->watcher);
                 axyne_watcher_release(state->watcher);
