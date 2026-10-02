@@ -3140,6 +3140,22 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_paint_shell(window, state);
         return 0;
     case WM_DESTROY:
+        /* Child controls still exist during the parent's WM_DESTROY. Their
+         * handles are already invalid by WM_NCDESTROY, so release every tab's
+         * independent Scintilla reference here while messages can reach it. */
+        if (state != NULL && state->editor != NULL) {
+            state->loading_editor = 1;
+            for (size_t i = 0; i < state->documents.count; ++i) {
+                AxyneDocument *doc = &state->documents.documents[i];
+                if (doc->owns_native_editor_document) {
+                    SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
+                                 (LPARAM)doc->native_editor_document);
+                    doc->native_editor_document = NULL;
+                    doc->owns_native_editor_document = 0;
+                }
+            }
+            state->editor = NULL;
+        }
         PostQuitMessage(0);
         return 0;
     case WM_NCDESTROY:
@@ -3191,17 +3207,6 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 axyne_watcher_release(state->watcher);
             }
             axyne_explorer_destroy(&state->explorer);
-            if (state->editor != NULL) {
-                for (size_t i = 0; i < state->documents.count; ++i) {
-                    AxyneDocument *doc = &state->documents.documents[i];
-                    if (doc->owns_native_editor_document)
-                        SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
-                                     (LPARAM)doc->native_editor_document);
-                }
-            }
-            if (state->editor != NULL) {
-                DestroyWindow(state->editor);
-            }
             if (state->lexilla_module != NULL) {
                 FreeLibrary(state->lexilla_module);
             }

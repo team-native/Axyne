@@ -92,4 +92,24 @@ if(APPLE)
         COMMAND $<TARGET_FILE:axyne_editor_runtime_tests>
     )
     set_tests_properties(axyne-editor-runtime PROPERTIES TIMEOUT 60)
+elseif(WIN32)
+    add_executable(axyne_editor_runtime_tests test_editor_runtime_windows.c)
+    target_include_directories(axyne_editor_runtime_tests PRIVATE
+        "${axyne_scintilla_SOURCE_DIR}/include")
+    target_link_libraries(axyne_editor_runtime_tests PRIVATE
+        axyne_ui axyne_debugger axyne_git axyne_lsp axyne_runner axyne_core)
+    if(MSVC)
+        target_compile_options(axyne_editor_runtime_tests PRIVATE /W4 /utf-8)
+    endif()
+    add_dependencies(axyne_editor_runtime_tests axyne)
+    add_custom_command(TARGET axyne_editor_runtime_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE_DIR:axyne>/Scintilla.dll"
+            "$<TARGET_FILE_DIR:axyne_editor_runtime_tests>/Scintilla.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE_DIR:axyne>/Lexilla.dll"
+            "$<TARGET_FILE_DIR:axyne_editor_runtime_tests>/Lexilla.dll"
+        VERBATIM)
+    add_test(NAME axyne-editor-runtime COMMAND $<TARGET_FILE:axyne_editor_runtime_tests>)
+    set_tests_properties(axyne-editor-runtime PROPERTIES TIMEOUT 60)
 endif()
