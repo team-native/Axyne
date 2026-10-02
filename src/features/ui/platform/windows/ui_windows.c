@@ -20,6 +20,7 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "../../editor_document.h"
 
 enum {
     AXYNE_TOP_MENU = 26,
@@ -105,7 +106,6 @@ typedef struct AxyneWindowState {
     int explorer_has_selection;
     int closing;
     int loading_editor;
-    int editor_document_initialized;
     AxyneRunnerConfig terminal_runner;
     AxyneRunnerConfig action_runner;
     AxyneDebugger debugger;
@@ -141,17 +141,6 @@ typedef struct AxyneScNotificationPrefix {
     int ch;
 } AxyneScNotificationPrefix;
 
-enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
-       SCI_GETMODIFY = 2159, SCI_SETSAVEPOINT = 2014,
-       SCI_CLEARALL = 2004, SCI_ADDTEXT = 2001, SCI_GETDOCPOINTER = 2357,
-       SCI_SETDOCPOINTER = 2358, SCI_CREATEDOCUMENT = 2375,
-       SCI_RELEASEDOCUMENT = 2377, SCN_SAVEPOINTREACHED = 2002,
-       SCN_SAVEPOINTLEFT = 2003, SCN_MODIFIED = 2008 };
-enum { SCI_GETCURRENTPOS = 2008, SCI_LINEFROMPOSITION = 2166,
-       SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
-       SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170,
-       SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
-enum { SCI_GETCOLUMN = 2129 };
 enum { AXYNE_SCN_CHARADDED = 2001, AXYNE_SCN_UPDATEUI = 2007 };
 
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
@@ -1830,10 +1819,10 @@ static int axyne_choose_path(HWND window, int save, char **path)
 
 static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
 {
+    (void)force;
     AxyneDocument *doc = axyne_active(state);
     if (doc == NULL || state->editor == NULL) return 1;
-    if (!force && !doc->is_dirty &&
-        !SendMessageA(state->editor, SCI_GETMODIFY, 0, 0)) return 1;
+    if (doc->native_editor_document == NULL) return 1;
     LRESULT length = SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
     if (length < 0 || (uint64_t)length >= SIZE_MAX) return 0;
     char *text = (char *)malloc((size_t)length + 1);
@@ -1841,10 +1830,16 @@ static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
     SendMessageA(state->editor, SCI_GETTEXT, (WPARAM)((size_t)length + 1),
                  (LPARAM)text);
     AxyneError error;
-    AxyneStatus status = axyne_documents_set_contents(&state->documents,
-        state->documents.active_index, text, (size_t)length, &error);
+    int changed = doc->length != (size_t)length ||
+        memcmp(doc->contents, text, (size_t)length) != 0;
+    int modified = SendMessageA(state->editor, SCI_GETMODIFY, 0, 0) != 0;
+    AxyneStatus status = changed ? axyne_documents_set_contents(&state->documents,
+        state->documents.active_index, text, (size_t)length, &error) : AXYNE_STATUS_OK;
     free(text);
-    if (status == AXYNE_STATUS_OK) axyne_lsp_sync_active(state);
+    if (status == AXYNE_STATUS_OK) {
+        doc->is_dirty = modified;
+        if (changed) axyne_lsp_sync_active(state);
+    }
     return status == AXYNE_STATUS_OK;
 }
 
@@ -1901,51 +1896,40 @@ static int axyne_confirm_document_close(HWND window, AxyneWindowState *state,
     if (answer == IDCANCEL) return 0;
     if (answer == IDYES) {
         if (!axyne_capture_editor(state)) return 0;
-        axyne_show_document(state, index);
+        if (!axyne_show_document(state, index)) return 0;
         return axyne_save_active(window, state);
     }
     return 1;
 }
 
+static intptr_t axyne_windows_editor_message(void *editor, unsigned int message,
+                                              uintptr_t w_param, intptr_t l_param)
+{
+    return (intptr_t)SendMessageA((HWND)editor, message, (WPARAM)w_param,
+                                 (LPARAM)l_param);
+}
+
 static int axyne_show_document(AxyneWindowState *state, size_t index)
 {
-    if (index >= state->documents.count) return 0;
+    if (index >= state->documents.count || state->editor == NULL) return 0;
     size_t previous_index = state->documents.active_index;
     (void)axyne_documents_set_active(&state->documents, index, NULL);
     AxyneDocument *doc = axyne_active(state);
     if (state->editor != NULL && doc != NULL) {
         state->loading_editor = 1;
-        if (!state->editor_document_initialized) {
-            doc->native_editor_document = (void *)(uintptr_t)SendMessageA(
-                state->editor, SCI_GETDOCPOINTER, 0, 0);
-            state->editor_document_initialized = 1;
-        } else if (doc->native_editor_document == NULL) {
-            LRESULT created = SendMessageA(state->editor, SCI_CREATEDOCUMENT,
-                                            (WPARAM)doc->length, 0);
-            if (created == 0) {
-                state->loading_editor = 0;
-                (void)axyne_documents_set_active(&state->documents,
-                                                   previous_index, NULL);
-                return 0;
-            }
-            doc->native_editor_document = (void *)(uintptr_t)created;
-            doc->owns_native_editor_document = 1;
-            SendMessageA(state->editor, SCI_SETDOCPOINTER, 0,
-                         (LPARAM)doc->native_editor_document);
-            SendMessageA(state->editor, SCI_ADDTEXT, (WPARAM)doc->length,
-                         (LPARAM)doc->contents);
-            if (!doc->is_dirty)
-                SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
-        } else {
-            SendMessageA(state->editor, SCI_SETDOCPOINTER, 0,
-                         (LPARAM)doc->native_editor_document);
-        }
+        int loaded = axyne_editor_load_document(doc, axyne_windows_editor_message,
+                                                state->editor);
         state->loading_editor = 0;
+        if (!loaded) {
+            (void)axyne_documents_set_active(&state->documents, previous_index, NULL);
+            return 0;
+        }
         axyne_apply_editor_lexer(state, doc);
         axyne_update_line_number_margin(state);
         axyne_update_brace_highlight(state);
     }
     axyne_refresh_action_controls(state);
+    SetFocus(state->editor);
     return 1;
 }
 
@@ -1972,7 +1956,7 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
     char *path = NULL;
     if (known_path == NULL && !axyne_choose_path(window, 0, &path)) return;
     const char *chosen = known_path != NULL ? known_path : path;
-    if (!axyne_capture_editor(state)) return;
+    if (!axyne_capture_editor(state)) { free(path); return; }
     size_t previous_count = state->documents.count;
     size_t previous_index = state->documents.active_index;
     size_t index = 0;
@@ -2002,6 +1986,16 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
     if (!axyne_capture_editor(state)) return;
     if (index >= state->documents.count ||
         !axyne_confirm_document_close(window, state, index)) return;
+    if (state->documents.count == 1) {
+        size_t replacement;
+        if (axyne_documents_new(&state->documents, &replacement, NULL) != AXYNE_STATUS_OK)
+            return;
+        if (!axyne_show_document(state, replacement)) {
+            (void)axyne_documents_close(&state->documents, replacement, NULL);
+            (void)axyne_documents_set_active(&state->documents, index, NULL);
+            return;
+        }
+    }
     AxyneDocument *doc = &state->documents.documents[index];
     if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
     if (doc->owns_native_editor_document && state->editor != NULL)
