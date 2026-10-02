@@ -141,6 +141,9 @@ elseif(APPLE)
             "ARCHS=${AXYNE_SCINTILLA_ARCHITECTURES}"
             "MACOSX_DEPLOYMENT_TARGET=${AXYNE_SCINTILLA_DEPLOYMENT_TARGET}"
             "CONFIGURATION_BUILD_DIR=${AXYNE_SCINTILLA_OUTPUT_DIR}"
+        COMMAND ${CMAKE_COMMAND}
+            "-DAXYNE_SCINTILLA_FRAMEWORK=${AXYNE_SCINTILLA_FRAMEWORK}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/packaging/validation/ensure-framework-runtime.cmake"
         WORKING_DIRECTORY "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla"
         DEPENDS
             "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla/Scintilla.xcodeproj/project.pbxproj"
