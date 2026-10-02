@@ -2953,7 +2953,9 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         UINT git_flags = state->explorer.root != NULL && state->git_process == NULL
             ? MF_ENABLED : MF_GRAYED;
         axyne_menu_add(menu, &pool, AXYNE_TERMINAL_START, L"새 터미널", NULL,
-                       state->terminal_process == NULL ? MF_ENABLED : MF_GRAYED);
+                       state->terminal_process == NULL &&
+                               !axyne_debugger_is_active(&state->debugger)
+                           ? MF_ENABLED : MF_GRAYED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
         axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE_PREFERENCES, L"작업 영역 설정...",
