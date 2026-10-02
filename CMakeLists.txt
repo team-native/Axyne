@@ -246,7 +246,6 @@ if(WIN32 OR APPLE)
                 "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks/Scintilla.framework"
             CONFIGURATIONS Release
             USE_SOURCE_PERMISSIONS
-            FOLLOW_SYMLINK_CHAIN
         )
     endif()
 endif()
