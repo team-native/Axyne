@@ -77,11 +77,7 @@ jobs:
             -P packaging/validation/validate-install.cmake
           cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
 
-          $debugOutput = & cmake `
-            '-DAXYNE_CONFIGURATION=Debug' `
-            '-DAXYNE_PLATFORM=Windows' `
-            '-DAXYNE_INSTALL_ROOT=unused' `
-            '-P' 'packaging/validation/validate-install.cmake' 2>&1
+          $debugOutput = & cpack --config build/CPackConfig.cmake -C Debug -B (Join-Path $packageDirectory 'debug') 2>&1
           $debugMessage = $debugOutput -join "`n"
           if ($LASTEXITCODE -eq 0 -or $debugMessage -notmatch 'Release-only') {
             throw "Debug packaging validation failed unexpectedly:`n$debugMessage"
@@ -113,7 +109,9 @@ jobs:
             -P packaging/validation/validate-install.cmake
           mkdir -p "$package_directory/productbuild" "$package_directory/dragndrop"
           cpack --config build/CPackConfig.cmake -G productbuild -C Release -B "$package_directory/productbuild"
-          cpack --config build/CPackConfig.cmake -G DragNDrop -C Release -B "$package_directory/dragndrop"
+          cpack --config build/CPackConfig.cmake -G DragNDrop -C Release \
+            -D CPACK_PACKAGING_INSTALL_PREFIX=/ \
+            -B "$package_directory/dragndrop"
 
           if cpack --config build/CPackConfig.cmake -G productbuild -C Debug -B "$package_directory/debug" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
             echo 'Debug packaging unexpectedly succeeded.' >&2
