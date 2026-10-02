@@ -100,6 +100,7 @@ typedef struct AxyneWindowState {
     HFONT font_glyph13; /* 13px: tab close glyph, toolbar glyphs */
     HFONT font_glyph14; /* 14px: toolbar glyphs */
     HFONT font_dot;     /* 7px: dirty marker */
+    HFONT font_output;  /* 12px mono: output and terminal panel text */
     AxyneDocumentSet documents;
     AxyneExplorer explorer;
     AxyneWatcher *watcher;
@@ -1322,11 +1323,13 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
     EnableWindow(state->debug_breakpoint, FALSE);
     axyne_refresh_action_controls(state);
     if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
-        WM_SETFONT, (WPARAM)state->code_font, TRUE);
+        WM_SETFONT, (WPARAM)(state->font_output != NULL ? state->font_output
+                                                       : state->code_font), TRUE);
     if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
         EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
     if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
-        WM_SETFONT, (WPARAM)state->code_font, TRUE);
+        WM_SETFONT, (WPARAM)(state->font_output != NULL ? state->font_output
+                                                       : state->code_font), TRUE);
     if (state->terminal_start != NULL) SendMessageA(state->terminal_start,
         WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     if (state->terminal_stop != NULL) SendMessageA(state->terminal_stop,
@@ -3034,6 +3037,26 @@ static size_t axyne_max_first_tab(AxyneWindowState *state, int width)
     return first;
 }
 
+static const wchar_t *const AXYNE_PANEL_LABELS[3] = {
+    L"출력", L"문제", L"터미널"
+};
+
+/* Figma panel tabs: items start 8px past the explorer column, 6px padding
+ * either side of the 11px label, 2px gaps. Paint and hit-test share this. */
+static RECT axyne_panel_tab_rect(AxyneWindowState *state, int index,
+                                 int panel_top)
+{
+    RECT rect = {0, panel_top, 0, panel_top + AXYNE_UI_PANEL_HEADER};
+    int x = AXYNE_SIDEBAR + 8;
+    int i;
+    for (i = 0; i <= index && i < 3; ++i) {
+        int width = 12 + axyne_measure_text(state->font_small, AXYNE_PANEL_LABELS[i]);
+        if (i == index) { rect.left = x; rect.right = x + width; }
+        x += width + 2;
+    }
+    return rect;
+}
+
 static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
 {
     int available = width > AXYNE_SIDEBAR ? width - AXYNE_SIDEBAR : 0;
@@ -3135,20 +3158,23 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
         AxyneExplorerNode *node = &state->explorer.nodes[i];
         wchar_t *name = axyne_wide(node->name);
         int x = 8 + (int)node->depth * AXYNE_UI_INDENT;
+        /* Figma rows: 10px chevron or 20px badge, a 6px gap, then the name. */
         RECT slot = {x, y, x + 10, y + AXYNE_UI_ROW};
-        RECT label = {x + 12, y, AXYNE_SIDEBAR - 8, y + AXYNE_UI_ROW};
-        if (state->explorer_has_selection && state->explorer_selection == i)
+        RECT label = {x + 16, y, AXYNE_SIDEBAR - 12, y + AXYNE_UI_ROW};
+        int selected = state->explorer_has_selection && state->explorer_selection == i;
+        if (selected)
             axyne_fill(dc, 0, y, AXYNE_SIDEBAR, y + AXYNE_UI_ROW, AXYNE_SELECTION_BG);
         if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
-            axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, slot,
+            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, slot,
                 axyne_explorer_is_expanded(&state->explorer, node->path)
                     ? L"⌄" : L"›", DT_CENTER);
         } else {
             slot.right = x + AXYNE_UI_BADGE_WIDTH;
             axyne_paint_badge(dc, state->badge_font, node->name, slot);
-            label.left = slot.right + 4;
+            label.left = slot.right + 6;
         }
-        axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, label,
+        axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
+                       ? RGB(255, 255, 255) : AXYNE_SIDEBAR_TEXT, label,
                        name != NULL ? name : L"(invalid name)", DT_LEFT);
         free(name);
         y += AXYNE_UI_ROW;
@@ -3348,21 +3374,22 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     }
     {
         RECT header = {12, editor_top, AXYNE_SIDEBAR - 8, editor_top + AXYNE_UI_EXPLORER_HEADER};
-        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, header, L"탐색기", DT_LEFT);
+        axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, header, L"탐색기", DT_LEFT);
     }
     axyne_paint_explorer(dc, state, editor_top, status_top);
     {
-        const wchar_t *labels[] = {L"출력", L"문제", L"터미널"};
-        const int lefts[] = {AXYNE_SIDEBAR + 8, AXYNE_SIDEBAR + 64, AXYNE_SIDEBAR + 120};
         size_t i;
         for (i = 0; i < 3; ++i) {
             int selected = (i == 0 && !state->terminal_panel_selected && !state->problems_panel_selected) ||
                 (i == 1 && state->problems_panel_selected) ||
                 (i == 2 && state->terminal_panel_selected);
-            RECT rect = {lefts[i], bottom_top, lefts[i] + (i == 2 ? 56 : 40),
-                         bottom_top + AXYNE_UI_PANEL_HEADER};
-            axyne_text_rect(dc, state->ui_font, selected ? AXYNE_TEXT : AXYNE_MUTED,
-                           rect, labels[i], DT_LEFT);
+            RECT rect = axyne_panel_tab_rect(state, (int)i, bottom_top);
+            RECT label = {rect.left + 6, rect.top, rect.right - 6, rect.bottom};
+            /* Figma keeps every label #737780; only the underline marks the
+             * selected tab. Custom palettes still brighten the selection. */
+            axyne_text_rect(dc, state->font_small,
+                           selected && !AXYNE_REFERENCE ? AXYNE_TEXT : AXYNE_MUTED,
+                           label, AXYNE_PANEL_LABELS[i], DT_LEFT);
             if (selected) axyne_fill(dc, rect.left, rect.bottom - 3,
                                      rect.right, rect.bottom, AXYNE_INDICATOR);
         }
@@ -3450,6 +3477,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->font_glyph13 = axyne_make_ui_font(-13, FW_NORMAL);
         state->font_glyph14 = axyne_make_ui_font(-14, FW_NORMAL);
         state->font_dot = axyne_make_ui_font(-7, FW_NORMAL);
+        state->font_output = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+            FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         axyne_open_scintilla(state, window, instance);
         axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
@@ -3531,12 +3561,17 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         {
             int panel_top = client.bottom - AXYNE_STATUS - AXYNE_BOTTOM;
             if (y >= panel_top && y < panel_top + AXYNE_UI_PANEL_HEADER) {
-                if (x >= AXYNE_SIDEBAR + 8 && x < AXYNE_SIDEBAR + 48)
-                    SendMessageW(window, WM_COMMAND, AXYNE_CMD_PANEL_OUTPUT, 0);
-                else if (x >= AXYNE_SIDEBAR + 64 && x < AXYNE_SIDEBAR + 104)
-                    SendMessageW(window, WM_COMMAND, AXYNE_CMD_PANEL_PROBLEMS, 0);
-                else if (x >= AXYNE_SIDEBAR + 120 && x < AXYNE_SIDEBAR + 176)
-                    SendMessageW(window, WM_COMMAND, AXYNE_CMD_PANEL_TERMINAL, 0);
+                static const UINT panel_commands[3] = {
+                    AXYNE_CMD_PANEL_OUTPUT, AXYNE_CMD_PANEL_PROBLEMS,
+                    AXYNE_CMD_PANEL_TERMINAL };
+                int panel_index;
+                for (panel_index = 0; panel_index < 3; ++panel_index) {
+                    RECT rect = axyne_panel_tab_rect(state, panel_index, panel_top);
+                    if (x >= rect.left && x < rect.right) {
+                        SendMessageW(window, WM_COMMAND, panel_commands[panel_index], 0);
+                        break;
+                    }
+                }
                 return 0;
             }
         }
@@ -3752,7 +3787,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if ((HWND)l_param == state->terminal_output ||
             (HWND)l_param == state->terminal_input) {
             HDC dc = (HDC)w_param;
-            SetTextColor(dc, AXYNE_TEXT);
+            /* Figma build output text is #a9aeb6 on #1d1f23. */
+            SetTextColor(dc, AXYNE_REFERENCE ? axyne_theme_color(0xa9aeb6)
+                                             : AXYNE_TEXT);
             SetBkColor(dc, AXYNE_OUTPUT_BG);
             return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
         }
@@ -4006,6 +4043,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->font_glyph13 != NULL) DeleteObject(state->font_glyph13);
             if (state->font_glyph14 != NULL) DeleteObject(state->font_glyph14);
             if (state->font_dot != NULL) DeleteObject(state->font_dot);
+            if (state->font_output != NULL) DeleteObject(state->font_output);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
