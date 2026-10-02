@@ -22,6 +22,8 @@ build `24:14516`, debug `24:14603`, tools `24:14695`, help `39:2402`.
 | Preferences window | 760x560 sidebar window; pages backed by real settings only: editor, font and color (theme), key bindings; pages with no backing setting (build, terminal, comparer) are omitted; new bool settings: line numbers, highlight current line, auto indent; rendering radio is Windows only | AGENT | ASSUMED |
 | Explorer outline | below the file tree: separator, "개요 - <file>" header (30px), 22px symbol rows from the symbol scanner, click jumps to the line | AGENT | ASSUMED |
 | Menus | Windows popup menus match the Figma menu frames; macOS keeps the system menu | AGENT | ASSUMED |
+| Problems ordering | problems sorted by severity, line, column; other-file groups ordered by their most severe problem, then file name (case-insensitive); groups default expanded, UI keeps the collapsed set; summary counts hints as information; list capped at 20000 problems | AGENT | ASSUMED |
+| Palette rows | file rows match the base name only (detail = directory relative to the workspace root); command rows match the Korean title and English keywords and show the shortcut (Ctrl or Cmd) as detail; symbol rows show kind badge f/#/T/v and "줄 N"; shortcuts follow the existing accelerators, macOS may differ per entry | AGENT | ASSUMED |
 
 ## Workflow rules (from AGENTS.md)
 
