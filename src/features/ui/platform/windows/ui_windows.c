@@ -3308,12 +3308,31 @@ static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
     return slots == 0 ? 1 : slots;
 }
 
+static HMODULE axyne_load_runtime_library(const wchar_t *name)
+{
+    HMODULE module = LoadLibraryExW(name, NULL,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    wchar_t path[MAX_PATH];
+    wchar_t *slash;
+    DWORD length;
+    size_t name_length;
+    size_t directory_length;
+    if (module != NULL) return module;
+    length = GetModuleFileNameW(NULL, path, (DWORD)(sizeof(path) / sizeof(*path)));
+    if (length == 0 || length >= sizeof(path) / sizeof(*path)) return NULL;
+    slash = wcsrchr(path, L'\\');
+    if (slash == NULL) return NULL;
+    directory_length = (size_t)(slash - path) + 1;
+    name_length = wcslen(name);
+    if (directory_length + name_length + 1 > sizeof(path) / sizeof(*path)) return NULL;
+    wcscpy(path + directory_length, name);
+    return LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
                                  HINSTANCE instance)
 {
-    state->scintilla_module = LoadLibraryExW(
-        L"Scintilla.dll", NULL,
-        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    state->scintilla_module = axyne_load_runtime_library(L"Scintilla.dll");
     if (state->scintilla_module == NULL) {
         return;
     }
@@ -3337,9 +3356,7 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     }
 
     SetWindowTextW(state->editor, L"Source editor");
-    state->lexilla_module = LoadLibraryExW(
-        L"Lexilla.dll", NULL,
-        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    state->lexilla_module = axyne_load_runtime_library(L"Lexilla.dll");
     if (state->lexilla_module != NULL) {
         state->create_lexer = (AxyneCreateLexer)(uintptr_t)GetProcAddress(
             state->lexilla_module, "CreateLexer");
