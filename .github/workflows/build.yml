@@ -68,7 +68,8 @@ jobs:
         run: |
           $stagingDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-install'
           $packageDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-packages'
-          New-Item -ItemType Directory -Force -Path $stagingDirectory, $packageDirectory | Out-Null
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-artifacts'
+          New-Item -ItemType Directory -Force -Path $stagingDirectory, $packageDirectory, $artifactDirectory | Out-Null
           cmake --install build --config Release --prefix $stagingDirectory
           cmake `
             "-DAXYNE_INSTALL_ROOT=$stagingDirectory" `
@@ -92,7 +93,8 @@ jobs:
           if ($null -eq $package) {
             throw 'CPack did not produce a Windows installer.'
           }
-          "path=$packageDirectory" >> $env:GITHUB_OUTPUT
+          Copy-Item -LiteralPath $package.FullName -Destination $artifactDirectory
+          "path=$artifactDirectory" >> $env:GITHUB_OUTPUT
 
       - name: Package macOS app bundle
         if: runner.os == 'macOS'
@@ -101,7 +103,8 @@ jobs:
         run: |
           staging_directory="$RUNNER_TEMP/Axyne-macos-install"
           package_directory="$RUNNER_TEMP/Axyne-macos-packages"
-          mkdir -p "$staging_directory" "$package_directory"
+          artifact_directory="$RUNNER_TEMP/Axyne-macos-artifacts"
+          mkdir -p "$staging_directory" "$package_directory" "$artifact_directory"
           cmake --install build --config Release --prefix "$staging_directory"
           cmake \
             -DAXYNE_INSTALL_ROOT="$staging_directory" \
@@ -131,7 +134,10 @@ jobs:
             echo 'CPack did not produce a macOS installer/package.' >&2
             exit 1
           fi
-          echo "path=$package_directory" >> "$GITHUB_OUTPUT"
+          find "$package_directory/productbuild" "$package_directory/dragndrop" \
+            -maxdepth 1 -type f \( -name '*.pkg' -o -name '*.dmg' \) \
+            -exec cp {} "$artifact_directory/" \;
+          echo "path=$artifact_directory" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows build artifact
         if: runner.os == 'Windows'
