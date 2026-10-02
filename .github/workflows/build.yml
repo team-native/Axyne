@@ -77,9 +77,12 @@ jobs:
             -P packaging/validation/validate-install.cmake
           cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
 
+          $PSNativeCommandUseErrorActionPreference = $false
           $debugOutput = & cpack --config build/CPackConfig.cmake -C Debug -B (Join-Path $packageDirectory 'debug') 2>&1
+          $debugExitCode = $LASTEXITCODE
           $debugMessage = $debugOutput -join "`n"
-          if ($LASTEXITCODE -eq 0 -or $debugMessage -notmatch 'Release-only') {
+          Write-Host $debugMessage
+          if ($debugExitCode -eq 0 -or $debugMessage -notmatch 'Release-only') {
             throw "Debug packaging validation failed unexpectedly:`n$debugMessage"
           }
 
