@@ -44,6 +44,12 @@ static void process_destroy(AxyneProcess *process)
     free(process);
 }
 
+static void process_reap_child(ProcessState *state)
+{
+    int status;
+    while (waitpid(state->child, &status, 0) < 0 && errno == EINTR) { }
+}
+
 static void process_try_deferred_destroy(AxyneProcess *process)
 {
     ProcessState *state = (ProcessState *)process->implementation;
@@ -55,7 +61,14 @@ static void process_try_deferred_destroy(AxyneProcess *process)
         destroy = 1;
     }
     (void)pthread_mutex_unlock(&state->child_lock);
-    if (destroy) process_destroy(process);
+    if (destroy) {
+        /* The worker deliberately uses WNOWAIT so the process-group ID stays
+         * reserved until the caller releases the handle. Deferred release is
+         * also a complete release, so it must reap the leader before freeing
+         * the state or a callback-triggered release leaves a zombie behind. */
+        process_reap_child(state);
+        process_destroy(process);
+    }
 }
 
 static unsigned char ascii_fold(unsigned char value)
