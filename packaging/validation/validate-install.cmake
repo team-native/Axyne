@@ -66,6 +66,16 @@ elseif(AXYNE_PLATFORM STREQUAL "macOS")
     require_path(
         "${app_root}/Contents/Frameworks/Scintilla.framework/Versions/A/Scintilla"
         "the macOS Scintilla framework runtime")
+    if(NOT IS_SYMLINK
+        "${app_root}/Contents/Frameworks/Scintilla.framework/Versions/Current")
+        message(FATAL_ERROR
+            "The macOS Scintilla framework has no Versions/Current symlink")
+    endif()
+    if(NOT IS_SYMLINK
+        "${app_root}/Contents/Frameworks/Scintilla.framework/Headers")
+        message(FATAL_ERROR
+            "The macOS Scintilla framework has no root Headers symlink")
+    endif()
     require_non_empty_file(
         "${app_root}/Contents/Resources/Scintilla-LICENSE.txt"
         "the macOS Scintilla license")
