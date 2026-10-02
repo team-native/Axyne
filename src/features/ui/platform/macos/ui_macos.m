@@ -825,13 +825,24 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         (void)[self sendEditorMessage:SCI_SETILEXER wParam:0
                                  lParam:(intptr_t)lexer];
         if (strcmp(language, "cpp") == 0) {
-            const unsigned int styles[] = { 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 15, 16 };
-            const uint32_t colors[] = { 0x5f8c5a, 0x5f8c5a, 0x5f8c5a, 0xd9b36c,
-                0xd98e73, 0xc79ad9, 0xc79ad9, 0xc79ad9, 0xd5d8dd, 0xd5d8dd,
-                0x8cc7c0, 0xe3cf86 };
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
+                "auto break case const continue default do else enum extern for goto "
+                "if inline register restrict return sizeof static struct switch typedef "
+                "union volatile while"];
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:1 lParam:(intptr_t)
+                "void char short int long float double signed unsigned bool size_t "
+                "ssize_t ptrdiff_t intptr_t uintptr_t FILE HWND HDC HMENU HFONT "
+                "HBRUSH HICON HANDLE HINSTANCE LRESULT WPARAM LPARAM UINT DWORD "
+                "WORD BYTE BOOL WCHAR LPCSTR LPCWSTR LPSTR LPWSTR COLORREF RECT POINT SIZE"];
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:3
+                lParam:(intptr_t)"NULL true false TRUE FALSE"];
+            const unsigned int styles[] = { 1, 2, 3, 15, 4, 5, 6, 7, 9, 10, 11, 16, 19 };
+            const uint32_t colors[] = { 0x7a828e, 0x7a828e, 0x7a828e, 0x7a828e,
+                0xd9b36c, 0xd98e73, 0xa3c98a, 0xa3c98a, 0xc79ad9, 0xd5d8dd,
+                0xd5d8dd, 0x7db5e3, 0x8cc7c0 };
             BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
             for (size_t i = 0; i < sizeof(styles) / sizeof(styles[0]); ++i) {
-                uint32_t color = reference ? colors[i] : (i < 3 ? _preferences.theme.muted :
+                uint32_t color = reference ? colors[i] : (i < 4 ? _preferences.theme.muted :
                     (styles[i] == 10 || styles[i] == 11 ? _preferences.theme.editor_text :
                      _preferences.theme.accent));
                 (void)[self sendEditorMessage:SCI_STYLESETFORE wParam:styles[i]
@@ -995,11 +1006,15 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:32
                               lParam:axyne_editor_color(_preferences.theme.editor_background)];
+        /* STYLECLEARALL copies the complete default style, including its font. */
+        [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
+        [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_STYLECLEARALL wParam:0 lParam:0];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:33
-                              lParam:axyne_editor_color(_preferences.theme.muted)];
+            lParam:axyne_editor_color(axyne_macos_reference_surfaces(&_preferences.theme)
+                ? 0x5a606a : _preferences.theme.muted)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:33
-                              lParam:axyne_editor_color(_preferences.theme.panel)];
+                              lParam:axyne_editor_color(_preferences.theme.editor_background)];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:STYLE_BRACELIGHT
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:STYLE_BRACELIGHT
@@ -1012,10 +1027,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_SETSELBACK wParam:1
                               lParam:axyne_editor_color(_preferences.theme.accent)];
-        [self sendEditorMessage:SCI_SETCARETFORE wParam:0
-                              lParam:axyne_editor_color(_preferences.theme.accent)];
-        [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
-        [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
+        [self sendEditorMessage:SCI_SETCARETFORE
+            wParam:axyne_editor_color(_preferences.theme.accent) lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEVISIBLE wParam:1 lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEBACK
+            wParam:axyne_editor_color(axyne_macos_reference_surfaces(&_preferences.theme)
+                ? 0x202328 : _preferences.theme.toolbar) lParam:0];
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETTABWIDTH wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
