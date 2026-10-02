@@ -1,0 +1,15 @@
+add_library(axyne_git STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/git.c"
+)
+target_include_directories(axyne_git PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(axyne_git PUBLIC axyne_process)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(axyne_git PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(axyne_git PRIVATE /W4)
+else()
+    target_compile_options(axyne_git PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+target_link_libraries(axyne PRIVATE axyne_git)
