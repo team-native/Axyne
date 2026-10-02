@@ -87,7 +87,7 @@ Windows PowerShell:
 - 측정 결과가 `--startup-budget-ms` 또는 `--memory-budget-mb`를 넘으면 exit code
   2를 반환합니다. 실행 실패나 샘플링 실패는 exit code 1입니다.
 
-JSON 출력의 `startup_ms.max`와 `peak_resident_mb`를 OS별 기준선에 기록하고,
+JSON 출력의 `startup_ms.max`와 `max_resident_mb`를 OS별 기준선에 기록하고,
 저메모리 개선 전후에는 동일한 빌드 구성·반복 횟수·settle window·실행 환경으로
 비교해야 합니다. 정확한 Windows/macOS 실측값은 해당 OS 호스트에서 이 명령을
 직접 실행한 결과로만 확정합니다.

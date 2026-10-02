@@ -502,7 +502,7 @@ static void axyne_perf_print_results(const AxynePerfOptions *options,
     if (options->json) {
         printf("{\"mode\":\"%s\",\"iterations\":%lu,\"completed\":%lu,"
                "\"startup_ms\":{\"min\":%.3f,\"avg\":%.3f,\"max\":%.3f},"
-               "\"peak_resident_mb\":%.3f,\"memory_budget_mb\":%lu,"
+               "\"max_resident_mb\":%.3f,\"memory_budget_mb\":%lu,"
                "\"startup_budget_ms\":%lu}\n",
                options->target == NULL ? "headless" : "target",
                results->iterations, results->completed,

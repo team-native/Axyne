@@ -131,7 +131,7 @@
 | PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | COMPLETE (shared JSON/preferences model and native Windows/AppKit integration implemented; Windows source compilation and diff checks passed; macOS build/runtime verification pending macOS host) |
 | PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | COMPLETE (CMake install manifest and CPack configuration implemented; native package generation remains host-tool dependent) |
 | PERF-1 | Opt-in headless and target-process startup/memory budget measurement | BASE-1 | COMPLETE (C17 benchmark target, Windows/macOS native measurement, CTest regression budget, and operator documentation; OS app measurements remain an explicit host verification step) |
-| AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
+| AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | COMPLETE (final diff audit, macOS headless/target-tool checks, CTest, and diff validation passed; native Axyne app build blocked by the host's Command Line Tools-only Xcode selection) |
 
 ## Excluded from this goal
 
