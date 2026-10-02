@@ -27,10 +27,13 @@
 @end
 
 static const CGFloat AXYNE_SIDEBAR = 248.0;
-static const CGFloat AXYNE_TOOLBAR = 40.0;
-static const CGFloat AXYNE_TABS = 36.0;
-static const CGFloat AXYNE_STATUS = 26.0;
-static const CGFloat AXYNE_BOTTOM = 158.0;
+/* These bands follow the 1440x900 Figma work area: toolbar 38px, tabs 34px,
+ * output panel 230px, and status bar 24px. The macOS titlebar remains owned
+ * by AppKit so its traffic-light controls stay native and accessible. */
+static const CGFloat AXYNE_TOOLBAR = 38.0;
+static const CGFloat AXYNE_TABS = 34.0;
+static const CGFloat AXYNE_STATUS = 24.0;
+static const CGFloat AXYNE_BOTTOM = 230.0;
 
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
@@ -2665,6 +2668,8 @@ else [_terminalInput setStringValue:@""];
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
         backing:NSBackingStoreBuffered defer:NO];
     [_window setTitle:_appName != nil ? _appName : @"Axyne"];
+    [_window setTitlebarAppearsTransparent:YES];
+    [_window setTitleVisibility:NSWindowTitleVisible];
     [_window setMinSize:NSMakeSize(800, 560)];
     AxyneWorkspaceView *workspace = [[[AxyneWorkspaceView alloc]
         initWithFrame:frame] autorelease];
