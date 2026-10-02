@@ -213,6 +213,7 @@ elseif(APPLE)
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.axyne.ide"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_ICON_FILE "Axyne.png"
         MACOSX_BUNDLE_COPYRIGHT "Copyright (C) ${AXYNE_AUTHOR}"
     )
     get_target_property(AXYNE_MACOS_BUNDLE_OUTPUT_NAME axyne OUTPUT_NAME)
@@ -242,6 +243,9 @@ elseif(APPLE)
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Lexilla.dylib"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/default.png"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/Axyne.png"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${axyne_scintilla_SOURCE_DIR}/License.txt"
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/Scintilla-LICENSE.txt"
@@ -314,6 +318,7 @@ if(WIN32 OR APPLE)
             "${CMAKE_CURRENT_BINARY_DIR}/version.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            "${CMAKE_CURRENT_SOURCE_DIR}/default.png"
             DESTINATION "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Resources"
             CONFIGURATIONS Release
         )
