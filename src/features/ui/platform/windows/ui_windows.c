@@ -488,6 +488,28 @@ static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
     free(old_text);
 }
 
+static void axyne_refresh_action_controls(AxyneWindowState *state)
+{
+    AxyneDocument *document;
+    int terminal_active;
+    int debugger_active;
+    if (state == NULL) return;
+    document = axyne_active(state);
+    terminal_active = state->terminal_process != NULL;
+    debugger_active = axyne_debugger_is_active(&state->debugger);
+    EnableWindow(state->terminal_start,
+                 !terminal_active && !debugger_active);
+    EnableWindow(state->terminal_stop, terminal_active);
+    EnableWindow(state->terminal_send, terminal_active);
+    EnableWindow(state->debug_start,
+                 !terminal_active && !debugger_active && document != NULL);
+    EnableWindow(state->debug_pause, debugger_active);
+    EnableWindow(state->debug_continue, debugger_active);
+    EnableWindow(state->debug_step_over, debugger_active);
+    EnableWindow(state->debug_breakpoint,
+                 document != NULL && document->path != NULL);
+}
+
 static void axyne_terminal_output(AxyneProcess *process,
                                   AxyneProcessStream stream,
                                   const char *bytes, size_t length,
@@ -584,6 +606,7 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     EnableWindow(state->terminal_stop, TRUE);
     state->active_action = 3;
     state->last_exit_failed = 0;
+    axyne_refresh_action_controls(state);
     (void)window;
 }
 
@@ -648,6 +671,7 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
     EnableWindow(state->debug_step_over, TRUE);
     EnableWindow(state->debug_breakpoint, TRUE);
     state->active_action = 4;
+    axyne_refresh_action_controls(state);
 }
 
 static void axyne_debugger_command_ui(AxyneWindowState *state,
@@ -977,6 +1001,7 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
     EnableWindow(state->debug_continue, FALSE);
     EnableWindow(state->debug_step_over, FALSE);
     EnableWindow(state->debug_breakpoint, FALSE);
+    axyne_refresh_action_controls(state);
     if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
         WM_SETFONT, (WPARAM)state->code_font, TRUE);
     if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
@@ -1230,8 +1255,9 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     AxyneProcessSpec process_spec;
     AxyneError error;
     AxyneStatus status;
-    if (state->terminal_process != NULL) {
-        const char *message = "Build or run is unavailable while a terminal session is active. Stop it first.\n";
+    if (state->terminal_process != NULL ||
+        axyne_debugger_is_active(&state->debugger)) {
+        const char *message = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
         axyne_terminal_append(state->terminal_output, message, strlen(message),
                               AXYNE_PROCESS_STDERR);
         return;
@@ -1658,6 +1684,7 @@ static int axyne_save_active(HWND window, AxyneWindowState *state)
     }
     SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
     axyne_update_title(window, state);
+    axyne_refresh_action_controls(state);
     return 1;
 }
 
@@ -1719,6 +1746,7 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
         }
         state->loading_editor = 0;
     }
+    axyne_refresh_action_controls(state);
     return 1;
 }
 
@@ -2197,6 +2225,15 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
 {
     HMENU menu = CreatePopupMenu();
     HMENU recent = CreatePopupMenu();
+    AxyneDocument *document = axyne_active(state);
+    UINT document_flags = document != NULL ? MF_ENABLED : MF_GRAYED;
+    UINT workspace_flags = state->explorer.root != NULL ? MF_ENABLED : MF_GRAYED;
+    UINT git_flags = state->explorer.root != NULL && state->git_process == NULL
+        ? MF_ENABLED : MF_GRAYED;
+    UINT saved_document_flags = document != NULL && !document->is_untitled &&
+        document->path != NULL ? MF_ENABLED : MF_GRAYED;
+    UINT action_flags = document != NULL && state->terminal_process == NULL &&
+        !axyne_debugger_is_active(&state->debugger) ? MF_ENABLED : MF_GRAYED;
     if (menu == NULL || recent == NULL) {
         if (menu != NULL) DestroyMenu(menu);
         if (recent != NULL) DestroyMenu(recent);
@@ -2232,6 +2269,21 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_LSP_REFERENCES,
                 L"LSP: Find References\tCtrl+Alt+R");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    EnableMenuItem(menu, AXYNE_CMD_SAVE, MF_BYCOMMAND | document_flags);
+    EnableMenuItem(menu, AXYNE_CMD_SAVE_AS, MF_BYCOMMAND | document_flags);
+    EnableMenuItem(menu, AXYNE_CMD_CLOSE, MF_BYCOMMAND | document_flags);
+    EnableMenuItem(menu, AXYNE_CMD_WORKSPACE_PREFERENCES,
+                   MF_BYCOMMAND | workspace_flags);
+    EnableMenuItem(menu, AXYNE_CMD_BUILD, MF_BYCOMMAND | action_flags);
+    EnableMenuItem(menu, AXYNE_CMD_RUN, MF_BYCOMMAND | action_flags);
+    EnableMenuItem(menu, AXYNE_CMD_GIT_STATUS, MF_BYCOMMAND | git_flags);
+    EnableMenuItem(menu, AXYNE_CMD_GIT_DIFF, MF_BYCOMMAND | git_flags);
+    EnableMenuItem(menu, AXYNE_CMD_GIT_STAGE_ALL, MF_BYCOMMAND | git_flags);
+    EnableMenuItem(menu, AXYNE_CMD_GIT_UNSTAGE_ALL, MF_BYCOMMAND | git_flags);
+    EnableMenuItem(menu, AXYNE_CMD_LSP_DEFINITION,
+                   MF_BYCOMMAND | saved_document_flags);
+    EnableMenuItem(menu, AXYNE_CMD_LSP_REFERENCES,
+                   MF_BYCOMMAND | saved_document_flags);
     for (size_t i = 0; i < state->documents.recent_count; ++i) {
         wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
         if (path != NULL) {
@@ -2724,6 +2776,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_continue, FALSE);
         EnableWindow(state->debug_step_over, FALSE);
         EnableWindow(state->debug_breakpoint, FALSE);
+        axyne_refresh_action_controls(state);
         InvalidateRect(window, NULL, FALSE);
         return 0;
     }
