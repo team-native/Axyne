@@ -338,7 +338,6 @@ if(WIN32 OR APPLE)
         # Versions/Current and the root framework links remain intact.
         install(SCRIPT
             "${CMAKE_CURRENT_BINARY_DIR}/install-scintilla-framework.cmake"
-            CONFIGURATIONS Release
         )
     endif()
 endif()
