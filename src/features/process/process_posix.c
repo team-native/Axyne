@@ -167,8 +167,10 @@ static void free_environment(char **environment)
 static void consume_sigpipe_if_pending(const sigset_t *blocked)
 {
     sigset_t pending;
+    int received_signal;
     (void)sigpending(&pending);
-    if (sigismember(&pending, SIGPIPE) == 1) (void)sigwait(blocked, NULL);
+    if (sigismember(&pending, SIGPIPE) == 1)
+        (void)sigwait(blocked, &received_signal);
 }
 
 static void *process_worker(void *opaque)
