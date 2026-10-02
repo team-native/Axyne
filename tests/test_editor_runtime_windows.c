@@ -72,10 +72,24 @@ int main(void)
     if (window == NULL) {
         fprintf(stderr, "CreateWindowExW failed: %lu\n", (unsigned long)GetLastError());
     } else if (state->editor == NULL) {
+        wchar_t module_path[32768];
+        DWORD module_length = GetModuleFileNameW(NULL, module_path,
+            (DWORD)(sizeof(module_path) / sizeof(*module_path)));
+        wchar_t *slash = module_length == 0 ? NULL : wcsrchr(module_path, L'\\');
+        DWORD scintilla_attributes = INVALID_FILE_ATTRIBUTES;
+        DWORD lexilla_attributes = INVALID_FILE_ATTRIBUTES;
+        if (slash != NULL) {
+            wcscpy(slash + 1, L"Scintilla.dll");
+            scintilla_attributes = GetFileAttributesW(module_path);
+            wcscpy(slash + 1, L"Lexilla.dll");
+            lexilla_attributes = GetFileAttributesW(module_path);
+        }
         fprintf(stderr, "Scintilla editor creation failed: scintilla=%p lexilla=%p "
-                        "lexer=%p error=%lu\n",
+                        "lexer=%p error=%lu files=%lu/%lu\n",
                 (void *)state->scintilla_module, (void *)state->lexilla_module,
-                (void *)state->create_lexer, (unsigned long)GetLastError());
+                (void *)state->create_lexer, (unsigned long)GetLastError(),
+                (unsigned long)scintilla_attributes,
+                (unsigned long)lexilla_attributes);
     }
     CHECK(window != NULL && state->editor != NULL);
     CHECK(state->scintilla_module != NULL && state->lexilla_module != NULL);
