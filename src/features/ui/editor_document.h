@@ -17,30 +17,45 @@ static int axyne_editor_load_document(AxyneDocument *document,
                                       AxyneEditorMessage send, void *editor)
 {
     if (document == NULL || document->length > (size_t)INTPTR_MAX) return 0;
+    intptr_t previous = send(editor, SCI_GETDOCPOINTER, 0, 0);
+    if (previous == 0) return 0;
+    send(editor, SCI_SETSTATUS, SC_STATUS_OK, 0);
     if (document->native_editor_document != NULL) {
+        if ((void *)previous == document->native_editor_document) return 1;
+        send(editor, SCI_ADDREFDOCUMENT, 0, previous);
         send(editor, SCI_SETDOCPOINTER, 0,
              (intptr_t)document->native_editor_document);
-        return (void *)send(editor, SCI_GETDOCPOINTER, 0, 0) ==
-               document->native_editor_document;
+        int bound = send(editor, SCI_GETSTATUS, 0, 0) == SC_STATUS_OK &&
+            (void *)send(editor, SCI_GETDOCPOINTER, 0, 0) ==
+                document->native_editor_document;
+        if (!bound) {
+            send(editor, SCI_SETSTATUS, SC_STATUS_OK, 0);
+            send(editor, SCI_SETDOCPOINTER, 0, previous);
+        }
+        send(editor, SCI_RELEASEDOCUMENT, 0, previous);
+        return bound;
     }
 
-    send(editor, SCI_SETSTATUS, SC_STATUS_OK, 0);
     /* Reserve during insertion instead of CreateDocument: a failed upstream
      * reserve can throw before it returns the caller-owned document pointer. */
     intptr_t created = send(editor, SCI_CREATEDOCUMENT, 0, 0);
     if (created == 0) return 0;
-    intptr_t previous = send(editor, SCI_GETDOCPOINTER, 0, 0);
-    if (previous == 0) {
+    if (send(editor, SCI_GETSTATUS, 0, 0) != SC_STATUS_OK) {
         send(editor, SCI_RELEASEDOCUMENT, 0, created);
         return 0;
     }
     send(editor, SCI_ADDREFDOCUMENT, 0, previous);
     send(editor, SCI_SETDOCPOINTER, 0, created);
-    send(editor, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
-    send(editor, SCI_ADDTEXT, document->length, (intptr_t)document->contents);
     int loaded = send(editor, SCI_GETSTATUS, 0, 0) == SC_STATUS_OK &&
-        send(editor, SCI_GETTEXTLENGTH, 0, 0) == (intptr_t)document->length;
+        send(editor, SCI_GETDOCPOINTER, 0, 0) == created;
+    if (loaded) {
+        send(editor, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
+        send(editor, SCI_ADDTEXT, document->length, (intptr_t)document->contents);
+        loaded = send(editor, SCI_GETSTATUS, 0, 0) == SC_STATUS_OK &&
+            send(editor, SCI_GETTEXTLENGTH, 0, 0) == (intptr_t)document->length;
+    }
     if (!loaded) {
+        send(editor, SCI_SETSTATUS, SC_STATUS_OK, 0);
         send(editor, SCI_SETDOCPOINTER, 0, previous);
         send(editor, SCI_RELEASEDOCUMENT, 0, created);
         send(editor, SCI_RELEASEDOCUMENT, 0, previous);
