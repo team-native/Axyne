@@ -36,6 +36,13 @@ function(require_non_empty_file path description)
     endif()
 endfunction()
 
+function(require_path_or_symlink path description)
+    if(NOT EXISTS "${path}" AND NOT IS_SYMLINK "${path}")
+        message(FATAL_ERROR
+            "Missing ${description}: ${path}")
+    endif()
+endfunction()
+
 set(install_root "${AXYNE_INSTALL_ROOT}")
 
 if(AXYNE_PLATFORM STREQUAL "Windows")
@@ -63,7 +70,7 @@ elseif(AXYNE_PLATFORM STREQUAL "macOS")
     require_path(
         "${app_root}/Contents/MacOS/${AXYNE_APP_EXECUTABLE}"
         "the macOS application executable")
-    require_path(
+    require_path_or_symlink(
         "${app_root}/Contents/Frameworks/Scintilla.framework/Versions/A/Scintilla"
         "the macOS Scintilla framework runtime")
     require_non_empty_file(
