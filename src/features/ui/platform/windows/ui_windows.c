@@ -31,7 +31,6 @@ enum {
     AXYNE_STATUS = AXYNE_UI_STATUS,
     AXYNE_SIDEBAR = AXYNE_UI_SIDEBAR,
     AXYNE_BOTTOM = AXYNE_UI_PANEL,
-    AXYNE_TAB_WIDTH = 184,
     AXYNE_MIN_CLIENT_WIDTH = 940
 };
 
@@ -75,6 +74,12 @@ static COLORREF AXYNE_ICON;
 static COLORREF AXYNE_ICON_OFF;
 static COLORREF AXYNE_PLACEHOLDER;
 static COLORREF AXYNE_SHORTCUT;
+static COLORREF AXYNE_TAB_STRIP;
+static COLORREF AXYNE_TAB_MARGIN;
+static COLORREF AXYNE_TAB_ACTIVE_TEXT;
+static COLORREF AXYNE_TAB_DOT;
+static COLORREF AXYNE_SIDEBAR_TEXT;
+static COLORREF AXYNE_SIDEBAR_MUTED;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -341,6 +346,12 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
     AXYNE_ICON_OFF = AXYNE_MUTED;
     AXYNE_PLACEHOLDER = AXYNE_MUTED;
     AXYNE_SHORTCUT = AXYNE_MUTED;
+    AXYNE_TAB_STRIP = AXYNE_TOOLBAR_BG;
+    AXYNE_TAB_MARGIN = AXYNE_TOOLBAR_BG;
+    AXYNE_TAB_ACTIVE_TEXT = AXYNE_TEXT;
+    AXYNE_TAB_DOT = AXYNE_MUTED;
+    AXYNE_SIDEBAR_TEXT = AXYNE_TEXT;
+    AXYNE_SIDEBAR_MUTED = AXYNE_MUTED;
     if (theme->background == 0x16171a && theme->panel == 0x1f2126 &&
         theme->toolbar == 0x1c1e22) {
         AXYNE_BUTTON_BG = axyne_theme_color(0x24262b);
@@ -358,6 +369,12 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
         AXYNE_ICON_OFF = axyne_theme_color(0x4f535b);
         AXYNE_PLACEHOLDER = axyne_theme_color(0x4f535b);
         AXYNE_SHORTCUT = axyne_theme_color(0x6c727c);
+        AXYNE_TAB_STRIP = axyne_theme_color(0x17191c);
+        AXYNE_TAB_MARGIN = axyne_theme_color(0x191b1f);
+        AXYNE_TAB_ACTIVE_TEXT = axyne_theme_color(0xe6e7ea);
+        AXYNE_TAB_DOT = axyne_theme_color(0x4f535b);
+        AXYNE_SIDEBAR_TEXT = axyne_theme_color(0xc4c8ce);
+        AXYNE_SIDEBAR_MUTED = axyne_theme_color(0x8b919b);
     }
     if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
         DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
@@ -2938,26 +2955,109 @@ static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
     return 1;
 }
 
+/* Figma tabs hug their content: 14px padding, badge, 8px gap, name, 8px gap,
+ * close glyph, 14px padding. Painting, hit-testing and scrolling share these. */
+static int axyne_tab_badge_width(AxyneWindowState *state, const char *title)
+{
+    AxyneFileBadge badge = axyne_ui_file_badge(title);
+    wchar_t *label;
+    int width;
+    if (badge.label[0] == '\0') return 8;
+    label = axyne_wide(badge.label);
+    if (label == NULL) return 20;
+    width = axyne_measure_text(state->tab_badge_font, label);
+    free(label);
+    return width;
+}
+
+static int axyne_tab_close_width(AxyneWindowState *state)
+{
+    return axyne_measure_text(state->font_glyph13, L"\u00d7");
+}
+
+static int axyne_tab_width(AxyneWindowState *state, size_t index)
+{
+    const AxyneDocument *doc = &state->documents.documents[index];
+    wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
+    int name_width = name != NULL ? axyne_measure_text(state->ui_font, name) : 0;
+    int width = 14 + axyne_tab_badge_width(state, doc->title) + 8 + name_width +
+                8 + axyne_tab_close_width(state) + 14;
+    free(name);
+    return width < 96 ? 96 : (width > 240 ? 240 : width);
+}
+
+static void axyne_tab_parts(AxyneWindowState *state, size_t index, int left,
+                            int top, int bottom, RECT *badge, RECT *title,
+                            RECT *close)
+{
+    const AxyneDocument *doc = &state->documents.documents[index];
+    int right = left + axyne_tab_width(state, index);
+    int close_width = axyne_tab_close_width(state);
+    badge->left = left + 14;
+    badge->right = badge->left + axyne_tab_badge_width(state, doc->title);
+    close->left = right - 14 - close_width;
+    close->right = right - 14;
+    title->left = badge->right + 8;
+    title->right = close->left - 8;
+    badge->top = title->top = close->top = top;
+    badge->bottom = title->bottom = close->bottom = bottom;
+}
+
+static size_t axyne_tabs_fit(AxyneWindowState *state, size_t first, int available)
+{
+    size_t count = 0;
+    int used = 0;
+    while (first + count < state->documents.count) {
+        int width = axyne_tab_width(state, first + count);
+        if (used + width > available) break;
+        used += width;
+        ++count;
+    }
+    return count;
+}
+
+/* Smallest first tab for which every later tab still fits. */
+static size_t axyne_max_first_tab(AxyneWindowState *state, int width)
+{
+    int available = width > AXYNE_SIDEBAR ? width - AXYNE_SIDEBAR : 0;
+    size_t first;
+    int used;
+    if (state->documents.count == 0) return 0;
+    first = state->documents.count - 1;
+    used = axyne_tab_width(state, first);
+    while (first > 0) {
+        int tab = axyne_tab_width(state, first - 1);
+        if (used + tab > available) break;
+        used += tab;
+        --first;
+    }
+    return first;
+}
+
 static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
 {
-    size_t slots = width > AXYNE_SIDEBAR
-        ? (size_t)((width - AXYNE_SIDEBAR) / AXYNE_TAB_WIDTH) : 0;
+    int available = width > AXYNE_SIDEBAR ? width - AXYNE_SIDEBAR : 0;
+    size_t slots;
     size_t max_first;
-    if (slots == 0) slots = 1;
     if (state->documents.count == 0) {
         state->first_visible_tab = 0;
-        return slots;
+        return 1;
     }
-    max_first = state->documents.count > slots ? state->documents.count - slots : 0;
+    max_first = axyne_max_first_tab(state, width);
     if (state->first_visible_tab > max_first) state->first_visible_tab = max_first;
     if (state->tab_reveal_index != state->documents.active_index) {
-        if (state->documents.active_index < state->first_visible_tab)
-            state->first_visible_tab = state->documents.active_index;
-        else if (state->documents.active_index >= state->first_visible_tab + slots)
-            state->first_visible_tab = state->documents.active_index - slots + 1;
-        state->tab_reveal_index = state->documents.active_index;
+        size_t active = state->documents.active_index;
+        if (active < state->first_visible_tab)
+            state->first_visible_tab = active;
+        else
+            while (state->first_visible_tab < active &&
+                   state->first_visible_tab + axyne_tabs_fit(state,
+                       state->first_visible_tab, available) <= active)
+                ++state->first_visible_tab;
+        state->tab_reveal_index = active;
     }
-    return slots;
+    slots = axyne_tabs_fit(state, state->first_visible_tab, available);
+    return slots == 0 ? 1 : slots;
 }
 
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
@@ -3123,8 +3223,12 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     axyne_fill(dc, 0, AXYNE_TOP_MENU - 1, width, AXYNE_TOP_MENU, AXYNE_BORDER);
     axyne_fill(dc, 0, AXYNE_TOP_MENU, width, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
                AXYNE_TOOLBAR_BG);
+    axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR - 1, width,
+               AXYNE_TOP_MENU + AXYNE_TOOLBAR, AXYNE_BORDER);
     axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR, width, editor_top,
-               AXYNE_TOOLBAR_BG);
+               AXYNE_TAB_STRIP);
+    axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR, AXYNE_SIDEBAR, editor_top,
+               AXYNE_TAB_MARGIN);
     axyne_fill(dc, 0, editor_top, AXYNE_SIDEBAR, status_top, AXYNE_PANEL);
     axyne_fill(dc, AXYNE_SIDEBAR, bottom_top, width, status_top, AXYNE_OUTPUT_BG);
     axyne_fill(dc, AXYNE_SIDEBAR, bottom_top, width,
@@ -3202,7 +3306,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             part.left += axyne_measure_text(state->ui_font, L"⌕") + 8;
             part.right = rect.right - 10 - shortcut - 8;
             axyne_text_rect(dc, state->font_small, AXYNE_PLACEHOLDER, part,
-                            L"파일 이동", DT_LEFT);
+                            L"파일 이동, > 명령 실행", DT_LEFT);
             part.left = rect.right - 10 - shortcut;
             part.right = rect.right - 10;
             axyne_text_rect(dc, state->font_tiny, AXYNE_SHORTCUT, part, L"Ctrl+P", DT_RIGHT);
@@ -3213,26 +3317,32 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     for (size_t i = state->first_visible_tab; i < state->documents.count &&
          i - state->first_visible_tab < visible_tabs && tab_left < width; ++i) {
         AxyneDocument *doc = &state->documents.documents[i];
-        int tab_right = tab_left + AXYNE_TAB_WIDTH;
+        int tab_right = tab_left + axyne_tab_width(state, i);
         int tab_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
         int saved_dc = SaveDC(dc);
-        RECT badge = {tab_left + 10, tab_top, tab_left + 38, editor_top};
-        RECT title = {tab_left + 42, tab_top, tab_right - 36, editor_top};
-        RECT close = {tab_right - 26, tab_top, tab_right - 6, editor_top};
+        int active = i == state->documents.active_index;
+        RECT badge, title, close;
+        /* Content row sits below the 2px active bar (Figma: 2px + 32px). */
+        axyne_tab_parts(state, i, tab_left, tab_top + 2, editor_top, &badge,
+                        &title, &close);
         IntersectClipRect(dc, AXYNE_SIDEBAR, tab_top, width, editor_top);
-        if (i == state->documents.active_index) {
+        if (active) {
             axyne_fill(dc, tab_left, tab_top, tab_right, editor_top, AXYNE_ACTIVE_TAB_BG);
             axyne_fill(dc, tab_left, tab_top, tab_right, tab_top + 2, AXYNE_INDICATOR);
         }
-        axyne_fill(dc, tab_right - 1, tab_top, tab_right, editor_top, AXYNE_BORDER);
+        if (!AXYNE_REFERENCE)
+            axyne_fill(dc, tab_right - 1, tab_top, tab_right, editor_top, AXYNE_BORDER);
         axyne_paint_badge(dc, state->tab_badge_font, doc->title, badge);
         wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
         if (name != NULL) {
-            axyne_text_rect(dc, state->ui_font, i == state->documents.active_index
-                ? AXYNE_TEXT : AXYNE_MUTED, title, name, DT_LEFT);
+            axyne_text_rect(dc, state->ui_font, active
+                ? AXYNE_TAB_ACTIVE_TEXT : AXYNE_MUTED, title, name, DT_LEFT);
             free(name);
         }
-        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, close, doc->is_dirty ? L"●" : L"×", DT_CENTER);
+        if (doc->is_dirty)
+            axyne_text_rect(dc, state->font_dot, AXYNE_TAB_DOT, close, L"\u25cf", DT_CENTER);
+        else
+            axyne_text_rect(dc, state->font_glyph13, AXYNE_MUTED, close, L"\u00d7", DT_CENTER);
         RestoreDC(dc, saved_dc);
         tab_left = tab_right;
     }
@@ -3331,7 +3441,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->badge_font = CreateFontW(-9, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
-        state->tab_badge_font = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+        state->tab_badge_font = CreateFontW(-11, 0, 0, 0, FW_BOLD, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         state->font_small = axyne_make_ui_font(-11, FW_NORMAL);
@@ -3436,17 +3546,21 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             size_t visible_tabs = axyne_visible_tabs(state, client.right);
             for (size_t i = state->first_visible_tab; i < state->documents.count &&
                  i - state->first_visible_tab < visible_tabs && left < client.right; ++i) {
-                if (x >= left && x < left + AXYNE_TAB_WIDTH && x < client.right) {
+                int tab_width = axyne_tab_width(state, i);
+                if (x >= left && x < left + tab_width && x < client.right) {
+                    RECT badge, title, close;
                     if (!axyne_capture_editor(state)) return 0;
-                    if (x >= left + AXYNE_TAB_WIDTH - 26 &&
-                        x < left + AXYNE_TAB_WIDTH - 6) axyne_close_tab(window, state, i);
+                    axyne_tab_parts(state, i, left, tab_y, tab_y + AXYNE_TABS,
+                                    &badge, &title, &close);
+                    if (x >= close.left - 6 && x < left + tab_width)
+                        axyne_close_tab(window, state, i);
                     else {
                         axyne_show_document(state, i);
                         axyne_update_title(window, state);
                     }
                     return 0;
                 }
-                left += AXYNE_TAB_WIDTH;
+                left += tab_width;
             }
         }
         break;
@@ -3499,8 +3613,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (point.x >= AXYNE_SIDEBAR && point.x < client.right &&
             point.y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR &&
             point.y < AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
-            size_t slots = axyne_visible_tabs(state, client.right);
-            size_t maximum = state->documents.count > slots ? state->documents.count - slots : 0;
+            size_t maximum;
+            (void)axyne_visible_tabs(state, client.right);
+            maximum = axyne_max_first_tab(state, client.right);
             int steps;
             state->tab_wheel_remainder += GET_WHEEL_DELTA_WPARAM(w_param) *
                 (message == WM_MOUSEHWHEEL ? 1 : -1);
