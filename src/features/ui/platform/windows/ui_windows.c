@@ -3312,21 +3312,37 @@ static HMODULE axyne_load_runtime_library(const wchar_t *name)
 {
     HMODULE module = LoadLibraryExW(name, NULL,
         LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    wchar_t path[MAX_PATH];
+    enum { AXYNE_MODULE_PATH_CAPACITY = 32768 };
+    wchar_t *path;
     wchar_t *slash;
     DWORD length;
     size_t name_length;
     size_t directory_length;
     if (module != NULL) return module;
-    length = GetModuleFileNameW(NULL, path, (DWORD)(sizeof(path) / sizeof(*path)));
-    if (length == 0 || length >= sizeof(path) / sizeof(*path)) return NULL;
+    path = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
+        AXYNE_MODULE_PATH_CAPACITY * sizeof(*path));
+    if (path == NULL) return NULL;
+    length = GetModuleFileNameW(NULL, path, AXYNE_MODULE_PATH_CAPACITY);
+    if (length == 0 || length >= AXYNE_MODULE_PATH_CAPACITY) {
+        HeapFree(GetProcessHeap(), 0, path);
+        return NULL;
+    }
     slash = wcsrchr(path, L'\\');
-    if (slash == NULL) return NULL;
+    if (slash == NULL) {
+        HeapFree(GetProcessHeap(), 0, path);
+        return NULL;
+    }
     directory_length = (size_t)(slash - path) + 1;
     name_length = wcslen(name);
-    if (directory_length + name_length + 1 > sizeof(path) / sizeof(*path)) return NULL;
+    if (directory_length + name_length + 1 > AXYNE_MODULE_PATH_CAPACITY) {
+        HeapFree(GetProcessHeap(), 0, path);
+        return NULL;
+    }
     wcscpy(path + directory_length, name);
-    return LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    module = LoadLibraryExW(path, NULL,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    HeapFree(GetProcessHeap(), 0, path);
+    return module;
 }
 
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
