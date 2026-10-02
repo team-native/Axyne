@@ -41,7 +41,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
                                      alpha:1.0];
 }
 
-@interface AxyneWorkspaceView : NSView {
+@interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     NSBundle *_scintillaBundle;
     AxyneDocumentSet _documents;
@@ -176,6 +176,8 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)setRecentMenu:(NSMenu *)menu;
 - (void)refreshRecentMenu;
 - (BOOL)captureEditor;
+- (void)refreshActionControls;
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem;
 - (BOOL)loadActiveDocument;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 - (void)findOrReplace:(BOOL)replace;
@@ -275,7 +277,8 @@ static void axyne_macos_lsp_status(AxyneWorkspaceView *view, const char *text)
     if (copy == NULL) return;
     [view retain];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [view setLspStatus:[NSString stringWithUTF8String:copy] ?: @"LSP"];
+        NSString *status = [NSString stringWithUTF8String:copy];
+        [view setLspStatus:status != nil ? status : @"LSP"];
         free(copy);
         [view release];
     });
@@ -425,8 +428,9 @@ static NSString *axyne_macos_runner_lines(char **values, size_t count)
 {
     NSMutableString *result = [NSMutableString string];
     for (size_t i = 0; i < count; ++i) {
+        NSString *value = [NSString stringWithUTF8String:values[i]];
         if (i != 0) [result appendString:@"\n"];
-        [result appendString:[NSString stringWithUTF8String:values[i]] ?: @""];
+        [result appendString:value != nil ? value : @""];
     }
     return result;
 }
@@ -527,6 +531,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [_debugBreakpoint setAction:@selector(toggleBreakpoint:)];
         [_debugBreakpoint setEnabled:NO]; [self addSubview:_debugBreakpoint];
         [self applyPreferences];
+        [self refreshActionControls];
     }
     return self;
 }
@@ -536,6 +541,58 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     if (_documents.count == 0 || _documents.active_index >= _documents.count)
         return NULL;
     return &_documents.documents[_documents.active_index];
+}
+
+- (void)refreshActionControls
+{
+    AxyneDocument *document = [self activeDocument];
+    BOOL terminalActive = _terminalProcess != NULL;
+    BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
+    BOOL savedDocument = document != NULL && !document->is_untitled &&
+        document->path != NULL && !document->is_dirty;
+    [_terminalStart setEnabled:!terminalActive && !debuggerActive];
+    [_terminalStop setEnabled:terminalActive];
+    [_terminalSend setEnabled:terminalActive];
+    [_debugStart setEnabled:!terminalActive && !debuggerActive && savedDocument];
+    [_debugPause setEnabled:debuggerActive && savedDocument];
+    [_debugContinue setEnabled:debuggerActive && savedDocument];
+    [_debugNext setEnabled:debuggerActive && savedDocument];
+    [_debugBreakpoint setEnabled:savedDocument];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem
+{
+    SEL action = [menuItem action];
+    AxyneDocument *document = [self activeDocument];
+    BOOL hasDocument = document != NULL;
+    BOOL savedDocument = hasDocument && !document->is_untitled &&
+        document->path != NULL && !document->is_dirty;
+    BOOL terminalActive = _terminalProcess != NULL;
+    BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
+    if (action == @selector(saveDocument:) ||
+        action == @selector(saveDocumentAs:) ||
+        action == @selector(closeDocument:)) return hasDocument;
+    if (action == @selector(buildDocument:) ||
+        action == @selector(runDocument:))
+        return hasDocument && !terminalActive && !debuggerActive;
+    if (action == @selector(startDebugger:))
+        return savedDocument && !terminalActive && !debuggerActive;
+    if (action == @selector(debugCommand:))
+        return debuggerActive && savedDocument;
+    if (action == @selector(toggleBreakpoint:)) return savedDocument;
+    if (action == @selector(startTerminal:))
+        return !terminalActive && !debuggerActive;
+    if (action == @selector(stopTerminal:) ||
+        action == @selector(sendTerminal:)) return terminalActive;
+    if (action == @selector(showWorkspacePreferences:))
+        return _workspacePreferencesPath != NULL;
+    if (action == @selector(showGitStatus:) ||
+        action == @selector(showGitDiff:) ||
+        action == @selector(stageAllGitChanges:) ||
+        action == @selector(unstageAllGitChanges:))
+        return _explorer.root != NULL && _gitProcess == NULL;
+    if (action == @selector(navigateLspReferences:)) return savedDocument;
+    return YES;
 }
 
 - (NSInteger)sendEditorMessage:(unsigned int)message wParam:(uintptr_t)wParam
@@ -554,8 +611,10 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     const char *fontUTF8 = [fontName UTF8String];
     unsigned int fontSize = _preferences.editor.font_size;
     if (fontSize < 6 || fontSize > 72) fontSize = 11;
-    [_terminalOutput setFont:[NSFont fontWithName:fontName size:fontSize]
-                         ?: [NSFont userFixedPitchFontOfSize:fontSize]];
+    NSFont *terminalFont = [NSFont fontWithName:fontName size:fontSize];
+    if (terminalFont == nil)
+        terminalFont = [NSFont userFixedPitchFontOfSize:fontSize];
+    [_terminalOutput setFont:terminalFont];
     [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalOutput setBackgroundColor:axyne_preference_color(_preferences.theme.background)];
     if (_editorView != nil) {
@@ -735,6 +794,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     _loadingEditor = NO;
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
+    [self refreshActionControls];
     return YES;
 }
 
@@ -743,8 +803,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneDocument *doc = [self activeDocument];
     NSString *name = doc != NULL && doc->title != NULL
         ? [NSString stringWithUTF8String:doc->title] : @"Untitled";
+    if (name == nil) name = @"Untitled";
     [[self window] setTitle:[NSString stringWithFormat:@"%@%@ - Axyne",
-        doc != NULL && doc->is_dirty ? @"● " : @"", name ?: @"Untitled"]];
+        doc != NULL && doc->is_dirty ? @"● " : @"", name]];
 }
 
 - (void)notification:(SCNotification *)notification
@@ -769,6 +830,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [self setNeedsDisplay:YES];
         [self updateWindowTitle];
     }
+    [self refreshActionControls];
 }
 
 - (BOOL)saveActiveToPath:(NSString *)path
@@ -780,8 +842,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         _documents.active_index, utf8Path, &error);
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        NSString *detail = [NSString stringWithUTF8String:error.message];
         [alert setMessageText:@"Could not save file"];
-        [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
+        [alert setInformativeText:detail != nil ? detail : @""];
         [alert runModal];
         return NO;
     }
@@ -789,6 +852,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshRecentMenu];
+    [self refreshActionControls];
     return YES;
 }
 
@@ -807,8 +871,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         _documents.active_index, &error);
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        NSString *detail = [NSString stringWithUTF8String:error.message];
         [alert setMessageText:@"Could not save file"];
-        [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
+        [alert setInformativeText:detail != nil ? detail : @""];
         [alert runModal];
         return NO;
     }
@@ -816,6 +881,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshRecentMenu];
+    [self refreshActionControls];
     return YES;
 }
 
@@ -846,8 +912,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [path UTF8String], &index, &error);
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        NSString *detail = [NSString stringWithUTF8String:error.message];
         [alert setMessageText:@"Could not open file"];
-        [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
+        [alert setInformativeText:detail != nil ? detail : @""];
         [alert runModal];
         return;
     }
@@ -877,16 +944,17 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error
 {
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:prefix ?: @"Workspace operation failed"];
-    [alert setInformativeText:error != NULL
-        ? ([NSString stringWithUTF8String:error->message] ?: @"") : @""];
+    NSString *detail = error != NULL
+        ? [NSString stringWithUTF8String:error->message] : nil;
+    [alert setMessageText:prefix != nil ? prefix : @"Workspace operation failed"];
+    [alert setInformativeText:detail != nil ? detail : @""];
     [alert runModal];
 }
 
 - (void)showWorkspaceMessage:(NSString *)message
 {
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:message ?: @"Workspace operation failed"];
+    [alert setMessageText:message != nil ? message : @"Workspace operation failed"];
     [alert runModal];
 }
 
@@ -1107,7 +1175,8 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     }
     for (size_t i = 0; i < _documents.recent_count; ++i) {
         NSString *path = [NSString stringWithUTF8String:_documents.recent_paths[i]];
-        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:path ?: @"(Invalid path)"
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:
+            path != nil ? path : @"(Invalid path)"
             action:@selector(openRecent:) keyEquivalent:@""];
         [item setTarget:self];
         [item setRepresentedObject:path];
@@ -1120,7 +1189,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
 {
     AxyneDocument *doc = &_documents.documents[index];
     if (!doc->is_dirty) return YES;
-    NSString *name = [NSString stringWithUTF8String:doc->title ?: "Untitled"];
+    NSString *name = [NSString stringWithUTF8String:
+        doc->title != NULL ? doc->title : "Untitled"];
+    if (name == nil) name = @"Untitled";
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     [alert setMessageText:[NSString stringWithFormat:@"Save changes to %@?", name]];
     [alert addButtonWithTitle:@"Save"];
@@ -1351,7 +1422,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     NSString *fontFamily = [self askForText:@"Editor Preferences" label:@"Font family: blank for native default"];
     if (fontFamily == nil) return NO;
     if ([[fontFamily dataUsingEncoding:NSUTF8StringEncoding] length] >= AXYNE_PREFERENCE_TEXT_MAX) { [self showWorkspaceMessage:@"The font family is invalid."]; return NO; }
-    (void)snprintf(next.editor.font_family, sizeof(next.editor.font_family), "%s", [fontFamily UTF8String] ?: "");
+    const char *fontFamilyUTF8 = [fontFamily UTF8String];
+    (void)snprintf(next.editor.font_family, sizeof(next.editor.font_family), "%s",
+                   fontFamilyUTF8 != NULL ? fontFamilyUTF8 : "");
     if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
     NSString *showWhitespace = [[self askForText:@"Editor Preferences" label:@"Show whitespace: yes or no"] lowercaseString];
     if (showWhitespace == nil || (![showWhitespace isEqualToString:@"yes"] && ![showWhitespace isEqualToString:@"no"])) { if (showWhitespace != nil) [self showWorkspaceMessage:@"Enter yes or no."]; return NO; }
@@ -1590,8 +1663,9 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     if (status != AXYNE_STATUS_OK) {
         (void)pthread_mutex_destroy(&run->lock);
         free(run);
-        [self showWorkspaceMessage:[NSString stringWithUTF8String:error.message]
-                                      ?: @"Unable to start Git operation."];
+        NSString *message = [NSString stringWithUTF8String:error.message];
+        [self showWorkspaceMessage:message != nil
+            ? message : @"Unable to start Git operation."];
         return;
     }
     _gitProcess = run->process;
@@ -1748,8 +1822,10 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         char **paths = NULL; size_t count = 0;
         if (axyne_search_files([[[folder URL] path] UTF8String], [query UTF8String],
                                &paths, &count, NULL) == AXYNE_STATUS_OK) {
-            for (size_t i = 0; i < count; ++i)
-                [choices addItemWithTitle:[NSString stringWithUTF8String:paths[i]] ?: @"(invalid path)"];
+            for (size_t i = 0; i < count; ++i) {
+                NSString *path = [NSString stringWithUTF8String:paths[i]];
+                [choices addItemWithTitle:path != nil ? path : @"(invalid path)"];
+            }
             if (count > 0) {
                 NSAlert *pick = [[[NSAlert alloc] init] autorelease];
                 [pick setMessageText:@"Choose a file to open"]; [pick setAccessoryView:choices];
@@ -1764,8 +1840,10 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         if (axyne_search_workspace([[[folder URL] path] UTF8String], [query UTF8String],
                                    0, &results, NULL) == AXYNE_STATUS_OK) {
             for (size_t i = 0; i < results.count; ++i) {
-                NSString *path = [NSString stringWithUTF8String:results.items[i].path] ?: @"";
-                NSString *preview = [NSString stringWithUTF8String:results.items[i].preview] ?: @"";
+                NSString *path = [NSString stringWithUTF8String:results.items[i].path];
+                NSString *preview = [NSString stringWithUTF8String:results.items[i].preview];
+                if (path == nil) path = @"";
+                if (preview == nil) preview = @"";
                 [choices addItemWithTitle:[NSString stringWithFormat:@"%@:%zu  %@", path,
                     results.items[i].line, preview]];
                 NSDictionary *match = @{
@@ -1842,6 +1920,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     [_debugContinue setEnabled:NO];
     [_debugNext setEnabled:NO];
     [_debugBreakpoint setEnabled:NO];
+    [self refreshActionControls];
     [self setNeedsDisplay:YES];
 }
 
@@ -1860,11 +1939,12 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     document = [self activeDocument];
     if (document == NULL || document->is_untitled || document->path == NULL ||
         document->is_dirty) {
-        if (![self saveActive]) return;
-        document = [self activeDocument];
+        const char *message =
+            "The debugger requires a saved, clean, non-untitled document.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
     }
-    if (document == NULL || document->is_untitled || document->path == NULL ||
-        document->is_dirty) return;
     if (axyne_debugger_start(&_debugger, document,
             axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
             &error) != AXYNE_STATUS_OK) {
@@ -1876,6 +1956,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     [_debugStart setEnabled:NO]; [_debugPause setEnabled:YES];
     [_debugContinue setEnabled:YES]; [_debugNext setEnabled:YES];
     [_debugBreakpoint setEnabled:YES]; _activeAction = 4;
+    [self refreshActionControls];
 }
 
 - (void)debugCommand:(id)sender
@@ -1932,6 +2013,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     [_terminalStop setEnabled:YES];
     _activeAction = 3;
     _lastExitFailed = NO;
+    [self refreshActionControls];
 }
 
 - (void)stopTerminal:(id)sender
@@ -1970,8 +2052,9 @@ else [_terminalInput setStringValue:@""];
         ? [NSString stringWithUTF8String:_actionRunner.executable] : @"";
     NSString *initialWorkingDirectory = _actionRunner.working_directory != NULL
         ? [NSString stringWithUTF8String:_actionRunner.working_directory] : @"";
-    [executable setStringValue:initialExecutable ?: @""];
-    [workingDirectory setStringValue:initialWorkingDirectory ?: @""];
+    [executable setStringValue:initialExecutable != nil ? initialExecutable : @""];
+    [workingDirectory setStringValue:initialWorkingDirectory != nil
+        ? initialWorkingDirectory : @""];
     [arguments setString:axyne_macos_runner_lines(_actionRunner.arguments,
                                                    _actionRunner.argument_count)];
     [environment setString:axyne_macos_runner_lines(_actionRunner.environment,
@@ -1999,10 +2082,15 @@ else [_terminalInput setStringValue:@""];
     NSInteger response = [alert runModal];
     BOOL accepted = NO;
     if (response == NSAlertFirstButtonReturn) {
-        char *executableUTF8 = strdup([[executable stringValue] UTF8String] ?: "");
-        char *argumentsUTF8 = strdup([[arguments string] UTF8String] ?: "");
-        char *workingDirectoryUTF8 = strdup([[workingDirectory stringValue] UTF8String] ?: "");
-        char *environmentUTF8 = strdup([[environment string] UTF8String] ?: "");
+        const char *executableText = [[executable stringValue] UTF8String];
+        const char *argumentsText = [[arguments string] UTF8String];
+        const char *workingDirectoryText = [[workingDirectory stringValue] UTF8String];
+        const char *environmentText = [[environment string] UTF8String];
+        char *executableUTF8 = strdup(executableText != NULL ? executableText : "");
+        char *argumentsUTF8 = strdup(argumentsText != NULL ? argumentsText : "");
+        char *workingDirectoryUTF8 = strdup(
+            workingDirectoryText != NULL ? workingDirectoryText : "");
+        char *environmentUTF8 = strdup(environmentText != NULL ? environmentText : "");
         char **argumentValues = NULL;
         char **environmentValues = NULL;
         size_t argumentCount = 0;
@@ -2041,9 +2129,10 @@ else [_terminalInput setStringValue:@""];
         } else {
             NSAlert *errorAlert = [[[NSAlert alloc] init] autorelease];
             [errorAlert setMessageText:@"Invalid runner configuration"];
-            [errorAlert setInformativeText:[NSString stringWithUTF8String:
+            NSString *detail = [NSString stringWithUTF8String:
                 error.message[0] != '\0' ? error.message :
-                "Unable to configure runner."] ?: @""];
+                "Unable to configure runner."];
+            [errorAlert setInformativeText:detail != nil ? detail : @""];
             [errorAlert addButtonWithTitle:@"OK"];
             [errorAlert runModal];
         }
@@ -2064,8 +2153,8 @@ else [_terminalInput setStringValue:@""];
     AxyneProcessSpec processSpec;
     AxyneError error;
     AxyneStatus status;
-    if (_terminalProcess != NULL) {
-        const char *message = "Build or run is unavailable while a terminal session is active. Stop it first.\n";
+    if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *message = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
         [self terminalAppend:message length:strlen(message)
                        stream:AXYNE_PROCESS_STDERR];
         return;
@@ -2105,6 +2194,7 @@ else [_terminalInput setStringValue:@""];
         _lastExitFailed = NO;
         [_terminalStart setEnabled:NO];
         [_terminalStop setEnabled:YES];
+        [self refreshActionControls];
         [self setNeedsDisplay:YES];
     }
 }
@@ -2154,7 +2244,9 @@ else [_terminalInput setStringValue:@""];
              size:(CGFloat)size color:(NSColor *)color family:(NSString *)family
 {
     NSDictionary *attributes = @{
-        NSFontAttributeName: [NSFont fontWithName:family size:size] ?: [NSFont systemFontOfSize:size],
+        NSFontAttributeName: ([NSFont fontWithName:family size:size] != nil
+            ? [NSFont fontWithName:family size:size]
+            : [NSFont systemFontOfSize:size]),
         NSForegroundColorAttributeName: color
     };
     [label drawAtPoint:point withAttributes:attributes];
@@ -2215,8 +2307,10 @@ else [_terminalInput setStringValue:@""];
             [axyne_preference_color(_preferences.theme.accent) setFill];
             NSRectFill(NSMakeRect(tabX, AXYNE_TOOLBAR, 1, AXYNE_TABS));
         }
-        NSString *title = [NSString stringWithUTF8String:doc->title ?: "Untitled"];
-        if (doc->is_dirty) title = [@"● " stringByAppendingString:title ?: @"Untitled"];
+        NSString *title = [NSString stringWithUTF8String:
+            doc->title != NULL ? doc->title : "Untitled"];
+        if (title == nil) title = @"Untitled";
+        if (doc->is_dirty) title = [@"● " stringByAppendingString:title];
         [self drawLabel:title at:NSMakePoint(tabX + 12, AXYNE_TOOLBAR + 10)
                     size:12 color:i == _documents.active_index ? text : muted
                  family:@"SF Pro Text"];
@@ -2237,7 +2331,8 @@ else [_terminalInput setStringValue:@""];
                 [border setFill];
                 NSRectFill(NSMakeRect(0, explorerY - 2, AXYNE_SIDEBAR, 22));
             }
-            NSString *name = [NSString stringWithUTF8String:node->name] ?: @"(invalid name)";
+            NSString *name = [NSString stringWithUTF8String:node->name];
+            if (name == nil) name = @"(invalid name)";
             NSString *arrow = node->kind == AXYNE_FILE_KIND_DIRECTORY
                 ? (axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›") : @"·";
             NSString *label = [NSString stringWithFormat:@"%@ %@", arrow, name];
@@ -2327,7 +2422,7 @@ else [_terminalInput setStringValue:@""];
 
 @end
 
-@interface AxyneApplicationDelegate : NSObject <NSApplicationDelegate> {
+@interface AxyneApplicationDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
     NSWindow *_window;
     NSString *_appName;
     BOOL _terminationConfirmed;
@@ -2356,7 +2451,7 @@ else [_terminalInput setStringValue:@""];
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
         backing:NSBackingStoreBuffered defer:NO];
-    [_window setTitle:_appName ?: @"Axyne"];
+    [_window setTitle:_appName != nil ? _appName : @"Axyne"];
     [_window setMinSize:NSMakeSize(800, 560)];
     AxyneWorkspaceView *workspace = [[[AxyneWorkspaceView alloc]
         initWithFrame:frame] autorelease];
