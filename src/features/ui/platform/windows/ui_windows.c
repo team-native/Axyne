@@ -89,8 +89,6 @@ static COLORREF AXYNE_POPUP_DISABLED;
 static COLORREF AXYNE_POPUP_SEPARATOR;
 static COLORREF AXYNE_POPUP_CHECK;
 static HBRUSH AXYNE_POPUP_BRUSH;
-static DWORD AXYNE_RUNTIME_LOAD_ERROR;
-static int AXYNE_RUNTIME_FAILURE_STAGE;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -295,8 +293,6 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
 static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
 static void axyne_layout(HWND window, AxyneWindowState *state);
-
-typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
 static wchar_t *axyne_wide(const char *utf8)
 {
@@ -3310,59 +3306,20 @@ static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
     return slots == 0 ? 1 : slots;
 }
 
-static HMODULE axyne_load_runtime_library(const wchar_t *name)
-{
-    HMODULE module = LoadLibraryExW(name, NULL,
-        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    enum { AXYNE_MODULE_PATH_CAPACITY = 32768 };
-    wchar_t *path;
-    wchar_t *slash;
-    DWORD length;
-    size_t name_length;
-    size_t directory_length;
-    if (module != NULL) return module;
-    AXYNE_RUNTIME_LOAD_ERROR = GetLastError();
-    AXYNE_RUNTIME_FAILURE_STAGE = 1;
-    path = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
-        AXYNE_MODULE_PATH_CAPACITY * sizeof(*path));
-    if (path == NULL) return NULL;
-    length = GetModuleFileNameW(NULL, path, AXYNE_MODULE_PATH_CAPACITY);
-    if (length == 0 || length >= AXYNE_MODULE_PATH_CAPACITY) {
-        HeapFree(GetProcessHeap(), 0, path);
-        return NULL;
-    }
-    slash = wcsrchr(path, L'\\');
-    if (slash == NULL) {
-        HeapFree(GetProcessHeap(), 0, path);
-        return NULL;
-    }
-    directory_length = (size_t)(slash - path) + 1;
-    name_length = wcslen(name);
-    if (directory_length + name_length + 1 > AXYNE_MODULE_PATH_CAPACITY) {
-        HeapFree(GetProcessHeap(), 0, path);
-        return NULL;
-    }
-    wcscpy(path + directory_length, name);
-    module = LoadLibraryExW(path, NULL,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (module == NULL) AXYNE_RUNTIME_LOAD_ERROR = GetLastError();
-    HeapFree(GetProcessHeap(), 0, path);
-    return module;
-}
-
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
                                  HINSTANCE instance)
 {
-    state->scintilla_module = axyne_load_runtime_library(L"Scintilla.dll");
+    WNDCLASSEXW scintilla_class;
+    state->scintilla_module = LoadLibraryExW(
+        L"Scintilla.dll", NULL,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (state->scintilla_module == NULL) {
         return;
     }
 
-    AxyneRegisterScintilla register_classes =
-        (AxyneRegisterScintilla)(uintptr_t)GetProcAddress(
-            state->scintilla_module, "Scintilla_RegisterClasses");
-    if (register_classes == NULL || !register_classes(instance)) {
-        AXYNE_RUNTIME_FAILURE_STAGE = register_classes == NULL ? 2 : 3;
+    memset(&scintilla_class, 0, sizeof(scintilla_class));
+    scintilla_class.cbSize = sizeof(scintilla_class);
+    if (!GetClassInfoExW(NULL, L"Scintilla", &scintilla_class)) {
         FreeLibrary(state->scintilla_module);
         state->scintilla_module = NULL;
         return;
@@ -3372,14 +3329,15 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
         0, L"Scintilla", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, NULL, instance, NULL);
     if (state->editor == NULL) {
-        AXYNE_RUNTIME_FAILURE_STAGE = 4;
         FreeLibrary(state->scintilla_module);
         state->scintilla_module = NULL;
         return;
     }
 
     SetWindowTextW(state->editor, L"Source editor");
-    state->lexilla_module = axyne_load_runtime_library(L"Lexilla.dll");
+    state->lexilla_module = LoadLibraryExW(
+        L"Lexilla.dll", NULL,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (state->lexilla_module != NULL) {
         state->create_lexer = (AxyneCreateLexer)(uintptr_t)GetProcAddress(
             state->lexilla_module, "CreateLexer");
