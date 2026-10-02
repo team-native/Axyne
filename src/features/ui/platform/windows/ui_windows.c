@@ -80,6 +80,15 @@ static COLORREF AXYNE_TAB_ACTIVE_TEXT;
 static COLORREF AXYNE_TAB_DOT;
 static COLORREF AXYNE_SIDEBAR_TEXT;
 static COLORREF AXYNE_SIDEBAR_MUTED;
+static COLORREF AXYNE_POPUP_BG;
+static COLORREF AXYNE_POPUP_HOVER;
+static COLORREF AXYNE_POPUP_HOVER_TEXT;
+static COLORREF AXYNE_POPUP_TEXT;
+static COLORREF AXYNE_POPUP_MUTED;
+static COLORREF AXYNE_POPUP_DISABLED;
+static COLORREF AXYNE_POPUP_SEPARATOR;
+static COLORREF AXYNE_POPUP_CHECK;
+static HBRUSH AXYNE_POPUP_BRUSH;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -167,6 +176,8 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_CUT, AXYNE_CMD_COPY, AXYNE_CMD_PASTE,
        AXYNE_CMD_SELECT_ALL, AXYNE_CMD_PANEL_OUTPUT,
        AXYNE_CMD_PANEL_TERMINAL, AXYNE_CMD_PANEL_PROBLEMS };
+
+enum { AXYNE_CMD_EXIT = 1090 };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -353,6 +364,14 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
     AXYNE_TAB_DOT = AXYNE_MUTED;
     AXYNE_SIDEBAR_TEXT = AXYNE_TEXT;
     AXYNE_SIDEBAR_MUTED = AXYNE_MUTED;
+    AXYNE_POPUP_BG = AXYNE_PANEL;
+    AXYNE_POPUP_HOVER = AXYNE_BORDER;
+    AXYNE_POPUP_HOVER_TEXT = AXYNE_TEXT;
+    AXYNE_POPUP_TEXT = AXYNE_TEXT;
+    AXYNE_POPUP_MUTED = AXYNE_MUTED;
+    AXYNE_POPUP_DISABLED = AXYNE_MUTED;
+    AXYNE_POPUP_SEPARATOR = AXYNE_BORDER;
+    AXYNE_POPUP_CHECK = AXYNE_ACCENT;
     if (theme->background == 0x16171a && theme->panel == 0x1f2126 &&
         theme->toolbar == 0x1c1e22) {
         AXYNE_BUTTON_BG = axyne_theme_color(0x24262b);
@@ -376,10 +395,20 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
         AXYNE_TAB_DOT = axyne_theme_color(0x4f535b);
         AXYNE_SIDEBAR_TEXT = axyne_theme_color(0xc4c8ce);
         AXYNE_SIDEBAR_MUTED = axyne_theme_color(0x8b919b);
+        AXYNE_POPUP_BG = axyne_theme_color(0x202329);
+        AXYNE_POPUP_HOVER = axyne_theme_color(0x402d5c);
+        AXYNE_POPUP_HOVER_TEXT = axyne_theme_color(0xf4edf9);
+        AXYNE_POPUP_TEXT = axyne_theme_color(0xd2d5db);
+        AXYNE_POPUP_MUTED = axyne_theme_color(0x969ba5);
+        AXYNE_POPUP_DISABLED = axyne_theme_color(0x666c76);
+        AXYNE_POPUP_SEPARATOR = axyne_theme_color(0x2b2e35);
+        AXYNE_POPUP_CHECK = axyne_theme_color(0xa667e8);
     }
     if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
         DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
     AXYNE_EDIT_BACKGROUND_BRUSH = CreateSolidBrush(AXYNE_OUTPUT_BG);
+    if (AXYNE_POPUP_BRUSH != NULL) DeleteObject(AXYNE_POPUP_BRUSH);
+    AXYNE_POPUP_BRUSH = CreateSolidBrush(AXYNE_POPUP_BG);
 }
 
 static void axyne_select_theme_preset(AxyneThemePreferences *theme,
@@ -2611,6 +2640,124 @@ static int axyne_measure_text(HFONT font, const wchar_t *text)
     return size.cx;
 }
 
+/* Popup menus are owner-drawn to match the Figma menu frames (27px rows,
+ * 4px outer padding, 18px status column, purple hover). Each item carries
+ * its label and shortcut so measuring and drawing need no string lookups. */
+typedef struct AxyneMenuItem {
+    struct AxyneMenuItem *next;
+    wchar_t *label;
+    wchar_t *shortcut;
+    int separator;
+    int arrow;
+    int first;
+    int last;
+} AxyneMenuItem;
+
+enum { AXYNE_MENU_ROW = 27, AXYNE_MENU_SEPARATOR = 9, AXYNE_MENU_PAD = 4 };
+
+static HMENU axyne_menu_create(void)
+{
+    HMENU menu = CreatePopupMenu();
+    MENUINFO info;
+    if (menu == NULL) return NULL;
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.fMask = MIM_BACKGROUND | MIM_STYLE | MIM_APPLYTOSUBMENUS;
+    info.dwStyle = MNS_NOCHECK;
+    info.hbrBack = AXYNE_POPUP_BRUSH;
+    (void)SetMenuInfo(menu, &info);
+    return menu;
+}
+
+static AxyneMenuItem *axyne_menu_item(AxyneMenuItem **pool, HMENU menu,
+                                      const wchar_t *label,
+                                      const wchar_t *shortcut)
+{
+    AxyneMenuItem *item = (AxyneMenuItem *)calloc(1, sizeof(*item));
+    if (item == NULL) return NULL;
+    item->label = label != NULL ? _wcsdup(label) : NULL;
+    item->shortcut = shortcut != NULL ? _wcsdup(shortcut) : NULL;
+    item->first = GetMenuItemCount(menu) == 0;
+    item->next = *pool;
+    *pool = item;
+    return item;
+}
+
+static void axyne_menu_add(HMENU menu, AxyneMenuItem **pool, UINT id,
+                           const wchar_t *label, const wchar_t *shortcut,
+                           UINT flags)
+{
+    AxyneMenuItem *item = axyne_menu_item(pool, menu, label, shortcut);
+    if (item != NULL)
+        AppendMenuW(menu, MF_OWNERDRAW | MF_STRING | flags, id, (LPCWSTR)item);
+}
+
+static void axyne_menu_separator(HMENU menu, AxyneMenuItem **pool)
+{
+    AxyneMenuItem *item = axyne_menu_item(pool, menu, NULL, NULL);
+    if (item == NULL) return;
+    item->separator = 1;
+    AppendMenuW(menu, MF_OWNERDRAW | MF_SEPARATOR, 0, (LPCWSTR)item);
+}
+
+static void axyne_menu_submenu(HMENU menu, AxyneMenuItem **pool, HMENU sub,
+                               const wchar_t *label, UINT flags)
+{
+    AxyneMenuItem *item = axyne_menu_item(pool, menu, label, NULL);
+    if (item == NULL) return;
+    item->arrow = 1;
+    AppendMenuW(menu, MF_OWNERDRAW | MF_POPUP | flags, (UINT_PTR)sub, (LPCWSTR)item);
+}
+
+/* Marks the final item so the bottom padding is part of its row. */
+static void axyne_menu_seal(HMENU menu)
+{
+    MENUITEMINFOW info;
+    int count = GetMenuItemCount(menu);
+    if (count <= 0) return;
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.fMask = MIIM_DATA;
+    if (GetMenuItemInfoW(menu, (UINT)(count - 1), TRUE, &info) && info.dwItemData != 0)
+        ((AxyneMenuItem *)info.dwItemData)->last = 1;
+}
+
+static void axyne_menu_pool_free(AxyneMenuItem *pool)
+{
+    while (pool != NULL) {
+        AxyneMenuItem *next = pool->next;
+        free(pool->label);
+        free(pool->shortcut);
+        free(pool);
+        pool = next;
+    }
+}
+
+static void axyne_menu_measure(AxyneWindowState *state, MEASUREITEMSTRUCT *measure)
+{
+    const AxyneMenuItem *item = (const AxyneMenuItem *)measure->itemData;
+    int width = 160;
+    int height = AXYNE_MENU_ROW;
+    if (item == NULL) return;
+    if (item->separator) {
+        height = AXYNE_MENU_SEPARATOR;
+    } else {
+        int computed = 2 * AXYNE_MENU_PAD + 10 + 18 + 8 + 10;
+        if (item->label != NULL)
+            computed += axyne_measure_text(state->ui_font, item->label);
+        if (item->shortcut != NULL)
+            computed += 24 + axyne_measure_text(state->badge_font, item->shortcut);
+        if (item->arrow)
+            computed += 24 + axyne_measure_text(state->font_glyph13, L"\u203a");
+        if (computed > width) width = computed;
+        if (width > 640) width = 640;
+    }
+    if (item->first) height += AXYNE_MENU_PAD;
+    if (item->last) height += AXYNE_MENU_PAD;
+    measure->itemWidth = (UINT)width;
+    measure->itemHeight = (UINT)height;
+}
+
 /* Figma menu bar: 8px leading inset, items padded 8px either side, 2px gaps.
  * Painting, popup anchoring and hit-testing all use this one geometry. */
 static RECT axyne_menu_bar_rect(AxyneWindowState *state, int index)
@@ -2648,155 +2795,152 @@ static POINT axyne_menu_anchor(AxyneWindowState *state, int index)
     return point;
 }
 
+static void axyne_menu_track(HWND window, AxyneWindowState *state,
+                             int menu_index, HMENU menu, AxyneMenuItem *pool)
+{
+    POINT point = axyne_menu_anchor(state, menu_index);
+    axyne_menu_seal(menu);
+    ClientToScreen(window, &point);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                   point.x, point.y, 0, window, NULL);
+    DestroyMenu(menu);
+    axyne_menu_pool_free(pool);
+}
+
 static void axyne_file_popup(HWND window, AxyneWindowState *state)
 {
-    HMENU menu = CreatePopupMenu();
-    HMENU recent = CreatePopupMenu();
+    AxyneMenuItem *pool = NULL;
+    HMENU menu = axyne_menu_create();
+    HMENU recent = axyne_menu_create();
     AxyneDocument *document = axyne_active(state);
     UINT document_flags = document != NULL ? MF_ENABLED : MF_GRAYED;
-    UINT workspace_flags = state->explorer.root != NULL ? MF_ENABLED : MF_GRAYED;
-    UINT git_flags = state->explorer.root != NULL && state->git_process == NULL
-        ? MF_ENABLED : MF_GRAYED;
-    UINT saved_document_flags = document != NULL && !document->is_untitled &&
-        document->path != NULL ? MF_ENABLED : MF_GRAYED;
-    UINT action_flags = document != NULL && state->terminal_process == NULL &&
-        !axyne_debugger_is_active(&state->debugger) ? MF_ENABLED : MF_GRAYED;
+    size_t i;
     if (menu == NULL || recent == NULL) {
         if (menu != NULL) DestroyMenu(menu);
         if (recent != NULL) DestroyMenu(recent);
         return;
     }
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_NEW, L"New\tCtrl+N");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_OPEN, L"Open...\tCtrl+O");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_SAVE, L"Save\tCtrl+S");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_SAVE_AS, L"Save As...");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_CLOSE, L"Close Tab\tCtrl+W");
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE, L"Open Workspace Folder...");
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_BUILD, L"Build\tCtrl+B");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_RUN, L"Run\tF5");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_CONFIGURE_RUNNER,
-                L"Configure Build/Run Runner...");
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_FIND, L"Find\tCtrl+F");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_REPLACE, L"Replace\tCtrl+H");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_PREFERENCES, L"Preferences...");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE_PREFERENCES,
-                L"Workspace Settings...");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STATUS, L"Git Status");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_DIFF, L"Git Diff");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STAGE_ALL, L"Git Stage All");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_UNSTAGE_ALL, L"Git Unstage All");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_LSP_DEFINITION,
-                L"LSP: Go to Definition\tCtrl+Alt+D");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_LSP_REFERENCES,
-                L"LSP: Find References\tCtrl+Alt+R");
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    EnableMenuItem(menu, AXYNE_CMD_SAVE, MF_BYCOMMAND | document_flags);
-    EnableMenuItem(menu, AXYNE_CMD_SAVE_AS, MF_BYCOMMAND | document_flags);
-    EnableMenuItem(menu, AXYNE_CMD_CLOSE, MF_BYCOMMAND | document_flags);
-    EnableMenuItem(menu, AXYNE_CMD_WORKSPACE_PREFERENCES,
-                   MF_BYCOMMAND | workspace_flags);
-    EnableMenuItem(menu, AXYNE_CMD_BUILD, MF_BYCOMMAND | action_flags);
-    EnableMenuItem(menu, AXYNE_CMD_RUN, MF_BYCOMMAND | action_flags);
-    EnableMenuItem(menu, AXYNE_CMD_GIT_STATUS, MF_BYCOMMAND | git_flags);
-    EnableMenuItem(menu, AXYNE_CMD_GIT_DIFF, MF_BYCOMMAND | git_flags);
-    EnableMenuItem(menu, AXYNE_CMD_GIT_STAGE_ALL, MF_BYCOMMAND | git_flags);
-    EnableMenuItem(menu, AXYNE_CMD_GIT_UNSTAGE_ALL, MF_BYCOMMAND | git_flags);
-    EnableMenuItem(menu, AXYNE_CMD_LSP_DEFINITION,
-                   MF_BYCOMMAND | saved_document_flags);
-    EnableMenuItem(menu, AXYNE_CMD_LSP_REFERENCES,
-                   MF_BYCOMMAND | saved_document_flags);
-    for (size_t i = 0; i < state->documents.recent_count; ++i) {
+    axyne_menu_add(menu, &pool, AXYNE_CMD_NEW, L"새 파일", L"Ctrl+N", MF_ENABLED);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_OPEN, L"열기...", L"Ctrl+O", MF_ENABLED);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE, L"폴더 열기...", NULL, MF_ENABLED);
+    axyne_menu_separator(menu, &pool);
+    for (i = 0; i < state->documents.recent_count; ++i) {
         wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
         if (path != NULL) {
-            AppendMenuW(recent, MF_STRING, AXYNE_CMD_RECENT_BASE + (UINT)i,
-                        path);
+            axyne_menu_add(recent, &pool, AXYNE_CMD_RECENT_BASE + (UINT)i, path,
+                           NULL, MF_ENABLED);
             free(path);
         }
     }
     if (state->documents.recent_count == 0)
-        AppendMenuW(recent, MF_STRING | MF_GRAYED, 0, L"No Recent Files");
-    AppendMenuW(menu, MF_POPUP, (UINT_PTR)recent, L"Open Recent");
-    POINT point = axyne_menu_anchor(state, 0);
-    ClientToScreen(window, &point);
-    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
-                   point.x, point.y, 0, window, NULL);
-    DestroyMenu(menu);
+        axyne_menu_add(recent, &pool, 0, L"최근 항목 없음", NULL, MF_GRAYED);
+    axyne_menu_seal(recent);
+    axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
+    axyne_menu_separator(menu, &pool);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", document_flags);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", NULL,
+                   document_flags);
+    axyne_menu_separator(menu, &pool);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
+    axyne_menu_separator(menu, &pool);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_CLOSE, L"닫기", L"Ctrl+W", document_flags);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_EXIT, L"종료", L"Alt+F4", MF_ENABLED);
+    axyne_menu_track(window, state, 0, menu, pool);
 }
 
 static void axyne_edit_popup(HWND window, AxyneWindowState *state)
 {
-    HMENU menu = CreatePopupMenu();
+    AxyneMenuItem *pool = NULL;
+    HMENU menu = axyne_menu_create();
     UINT has_editor = state->editor != NULL ? MF_ENABLED : MF_GRAYED;
+    UINT saved_document_flags = axyne_active(state) != NULL &&
+        !axyne_active(state)->is_untitled && axyne_active(state)->path != NULL
+        ? MF_ENABLED : MF_GRAYED;
     if (menu == NULL) return;
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_UNDO, L"Undo\tCtrl+Z");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_REDO, L"Redo\tCtrl+Y");
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_CUT, L"Cut\tCtrl+X");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_COPY, L"Copy\tCtrl+C");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_PASTE, L"Paste\tCtrl+V");
-    AppendMenuW(menu, MF_STRING, AXYNE_CMD_SELECT_ALL, L"Select All\tCtrl+A");
-    EnableMenuItem(menu, AXYNE_CMD_UNDO, MF_BYCOMMAND | has_editor);
-    EnableMenuItem(menu, AXYNE_CMD_REDO, MF_BYCOMMAND | has_editor);
-    EnableMenuItem(menu, AXYNE_CMD_CUT, MF_BYCOMMAND | has_editor);
-    EnableMenuItem(menu, AXYNE_CMD_COPY, MF_BYCOMMAND | has_editor);
-    EnableMenuItem(menu, AXYNE_CMD_PASTE, MF_BYCOMMAND | has_editor);
-    EnableMenuItem(menu, AXYNE_CMD_SELECT_ALL, MF_BYCOMMAND | has_editor);
-    {
-        POINT point = axyne_menu_anchor(state, 1);
-        ClientToScreen(window, &point);
-        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
-                       point.x, point.y, 0, window, NULL);
-    }
-    DestroyMenu(menu);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_UNDO, L"실행 취소", L"Ctrl+Z", has_editor);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_REDO, L"다시 실행", L"Ctrl+Y", has_editor);
+    axyne_menu_separator(menu, &pool);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_CUT, L"잘라내기", L"Ctrl+X", has_editor);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_COPY, L"복사", L"Ctrl+C", has_editor);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_PASTE, L"붙여넣기", L"Ctrl+V", has_editor);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SELECT_ALL, L"모두 선택", L"Ctrl+A", has_editor);
+    axyne_menu_separator(menu, &pool);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_FIND, L"찾기...", L"Ctrl+F", MF_ENABLED);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_REPLACE, L"바꾸기...", L"Ctrl+H", MF_ENABLED);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SEARCH_FOLDER, L"파일에서 찾기...",
+                   L"Ctrl+Shift+F", MF_ENABLED);
+    axyne_menu_separator(menu, &pool);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_LSP_DEFINITION, L"정의로 이동",
+                   L"Ctrl+Alt+D", saved_document_flags);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_LSP_REFERENCES, L"참조 찾기",
+                   L"Ctrl+Alt+R", saved_document_flags);
+    axyne_menu_track(window, state, 1, menu, pool);
 }
 
 static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
                                int menu_index)
 {
-    HMENU menu = CreatePopupMenu();
-    POINT point = axyne_menu_anchor(state, menu_index);
+    AxyneMenuItem *pool = NULL;
+    HMENU menu = axyne_menu_create();
     if (menu == NULL) return;
     if (menu_index == 2) {
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_OUTPUT, L"출력");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_PROBLEMS, L"문제");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_TERMINAL, L"터미널");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE, L"폴더 열기...");
+        UINT output = !state->terminal_panel_selected && !state->problems_panel_selected
+            ? MF_CHECKED : 0;
+        axyne_menu_add(menu, &pool, AXYNE_CMD_QUICK_FILE, L"파일 이동...", L"Ctrl+P",
+                       MF_ENABLED);
+        axyne_menu_separator(menu, &pool);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_OUTPUT, L"출력", NULL,
+                       MF_ENABLED | output);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_PROBLEMS, L"문제", NULL,
+                       MF_ENABLED | (state->problems_panel_selected ? MF_CHECKED : 0));
+        axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_TERMINAL, L"터미널", NULL,
+                       MF_ENABLED | (state->terminal_panel_selected ? MF_CHECKED : 0));
     } else if (menu_index == 3) {
         UINT flags = axyne_active(state) != NULL && state->terminal_process == NULL &&
-            !axyne_debugger_is_active(&state->debugger) ? MF_STRING : MF_STRING | MF_GRAYED;
-        AppendMenuW(menu, flags, AXYNE_CMD_BUILD, L"빌드\tCtrl+B");
-        AppendMenuW(menu, flags, AXYNE_CMD_RUN, L"실행\tF5");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_CONFIGURE_RUNNER, L"실행 구성...");
+            !axyne_debugger_is_active(&state->debugger) ? MF_ENABLED : MF_GRAYED;
+        axyne_menu_add(menu, &pool, AXYNE_CMD_BUILD, L"빌드", L"Ctrl+B", flags);
+        axyne_menu_separator(menu, &pool);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_RUN, L"실행", L"F5", flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_CONFIGURE_RUNNER, L"실행 구성...", NULL,
+                       MF_ENABLED);
+        axyne_menu_separator(menu, &pool);
+        axyne_menu_add(menu, &pool, AXYNE_TERMINAL_STOP, L"빌드 취소", NULL,
+                       state->active_action == 1 && state->terminal_process != NULL
+                           ? MF_ENABLED : MF_GRAYED);
     } else if (menu_index == 4) {
         const UINT commands[] = {AXYNE_DEBUG_START, AXYNE_DEBUG_PAUSE,
-            AXYNE_DEBUG_CONTINUE, AXYNE_DEBUG_STEP_OVER, AXYNE_DEBUG_BREAKPOINT};
-        const wchar_t *labels[] = {L"Debug", L"Pause", L"Continue", L"Next", L"Breakpoint"};
+            AXYNE_DEBUG_CONTINUE, AXYNE_DEBUG_BREAKPOINT, AXYNE_DEBUG_STEP_OVER};
+        const wchar_t *labels[] = {L"디버깅 시작", L"일시 중지", L"계속",
+            L"중단점 토글", L"프로시저 단위 실행"};
         const HWND controls[] = {state->debug_start, state->debug_pause,
-            state->debug_continue, state->debug_step_over, state->debug_breakpoint};
+            state->debug_continue, state->debug_breakpoint, state->debug_step_over};
         size_t i;
         axyne_refresh_action_controls(state);
-        for (i = 0; i < sizeof(commands) / sizeof(*commands); ++i)
-            AppendMenuW(menu, MF_STRING | (IsWindowEnabled(controls[i])
-                ? MF_ENABLED : MF_GRAYED), commands[i], labels[i]);
+        for (i = 0; i < sizeof(commands) / sizeof(*commands); ++i) {
+            /* Figma separates run control, breakpoints and stepping. */
+            if (i == 3 || i == 4) axyne_menu_separator(menu, &pool);
+            axyne_menu_add(menu, &pool, commands[i], labels[i], NULL,
+                           IsWindowEnabled(controls[i]) ? MF_ENABLED : MF_GRAYED);
+        }
     } else if (menu_index == 5) {
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PREFERENCES, L"Preferences...");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE_PREFERENCES, L"Workspace Settings...");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STATUS, L"Git Status");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_DIFF, L"Git Diff");
-        AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
+        UINT git_flags = state->explorer.root != NULL && state->git_process == NULL
+            ? MF_ENABLED : MF_GRAYED;
+        axyne_menu_add(menu, &pool, AXYNE_TERMINAL_START, L"새 터미널", NULL,
+                       state->terminal_process == NULL ? MF_ENABLED : MF_GRAYED);
+        axyne_menu_separator(menu, &pool);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE_PREFERENCES, L"작업 영역 설정...",
+                       NULL, state->explorer.root != NULL ? MF_ENABLED : MF_GRAYED);
+        axyne_menu_separator(menu, &pool);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_STATUS, L"Git 상태", NULL, git_flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_DIFF, L"Git 변경 사항", NULL, git_flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_STAGE_ALL, L"모두 스테이지", NULL, git_flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_UNSTAGE_ALL, L"모두 스테이지 해제", NULL,
+                       git_flags);
     } else {
-        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Axyne");
+        axyne_menu_add(menu, &pool, 0, L"Axyne 정보", NULL, MF_GRAYED);
     }
-    ClientToScreen(window, &point);
-    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
-                   point.x, point.y, 0, window, NULL);
-    DestroyMenu(menu);
+    axyne_menu_track(window, state, menu_index, menu, pool);
 }
 
 static void axyne_fill(HDC dc, int left, int top, int right, int bottom,
@@ -2876,6 +3020,58 @@ static void axyne_paint_badge(HDC dc, HFONT font, const char *name, RECT rect)
         axyne_text_rect(dc, font, axyne_theme_color(badge.color), rect, label, DT_CENTER);
         free(label);
     }
+}
+
+static void axyne_menu_draw(AxyneWindowState *state, const DRAWITEMSTRUCT *draw)
+{
+    const AxyneMenuItem *item = (const AxyneMenuItem *)draw->itemData;
+    RECT rect = draw->rcItem;
+    int disabled = (draw->itemState & (ODS_GRAYED | ODS_DISABLED)) != 0;
+    int hot = (draw->itemState & ODS_SELECTED) != 0 && !disabled;
+    int top = rect.top + (item != NULL && item->first ? AXYNE_MENU_PAD : 0);
+    HDC dc = draw->hDC;
+    RECT cell;
+    COLORREF text;
+    axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom, AXYNE_POPUP_BG);
+    if (item == NULL) return;
+    if (item->separator) {
+        int y = top + 4;
+        axyne_fill(dc, rect.left + 12, y, rect.right - 12, y + 1, AXYNE_POPUP_SEPARATOR);
+        return;
+    }
+    if (hot)
+        axyne_round_fill(dc, rect.left + AXYNE_MENU_PAD, top, rect.right - AXYNE_MENU_PAD,
+                         top + AXYNE_MENU_ROW, 3, AXYNE_POPUP_HOVER, AXYNE_POPUP_HOVER);
+    text = disabled ? AXYNE_POPUP_DISABLED
+                    : (hot ? AXYNE_POPUP_HOVER_TEXT : AXYNE_POPUP_TEXT);
+    if ((draw->itemState & ODS_CHECKED) != 0) {
+        cell.left = rect.left + AXYNE_MENU_PAD + 10;
+        cell.right = cell.left + 18;
+        cell.top = top;
+        cell.bottom = top + AXYNE_MENU_ROW;
+        axyne_text_rect(dc, state->font_bold, AXYNE_POPUP_CHECK, cell, L"\u2713", DT_CENTER);
+    }
+    cell.left = rect.left + AXYNE_MENU_PAD + 10 + 18 + 8;
+    cell.right = rect.right - AXYNE_MENU_PAD - 10;
+    cell.top = top;
+    cell.bottom = top + AXYNE_MENU_ROW;
+    if (item->arrow) {
+        int arrow = axyne_measure_text(state->font_glyph13, L"\u203a");
+        RECT part = cell;
+        part.left = cell.right - arrow;
+        axyne_text_rect(dc, state->font_glyph13, AXYNE_POPUP_MUTED, part, L"\u203a", DT_RIGHT);
+        cell.right -= arrow + 12;
+    } else if (item->shortcut != NULL) {
+        int shortcut = axyne_measure_text(state->badge_font, item->shortcut);
+        RECT part = cell;
+        part.left = cell.right - shortcut;
+        axyne_text_rect(dc, state->badge_font,
+                        disabled ? AXYNE_POPUP_DISABLED : AXYNE_POPUP_MUTED,
+                        part, item->shortcut, DT_RIGHT);
+        cell.right -= shortcut + 12;
+    }
+    if (item->label != NULL)
+        axyne_text_rect(dc, state->ui_font, text, cell, item->label, DT_LEFT);
 }
 
 static const UINT AXYNE_TOOLBAR_COMMANDS[] = {
@@ -3697,6 +3893,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->terminal_panel_selected) SetFocus(state->terminal_input);
             else if (state->editor != NULL) SetFocus(state->editor);
         }
+        else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
         else if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
         else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
         else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
@@ -3794,8 +3991,20 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
         }
         break;
+    case WM_MEASUREITEM: {
+        MEASUREITEMSTRUCT *measure = (MEASUREITEMSTRUCT *)l_param;
+        if (state != NULL && measure != NULL && measure->CtlType == ODT_MENU) {
+            axyne_menu_measure(state, measure);
+            return TRUE;
+        }
+        break;
+    }
     case WM_DRAWITEM: {
         const DRAWITEMSTRUCT *item = (const DRAWITEMSTRUCT *)l_param;
+        if (state != NULL && item != NULL && item->CtlType == ODT_MENU) {
+            axyne_menu_draw(state, item);
+            return TRUE;
+        }
         if (item != NULL && item->CtlType == ODT_BUTTON &&
             (item->CtlID == AXYNE_TERMINAL_START || item->CtlID == AXYNE_TERMINAL_STOP ||
              item->CtlID == AXYNE_TERMINAL_SEND)) {
