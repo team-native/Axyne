@@ -1148,7 +1148,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (terminalFont == nil)
         terminalFont = [NSFont userFixedPitchFontOfSize:fontSize];
     [_terminalOutput setFont:terminalFont];
-    [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
+    [_terminalOutput setTextColor:axyne_preference_color(
+        axyne_macos_reference_surfaces(&_preferences.theme) ? 0xa9aeb6
+                                                           : _preferences.theme.text)];
     [_terminalOutput setBackgroundColor:axyne_preference_color(
         axyne_macos_output_background(&_preferences.theme))];
     [_terminalScroll setBackgroundColor:[_terminalOutput backgroundColor]];
@@ -3100,11 +3102,18 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     if (text == nil) text = @"(invalid UTF-8 output)";
     if (stream == AXYNE_PROCESS_STDERR) text = [@"[stderr] " stringByAppendingString:text];
     NSTextStorage *storage = [_terminalOutput textStorage];
+    /* Figma output rows are 12px text on an 18px line. */
+    NSFont *outputFont = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+    NSMutableParagraphStyle *lineStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [lineStyle setLineSpacing:MAX(0, 18 - ceil([outputFont ascender] -
+        [outputFont descender] + [outputFont leading]))];
+    uint32_t outputColor = axyne_macos_reference_surfaces(&_preferences.theme)
+        ? 0xa9aeb6 : _preferences.theme.text;
     [storage appendAttributedString:[[[NSAttributedString alloc]
-        initWithString:text attributes:@{ NSFontAttributeName:
-            [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular],
+        initWithString:text attributes:@{ NSFontAttributeName:outputFont,
+            NSParagraphStyleAttributeName:lineStyle,
             NSForegroundColorAttributeName:axyne_preference_color(
-                stream == AXYNE_PROCESS_STDERR ? 0xe5a445 : _preferences.theme.text) }]
+                stream == AXYNE_PROCESS_STDERR ? 0xe5a445 : outputColor) }]
         autorelease]];
     if ([storage length] > 1024 * 1024)
         [storage deleteCharactersInRange:NSMakeRange(0, [storage length] - 1024 * 1024)];
