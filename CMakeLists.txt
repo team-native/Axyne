@@ -240,12 +240,13 @@ if(WIN32 OR APPLE)
         # CMake's bundle install traversal can omit symlinked framework
         # members. Preserve the complete framework symlink chain explicitly so
         # the packaged app contains a loadable Cocoa runtime.
-        install(DIRECTORY
-            "${AXYNE_SCINTILLA_FRAMEWORK}/"
-            DESTINATION
-                "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks/Scintilla.framework"
+        install(CODE
+            "file(INSTALL
+                DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks\"
+                TYPE DIRECTORY
+                FILES \"${AXYNE_SCINTILLA_FRAMEWORK}\"
+                FOLLOW_SYMLINK_CHAIN)"
             CONFIGURATIONS Release
-            USE_SOURCE_PERMISSIONS
         )
     endif()
 endif()
