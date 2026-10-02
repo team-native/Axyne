@@ -49,6 +49,13 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     NSBundle *_scintillaBundle;
+    NSButton *_newButton;
+    NSButton *_openButton;
+    NSButton *_saveButton;
+    NSButton *_undoButton;
+    NSButton *_redoButton;
+    NSButton *_buildButton;
+    NSButton *_runButton;
     void *_lexillaModule;
     void *(*_createLexer)(const char *name);
     AxyneDocumentSet _documents;
@@ -204,6 +211,8 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)openDocument:(id)sender;
 - (void)saveDocument:(id)sender;
 - (void)saveDocumentAs:(id)sender;
+- (void)undo:(id)sender;
+- (void)redo:(id)sender;
 - (void)closeDocument:(id)sender;
 - (void)openRecent:(id)sender;
 - (BOOL)confirmCloseAll;
@@ -214,6 +223,7 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)refreshActionControls;
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem;
 - (BOOL)loadActiveDocument;
+- (void)loadScintillaView;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 - (void)findOrReplace:(BOOL)replace;
 - (void)searchFolder:(BOOL)quickFile;
@@ -481,6 +491,35 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     return field;
 }
 
+static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
+                                            SEL action)
+{
+    NSButton *button = [[[NSButton alloc] initWithFrame:NSZeroRect] autorelease];
+    [button setTitle:title];
+    [button setTarget:target];
+    [button setAction:action];
+    [button setBordered:NO];
+    [button setBezelStyle:NSBezelStyleTexturedRounded];
+    [button setFont:[NSFont systemFontOfSize:12.0]];
+    [button setContentTintColor:axyne_color(115, 119, 128)];
+    [button setToolTip:title];
+    return [button retain];
+}
+
+static NSString *axyne_macos_file_badge(const char *name)
+{
+    const char *dot;
+    if (name == NULL) return @"•";
+    dot = strrchr(name, '.');
+    if (dot == NULL || dot[1] == '\0') return @"•";
+    if (strcasecmp(dot, ".c") == 0) return @"C";
+    if (strcasecmp(dot, ".h") == 0) return @"H";
+    if (strcasecmp(dot, ".cpp") == 0 || strcasecmp(dot, ".cc") == 0) return @"C++";
+    if (strcasecmp(dot, ".json") == 0) return @"{}";
+    if (strcasecmp(dot, ".cmake") == 0 || strcasecmp(name, "CMakeLists.txt") == 0) return @"CM";
+    return [[NSString stringWithUTF8String:dot + 1] uppercaseString];
+}
+
 @implementation AxyneWorkspaceView
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -534,6 +573,17 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
         [_terminalOutput setBackgroundColor:axyne_preference_color(_preferences.theme.background)];
         [self addSubview:_terminalOutput];
+        _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
+        _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
+        _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
+        _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
+        _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
+        _buildButton = axyne_macos_toolbar_button(@"빌드", self, @selector(buildDocument:));
+        _runButton = axyne_macos_toolbar_button(@"▷ 실행", self, @selector(runDocument:));
+        [self addSubview:_newButton]; [self addSubview:_openButton];
+        [self addSubview:_saveButton]; [self addSubview:_undoButton];
+        [self addSubview:_redoButton]; [self addSubview:_buildButton];
+        [self addSubview:_runButton];
         _terminalInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
         [_terminalInput setPlaceholderString:@"Terminal input"];
         [self addSubview:_terminalInput];
@@ -774,6 +824,20 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     [_terminalOutput setFont:terminalFont];
     [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalOutput setBackgroundColor:axyne_preference_color(_preferences.theme.background)];
+    [_terminalInput setTextColor:axyne_preference_color(_preferences.theme.text)];
+    [_terminalInput setBackgroundColor:axyne_preference_color(_preferences.theme.panel)];
+    [_terminalInput setDrawsBackground:YES];
+    for (NSButton *button in @[_terminalStart, _terminalStop, _terminalSend,
+                               _debugStart, _debugPause, _debugContinue,
+                               _debugNext, _debugBreakpoint]) {
+        [button setBezelStyle:NSBezelStyleTexturedRounded];
+        [button setContentTintColor:axyne_preference_color(_preferences.theme.text)];
+    }
+    for (NSButton *button in @[_newButton, _openButton, _saveButton,
+                               _undoButton, _redoButton, _buildButton,
+                               _runButton]) {
+        [button setContentTintColor:axyne_preference_color(_preferences.theme.text)];
+    }
     if (_editorView != nil) {
         [self sendEditorMessage:SCI_STYLESETFORE wParam:32
                               lParam:(intptr_t)_preferences.theme.editor_text];
@@ -1086,9 +1150,22 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     }
 }
 
+- (void)undo:(id)sender
+{
+    (void)sender;
+    (void)[self sendEditorMessage:SCI_UNDO wParam:0 lParam:0];
+}
+
+- (void)redo:(id)sender
+{
+    (void)sender;
+    (void)[self sendEditorMessage:SCI_REDO wParam:0 lParam:0];
+}
+
 - (void)openPath:(NSString *)path
 {
     if (path == nil) return;
+    [self loadScintillaView];
     if (![self captureEditor]) return;
     size_t previousCount = _documents.count;
     size_t previousIndex = _documents.active_index;
@@ -2453,6 +2530,15 @@ else [_terminalInput setStringValue:@""];
     [_debugContinue setFrame:NSMakeRect(156.0, bottomTop + 4.0, 76.0, 22.0)];
     [_debugNext setFrame:NSMakeRect(236.0, bottomTop + 4.0, 56.0, 22.0)];
     [_debugBreakpoint setFrame:NSMakeRect(296.0, bottomTop + 4.0, 96.0, 22.0)];
+    NSArray *toolbarButtons = @[_newButton, _openButton, _saveButton,
+        _undoButton, _redoButton, _buildButton, _runButton];
+    CGFloat buttonX = 8.0;
+    for (NSButton *button in toolbarButtons) {
+        CGFloat buttonWidth = ([button isEqual:_buildButton] ||
+                               [button isEqual:_runButton]) ? 72.0 : 30.0;
+        [button setFrame:NSMakeRect(buttonX, 7.0, buttonWidth, 26.0)];
+        buttonX += buttonWidth + 2.0;
+    }
 }
 
 - (void)drawLabel:(NSString *)label at:(NSPoint)point
@@ -2550,7 +2636,9 @@ else [_terminalInput setStringValue:@""];
             if (name == nil) name = @"(invalid name)";
             NSString *arrow = node->kind == AXYNE_FILE_KIND_DIRECTORY
                 ? (axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›") : @"·";
-            NSString *label = [NSString stringWithFormat:@"%@ %@", arrow, name];
+            NSString *badge = node->kind == AXYNE_FILE_KIND_DIRECTORY
+                ? arrow : axyne_macos_file_badge(node->name);
+            NSString *label = [NSString stringWithFormat:@"%@ %@", badge, name];
             [self drawLabel:label at:NSMakePoint(16 + node->depth * 16, explorerY)
                         size:12 color:text family:@"SF Pro Text"];
             explorerY += 22;
@@ -2616,6 +2704,9 @@ else [_terminalInput setStringValue:@""];
     }
     axyne_documents_destroy(&_documents);
     [_editorView release];
+    [_newButton release]; [_openButton release]; [_saveButton release];
+    [_undoButton release]; [_redoButton release];
+    [_buildButton release]; [_runButton release];
     [_terminalOutput release];
     [_terminalInput release];
     [_terminalStart release];

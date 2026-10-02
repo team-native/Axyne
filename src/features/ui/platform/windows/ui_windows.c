@@ -22,12 +22,12 @@
 #include "axyne/lsp.h"
 
 enum {
-    AXYNE_TOP_MENU = 28,
-    AXYNE_TOOLBAR = 40,
-    AXYNE_TABS = 36,
-    AXYNE_STATUS = 26,
+    AXYNE_TOP_MENU = 26,
+    AXYNE_TOOLBAR = 38,
+    AXYNE_TABS = 34,
+    AXYNE_STATUS = 24,
     AXYNE_SIDEBAR = 248,
-    AXYNE_BOTTOM = 158
+    AXYNE_BOTTOM = 230
 };
 
 enum {
@@ -2549,6 +2549,21 @@ static void axyne_text(HDC dc, HFONT font, COLORREF color, int x, int y,
     SelectObject(dc, previous_font);
 }
 
+static const wchar_t *axyne_file_badge(const char *name)
+{
+    const char *dot;
+    if (name == NULL) return L"•";
+    dot = strrchr(name, '.');
+    if (dot == NULL || dot[1] == '\0') return L"•";
+    if (_stricmp(dot, ".c") == 0) return L"C";
+    if (_stricmp(dot, ".h") == 0) return L"H";
+    if (_stricmp(dot, ".cpp") == 0 || _stricmp(dot, ".cc") == 0) return L"C++";
+    if (_stricmp(dot, ".json") == 0) return L"{}";
+    if (_stricmp(dot, ".cmake") == 0 || _stricmp(name, "CMakeLists.txt") == 0)
+        return L"CM";
+    return L"•";
+}
+
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
                                  HINSTANCE instance)
 {
@@ -2622,8 +2637,11 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
         int x = 16 + (int)node->depth * 16;
         if (state->explorer_has_selection && state->explorer_selection == i)
             axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, AXYNE_BORDER);
-        (void)swprintf_s(label, 512, L"%lc %ls", node->kind == AXYNE_FILE_KIND_DIRECTORY
-            ? (axyne_explorer_is_expanded(&state->explorer, node->path) ? L'⌄' : L'›') : L'·',
+        (void)swprintf_s(label, 512, L"%ls %ls",
+            node->kind == AXYNE_FILE_KIND_DIRECTORY
+                ? (axyne_explorer_is_expanded(&state->explorer, node->path)
+                    ? L"⌄" : L"›")
+                : axyne_file_badge(node->name),
             name != NULL ? name : L"(invalid name)");
         axyne_text(dc, state->ui_font, AXYNE_TEXT, x, y, label);
         free(name);
@@ -2705,8 +2723,26 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
 
     axyne_text(dc, state->ui_font, AXYNE_TEXT, 14, 7,
                L"파일(F)   편집(E)   보기(V)   빌드(B)   디버그(D)   도구(T)   도움말(H)");
-    axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, 39,
-               L"▱   ▣    ↶   ↷       ▷  Debug · x64 (MSVC)       빌드  Ctrl+B");
+    {
+        const wchar_t *toolbar_labels[] = {L"새 파일", L"열기", L"저장",
+            L"↶", L"↷", L"Debug · x64 (MSVC)", L"빌드", L"▷ 실행"};
+        int toolbar_x = 10;
+        size_t toolbar_index;
+        for (toolbar_index = 0; toolbar_index < sizeof(toolbar_labels) /
+             sizeof(toolbar_labels[0]); ++toolbar_index) {
+            int toolbar_width = toolbar_index == 5 ? 132 :
+                (toolbar_index >= 6 ? 58 : 42);
+            axyne_fill(dc, toolbar_x, AXYNE_TOP_MENU + 6,
+                       toolbar_x + toolbar_width,
+                       AXYNE_TOP_MENU + 32,
+                       toolbar_index == 7 ? AXYNE_ACCENT : AXYNE_BG);
+            axyne_text(dc, state->ui_font,
+                       toolbar_index == 7 ? AXYNE_BG : AXYNE_MUTED,
+                       toolbar_x + 8, AXYNE_TOP_MENU + 12,
+                       toolbar_labels[toolbar_index]);
+            toolbar_x += toolbar_width + 4;
+        }
+    }
     axyne_fill(dc, width - 360, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 6,
                width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30, AXYNE_BG);
     axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 346,
@@ -2985,10 +3021,26 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORSTATIC:
-        if ((HWND)l_param == state->terminal_output) {
+        if ((HWND)l_param == state->terminal_output ||
+            (HWND)l_param == state->terminal_input) {
             HDC dc = (HDC)w_param;
             SetTextColor(dc, AXYNE_TEXT);
             SetBkColor(dc, AXYNE_BG);
+            return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+        if ((HWND)l_param == state->terminal_start ||
+            (HWND)l_param == state->terminal_stop ||
+            (HWND)l_param == state->terminal_send ||
+            (HWND)l_param == state->debug_start ||
+            (HWND)l_param == state->debug_pause ||
+            (HWND)l_param == state->debug_continue ||
+            (HWND)l_param == state->debug_step_over ||
+            (HWND)l_param == state->debug_breakpoint) {
+            HDC dc = (HDC)w_param;
+            SetTextColor(dc, AXYNE_TEXT);
+            SetBkColor(dc, AXYNE_TOOLBAR_BG);
             return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
         }
         break;
