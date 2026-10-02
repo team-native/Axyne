@@ -15,6 +15,7 @@ int axyne_test_settings_preferences(const char *root)
     char *value = NULL;
     AxyneError error = {0};
 
+    AXYNE_TEST_CHECK(axyne_test_register_cleanup(root));
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
     AXYNE_TEST_CHECK(axyne_test_path(settings_path, sizeof(settings_path), root,
                                      "settings.json"));

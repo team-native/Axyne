@@ -17,6 +17,7 @@ int axyne_test_documents_search(const char *root)
     size_t replacement_length = 0, replacement_count = 0;
     AxyneError error = {0};
 
+    AXYNE_TEST_CHECK(axyne_test_register_cleanup(root));
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
     AXYNE_TEST_CHECK(axyne_test_path(alpha, sizeof(alpha), root, "alpha.txt"));
     AXYNE_TEST_CHECK(axyne_test_path(beta_directory, sizeof(beta_directory), root,
@@ -90,11 +91,6 @@ int axyne_test_documents_search(const char *root)
     AXYNE_TEST_CHECK(documents.count == 1 && documents.documents[0].is_untitled);
     axyne_documents_destroy(&documents);
 
-    axyne_test_remove_file(alpha);
-    axyne_test_remove_file(beta);
-    axyne_test_remove_file(binary);
-    axyne_test_remove_file(saved);
-    axyne_test_remove_directory(beta_directory);
-    axyne_test_remove_directory(root);
+    axyne_test_remove_tree(root);
     return 1;
 }

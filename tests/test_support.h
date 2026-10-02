@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "axyne/filesystem.h"
@@ -70,6 +71,22 @@ static inline void axyne_test_remove_tree(const char *path)
         axyne_fs_free_directory_list(&list);
     }
     axyne_test_remove_directory(path);
+}
+
+static char axyne_test_cleanup_path[1024];
+
+static void axyne_test_cleanup_at_exit(void)
+{
+    if (axyne_test_cleanup_path[0] != '\0')
+        axyne_test_remove_tree(axyne_test_cleanup_path);
+}
+
+static inline int axyne_test_register_cleanup(const char *path)
+{
+    int written = snprintf(axyne_test_cleanup_path,
+                           sizeof(axyne_test_cleanup_path), "%s", path);
+    return written >= 0 && (size_t)written < sizeof(axyne_test_cleanup_path) &&
+           atexit(axyne_test_cleanup_at_exit) == 0;
 }
 
 #define AXYNE_TEST_CHECK(condition) \

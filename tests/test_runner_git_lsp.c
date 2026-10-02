@@ -1,6 +1,5 @@
 #include "test_support.h"
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +7,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <time.h>
+#include <pthread.h>
 #endif
 
 #include "axyne/document.h"
@@ -19,7 +18,13 @@
 
 typedef struct AxyneTestProcessResult {
     int exit_code;
-    atomic_int done;
+#ifdef _WIN32
+    HANDLE done_event;
+#else
+    pthread_mutex_t lock;
+    pthread_cond_t condition;
+    int done;
+#endif
 } AxyneTestProcessResult;
 
 static void axyne_test_process_exit(AxyneProcess *process, int exit_code,
@@ -27,8 +32,16 @@ static void axyne_test_process_exit(AxyneProcess *process, int exit_code,
 {
     AxyneTestProcessResult *result = (AxyneTestProcessResult *)user_data;
     (void)process;
+#ifdef _WIN32
     result->exit_code = exit_code;
-    atomic_store_explicit(&result->done, 1, memory_order_release);
+    (void)SetEvent(result->done_event);
+#else
+    (void)pthread_mutex_lock(&result->lock);
+    result->exit_code = exit_code;
+    result->done = 1;
+    (void)pthread_cond_signal(&result->condition);
+    (void)pthread_mutex_unlock(&result->lock);
+#endif
 }
 
 #ifdef _WIN32
@@ -86,37 +99,62 @@ static int axyne_test_git_command(const char *root, const char *const *arguments
         fprintf(stderr, "git.exe was not found on PATH\n");
         return 0;
     }
-    spec.executable = git_executable;
 #else
     const char *git_executable = "git";
-    spec.executable = git_executable;
 #endif
+#ifdef _WIN32
+    result.exit_code = -1;
+    result.done_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (result.done_event == NULL) {
+        free(git_executable);
+        return 0;
+    }
+#else
+    result.exit_code = -1;
+    result.done = 0;
+    if (pthread_mutex_init(&result.lock, NULL) != 0) return 0;
+    if (pthread_cond_init(&result.condition, NULL) != 0) {
+        (void)pthread_mutex_destroy(&result.lock);
+        return 0;
+    }
+#endif
+    spec.executable = git_executable;
 
     spec.arguments = arguments;
     spec.argument_count = argument_count;
     spec.working_directory = root;
     spec.on_exit = axyne_test_process_exit;
     spec.user_data = &result;
-    result.exit_code = -1;
-    atomic_init(&result.done, 0);
     status = axyne_process_start(&spec, &process, &error);
 #ifdef _WIN32
     free(git_executable);
 #endif
     if (status != AXYNE_STATUS_OK) {
+#ifdef _WIN32
+        (void)CloseHandle(result.done_event);
+#else
+        (void)pthread_cond_destroy(&result.condition);
+        (void)pthread_mutex_destroy(&result.lock);
+#endif
         fprintf(stderr, "git fixture process failed: %d %s\n", (int)status,
                 error.message);
         return 0;
     }
-    while (atomic_load_explicit(&result.done, memory_order_acquire) == 0) {
 #ifdef _WIN32
-        Sleep(1);
+    (void)WaitForSingleObject(result.done_event, INFINITE);
 #else
-        struct timespec delay = {0, 1000000L};
-        (void)nanosleep(&delay, NULL);
+    (void)pthread_mutex_lock(&result.lock);
+    while (!result.done)
+        (void)pthread_cond_wait(&result.condition, &result.lock);
+    (void)pthread_mutex_unlock(&result.lock);
 #endif
-    }
     axyne_process_release(process);
+#ifdef _WIN32
+    (void)CloseHandle(result.done_event);
+#else
+    (void)pthread_cond_destroy(&result.condition);
+    (void)pthread_mutex_destroy(&result.lock);
+#endif
     if (result.exit_code != 0)
         fprintf(stderr, "git fixture command exited with %d\n", result.exit_code);
     return result.exit_code == 0;
@@ -139,6 +177,7 @@ int axyne_test_runner_git_lsp(const char *root, const char *source_root)
     AxyneError error = {0};
     char utf8_line[] = "A\xF0\x9F\x98\x80" "B";
 
+    AXYNE_TEST_CHECK(axyne_test_register_cleanup(root));
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
     AXYNE_TEST_CHECK(axyne_test_path(tracked_path, sizeof(tracked_path), root,
                                      "tracked.txt"));
