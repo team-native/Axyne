@@ -1,0 +1,32 @@
+#!/bin/zsh
+
+set -u
+
+bundle_name="@AXYNE_MACOS_BUNDLE_NAME@"
+script_directory="${0:A:h}"
+if [[ -d "${script_directory}/${bundle_name}" ]]; then
+    app_path="${script_directory}/${bundle_name}"
+elif [[ -d "/Applications/${bundle_name}" ]]; then
+    app_path="/Applications/${bundle_name}"
+else
+    osascript -e 'display alert "@AXYNE_DISPLAY_NAME@ Uninstaller" message "@AXYNE_MACOS_BUNDLE_NAME@ was not found next to this uninstaller or in /Applications." as warning buttons {"OK"}'
+    exit 1
+fi
+
+osascript - "${app_path}" <<'APPLESCRIPT'
+on run argv
+    set appPath to item 1 of argv
+    set confirmation to display dialog "Remove @AXYNE_DISPLAY_NAME@ from this Mac?" & return & return & appPath buttons {"Cancel", "Uninstall"} default button "Cancel" with icon caution
+    if button returned of confirmation is not "Uninstall" then
+        return
+    end if
+
+    try
+        do shell script "/bin/rm -rf -- " & quoted form of appPath with administrator privileges
+        display dialog "@AXYNE_DISPLAY_NAME@ was removed." buttons {"OK"} with icon note
+    on error errorMessage
+        display alert "@AXYNE_DISPLAY_NAME@ could not be removed" message errorMessage as warning buttons {"OK"}
+        error number -128
+    end try
+end run
+APPLESCRIPT
