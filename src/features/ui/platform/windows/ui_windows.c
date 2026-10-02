@@ -121,6 +121,8 @@ typedef struct AxyneWindowState {
     size_t explorer_scroll;
     int explorer_wheel_remainder;
     size_t first_visible_tab;
+    size_t tab_reveal_index;
+    int tab_wheel_remainder;
     int terminal_panel_selected;
     int problems_panel_selected;
     int closing;
@@ -2684,6 +2686,18 @@ static void axyne_text_rect(HDC dc, HFONT font, COLORREF color,
 static void axyne_paint_badge(HDC dc, HFONT font, const char *name, RECT rect)
 {
     AxyneFileBadge badge = axyne_ui_file_badge(name);
+    if (badge.label[0] == '\0') {
+        HPEN pen = CreatePen(PS_SOLID, 1, axyne_theme_color(badge.color));
+        HGDIOBJ previous_pen = SelectObject(dc, pen);
+        HGDIOBJ previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        int x = (rect.left + rect.right - 8) / 2;
+        int y = (rect.top + rect.bottom - 10) / 2;
+        Rectangle(dc, x, y, x + 8, y + 10);
+        SelectObject(dc, previous_brush);
+        SelectObject(dc, previous_pen);
+        DeleteObject(pen);
+        return;
+    }
     wchar_t *label = axyne_wide(badge.label);
     if (label != NULL) {
         axyne_text_rect(dc, font, axyne_theme_color(badge.color), rect, label, DT_CENTER);
@@ -2742,10 +2756,13 @@ static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
     }
     max_first = state->documents.count > slots ? state->documents.count - slots : 0;
     if (state->first_visible_tab > max_first) state->first_visible_tab = max_first;
-    if (state->documents.active_index < state->first_visible_tab)
-        state->first_visible_tab = state->documents.active_index;
-    else if (state->documents.active_index >= state->first_visible_tab + slots)
-        state->first_visible_tab = state->documents.active_index - slots + 1;
+    if (state->tab_reveal_index != state->documents.active_index) {
+        if (state->documents.active_index < state->first_visible_tab)
+            state->first_visible_tab = state->documents.active_index;
+        else if (state->documents.active_index >= state->first_visible_tab + slots)
+            state->first_visible_tab = state->documents.active_index - slots + 1;
+        state->tab_reveal_index = state->documents.active_index;
+    }
     return slots;
 }
 
@@ -2889,6 +2906,7 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
         ShowWindow(state->debug_step_over, SW_HIDE);
         ShowWindow(state->debug_breakpoint, SW_HIDE);
     }
+    state->tab_reveal_index = SIZE_MAX;
     (void)axyne_visible_tabs(state, width);
     (void)axyne_explorer_visible_rows(state, status_top);
     InvalidateRect(window, NULL, FALSE);
@@ -3245,12 +3263,34 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         break;
     }
-    case WM_MOUSEWHEEL: {
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL: {
         POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
         RECT client;
         int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
         ScreenToClient(window, &point);
         GetClientRect(window, &client);
+        if (point.x >= AXYNE_SIDEBAR && point.x < client.right &&
+            point.y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR &&
+            point.y < AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
+            size_t slots = axyne_visible_tabs(state, client.right);
+            size_t maximum = state->documents.count > slots ? state->documents.count - slots : 0;
+            int steps;
+            state->tab_wheel_remainder += GET_WHEEL_DELTA_WPARAM(w_param) *
+                (message == WM_MOUSEHWHEEL ? 1 : -1);
+            steps = state->tab_wheel_remainder / WHEEL_DELTA;
+            state->tab_wheel_remainder %= WHEEL_DELTA;
+            if (steps < 0) {
+                size_t movement = (size_t)-steps;
+                state->first_visible_tab = movement > state->first_visible_tab ? 0 :
+                    state->first_visible_tab - movement;
+            } else if ((size_t)steps > maximum - state->first_visible_tab) {
+                state->first_visible_tab = maximum;
+            } else state->first_visible_tab += (size_t)steps;
+            InvalidateRect(window, NULL, FALSE);
+            return 0;
+        }
+        if (message == WM_MOUSEHWHEEL) break;
         if (point.x >= 0 && point.x < AXYNE_SIDEBAR && point.y >= top &&
             point.y < client.bottom - AXYNE_STATUS) {
             size_t rows = axyne_explorer_visible_rows(state, client.bottom - AXYNE_STATUS);
