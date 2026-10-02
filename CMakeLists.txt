@@ -237,6 +237,15 @@ if(WIN32 OR APPLE)
             DESTINATION .
             CONFIGURATIONS Release
         )
+        # CMake's bundle install traversal preserves the framework's resource
+        # tree but can omit the symlinked Cocoa binary.  Install the concrete
+        # framework runtime explicitly so the packaged app is self-contained.
+        install(FILES
+            "${AXYNE_SCINTILLA_FRAMEWORK}/Versions/A/Scintilla"
+            DESTINATION
+                "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks/Scintilla.framework/Versions/A"
+            CONFIGURATIONS Release
+        )
     endif()
 endif()
 
