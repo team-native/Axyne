@@ -493,21 +493,24 @@ static void axyne_refresh_action_controls(AxyneWindowState *state)
     AxyneDocument *document;
     int terminal_active;
     int debugger_active;
+    int saved_document;
     if (state == NULL) return;
     document = axyne_active(state);
     terminal_active = state->terminal_process != NULL;
     debugger_active = axyne_debugger_is_active(&state->debugger);
+    saved_document = document != NULL && !document->is_untitled &&
+        document->path != NULL && !document->is_dirty;
     EnableWindow(state->terminal_start,
                  !terminal_active && !debugger_active);
     EnableWindow(state->terminal_stop, terminal_active);
     EnableWindow(state->terminal_send, terminal_active);
     EnableWindow(state->debug_start,
-                 !terminal_active && !debugger_active && document != NULL);
-    EnableWindow(state->debug_pause, debugger_active);
-    EnableWindow(state->debug_continue, debugger_active);
-    EnableWindow(state->debug_step_over, debugger_active);
+                 !terminal_active && !debugger_active && saved_document);
+    EnableWindow(state->debug_pause, debugger_active && saved_document);
+    EnableWindow(state->debug_continue, debugger_active && saved_document);
+    EnableWindow(state->debug_step_over, debugger_active && saved_document);
     EnableWindow(state->debug_breakpoint,
-                 document != NULL && document->path != NULL);
+                 saved_document);
 }
 
 static void axyne_terminal_output(AxyneProcess *process,
@@ -640,6 +643,7 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *document;
     AxyneError error;
+    (void)window;
     if (axyne_debugger_is_active(&state->debugger)) return;
     if (state->terminal_process != NULL) {
         const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\r\n";
@@ -651,11 +655,12 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
     document = axyne_active(state);
     if (document == NULL || document->is_untitled || document->path == NULL ||
         document->is_dirty) {
-        if (!axyne_save_active(window, state)) return;
-        document = axyne_active(state);
+        const char *message =
+            "The debugger requires a saved, clean, non-untitled document.\r\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
     }
-    if (document == NULL || document->is_untitled || document->path == NULL ||
-        document->is_dirty) return;
     if (axyne_debugger_start(&state->debugger, document,
             axyne_terminal_output, axyne_terminal_exit, state, &error) !=
             AXYNE_STATUS_OK) {
@@ -1299,6 +1304,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
         state->last_exit_failed = 0;
         EnableWindow(state->terminal_start, FALSE);
         EnableWindow(state->terminal_stop, TRUE);
+        axyne_refresh_action_controls(state);
     }
     (void)window;
 }
@@ -2690,6 +2696,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 if (status == AXYNE_STATUS_OK) {
                     SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
                     axyne_update_title(window, state);
+                    axyne_refresh_action_controls(state);
                 } else MessageBoxA(window, error.message, "Axyne - Save failed",
                                    MB_OK | MB_ICONERROR);
             }
@@ -2816,6 +2823,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->documents.active_index, NULL);
             axyne_update_title(window, state);
         }
+        axyne_refresh_action_controls(state);
         return 0;
     }
     case WM_CLOSE:

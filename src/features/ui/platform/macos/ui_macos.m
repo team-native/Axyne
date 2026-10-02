@@ -548,14 +548,16 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneDocument *document = [self activeDocument];
     BOOL terminalActive = _terminalProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
+    BOOL savedDocument = document != NULL && !document->is_untitled &&
+        document->path != NULL && !document->is_dirty;
     [_terminalStart setEnabled:!terminalActive && !debuggerActive];
     [_terminalStop setEnabled:terminalActive];
     [_terminalSend setEnabled:terminalActive];
-    [_debugStart setEnabled:!terminalActive && !debuggerActive && document != NULL];
-    [_debugPause setEnabled:debuggerActive];
-    [_debugContinue setEnabled:debuggerActive];
-    [_debugNext setEnabled:debuggerActive];
-    [_debugBreakpoint setEnabled:document != NULL && document->path != NULL];
+    [_debugStart setEnabled:!terminalActive && !debuggerActive && savedDocument];
+    [_debugPause setEnabled:debuggerActive && savedDocument];
+    [_debugContinue setEnabled:debuggerActive && savedDocument];
+    [_debugNext setEnabled:debuggerActive && savedDocument];
+    [_debugBreakpoint setEnabled:savedDocument];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
@@ -564,17 +566,19 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneDocument *document = [self activeDocument];
     BOOL hasDocument = document != NULL;
     BOOL savedDocument = hasDocument && !document->is_untitled &&
-        document->path != NULL;
+        document->path != NULL && !document->is_dirty;
     BOOL terminalActive = _terminalProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     if (action == @selector(saveDocument:) ||
         action == @selector(saveDocumentAs:) ||
         action == @selector(closeDocument:)) return hasDocument;
     if (action == @selector(buildDocument:) ||
-        action == @selector(runDocument:) ||
-        action == @selector(startDebugger:))
+        action == @selector(runDocument:))
         return hasDocument && !terminalActive && !debuggerActive;
-    if (action == @selector(debugCommand:)) return debuggerActive;
+    if (action == @selector(startDebugger:))
+        return savedDocument && !terminalActive && !debuggerActive;
+    if (action == @selector(debugCommand:))
+        return debuggerActive && savedDocument;
     if (action == @selector(toggleBreakpoint:)) return savedDocument;
     if (action == @selector(startTerminal:))
         return !terminalActive && !debuggerActive;
@@ -826,6 +830,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [self setNeedsDisplay:YES];
         [self updateWindowTitle];
     }
+    [self refreshActionControls];
 }
 
 - (BOOL)saveActiveToPath:(NSString *)path
@@ -1934,11 +1939,12 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     document = [self activeDocument];
     if (document == NULL || document->is_untitled || document->path == NULL ||
         document->is_dirty) {
-        if (![self saveActive]) return;
-        document = [self activeDocument];
+        const char *message =
+            "The debugger requires a saved, clean, non-untitled document.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
     }
-    if (document == NULL || document->is_untitled || document->path == NULL ||
-        document->is_dirty) return;
     if (axyne_debugger_start(&_debugger, document,
             axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
             &error) != AXYNE_STATUS_OK) {
