@@ -78,15 +78,20 @@ jobs:
             -P packaging/validation/validate-install.cmake
           cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
 
-          $debugOutput = & cmake `
-            '-DAXYNE_CONFIGURATION=Debug' `
-            '-DAXYNE_PLATFORM=Windows' `
-            '-DAXYNE_INSTALL_ROOT=unused' `
-            '-P' 'packaging/validation/validate-install.cmake' 2>&1
-          $debugExitCode = $LASTEXITCODE
-          $debugMessage = $debugOutput -join "`n"
+          $debugStdout = Join-Path $env:RUNNER_TEMP 'axyne-cmake-debug.stdout.log'
+          $debugStderr = Join-Path $env:RUNNER_TEMP 'axyne-cmake-debug.stderr.log'
+          $debugProcess = Start-Process `
+            -FilePath 'cmake' `
+            -ArgumentList @('-DAXYNE_CONFIGURATION=Debug', '-DAXYNE_PLATFORM=Windows', '-DAXYNE_INSTALL_ROOT=unused', '-P', 'packaging/validation/validate-install.cmake') `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $debugStdout `
+            -RedirectStandardError $debugStderr
+          $debugMessage = @(
+            (Get-Content -Path $debugStdout -ErrorAction SilentlyContinue)
+            (Get-Content -Path $debugStderr -ErrorAction SilentlyContinue)
+          ) -join "`n"
           Write-Host $debugMessage
-          if ($debugExitCode -eq 0 -or $debugMessage -notmatch 'Release-only') {
+          if ($debugProcess.ExitCode -eq 0 -or $debugMessage -notmatch 'Release-only') {
             throw "Debug packaging validation failed unexpectedly:`n$debugMessage"
           }
 
