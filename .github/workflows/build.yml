@@ -111,9 +111,11 @@ jobs:
             -DAXYNE_APP_BUNDLE=Axyne.app \
             -DAXYNE_APP_EXECUTABLE=Axyne \
             -P packaging/validation/validate-install.cmake
-          cpack --config build/CPackConfig.cmake -G productbuild -C Release -B "$package_directory"
+          mkdir -p "$package_directory/productbuild" "$package_directory/dragndrop"
+          cpack --config build/CPackConfig.cmake -G productbuild -C Release -B "$package_directory/productbuild"
+          cpack --config build/CPackConfig.cmake -G DragNDrop -C Release -B "$package_directory/dragndrop"
 
-          if cpack --config build/CPackConfig.cmake -C Debug -B "$package_directory" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
+          if cpack --config build/CPackConfig.cmake -G productbuild -C Debug -B "$package_directory/debug" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
             echo 'Debug packaging unexpectedly succeeded.' >&2
             exit 1
           fi
