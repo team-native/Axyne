@@ -1,6 +1,8 @@
 #include "test_support.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -17,7 +19,7 @@
 
 typedef struct AxyneTestProcessResult {
     int exit_code;
-    volatile int done;
+    atomic_int done;
 } AxyneTestProcessResult;
 
 static void axyne_test_process_exit(AxyneProcess *process, int exit_code,
@@ -26,31 +28,87 @@ static void axyne_test_process_exit(AxyneProcess *process, int exit_code,
     AxyneTestProcessResult *result = (AxyneTestProcessResult *)user_data;
     (void)process;
     result->exit_code = exit_code;
-    result->done = 1;
+    atomic_store_explicit(&result->done, 1, memory_order_release);
 }
+
+#ifdef _WIN32
+static char *axyne_test_find_git(void)
+{
+    wchar_t *wide_path = NULL;
+    DWORD capacity = MAX_PATH;
+    DWORD length;
+    int utf8_length;
+    char *utf8_path;
+
+    for (;;) {
+        wide_path = (wchar_t *)malloc((size_t)capacity * sizeof(*wide_path));
+        if (wide_path == NULL) return NULL;
+        length = SearchPathW(NULL, L"git.exe", NULL, capacity, wide_path,
+                             NULL);
+        if (length == 0) {
+            free(wide_path);
+            return NULL;
+        }
+        if (length < capacity) break;
+        free(wide_path);
+        capacity = length + 1;
+    }
+    utf8_length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                      wide_path, -1, NULL, 0, NULL, NULL);
+    if (utf8_length <= 0) {
+        free(wide_path);
+        return NULL;
+    }
+    utf8_path = (char *)malloc((size_t)utf8_length);
+    if (utf8_path == NULL || WideCharToMultiByte(
+                                 CP_UTF8, WC_ERR_INVALID_CHARS, wide_path, -1,
+                                 utf8_path, utf8_length, NULL, NULL) <= 0) {
+        free(utf8_path);
+        free(wide_path);
+        return NULL;
+    }
+    free(wide_path);
+    return utf8_path;
+}
+#endif
 
 static int axyne_test_git_command(const char *root, const char *const *arguments,
                                   size_t argument_count)
 {
     AxyneProcessSpec spec = {0};
     AxyneProcess *process = NULL;
-    AxyneTestProcessResult result = {-1, 0};
+    AxyneTestProcessResult result;
     AxyneError error = {0};
     AxyneStatus status;
+#ifdef _WIN32
+    char *git_executable = axyne_test_find_git();
+    if (git_executable == NULL) {
+        fprintf(stderr, "git.exe was not found on PATH\n");
+        return 0;
+    }
+    spec.executable = git_executable;
+#else
+    const char *git_executable = "git";
+    spec.executable = git_executable;
+#endif
 
-    spec.executable = "git";
     spec.arguments = arguments;
     spec.argument_count = argument_count;
     spec.working_directory = root;
     spec.on_exit = axyne_test_process_exit;
     spec.user_data = &result;
+    result.exit_code = -1;
+    atomic_init(&result.done, 0);
     status = axyne_process_start(&spec, &process, &error);
+#ifdef _WIN32
+    free(git_executable);
+#endif
     if (status != AXYNE_STATUS_OK) {
         fprintf(stderr, "git fixture process failed: %d %s\n", (int)status,
                 error.message);
         return 0;
     }
-    while (!result.done) {
+    while (atomic_load_explicit(&result.done, memory_order_acquire) == 0) {
 #ifdef _WIN32
         Sleep(1);
 #else

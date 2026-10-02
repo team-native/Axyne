@@ -20,17 +20,17 @@ endif()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 add_test(
     NAME axyne-documents-search
-    COMMAND axyne_tests documents-search
+    COMMAND $<TARGET_FILE:axyne_tests> documents-search
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/documents-search"
 )
 add_test(
     NAME axyne-settings-preferences
-    COMMAND axyne_tests settings-preferences
+    COMMAND $<TARGET_FILE:axyne_tests> settings-preferences
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/settings-preferences"
 )
 add_test(
     NAME axyne-runner-git-lsp
-    COMMAND axyne_tests runner-git-lsp
+    COMMAND $<TARGET_FILE:axyne_tests> runner-git-lsp
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/runner-git-lsp"
             "${CMAKE_SOURCE_DIR}"
 )
