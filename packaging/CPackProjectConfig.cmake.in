@@ -1,0 +1,21 @@
+# CPack is intentionally a Release-only packaging workflow.  Multi-config
+# generators select the package input with `cpack -C Release`; single-config
+# generators capture and validate their configured build type below.
+if(DEFINED CPACK_BUILD_CONFIG AND NOT CPACK_BUILD_CONFIG STREQUAL "Release")
+    message(FATAL_ERROR
+        "Axyne packaging is Release-only; requested CPack configuration is '${CPACK_BUILD_CONFIG}'.")
+endif()
+
+set(_axyne_packaging_configured_build_type
+    "@AXYNE_PACKAGING_CONFIGURED_BUILD_TYPE@")
+set(_axyne_packaging_multi_config "@AXYNE_PACKAGING_MULTI_CONFIG@")
+
+if(NOT _axyne_packaging_multi_config STREQUAL "TRUE"
+   AND _axyne_packaging_configured_build_type STREQUAL "")
+    message(FATAL_ERROR
+        "Axyne packaging is Release-only; configure the single-config build with CMAKE_BUILD_TYPE=Release.")
+elseif(NOT _axyne_packaging_multi_config STREQUAL "TRUE"
+       AND NOT _axyne_packaging_configured_build_type STREQUAL "Release")
+    message(FATAL_ERROR
+        "Axyne packaging is Release-only; configure the single-config build with CMAKE_BUILD_TYPE=Release.")
+endif()
