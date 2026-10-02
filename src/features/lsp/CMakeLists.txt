@@ -1,0 +1,15 @@
+add_library(axyne_lsp STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/lsp.c"
+)
+target_include_directories(axyne_lsp PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(axyne_lsp PUBLIC axyne_process)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(axyne_lsp PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(axyne_lsp PRIVATE /W4)
+else()
+    target_compile_options(axyne_lsp PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+target_link_libraries(axyne PRIVATE axyne_lsp)
