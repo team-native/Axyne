@@ -47,3 +47,38 @@ set_tests_properties(
     axyne-process-stability
     PROPERTIES TIMEOUT 60
 )
+
+if(APPLE)
+    # Exercise the production AppKit adapter in a bundle with the same native
+    # runtime as Axyne, without starting the interactive application.
+    add_executable(axyne_editor_runtime_tests MACOSX_BUNDLE
+        test_editor_runtime_macos.m
+    )
+    target_include_directories(axyne_editor_runtime_tests PRIVATE
+        "${axyne_scintilla_SOURCE_DIR}/include"
+    )
+    target_link_libraries(axyne_editor_runtime_tests PRIVATE
+        axyne_ui axyne_debugger axyne_git axyne_lsp axyne_runner axyne_core
+        "-framework AppKit"
+    )
+    target_link_options(axyne_editor_runtime_tests PRIVATE -ObjC)
+    target_compile_options(axyne_editor_runtime_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_dependencies(axyne_editor_runtime_tests axyne)
+    add_custom_command(TARGET axyne_editor_runtime_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne_editor_runtime_tests>/Frameworks"
+        COMMAND /bin/cp -R
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Scintilla.framework"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne_editor_runtime_tests>/Frameworks/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Lexilla.dylib"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne_editor_runtime_tests>/Frameworks/Lexilla.dylib"
+        VERBATIM
+    )
+    add_test(NAME axyne-editor-runtime
+        COMMAND $<TARGET_FILE:axyne_editor_runtime_tests>
+    )
+    set_tests_properties(axyne-editor-runtime PROPERTIES TIMEOUT 60)
+endif()

@@ -1504,13 +1504,12 @@ static NSString *axyne_macos_file_badge(const char *name)
     if (_editorView != nil) {
         return;
     }
-    NSString *frameworkPath = [[NSBundle mainBundle] pathForResource:@"Scintilla"
-                                                               ofType:@"framework"
-                                                          inDirectory:@"Frameworks"];
-    if (frameworkPath != nil) {
-        _scintillaBundle = [[NSBundle bundleWithPath:frameworkPath] retain];
-        [_scintillaBundle load];
-    }
+    NSString *frameworksPath = [[NSBundle mainBundle] privateFrameworksPath];
+    NSString *frameworkPath = [frameworksPath
+        stringByAppendingPathComponent:@"Scintilla.framework"];
+    NSBundle *bundle = [NSBundle bundleWithPath:frameworkPath];
+    if (bundle == nil || ![bundle load]) return;
+    _scintillaBundle = [bundle retain];
 
     Class scintillaClass = NSClassFromString(@"ScintillaView");
     if (scintillaClass != Nil) {
@@ -1534,8 +1533,8 @@ static NSString *axyne_macos_file_badge(const char *name)
         [self addSubview:_editorView];
         [self setNeedsLayout:YES];
 
-        NSString *lexillaPath = [[NSBundle mainBundle]
-            pathForResource:@"Lexilla" ofType:@"dylib" inDirectory:@"Frameworks"];
+        NSString *lexillaPath = [frameworksPath
+            stringByAppendingPathComponent:@"Lexilla.dylib"];
         if (lexillaPath != nil) {
             _lexillaModule = dlopen([lexillaPath fileSystemRepresentation],
                                     RTLD_NOW | RTLD_LOCAL);
