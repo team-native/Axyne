@@ -113,3 +113,13 @@ elseif(WIN32)
     add_test(NAME axyne-editor-runtime COMMAND $<TARGET_FILE:axyne_editor_runtime_tests>)
     set_tests_properties(axyne-editor-runtime PROPERTIES TIMEOUT 60)
 endif()
+
+if(APPLE)
+    add_executable(axyne_workspace_layout_tests test_workspace_layout_macos.m)
+    target_link_libraries(axyne_workspace_layout_tests PRIVATE
+        axyne_ui axyne_debugger axyne_lsp axyne_git)
+    target_link_options(axyne_workspace_layout_tests PRIVATE
+        "LINKER:-force_load,$<TARGET_FILE:axyne_ui>")
+    add_test(NAME axyne-workspace-layout COMMAND $<TARGET_FILE:axyne_workspace_layout_tests>)
+    set_tests_properties(axyne-workspace-layout PROPERTIES TIMEOUT 60)
+endif()
