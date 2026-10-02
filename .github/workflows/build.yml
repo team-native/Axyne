@@ -78,8 +78,11 @@ jobs:
             -P packaging/validation/validate-install.cmake
           cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
 
-          $PSNativeCommandUseErrorActionPreference = $false
-          $debugOutput = & cpack --config build/CPackConfig.cmake -C Debug -B (Join-Path $packageDirectory 'debug') 2>&1
+          $debugOutput = & cmake `
+            '-DAXYNE_CONFIGURATION=Debug' `
+            '-DAXYNE_PLATFORM=Windows' `
+            '-DAXYNE_INSTALL_ROOT=unused' `
+            '-P' 'packaging/validation/validate-install.cmake' 2>&1
           $debugExitCode = $LASTEXITCODE
           $debugMessage = $debugOutput -join "`n"
           Write-Host $debugMessage
