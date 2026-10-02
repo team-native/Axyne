@@ -5,6 +5,7 @@ add_executable(axyne_tests
     test_runner_git_lsp.c
     test_process_stability.c
     test_palette_problems.c
+    test_problems_feed.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -52,12 +53,18 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> palette-problems
             "${AXYNE_TEST_FIXTURE_DIR}/palette-problems"
 )
+add_test(
+    NAME axyne-problems-feed
+    COMMAND $<TARGET_FILE:axyne_tests> problems-feed
+            "${AXYNE_TEST_FIXTURE_DIR}/problems-feed"
+)
 set_tests_properties(
     axyne-documents-search
     axyne-settings-preferences
     axyne-runner-git-lsp
     axyne-process-stability
     axyne-palette-problems
+    axyne-problems-feed
     PROPERTIES TIMEOUT 60
 )
 
