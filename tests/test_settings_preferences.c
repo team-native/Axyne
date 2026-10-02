@@ -199,6 +199,41 @@ int axyne_test_settings_preferences(const char *root)
                          edited.theme.editor_background == 0xffffff);
     }
 
+    {
+        AxynePreferences base, edited, out;
+        unsigned char bindings[AXYNE_ACTION_COUNT];
+        AxyneKeyBinding *save;
+        uint32_t fields;
+        axyne_preferences_defaults(&base);
+        edited = base;
+        AXYNE_TEST_CHECK(axyne_preferences_changed_fields(&base, &edited, bindings) == 0);
+        edited.editor.line_numbers = 0;
+        edited.editor.rendering = AXYNE_RENDERING_GDI;
+        strcpy(edited.editor.font_family, "Menlo");
+        axyne_preferences_select_theme(&edited.theme, AXYNE_THEME_LIGHT);
+        save = (AxyneKeyBinding *)axyne_preferences_find_binding(&edited, AXYNE_ACTION_SAVE);
+        save->enabled = 0;
+        fields = axyne_preferences_changed_fields(&base, &edited, bindings);
+        AXYNE_TEST_CHECK(fields == (AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS |
+                                    AXYNE_PREFERENCE_EDITOR_RENDERING |
+                                    AXYNE_PREFERENCE_EDITOR_FONT_FAMILY |
+                                    AXYNE_PREFERENCE_THEME_PRESET));
+        AXYNE_TEST_CHECK(bindings[AXYNE_ACTION_SAVE] == 1 && bindings[AXYNE_ACTION_NEW] == 0);
+        /* Workspace: keep existing overrides, add only what changed. */
+        base.present_fields = AXYNE_PREFERENCE_EDITOR_TAB_WIDTH;
+        memset(base.binding_present, 0, sizeof(base.binding_present));
+        base.binding_present[AXYNE_ACTION_OPEN] = 1;
+        axyne_preferences_prepare_save(&out, &base, &edited, 1);
+        AXYNE_TEST_CHECK(out.present_fields == (fields | AXYNE_PREFERENCE_EDITOR_TAB_WIDTH));
+        AXYNE_TEST_CHECK(out.binding_present[AXYNE_ACTION_SAVE] == 1 &&
+                         out.binding_present[AXYNE_ACTION_OPEN] == 1 &&
+                         out.binding_present[AXYNE_ACTION_NEW] == 0);
+        /* Global: everything is written. */
+        axyne_preferences_prepare_save(&out, &base, &edited, 0);
+        AXYNE_TEST_CHECK(out.present_fields == AXYNE_PREFERENCE_ALL_FIELDS &&
+                         out.binding_present[AXYNE_ACTION_NEW] == 1);
+    }
+
     axyne_test_remove_tree(root);
     return 1;
 }

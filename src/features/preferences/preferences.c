@@ -486,3 +486,69 @@ void axyne_preferences_restore_binding(AxynePreferences *preferences, AxynePrefe
     index = axyne_binding_index(preferences, action);
     if (restored != NULL && index >= 0) preferences->bindings[index] = *restored;
 }
+
+uint32_t axyne_preferences_changed_fields(
+    const AxynePreferences *before, const AxynePreferences *after,
+    unsigned char bindings_changed[AXYNE_ACTION_COUNT])
+{
+    uint32_t fields = 0;
+    static const uint32_t color_bits[] = {
+        AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL,
+        AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER,
+        AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED,
+        AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND,
+        AXYNE_PREFERENCE_THEME_EDITOR_TEXT
+    };
+    if (bindings_changed != NULL)
+        memset(bindings_changed, 0, AXYNE_ACTION_COUNT);
+    if (before == NULL || after == NULL) return 0;
+#define AXYNE_DIFF(member, bit) if (before->editor.member != after->editor.member) fields |= (bit)
+    AXYNE_DIFF(tab_width, AXYNE_PREFERENCE_EDITOR_TAB_WIDTH);
+    AXYNE_DIFF(font_size, AXYNE_PREFERENCE_EDITOR_FONT_SIZE);
+    AXYNE_DIFF(insert_spaces, AXYNE_PREFERENCE_EDITOR_INSERT_SPACES);
+    AXYNE_DIFF(word_wrap, AXYNE_PREFERENCE_EDITOR_WORD_WRAP);
+    AXYNE_DIFF(show_whitespace, AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE);
+    AXYNE_DIFF(line_numbers, AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS);
+    AXYNE_DIFF(highlight_current_line, AXYNE_PREFERENCE_EDITOR_HIGHLIGHT_CURRENT_LINE);
+    AXYNE_DIFF(auto_indent, AXYNE_PREFERENCE_EDITOR_AUTO_INDENT);
+    AXYNE_DIFF(rendering, AXYNE_PREFERENCE_EDITOR_RENDERING);
+#undef AXYNE_DIFF
+    if (strcmp(before->editor.font_family, after->editor.font_family) != 0)
+        fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
+    if (before->theme.preset != after->theme.preset) {
+        fields |= AXYNE_PREFERENCE_THEME_PRESET;
+    } else {
+        const uint32_t *a = &before->theme.background;
+        const uint32_t *b = &after->theme.background;
+        for (size_t i = 0; i < sizeof(color_bits) / sizeof(color_bits[0]); ++i)
+            if (a[i] != b[i]) fields |= color_bits[i];
+    }
+    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
+        const AxyneKeyBinding *x = axyne_preferences_find_binding(before, (AxynePreferenceAction)action);
+        const AxyneKeyBinding *y = axyne_preferences_find_binding(after, (AxynePreferenceAction)action);
+        int changed = (x == NULL) != (y == NULL) ||
+            (x != NULL && (x->modifiers != y->modifiers || x->enabled != y->enabled ||
+                           strcmp(x->key, y->key) != 0));
+        if (changed && bindings_changed != NULL) bindings_changed[action] = 1;
+    }
+    return fields;
+}
+
+void axyne_preferences_prepare_save(AxynePreferences *out,
+                                    const AxynePreferences *base,
+                                    const AxynePreferences *edited,
+                                    int workspace)
+{
+    unsigned char bindings[AXYNE_ACTION_COUNT];
+    uint32_t fields;
+    if (out == NULL || edited == NULL) return;
+    *out = *edited;
+    if (!workspace || base == NULL) {
+        axyne_preferences_mark_all(out);
+        return;
+    }
+    fields = axyne_preferences_changed_fields(base, edited, bindings);
+    out->present_fields = (base->present_fields | fields) & AXYNE_PREFERENCE_ALL_FIELDS;
+    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action)
+        out->binding_present[action] = (unsigned char)(base->binding_present[action] || bindings[action]);
+}
