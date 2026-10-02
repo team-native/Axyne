@@ -1768,7 +1768,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             NSRect tab = [self tabFrameAtIndex:index];
             if (!NSPointInRect(point, tab)) continue;
             if (![self captureEditor]) return;
-            if (point.x >= NSMaxX(tab) - 24)
+            if (point.x >= NSMaxX(tab) - 24) {
                 [self closeDocumentAtIndex:index];
             } else {
                 [self selectDocumentAtIndex:index];
