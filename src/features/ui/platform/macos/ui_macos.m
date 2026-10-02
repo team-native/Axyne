@@ -79,8 +79,9 @@ typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
         CGContextSetAlpha([[NSGraphicsContext currentContext] CGContext], 0.45);
     NSRectClip(bounds);
     if (available > 0)
-        [_richTitle drawInRect:NSMakeRect(x, (NSHeight(bounds) - size.height) / 2,
-            available, size.height)];
+        [_richTitle drawWithRect:NSMakeRect(x, (NSHeight(bounds) - size.height) / 2,
+            available, size.height)
+            options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine];
     if (trailing.width > 0)
         [_trailingTitle drawAtPoint:NSMakePoint(
             NSWidth(bounds) - _contentInset - trailing.width,
@@ -3664,7 +3665,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
             at:NSMakePoint(NSMaxX(frame) - (doc->is_dirty ? 19 : 22),
                            AXYNE_TOOLBAR + (doc->is_dirty ? 13 : 10))
             size:doc->is_dirty ? 7 : 13
-            color:doc->is_dirty && !light ? axyne_preference_color(0x4f535b) : muted
+            color:doc->is_dirty && reference && !light ? axyne_preference_color(0x4f535b) : muted
             family:@"SF Pro Text"];
     }
     [NSGraphicsContext restoreGraphicsState];
