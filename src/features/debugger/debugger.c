@@ -510,9 +510,22 @@ static AxyneStatus debugger_send_breakpoint_insert(AxyneDebugger *debugger,
     char *command;
     char *cursor;
     AxyneStatus status;
-    for (i = 0; breakpoint->path[i] != '\0'; ++i)
+    for (i = 0; breakpoint->path[i] != '\0'; ++i) {
+        if (escaped_length == SIZE_MAX ||
+            escaped_length > SIZE_MAX -
+                (breakpoint->path[i] == '\\' || breakpoint->path[i] == '"' ? 2 : 1)) {
+            debugger_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                           "unable to allocate breakpoint command");
+            return AXYNE_STATUS_OUT_OF_MEMORY;
+        }
         escaped_length += (breakpoint->path[i] == '\\' ||
                            breakpoint->path[i] == '"') ? 2 : 1;
+    }
+    if (escaped_length > SIZE_MAX - 64) {
+        debugger_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                       "unable to allocate breakpoint command");
+        return AXYNE_STATUS_OUT_OF_MEMORY;
+    }
     length = escaped_length + 64;
     command = (char *)malloc(length);
     if (command == NULL) {
@@ -709,6 +722,13 @@ AxyneStatus axyne_debugger_toggle_breakpoint(AxyneDebugger *debugger,
     if (debugger->breakpoint_count == debugger->breakpoint_capacity) {
         size_t capacity = debugger->breakpoint_capacity == 0 ? 8 :
             debugger->breakpoint_capacity * 2;
+        if (capacity < debugger->breakpoint_capacity ||
+            capacity > SIZE_MAX / sizeof(*grown)) {
+            debugger_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                           "unable to allocate breakpoint");
+            debugger_mutex_unlock(debugger);
+            return AXYNE_STATUS_OUT_OF_MEMORY;
+        }
         grown = (AxyneDebuggerBreakpoint *)realloc(debugger->breakpoints,
             capacity * sizeof(*grown));
         if (grown == NULL) {
