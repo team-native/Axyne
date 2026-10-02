@@ -270,6 +270,8 @@ foreach(AXYNE_FEATURE_MODULE IN LISTS AXYNE_FEATURE_MODULES)
 endforeach()
 
 include(CTest)
+add_subdirectory(tools/perf/benchmarks)
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
