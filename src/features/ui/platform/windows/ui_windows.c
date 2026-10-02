@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <ctype.h>
@@ -10,6 +11,7 @@
 #include <shlobj.h>
 
 #include "axyne/ui.h"
+#include "axyne/ui_design.h"
 #include "axyne/document.h"
 #include "axyne/search.h"
 #include "axyne/explorer.h"
@@ -23,11 +25,13 @@
 
 enum {
     AXYNE_TOP_MENU = 26,
-    AXYNE_TOOLBAR = 38,
-    AXYNE_TABS = 34,
-    AXYNE_STATUS = 24,
-    AXYNE_SIDEBAR = 248,
-    AXYNE_BOTTOM = 230
+    AXYNE_TOOLBAR = AXYNE_UI_TOOLBAR,
+    AXYNE_TABS = AXYNE_UI_TABS,
+    AXYNE_STATUS = AXYNE_UI_STATUS,
+    AXYNE_SIDEBAR = AXYNE_UI_SIDEBAR,
+    AXYNE_BOTTOM = AXYNE_UI_PANEL,
+    AXYNE_TAB_WIDTH = 184,
+    AXYNE_MIN_CLIENT_WIDTH = 940
 };
 
 enum {
@@ -86,6 +90,15 @@ static COLORREF AXYNE_BORDER;
 static COLORREF AXYNE_TEXT;
 static COLORREF AXYNE_MUTED;
 static COLORREF AXYNE_ACCENT;
+static COLORREF AXYNE_BUTTON_BG;
+static COLORREF AXYNE_ACTIVE_TAB_BG;
+static COLORREF AXYNE_SELECTION_BG;
+static COLORREF AXYNE_OUTPUT_BG;
+static COLORREF AXYNE_PANEL_HEADER_BG;
+static COLORREF AXYNE_STATUS_BG;
+static COLORREF AXYNE_INDICATOR;
+static COLORREF AXYNE_SEARCH_BORDER;
+static COLORREF AXYNE_RUN_TEXT;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -98,11 +111,20 @@ typedef struct AxyneWindowState {
     HWND editor;
     HFONT ui_font;
     HFONT code_font;
+    HFONT badge_font;
+    HFONT tab_badge_font;
     AxyneDocumentSet documents;
     AxyneExplorer explorer;
     AxyneWatcher *watcher;
     size_t explorer_selection;
     int explorer_has_selection;
+    size_t explorer_scroll;
+    int explorer_wheel_remainder;
+    size_t first_visible_tab;
+    size_t tab_reveal_index;
+    int tab_wheel_remainder;
+    int terminal_panel_selected;
+    int problems_panel_selected;
     int closing;
     int loading_editor;
     int editor_document_initialized;
@@ -166,7 +188,8 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_GIT_UNSTAGE_ALL, AXYNE_CMD_LSP_DEFINITION,
        AXYNE_CMD_LSP_REFERENCES, AXYNE_CMD_UNDO, AXYNE_CMD_REDO,
        AXYNE_CMD_CUT, AXYNE_CMD_COPY, AXYNE_CMD_PASTE,
-       AXYNE_CMD_SELECT_ALL };
+       AXYNE_CMD_SELECT_ALL, AXYNE_CMD_PANEL_OUTPUT,
+       AXYNE_CMD_PANEL_TERMINAL, AXYNE_CMD_PANEL_PROBLEMS };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -281,6 +304,7 @@ static void axyne_find(HWND window, AxyneWindowState *state, int replace,
 static void axyne_search_folder(HWND window, AxyneWindowState *state, int files);
 static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
+static void axyne_layout(HWND window, AxyneWindowState *state);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -328,9 +352,31 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
     AXYNE_TEXT = axyne_theme_color(theme->text);
     AXYNE_MUTED = axyne_theme_color(theme->muted);
     AXYNE_ACCENT = axyne_theme_color(theme->accent);
+    /* Preserve configured palettes; the default dark palette adds the
+     * reference's distinct surface and selection colors. */
+    AXYNE_BUTTON_BG = AXYNE_TOOLBAR_BG;
+    AXYNE_ACTIVE_TAB_BG = axyne_theme_color(theme->editor_background);
+    AXYNE_SELECTION_BG = AXYNE_BORDER;
+    AXYNE_OUTPUT_BG = AXYNE_BG;
+    AXYNE_PANEL_HEADER_BG = AXYNE_TOOLBAR_BG;
+    AXYNE_STATUS_BG = AXYNE_TOOLBAR_BG;
+    AXYNE_INDICATOR = AXYNE_ACCENT;
+    AXYNE_SEARCH_BORDER = AXYNE_BORDER;
+    AXYNE_RUN_TEXT = AXYNE_BG;
+    if (theme->background == 0x16171a && theme->panel == 0x1f2126 &&
+        theme->toolbar == 0x1c1e22) {
+        AXYNE_BUTTON_BG = axyne_theme_color(0x24262b);
+        AXYNE_SELECTION_BG = axyne_theme_color(0x2f343c);
+        AXYNE_OUTPUT_BG = axyne_theme_color(0x1d1f23);
+        AXYNE_PANEL_HEADER_BG = axyne_theme_color(0x17191c);
+        AXYNE_STATUS_BG = axyne_theme_color(0x1c1e22);
+        AXYNE_INDICATOR = axyne_theme_color(0xa66bf0);
+        AXYNE_SEARCH_BORDER = axyne_theme_color(0x3a3d44);
+        AXYNE_RUN_TEXT = axyne_theme_color(0x181a1f);
+    }
     if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
         DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
-    AXYNE_EDIT_BACKGROUND_BRUSH = CreateSolidBrush(AXYNE_BG);
+    AXYNE_EDIT_BACKGROUND_BRUSH = CreateSolidBrush(AXYNE_OUTPUT_BG);
 }
 
 static void axyne_select_theme_preset(AxyneThemePreferences *theme,
@@ -776,6 +822,9 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
+    state->terminal_panel_selected = 1;
+    state->problems_panel_selected = 0;
+    axyne_layout(window, state);
     if (state->terminal_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
         const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\r\n";
@@ -1160,21 +1209,21 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
 static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
                                            HINSTANCE instance)
 {
-    state->terminal_output = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+    state->terminal_output = CreateWindowExA(0, "EDIT", "",
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
         WS_VSCROLL, 0, 0, 0, 0, window, (HMENU)AXYNE_TERMINAL_OUTPUT,
         instance, NULL);
     state->terminal_input = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0,
         window, (HMENU)AXYNE_TERMINAL_INPUT, instance, NULL);
-    state->terminal_start = CreateWindowA("BUTTON", "Start Terminal",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+    state->terminal_start = CreateWindowA("BUTTON", "Start",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_START, instance, NULL);
     state->terminal_stop = CreateWindowA("BUTTON", "Stop",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_STOP, instance, NULL);
     state->terminal_send = CreateWindowA("BUTTON", "Send",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_SEND, instance, NULL);
     state->debug_start = CreateWindowA("BUTTON", "Debug",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
@@ -1199,7 +1248,15 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
     axyne_refresh_action_controls(state);
     if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
         WM_SETFONT, (WPARAM)state->code_font, TRUE);
+    if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
+        EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
     if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
+        WM_SETFONT, (WPARAM)state->code_font, TRUE);
+    if (state->terminal_start != NULL) SendMessageA(state->terminal_start,
+        WM_SETFONT, (WPARAM)state->ui_font, TRUE);
+    if (state->terminal_stop != NULL) SendMessageA(state->terminal_stop,
+        WM_SETFONT, (WPARAM)state->ui_font, TRUE);
+    if (state->terminal_send != NULL) SendMessageA(state->terminal_send,
         WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     (void)axyne_terminal_configure_default(state);
     (void)axyne_debugger_initialize(&state->debugger, NULL);
@@ -1450,6 +1507,9 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     AxyneProcessSpec process_spec;
     AxyneError error;
     AxyneStatus status;
+    state->terminal_panel_selected = 0;
+    state->problems_panel_selected = 0;
+    axyne_layout(window, state);
     if (state->terminal_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
         const char *message = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
@@ -2131,20 +2191,36 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
     }
     state->watcher = watcher;
     state->explorer_has_selection = 0;
+    state->explorer_scroll = 0;
     axyne_load_workspace_preferences(state, root);
     free(root);
     InvalidateRect(window, NULL, FALSE);
     return 1;
 }
 
-static int axyne_workspace_row_at(AxyneWindowState *state, int y)
+static size_t axyne_explorer_visible_rows(AxyneWindowState *state, int bottom)
 {
-    const int explorer_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + 31;
-    int row;
-    if (y < explorer_top) return -1;
-    row = (y - explorer_top) / 22;
-    if (row < 0 || (size_t)row >= state->explorer.count) return -1;
-    return row;
+    const int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS +
+        AXYNE_UI_EXPLORER_HEADER;
+    size_t rows = bottom > top ? (size_t)((bottom - top) / AXYNE_UI_ROW) : 0;
+    size_t max_scroll = state->explorer.count > rows
+        ? state->explorer.count - rows : 0;
+    if (state->explorer_scroll > max_scroll) state->explorer_scroll = max_scroll;
+    return rows;
+}
+
+static int axyne_workspace_row_at(HWND window, AxyneWindowState *state, int y)
+{
+    const int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS +
+        AXYNE_UI_EXPLORER_HEADER;
+    RECT client;
+    size_t row, rows;
+    GetClientRect(window, &client);
+    rows = axyne_explorer_visible_rows(state, client.bottom - AXYNE_STATUS);
+    if (y < top || y >= top + (int)rows * AXYNE_UI_ROW) return -1;
+    row = state->explorer_scroll + (size_t)((y - top) / AXYNE_UI_ROW);
+    if (row >= state->explorer.count || row > (size_t)INT_MAX) return -1;
+    return (int)row;
 }
 
 static void axyne_workspace_open_selected(HWND window,
@@ -2530,6 +2606,49 @@ static void axyne_edit_popup(HWND window, AxyneWindowState *state)
     DestroyMenu(menu);
 }
 
+static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
+                               int menu_index)
+{
+    HMENU menu = CreatePopupMenu();
+    POINT point = {14 + menu_index * 64, AXYNE_TOP_MENU};
+    if (menu == NULL) return;
+    if (menu_index == 2) {
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_OUTPUT, L"출력");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_PROBLEMS, L"문제");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_TERMINAL, L"터미널");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE, L"폴더 열기...");
+    } else if (menu_index == 3) {
+        UINT flags = axyne_active(state) != NULL && state->terminal_process == NULL &&
+            !axyne_debugger_is_active(&state->debugger) ? MF_STRING : MF_STRING | MF_GRAYED;
+        AppendMenuW(menu, flags, AXYNE_CMD_BUILD, L"빌드\tCtrl+B");
+        AppendMenuW(menu, flags, AXYNE_CMD_RUN, L"실행\tF5");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_CONFIGURE_RUNNER, L"실행 구성...");
+    } else if (menu_index == 4) {
+        const UINT commands[] = {AXYNE_DEBUG_START, AXYNE_DEBUG_PAUSE,
+            AXYNE_DEBUG_CONTINUE, AXYNE_DEBUG_STEP_OVER, AXYNE_DEBUG_BREAKPOINT};
+        const wchar_t *labels[] = {L"Debug", L"Pause", L"Continue", L"Next", L"Breakpoint"};
+        const HWND controls[] = {state->debug_start, state->debug_pause,
+            state->debug_continue, state->debug_step_over, state->debug_breakpoint};
+        size_t i;
+        axyne_refresh_action_controls(state);
+        for (i = 0; i < sizeof(commands) / sizeof(*commands); ++i)
+            AppendMenuW(menu, MF_STRING | (IsWindowEnabled(controls[i])
+                ? MF_ENABLED : MF_GRAYED), commands[i], labels[i]);
+    } else if (menu_index == 5) {
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_PREFERENCES, L"Preferences...");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE_PREFERENCES, L"Workspace Settings...");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STATUS, L"Git Status");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_DIFF, L"Git Diff");
+        AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
+    } else {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Axyne");
+    }
+    ClientToScreen(window, &point);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                   point.x, point.y, 0, window, NULL);
+    DestroyMenu(menu);
+}
+
 static void axyne_fill(HDC dc, int left, int top, int right, int bottom,
                        COLORREF color)
 {
@@ -2551,19 +2670,100 @@ static void axyne_text(HDC dc, HFONT font, COLORREF color, int x, int y,
     SelectObject(dc, previous_font);
 }
 
-static const wchar_t *axyne_file_badge(const char *name)
+static void axyne_text_rect(HDC dc, HFONT font, COLORREF color,
+                            RECT rect, const wchar_t *value, UINT alignment)
 {
-    const char *dot;
-    if (name == NULL) return L"•";
-    dot = strrchr(name, '.');
-    if (dot == NULL || dot[1] == '\0') return L"•";
-    if (_stricmp(dot, ".c") == 0) return L"C";
-    if (_stricmp(dot, ".h") == 0) return L"H";
-    if (_stricmp(dot, ".cpp") == 0 || _stricmp(dot, ".cc") == 0) return L"C++";
-    if (_stricmp(dot, ".json") == 0) return L"{}";
-    if (_stricmp(dot, ".cmake") == 0 || _stricmp(name, "CMakeLists.txt") == 0)
-        return L"CM";
-    return L"•";
+    HFONT previous = (HFONT)SelectObject(dc, font);
+    if (rect.right > rect.left && rect.bottom > rect.top) {
+        SetTextColor(dc, color);
+        SetBkMode(dc, TRANSPARENT);
+        DrawTextW(dc, value, -1, &rect, alignment | DT_SINGLELINE |
+                  DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    SelectObject(dc, previous);
+}
+
+static void axyne_paint_badge(HDC dc, HFONT font, const char *name, RECT rect)
+{
+    AxyneFileBadge badge = axyne_ui_file_badge(name);
+    if (badge.label[0] == '\0') {
+        HPEN pen = CreatePen(PS_SOLID, 1, axyne_theme_color(badge.color));
+        HGDIOBJ previous_pen = SelectObject(dc, pen);
+        HGDIOBJ previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        int x = (rect.left + rect.right - 8) / 2;
+        int y = (rect.top + rect.bottom - 10) / 2;
+        Rectangle(dc, x, y, x + 8, y + 10);
+        SelectObject(dc, previous_brush);
+        SelectObject(dc, previous_pen);
+        DeleteObject(pen);
+        return;
+    }
+    wchar_t *label = axyne_wide(badge.label);
+    if (label != NULL) {
+        axyne_text_rect(dc, font, axyne_theme_color(badge.color), rect, label, DT_CENTER);
+        free(label);
+    }
+}
+
+static const UINT AXYNE_TOOLBAR_COMMANDS[] = {
+    AXYNE_CMD_NEW, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE, AXYNE_CMD_UNDO,
+    AXYNE_CMD_REDO, AXYNE_CMD_CONFIGURE_RUNNER, AXYNE_CMD_BUILD,
+    AXYNE_CMD_RUN, AXYNE_CMD_QUICK_FILE
+};
+
+/* Painting and command dispatch share these exact button bounds. */
+static RECT axyne_toolbar_rect(size_t index, int width)
+{
+    static const int lefts[] = {8, 38, 68, 114, 144, 184, 342, 454};
+    static const int widths[] = {28, 28, 28, 28, 28, 150, 104, 92};
+    RECT rect = {0, AXYNE_TOP_MENU + 6, 0, AXYNE_TOP_MENU + 32};
+    if (index < sizeof(lefts) / sizeof(*lefts)) {
+        rect.left = lefts[index];
+        rect.right = rect.left + widths[index];
+        if (index < 5) {
+            --rect.top;
+            ++rect.bottom;
+        }
+    } else {
+        rect.left = width - 352;
+        rect.right = width - 12;
+        if (rect.left < 558) rect.left = rect.right;
+    }
+    return rect;
+}
+
+static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
+{
+    if (command == AXYNE_CMD_SAVE) return axyne_active(state) != NULL;
+    if (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO)
+        return state->editor != NULL && SendMessageA(state->editor,
+            command == AXYNE_CMD_UNDO ? 2174 : 2016, 0, 0) != 0;
+    if (command == AXYNE_CMD_BUILD || command == AXYNE_CMD_RUN)
+        return axyne_active(state) != NULL && state->terminal_process == NULL &&
+            !axyne_debugger_is_active(&state->debugger);
+    return 1;
+}
+
+static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
+{
+    size_t slots = width > AXYNE_SIDEBAR
+        ? (size_t)((width - AXYNE_SIDEBAR) / AXYNE_TAB_WIDTH) : 0;
+    size_t max_first;
+    if (slots == 0) slots = 1;
+    if (state->documents.count == 0) {
+        state->first_visible_tab = 0;
+        return slots;
+    }
+    max_first = state->documents.count > slots ? state->documents.count - slots : 0;
+    if (state->first_visible_tab > max_first) state->first_visible_tab = max_first;
+    if (state->tab_reveal_index != state->documents.active_index) {
+        if (state->documents.active_index < state->first_visible_tab)
+            state->first_visible_tab = state->documents.active_index;
+        else if (state->documents.active_index >= state->first_visible_tab + slots)
+            state->first_visible_tab = state->documents.active_index - slots + 1;
+        state->tab_reveal_index = state->documents.active_index;
+    }
+    return slots;
 }
 
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
@@ -2623,32 +2823,43 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
 }
 
 static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
-                                 int editor_top, int bottom_top)
+                                 int editor_top, int bottom)
 {
-    int y = editor_top + 31;
+    int y = editor_top + AXYNE_UI_EXPLORER_HEADER;
+    size_t rows = axyne_explorer_visible_rows(state, bottom);
     size_t i;
+    int saved_dc = SaveDC(dc);
+    IntersectClipRect(dc, 0, y, AXYNE_SIDEBAR - 1, bottom);
     if (state->explorer.root == NULL) {
-        axyne_text(dc, state->ui_font, AXYNE_TEXT, 16, y,
-                   L"폴더 열기...");
+        RECT rect = {8, y, AXYNE_SIDEBAR - 8, y + AXYNE_UI_ROW};
+        axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect, L"폴더 열기...", DT_LEFT);
+        RestoreDC(dc, saved_dc);
         return;
     }
-    for (i = 0; i < state->explorer.count && y + 22 < bottom_top; ++i) {
+    for (i = state->explorer_scroll; i < state->explorer.count &&
+         i - state->explorer_scroll < rows; ++i) {
         AxyneExplorerNode *node = &state->explorer.nodes[i];
         wchar_t *name = axyne_wide(node->name);
-        wchar_t label[512];
-        int x = 16 + (int)node->depth * 16;
+        int x = 8 + (int)node->depth * AXYNE_UI_INDENT;
+        RECT slot = {x, y, x + 10, y + AXYNE_UI_ROW};
+        RECT label = {x + 12, y, AXYNE_SIDEBAR - 8, y + AXYNE_UI_ROW};
         if (state->explorer_has_selection && state->explorer_selection == i)
-            axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, AXYNE_BORDER);
-        (void)swprintf_s(label, 512, L"%ls %ls",
-            node->kind == AXYNE_FILE_KIND_DIRECTORY
-                ? (axyne_explorer_is_expanded(&state->explorer, node->path)
-                    ? L"⌄" : L"›")
-                : axyne_file_badge(node->name),
-            name != NULL ? name : L"(invalid name)");
-        axyne_text(dc, state->ui_font, AXYNE_TEXT, x, y, label);
+            axyne_fill(dc, 0, y, AXYNE_SIDEBAR, y + AXYNE_UI_ROW, AXYNE_SELECTION_BG);
+        if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+            axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, slot,
+                axyne_explorer_is_expanded(&state->explorer, node->path)
+                    ? L"⌄" : L"›", DT_CENTER);
+        } else {
+            slot.right = x + AXYNE_UI_BADGE_WIDTH;
+            axyne_paint_badge(dc, state->badge_font, node->name, slot);
+            label.left = slot.right + 4;
+        }
+        axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, label,
+                       name != NULL ? name : L"(invalid name)", DT_LEFT);
         free(name);
-        y += 22;
+        y += AXYNE_UI_ROW;
     }
+    RestoreDC(dc, saved_dc);
 }
 
 static void axyne_layout(HWND window, AxyneWindowState *state)
@@ -2670,31 +2881,34 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                      editor_width, editor_height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (state->terminal_output != NULL) {
-        int terminal_top = bottom_top + 30;
-        int terminal_height = AXYNE_BOTTOM - 62;
+        int terminal_top = bottom_top + AXYNE_UI_PANEL_HEADER + 6;
         int input_top = status_top - 28;
-        SetWindowPos(state->terminal_output, NULL, 12, terminal_top,
-                     width - 24, terminal_height,
+        int terminal_bottom = state->terminal_panel_selected ? input_top - 6 : status_top - 6;
+        int terminal_width = width - AXYNE_SIDEBAR - 32;
+        if (terminal_width < 0) terminal_width = 0;
+        SetWindowPos(state->terminal_output, NULL, AXYNE_SIDEBAR + 16, terminal_top,
+                     terminal_width, terminal_bottom > terminal_top ? terminal_bottom - terminal_top : 0,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_input, NULL, 12, input_top,
-                     width - 260, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_start, NULL, width - 240, input_top,
-                     96, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_stop, NULL, width - 138, input_top,
-                     56, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_send, NULL, width - 76, input_top,
-                     64, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->debug_start, NULL, 12, bottom_top + 4,
-                     72, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->debug_pause, NULL, 88, bottom_top + 4,
-                     64, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->debug_continue, NULL, 156, bottom_top + 4,
-                     76, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->debug_step_over, NULL, 236, bottom_top + 4,
-                     56, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->debug_breakpoint, NULL, 296, bottom_top + 4,
-                     96, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_input, NULL, AXYNE_SIDEBAR + 16, input_top,
+                     terminal_width, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_start, NULL, width - 172, bottom_top + 5,
+                     52, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_stop, NULL, width - 116, bottom_top + 5,
+                     48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_send, NULL, width - 64, bottom_top + 5,
+                     48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(state->terminal_output, state->problems_panel_selected ? SW_HIDE : SW_SHOW);
+        ShowWindow(state->terminal_input, state->terminal_panel_selected ? SW_SHOW : SW_HIDE);
+        ShowWindow(state->terminal_send, state->terminal_panel_selected ? SW_SHOW : SW_HIDE);
+        ShowWindow(state->debug_start, SW_HIDE);
+        ShowWindow(state->debug_pause, SW_HIDE);
+        ShowWindow(state->debug_continue, SW_HIDE);
+        ShowWindow(state->debug_step_over, SW_HIDE);
+        ShowWindow(state->debug_breakpoint, SW_HIDE);
     }
+    state->tab_reveal_index = SIZE_MAX;
+    (void)axyne_visible_tabs(state, width);
+    (void)axyne_explorer_visible_rows(state, status_top);
     InvalidateRect(window, NULL, FALSE);
 }
 
@@ -2716,81 +2930,130 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                AXYNE_TOOLBAR_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR, width, editor_top,
                AXYNE_TOOLBAR_BG);
-    axyne_fill(dc, 0, editor_top, AXYNE_SIDEBAR, bottom_top, AXYNE_PANEL);
-    axyne_fill(dc, 0, bottom_top, width, status_top, AXYNE_TOOLBAR_BG);
-    axyne_fill(dc, 0, status_top, width, height, AXYNE_BG);
+    axyne_fill(dc, 0, editor_top, AXYNE_SIDEBAR, status_top, AXYNE_PANEL);
+    axyne_fill(dc, AXYNE_SIDEBAR, bottom_top, width, status_top, AXYNE_OUTPUT_BG);
+    axyne_fill(dc, AXYNE_SIDEBAR, bottom_top, width,
+               bottom_top + AXYNE_UI_PANEL_HEADER, AXYNE_PANEL_HEADER_BG);
+    axyne_fill(dc, 0, status_top, width, height, AXYNE_STATUS_BG);
     axyne_fill(dc, AXYNE_SIDEBAR - 1, editor_top, AXYNE_SIDEBAR, status_top,
                AXYNE_BORDER);
-    axyne_fill(dc, 0, bottom_top, width, bottom_top + 1, AXYNE_BORDER);
+    axyne_fill(dc, AXYNE_SIDEBAR, bottom_top, width, bottom_top + 1, AXYNE_BORDER);
 
-    axyne_text(dc, state->ui_font, AXYNE_TEXT, 14, 7,
-               L"파일(F)   편집(E)   보기(V)   빌드(B)   디버그(D)   도구(T)   도움말(H)");
     {
-        const wchar_t *toolbar_labels[] = {L"새 파일", L"열기", L"저장",
-            L"↶", L"↷", L"Debug · x64 (MSVC)", L"빌드", L"▷ 실행"};
-        int toolbar_x = 10;
-        size_t toolbar_index;
-        for (toolbar_index = 0; toolbar_index < sizeof(toolbar_labels) /
-             sizeof(toolbar_labels[0]); ++toolbar_index) {
-            int toolbar_width = toolbar_index == 5 ? 132 :
-                (toolbar_index >= 6 ? 58 : 42);
-            axyne_fill(dc, toolbar_x, AXYNE_TOP_MENU + 6,
-                       toolbar_x + toolbar_width,
-                       AXYNE_TOP_MENU + 32,
-                       toolbar_index == 7 ? AXYNE_ACCENT : AXYNE_BG);
-            axyne_text(dc, state->ui_font,
-                       toolbar_index == 7 ? AXYNE_BG : AXYNE_MUTED,
-                       toolbar_x + 8, AXYNE_TOP_MENU + 12,
-                       toolbar_labels[toolbar_index]);
-            toolbar_x += toolbar_width + 4;
+        const wchar_t *labels[] = {L"파일(F)", L"편집(E)", L"보기(V)",
+            L"빌드(B)", L"디버그(D)", L"도구(T)", L"도움말(H)"};
+        size_t i;
+        for (i = 0; i < sizeof(labels) / sizeof(*labels); ++i) {
+            RECT rect = {14 + (int)i * 64, 0, 78 + (int)i * 64, AXYNE_TOP_MENU};
+            axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect, labels[i], DT_LEFT);
         }
     }
     {
-        int toolbar_right = 10 + 42 + 4 + 42 + 4 + 42 + 4 + 42 + 4 + 42 +
-            4 + 132 + 4 + 58 + 4 + 58;
-        int search_left = width - 360;
-        if (search_left < toolbar_right + 8) search_left = toolbar_right + 8;
-        if (width - search_left - 12 >= 120) {
-            axyne_fill(dc, search_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 6,
-                       width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30,
-                       AXYNE_BG);
-            axyne_text(dc, state->ui_font, AXYNE_MUTED, search_left + 14,
-                       AXYNE_TOP_MENU + AXYNE_TOOLBAR + 11,
-                       L"⌕  파일 이동, > 명령 실행");
+        const wchar_t *labels[] = {L"▱", L"▰", L"▣", L"↶", L"↷",
+            L"실행 구성", L"빌드", L"▷ 실행"};
+        size_t i;
+        for (i = 0; i < sizeof(labels) / sizeof(*labels); ++i) {
+            RECT rect = axyne_toolbar_rect(i, width);
+            RECT text_rect = rect;
+            COLORREF color = axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i])
+                ? AXYNE_TEXT : AXYNE_MUTED;
+            wchar_t *runner = NULL;
+            if (i >= 5) {
+                axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom,
+                           i == 7 ? AXYNE_ACCENT : AXYNE_BUTTON_BG);
+                text_rect.left += 8;
+                text_rect.right -= i == 5 ? 20 : 44;
+            }
+            if (i == 5 && state->action_runner.executable != NULL) {
+                const char *name = state->action_runner.executable;
+                const char *slash = strrchr(name, '/');
+                const char *backslash = strrchr(name, '\\');
+                if (slash != NULL) name = slash + 1;
+                if (backslash != NULL && backslash + 1 > name) name = backslash + 1;
+                runner = axyne_wide(name);
+            }
+            if (i == 7) color = AXYNE_RUN_TEXT;
+            axyne_text_rect(dc, state->ui_font, color, text_rect,
+                           runner != NULL ? runner : labels[i], i < 5 ? DT_CENTER : DT_LEFT);
+            free(runner);
+            if (i >= 5) {
+                RECT hint = {rect.right - (i == 5 ? 20 : 44), rect.top,
+                             rect.right - 8, rect.bottom};
+                axyne_text_rect(dc, state->ui_font, i == 7 ? AXYNE_RUN_TEXT : AXYNE_MUTED,
+                    hint, i == 5 ? L"▾" : i == 6 ? L"Ctrl+B" : L"F5", DT_RIGHT);
+            }
+        }
+        axyne_fill(dc, 104, AXYNE_TOP_MENU + 9, 105, AXYNE_TOP_MENU + 29, AXYNE_BORDER);
+        axyne_fill(dc, 178, AXYNE_TOP_MENU + 9, 179, AXYNE_TOP_MENU + 29, AXYNE_BORDER);
+        {
+            RECT rect = axyne_toolbar_rect(8, width);
+            if (rect.right > rect.left) {
+                RECT label = {rect.left + 12, rect.top, rect.right - 62, rect.bottom};
+                RECT hint = {rect.right - 60, rect.top, rect.right - 10, rect.bottom};
+                axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom, AXYNE_SEARCH_BORDER);
+                axyne_fill(dc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1, AXYNE_BG);
+                axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, label, L"⌕  파일 이동", DT_LEFT);
+                axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, hint, L"Ctrl+P", DT_RIGHT);
+            }
         }
     }
-    axyne_fill(dc, AXYNE_SIDEBAR + 20,
-               AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS,
-               AXYNE_SIDEBAR + 21, editor_top, AXYNE_ACCENT);
-    int tab_left = AXYNE_SIDEBAR + 12;
-    for (size_t i = 0; i < state->documents.count; ++i) {
+    int tab_left = AXYNE_SIDEBAR;
+    size_t visible_tabs = axyne_visible_tabs(state, width);
+    for (size_t i = state->first_visible_tab; i < state->documents.count &&
+         i - state->first_visible_tab < visible_tabs && tab_left < width; ++i) {
         AxyneDocument *doc = &state->documents.documents[i];
-        int tab_right = tab_left + 184;
+        int tab_right = tab_left + AXYNE_TAB_WIDTH;
+        int tab_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
+        int saved_dc = SaveDC(dc);
+        RECT badge = {tab_left + 10, tab_top, tab_left + 38, editor_top};
+        RECT title = {tab_left + 42, tab_top, tab_right - 36, editor_top};
+        RECT close = {tab_right - 26, tab_top, tab_right - 6, editor_top};
+        IntersectClipRect(dc, AXYNE_SIDEBAR, tab_top, width, editor_top);
         if (i == state->documents.active_index) {
-            axyne_fill(dc, tab_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
-                       tab_right, editor_top, AXYNE_PANEL);
-            axyne_fill(dc, tab_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
-                       tab_left + 1, editor_top, AXYNE_ACCENT);
+            axyne_fill(dc, tab_left, tab_top, tab_right, editor_top, AXYNE_ACTIVE_TAB_BG);
+            axyne_fill(dc, tab_left, tab_top, tab_right, tab_top + 2, AXYNE_INDICATOR);
         }
+        axyne_fill(dc, tab_right - 1, tab_top, tab_right, editor_top, AXYNE_BORDER);
+        axyne_paint_badge(dc, state->tab_badge_font, doc->title, badge);
         wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
         if (name != NULL) {
-            wchar_t label[96];
-            (void)swprintf_s(label, 96, L"%ls%ls",
-                             doc->is_dirty ? L"● " : L"", name);
-            axyne_text(dc, state->ui_font, i == state->documents.active_index
-                ? AXYNE_TEXT : AXYNE_MUTED, tab_left + 12,
-                AXYNE_TOP_MENU + AXYNE_TOOLBAR + 10, label);
+            axyne_text_rect(dc, state->ui_font, i == state->documents.active_index
+                ? AXYNE_TEXT : AXYNE_MUTED, title, name, DT_LEFT);
             free(name);
         }
-        axyne_text(dc, state->ui_font, AXYNE_MUTED, tab_right - 20,
-                   AXYNE_TOP_MENU + AXYNE_TOOLBAR + 10, L"×");
+        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, close, doc->is_dirty ? L"●" : L"×", DT_CENTER);
+        RestoreDC(dc, saved_dc);
         tab_left = tab_right;
-        if (tab_left > AXYNE_SIDEBAR + 12 + 920) break;
     }
-    axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, editor_top + 12, L"탐색기");
-    axyne_paint_explorer(dc, state, editor_top, bottom_top);
-    axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, bottom_top + 9,
-               L"출력    문제 1    터미널 / Git");
+    {
+        RECT header = {12, editor_top, AXYNE_SIDEBAR - 8, editor_top + AXYNE_UI_EXPLORER_HEADER};
+        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, header, L"탐색기", DT_LEFT);
+    }
+    axyne_paint_explorer(dc, state, editor_top, status_top);
+    {
+        const wchar_t *labels[] = {L"출력", L"문제", L"터미널"};
+        const int lefts[] = {AXYNE_SIDEBAR + 8, AXYNE_SIDEBAR + 64, AXYNE_SIDEBAR + 120};
+        size_t i;
+        for (i = 0; i < 3; ++i) {
+            int selected = (i == 0 && !state->terminal_panel_selected && !state->problems_panel_selected) ||
+                (i == 1 && state->problems_panel_selected) ||
+                (i == 2 && state->terminal_panel_selected);
+            RECT rect = {lefts[i], bottom_top, lefts[i] + (i == 2 ? 56 : 40),
+                         bottom_top + AXYNE_UI_PANEL_HEADER};
+            axyne_text_rect(dc, state->ui_font, selected ? AXYNE_TEXT : AXYNE_MUTED,
+                           rect, labels[i], DT_LEFT);
+            if (selected) axyne_fill(dc, rect.left, rect.bottom - 3,
+                                     rect.right, rect.bottom, AXYNE_INDICATOR);
+        }
+    }
+    if (state->problems_panel_selected) {
+        wchar_t *status = axyne_wide(state->lsp_status);
+        RECT rect = {AXYNE_SIDEBAR + 16, bottom_top + AXYNE_UI_PANEL_HEADER + 6,
+                     width - 16, bottom_top + AXYNE_UI_PANEL_HEADER + 28};
+        axyne_text_rect(dc, state->code_font, AXYNE_TEXT, rect,
+            status != NULL && status[0] != L'\0' ? status : L"진단 정보 없음", DT_LEFT);
+        free(status);
+    }
     {
         wchar_t status[96];
         if (state->last_exit_failed) {
@@ -2801,22 +3064,29 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         } else if (state->has_exit_status) {
             (void)swprintf_s(status, 96, L"✓ 실행 완료 (exit 0)");
         } else {
-            (void)swprintf_s(status, 96, L"✓ 빌드 준비됨");
+            (void)swprintf_s(status, 96, L"준비");
         }
-        axyne_text(dc, state->ui_font,
-                   state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED,
-                   12, status_top + 6, status);
+        RECT rect = {12, status_top, AXYNE_SIDEBAR - 8, height};
+        axyne_text_rect(dc, state->ui_font,
+                   state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED, rect, status, DT_LEFT);
     }
     if (state->lsp_status[0] != '\0') {
         wchar_t *lsp_status = axyne_wide(state->lsp_status);
         if (lsp_status != NULL) {
-            axyne_text(dc, state->ui_font, AXYNE_MUTED, 250, status_top + 6,
-                       lsp_status);
+            RECT rect = {AXYNE_SIDEBAR + 8, status_top, width - 250, height};
+            axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, lsp_status, DT_LEFT);
             free(lsp_status);
         }
-    } else {
-        axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 250, status_top + 6,
-                   L"줄 1, 열 1     UTF-8    C17");
+    }
+    if (state->editor != NULL && axyne_active(state) != NULL) {
+        wchar_t position[96];
+        LRESULT caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+        LRESULT line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+        LRESULT column = SendMessageA(state->editor, SCI_GETCOLUMN, (WPARAM)caret, 0);
+        RECT rect = {width - 246, status_top, width - 12, height};
+        (void)swprintf_s(position, 96, L"줄 %lld, 열 %lld     UTF-8",
+                       (long long)line + 1, (long long)column + 1);
+        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, position, DT_RIGHT);
     }
 
     if (state->editor == NULL) {
@@ -2844,7 +3114,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->ui_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        state->code_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+        state->code_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+            FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
+        state->badge_font = CreateFontW(-9, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+            FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
+        state->tab_badge_font = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         axyne_open_scintilla(state, window, instance);
@@ -2859,6 +3135,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_SIZE:
         axyne_layout(window, state);
         return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *limits = (MINMAXINFO *)l_param;
+        RECT minimum = {0, 0, AXYNE_MIN_CLIENT_WIDTH, 480};
+        AdjustWindowRectEx(&minimum, WS_OVERLAPPEDWINDOW, FALSE, 0);
+        limits->ptMinTrackSize.x = minimum.right - minimum.left;
+        limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
+        return 0;
+    }
     case WM_SETTINGCHANGE:
         if (state != NULL && state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
             axyne_apply_preferences(state);
@@ -2876,36 +3160,67 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(l_param);
         int y = GET_Y_LPARAM(l_param);
-        if (y < AXYNE_TOP_MENU && x < 80) {
-            axyne_file_popup(window, state);
+        RECT client;
+        POINT point = {x, y};
+        GetClientRect(window, &client);
+        if (y >= 0 && y < AXYNE_TOP_MENU && x >= 14 && x < 14 + 7 * 64) {
+            int index = (x - 14) / 64;
+            if (index == 0) axyne_file_popup(window, state);
+            else if (index == 1) axyne_edit_popup(window, state);
+            else axyne_chrome_popup(window, state, index);
             return 0;
         }
-        if (y < AXYNE_TOP_MENU && x < 160) {
-            axyne_edit_popup(window, state);
+        if (y >= AXYNE_TOP_MENU && y < AXYNE_TOP_MENU + AXYNE_TOOLBAR) {
+            size_t i;
+            for (i = 0; i < sizeof(AXYNE_TOOLBAR_COMMANDS) / sizeof(*AXYNE_TOOLBAR_COMMANDS); ++i) {
+                RECT rect = axyne_toolbar_rect(i, client.right);
+                if (PtInRect(&rect, point)) {
+                    if (axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i]))
+                        SendMessageW(window, WM_COMMAND, AXYNE_TOOLBAR_COMMANDS[i], 0);
+                    return 0;
+                }
+            }
             return 0;
         }
-        if (x < AXYNE_SIDEBAR &&
-            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
-            int row = axyne_workspace_row_at(state, y);
+        if (x >= 0 && x < AXYNE_SIDEBAR &&
+            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
+            int row = axyne_workspace_row_at(window, state, y);
             if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row);
-            else if (state->explorer.root == NULL)
+            else if (state->explorer.root == NULL &&
+                     y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER &&
+                     y < AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER + AXYNE_UI_ROW)
                 (void)axyne_workspace_select_root(window, state);
             return 0;
         }
+        {
+            int panel_top = client.bottom - AXYNE_STATUS - AXYNE_BOTTOM;
+            if (y >= panel_top && y < panel_top + AXYNE_UI_PANEL_HEADER) {
+                if (x >= AXYNE_SIDEBAR + 8 && x < AXYNE_SIDEBAR + 48)
+                    SendMessageW(window, WM_COMMAND, AXYNE_CMD_PANEL_OUTPUT, 0);
+                else if (x >= AXYNE_SIDEBAR + 64 && x < AXYNE_SIDEBAR + 104)
+                    SendMessageW(window, WM_COMMAND, AXYNE_CMD_PANEL_PROBLEMS, 0);
+                else if (x >= AXYNE_SIDEBAR + 120 && x < AXYNE_SIDEBAR + 176)
+                    SendMessageW(window, WM_COMMAND, AXYNE_CMD_PANEL_TERMINAL, 0);
+                return 0;
+            }
+        }
         int tab_y = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
         if (y >= tab_y && y < tab_y + AXYNE_TABS) {
-            int left = AXYNE_SIDEBAR + 12;
-            for (size_t i = 0; i < state->documents.count; ++i) {
-                if (x >= left && x < left + 184) {
+            int left = AXYNE_SIDEBAR;
+            size_t visible_tabs = axyne_visible_tabs(state, client.right);
+            for (size_t i = state->first_visible_tab; i < state->documents.count &&
+                 i - state->first_visible_tab < visible_tabs && left < client.right; ++i) {
+                if (x >= left && x < left + AXYNE_TAB_WIDTH && x < client.right) {
                     if (!axyne_capture_editor(state)) return 0;
-                    if (x >= left + 160) axyne_close_tab(window, state, i);
+                    if (x >= left + AXYNE_TAB_WIDTH - 26 &&
+                        x < left + AXYNE_TAB_WIDTH - 6) axyne_close_tab(window, state, i);
                     else {
                         axyne_show_document(state, i);
                         axyne_update_title(window, state);
                     }
                     return 0;
                 }
-                left += 184;
+                left += AXYNE_TAB_WIDTH;
             }
         }
         break;
@@ -2913,9 +3228,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_RBUTTONUP: {
         int x = GET_X_LPARAM(l_param);
         int y = GET_Y_LPARAM(l_param);
-        if (x < AXYNE_SIDEBAR &&
-            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
-            int row = axyne_workspace_row_at(state, y);
+        RECT client;
+        GetClientRect(window, &client);
+        if (x >= 0 && x < AXYNE_SIDEBAR &&
+            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
+            int row = axyne_workspace_row_at(window, state, y);
             HMENU menu = CreatePopupMenu();
             POINT point = {x, y};
             if (row >= 0) {
@@ -2946,12 +3263,70 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         break;
     }
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL: {
+        POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        RECT client;
+        int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+        ScreenToClient(window, &point);
+        GetClientRect(window, &client);
+        if (point.x >= AXYNE_SIDEBAR && point.x < client.right &&
+            point.y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR &&
+            point.y < AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
+            size_t slots = axyne_visible_tabs(state, client.right);
+            size_t maximum = state->documents.count > slots ? state->documents.count - slots : 0;
+            int steps;
+            state->tab_wheel_remainder += GET_WHEEL_DELTA_WPARAM(w_param) *
+                (message == WM_MOUSEHWHEEL ? 1 : -1);
+            steps = state->tab_wheel_remainder / WHEEL_DELTA;
+            state->tab_wheel_remainder %= WHEEL_DELTA;
+            if (steps < 0) {
+                size_t movement = (size_t)-steps;
+                state->first_visible_tab = movement > state->first_visible_tab ? 0 :
+                    state->first_visible_tab - movement;
+            } else if ((size_t)steps > maximum - state->first_visible_tab) {
+                state->first_visible_tab = maximum;
+            } else state->first_visible_tab += (size_t)steps;
+            InvalidateRect(window, NULL, FALSE);
+            return 0;
+        }
+        if (message == WM_MOUSEHWHEEL) break;
+        if (point.x >= 0 && point.x < AXYNE_SIDEBAR && point.y >= top &&
+            point.y < client.bottom - AXYNE_STATUS) {
+            size_t rows = axyne_explorer_visible_rows(state, client.bottom - AXYNE_STATUS);
+            size_t max_scroll = state->explorer.count > rows ? state->explorer.count - rows : 0;
+            int steps;
+            state->explorer_wheel_remainder += GET_WHEEL_DELTA_WPARAM(w_param);
+            steps = state->explorer_wheel_remainder / WHEEL_DELTA;
+            state->explorer_wheel_remainder %= WHEEL_DELTA;
+            if (steps > 0) {
+                size_t amount = (size_t)steps * 3;
+                state->explorer_scroll = amount > state->explorer_scroll ? 0 : state->explorer_scroll - amount;
+            } else if (steps < 0) {
+                size_t amount = (size_t)(-steps) * 3;
+                state->explorer_scroll = amount > max_scroll - state->explorer_scroll ? max_scroll : state->explorer_scroll + amount;
+            }
+            InvalidateRect(window, NULL, FALSE);
+            return 0;
+        }
+        break;
+    }
     case WM_COMMAND: {
         UINT command = LOWORD(w_param);
-        if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
+        if (command == AXYNE_CMD_PANEL_OUTPUT || command == AXYNE_CMD_PANEL_TERMINAL ||
+            command == AXYNE_CMD_PANEL_PROBLEMS) {
+            state->terminal_panel_selected = command == AXYNE_CMD_PANEL_TERMINAL;
+            state->problems_panel_selected = command == AXYNE_CMD_PANEL_PROBLEMS;
+            axyne_layout(window, state);
+            if (state->terminal_panel_selected) SetFocus(state->terminal_input);
+            else if (state->editor != NULL) SetFocus(state->editor);
+        }
+        else if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
         else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
-        else if (command == AXYNE_CMD_CONFIGURE_RUNNER)
+        else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
             (void)axyne_configure_runner(window, &state->action_runner);
+            InvalidateRect(window, NULL, FALSE);
+        }
         else if (command == AXYNE_CMD_PREFERENCES)
             (void)axyne_preferences_dialog(window, state, 0);
         else if (command == AXYNE_CMD_WORKSPACE_PREFERENCES) {
@@ -3037,10 +3412,31 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             (HWND)l_param == state->terminal_input) {
             HDC dc = (HDC)w_param;
             SetTextColor(dc, AXYNE_TEXT);
-            SetBkColor(dc, AXYNE_BG);
+            SetBkColor(dc, AXYNE_OUTPUT_BG);
             return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
         }
         break;
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT *item = (const DRAWITEMSTRUCT *)l_param;
+        if (item != NULL && item->CtlType == ODT_BUTTON &&
+            (item->CtlID == AXYNE_TERMINAL_START || item->CtlID == AXYNE_TERMINAL_STOP ||
+             item->CtlID == AXYNE_TERMINAL_SEND)) {
+            wchar_t label[32];
+            RECT rect = item->rcItem;
+            int disabled = (item->itemState & ODS_DISABLED) != 0;
+            GetWindowTextW(item->hwndItem, label, 32);
+            axyne_fill(item->hDC, rect.left, rect.top, rect.right, rect.bottom,
+                (item->itemState & ODS_SELECTED) != 0 ? AXYNE_SELECTION_BG : AXYNE_BUTTON_BG);
+            axyne_text_rect(item->hDC, state->ui_font, disabled ? AXYNE_MUTED : AXYNE_TEXT,
+                           rect, label, DT_CENTER);
+            if ((item->itemState & ODS_FOCUS) != 0) {
+                InflateRect(&rect, -2, -2);
+                DrawFocusRect(item->hDC, &rect);
+            }
+            return TRUE;
+        }
+        break;
+    }
     case WM_CTLCOLORBTN:
         if ((HWND)l_param == state->terminal_start ||
             (HWND)l_param == state->terminal_stop ||
@@ -3157,6 +3553,16 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_update_title(window, state);
         }
         axyne_refresh_action_controls(state);
+        {
+            RECT client;
+            RECT toolbar;
+            RECT status;
+            GetClientRect(window, &client);
+            toolbar = (RECT){0, AXYNE_TOP_MENU, client.right, AXYNE_TOP_MENU + AXYNE_TOOLBAR};
+            status = (RECT){0, client.bottom - AXYNE_STATUS, client.right, client.bottom};
+            InvalidateRect(window, &toolbar, FALSE);
+            InvalidateRect(window, &status, FALSE);
+        }
         return 0;
     }
     case WM_CLOSE:
@@ -3246,6 +3652,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             if (state->ui_font != NULL) DeleteObject(state->ui_font);
             if (state->code_font != NULL) DeleteObject(state->code_font);
+            if (state->badge_font != NULL) DeleteObject(state->badge_font);
+            if (state->tab_badge_font != NULL) DeleteObject(state->tab_badge_font);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
@@ -3313,6 +3721,16 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         if (message.message == WM_KEYDOWN) {
             AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
                 window, GWLP_USERDATA);
+            if (current != NULL && message.hwnd == current->terminal_input) {
+                if (message.wParam == VK_RETURN) {
+                    axyne_terminal_send(current);
+                    continue;
+                }
+                /* Editor shortcuts must not consume typing in the input. */
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+                continue;
+            }
             if (current != NULL && axyne_handle_key(window, current,
                                                     message.wParam)) continue;
         }
