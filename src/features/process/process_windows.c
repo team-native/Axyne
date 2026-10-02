@@ -36,7 +36,6 @@ static int checked_mul_size(size_t left, size_t right, size_t *result)
     *result = left * right;
     return 1;
 }
-
 static void process_destroy(AxyneProcess *process)
 {
     ProcessState *state = (ProcessState *)process->implementation;
