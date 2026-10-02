@@ -1107,24 +1107,26 @@ static int lsp_send_initialize_locked(AxyneLspClient *client)
     if (!LSP_APPEND_LITERAL(&body, "{\"jsonrpc\":\"2.0\",\"id\":") ||
         !lsp_buffer_uint(&body, id) ||
         !LSP_APPEND_LITERAL(&body, ",\"method\":\"initialize\",\"params\":{\"processId\":null,\"clientInfo\":{\"name\":\"Axyne\",\"version\":\"0.1.0\"},\"rootUri\":")) {
-        lsp_buffer_dispose(&body); return 0;
+        goto fail;
     }
     if (client->root_uri == NULL) {
-        if (!LSP_APPEND_LITERAL(&body, "null")) { lsp_buffer_dispose(&body); return 0; }
-    } else if (!lsp_json_cstr(&body, client->root_uri)) { lsp_buffer_dispose(&body); return 0; }
+        if (!LSP_APPEND_LITERAL(&body, "null")) goto fail;
+    } else if (!lsp_json_cstr(&body, client->root_uri)) goto fail;
     if (!LSP_APPEND_LITERAL(&body, ",\"capabilities\":{\"textDocument\":{\"publishDiagnostics\":{}}},\"initializationOptions\":") ||
         !lsp_buffer_append(&body, client->initialization_options_json,
                            strlen(client->initialization_options_json)) ||
-        !LSP_APPEND_LITERAL(&body, "}}}")) { lsp_buffer_dispose(&body); return 0; }
+        !LSP_APPEND_LITERAL(&body, "}}}")) goto fail;
     ok = lsp_send_body_locked(client, body.data, body.length);
     if (!ok) {
-        size_t i;
-        for (i = 0; i < client->request_count; ++i) if (client->requests[i].id == id) {
-            client->requests[i] = client->requests[--client->request_count]; break;
-        }
+        (void)lsp_take_request(client, id);
     } else client->initialize_id = id;
     lsp_buffer_dispose(&body);
     return ok;
+
+fail:
+    (void)lsp_take_request(client, id);
+    lsp_buffer_dispose(&body);
+    return 0;
 }
 
 static void lsp_report(AxyneLspClient *client, AxyneStatus status, const char *message)
@@ -1439,11 +1441,13 @@ static AxyneStatus lsp_update_document_text_locked(LspDocument *entry,
                                                     const AxyneDocument *document,
                                                     AxyneError *error)
 {
-    char *text = document->length == 0 ? lsp_copy("") :
+    char *text;
+    if (entry->version == UINT64_MAX)
+        return lsp_error(error, AXYNE_STATUS_UNSUPPORTED, "Document version limit reached");
+    text = document->length == 0 ? lsp_copy("") :
         lsp_copy_bytes(document->contents, document->length);
     if (text == NULL) return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to copy document contents");
     free(entry->text); entry->text = text; entry->length = document->length;
-    if (entry->version == UINT64_MAX) return lsp_error(error, AXYNE_STATUS_UNSUPPORTED, "Document version limit reached");
     ++entry->version;
     return lsp_error(error, AXYNE_STATUS_OK, "");
 }
@@ -1485,16 +1489,28 @@ static void lsp_cleanup_failed_start(AxyneLspClient *client)
 {
     AxyneProcess *process;
     lsp_mutex_lock(&client->mutex);
-    if (!client->stopping || !client->exited || client->process == NULL) {
+    if (client->process == NULL) {
         lsp_mutex_unlock(&client->mutex);
         return;
     }
     process = client->process;
     client->process = NULL;
     client->started = 0;
+    client->stopping = 1;
+    client->initialized = 0;
+    client->exited = 1;
     lsp_mutex_unlock(&client->mutex);
     axyne_process_release(process);
     lsp_mutex_lock(&client->mutex);
+    for (size_t i = 0; i < client->queued_count; ++i)
+        free(client->queued[i].uri);
+    client->queued_count = 0;
+    client->request_count = 0;
+    client->initialize_id = 0;
+    client->next_id = 1;
+    lsp_buffer_dispose(&client->input);
+    for (size_t i = 0; i < client->document_count; ++i)
+        client->documents[i].open_sent = 0;
     client->stopping = 0;
     client->initialized = 0;
     client->exited = 0;
@@ -1620,6 +1636,7 @@ AxyneStatus axyne_lsp_did_change(AxyneLspClient *client,
 {
     LspDocument *entry;
     AxyneStatus status;
+    int cleanup = 0;
     if (client == NULL) return lsp_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "LSP client is null");
     status = lsp_validate_document(document, error);
     if (status != AXYNE_STATUS_OK) return status;
@@ -1627,9 +1644,13 @@ AxyneStatus axyne_lsp_did_change(AxyneLspClient *client,
     entry = lsp_find_document(client, document->path);
     if (entry == NULL) { lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_NOT_FOUND, "Document is not open in LSP"); }
     status = lsp_update_document_text_locked(entry, document, error);
-    if (status == AXYNE_STATUS_OK && client->initialized && entry->open_sent && !lsp_send_change_locked(client, entry))
+    if (status == AXYNE_STATUS_OK && client->initialized && entry->open_sent && !lsp_send_change_locked(client, entry)) {
         status = lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send didChange");
-    lsp_mutex_unlock(&client->mutex); return status;
+        cleanup = 1;
+    }
+    lsp_mutex_unlock(&client->mutex);
+    if (cleanup) lsp_cleanup_failed_start(client);
+    return status;
 }
 
 AxyneStatus axyne_lsp_did_close(AxyneLspClient *client,
@@ -1643,7 +1664,9 @@ AxyneStatus axyne_lsp_did_close(AxyneLspClient *client,
     entry = lsp_find_document(client, document->path);
     if (entry == NULL) { lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_NOT_FOUND, "Document is not open in LSP"); }
     if (client->initialized && entry->open_sent && !lsp_send_close_locked(client, entry)) {
-        lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send didClose");
+        lsp_mutex_unlock(&client->mutex);
+        lsp_cleanup_failed_start(client);
+        return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send didClose");
     }
     lsp_remove_queued_for_uri_locked(client, entry->uri);
     index = (size_t)(entry - client->documents); lsp_remove_document_locked(client, index);
@@ -1679,7 +1702,9 @@ static AxyneStatus lsp_request(AxyneLspClient *client, const AxyneDocument *docu
     if (client->initialized) {
         if (!lsp_send_position_request_locked(client, &request)) {
             (void)lsp_take_request(client, request.id); free(request.uri);
-            lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send LSP request");
+            lsp_mutex_unlock(&client->mutex);
+            lsp_cleanup_failed_start(client);
+            return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send LSP request");
         }
         free(request.uri);
     } else {
