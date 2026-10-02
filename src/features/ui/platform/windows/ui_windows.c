@@ -89,6 +89,7 @@ static COLORREF AXYNE_POPUP_DISABLED;
 static COLORREF AXYNE_POPUP_SEPARATOR;
 static COLORREF AXYNE_POPUP_CHECK;
 static HBRUSH AXYNE_POPUP_BRUSH;
+static DWORD AXYNE_RUNTIME_LOAD_ERROR;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -3319,6 +3320,7 @@ static HMODULE axyne_load_runtime_library(const wchar_t *name)
     size_t name_length;
     size_t directory_length;
     if (module != NULL) return module;
+    AXYNE_RUNTIME_LOAD_ERROR = GetLastError();
     path = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
         AXYNE_MODULE_PATH_CAPACITY * sizeof(*path));
     if (path == NULL) return NULL;
@@ -3341,6 +3343,7 @@ static HMODULE axyne_load_runtime_library(const wchar_t *name)
     wcscpy(path + directory_length, name);
     module = LoadLibraryExW(path, NULL,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (module == NULL) AXYNE_RUNTIME_LOAD_ERROR = GetLastError();
     HeapFree(GetProcessHeap(), 0, path);
     return module;
 }
