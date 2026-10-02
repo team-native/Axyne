@@ -16,6 +16,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/debugger.h"
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
@@ -35,7 +36,12 @@ enum {
     AXYNE_TERMINAL_START,
     AXYNE_TERMINAL_STOP,
     AXYNE_TERMINAL_SEND,
-    AXYNE_RUNNER_CONFIGURE
+    AXYNE_RUNNER_CONFIGURE,
+    AXYNE_DEBUG_START,
+    AXYNE_DEBUG_PAUSE,
+    AXYNE_DEBUG_CONTINUE,
+    AXYNE_DEBUG_STEP_OVER,
+    AXYNE_DEBUG_BREAKPOINT
 };
 
 enum {
@@ -79,6 +85,7 @@ typedef struct AxyneWindowState {
     int editor_document_initialized;
     AxyneRunnerConfig terminal_runner;
     AxyneRunnerConfig action_runner;
+    AxyneDebugger debugger;
     AxyneProcess *terminal_process;
     AxyneProcess *git_process;
     AxyneGitUiRun *git_run;
@@ -87,6 +94,11 @@ typedef struct AxyneWindowState {
     HWND terminal_start;
     HWND terminal_stop;
     HWND terminal_send;
+    HWND debug_start;
+    HWND debug_pause;
+    HWND debug_continue;
+    HWND debug_step_over;
+    HWND debug_breakpoint;
     int active_action;
     int last_exit_code;
     int last_exit_failed;
@@ -106,10 +118,11 @@ enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_SETDOCPOINTER = 2358, SCI_CREATEDOCUMENT = 2375,
        SCI_RELEASEDOCUMENT = 2377, SCN_SAVEPOINTREACHED = 2002,
        SCN_SAVEPOINTLEFT = 2003, SCN_MODIFIED = 2008 };
-enum { SCI_GETCURRENTPOS = 2008, SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
+enum { SCI_GETCURRENTPOS = 2008, SCI_LINEFROMPOSITION = 2166,
+       SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
        SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170,
        SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
-enum { SCI_LINEFROMPOSITION = 2166, SCI_GETCOLUMN = 2129 };
+enum { SCI_GETCOLUMN = 2129 };
 
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
@@ -141,6 +154,10 @@ typedef struct AxyneTerminalMessage {
     AxyneProcessStream stream;
 } AxyneTerminalMessage;
 
+typedef struct AxyneTerminalExitMessage {
+    AxyneProcess *process;
+    int exit_code;
+} AxyneTerminalExitMessage;
 struct AxyneGitUiRun {
     HWND window;
     CRITICAL_SECTION lock;
@@ -499,11 +516,16 @@ static void axyne_terminal_exit(AxyneProcess *process, int exit_code,
                                 void *user_data)
 {
     AxyneWindowState *state = (AxyneWindowState *)user_data;
-    (void)process;
+    AxyneTerminalExitMessage *message;
     if (state != NULL) {
-        PostMessageA(state->terminal_output != NULL
-                         ? GetParent(state->terminal_output) : NULL,
-                     AXYNE_WM_TERMINAL_EXIT, (WPARAM)exit_code, 0);
+        message = (AxyneTerminalExitMessage *)malloc(sizeof(*message));
+        if (message == NULL) return;
+        message->process = process;
+        message->exit_code = exit_code;
+        if (!PostMessageA(state->terminal_output != NULL
+                              ? GetParent(state->terminal_output) : NULL,
+                          AXYNE_WM_TERMINAL_EXIT, 0, (LPARAM)message))
+            free(message);
     }
 }
 
@@ -539,7 +561,13 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
-    if (state->terminal_process != NULL) return;
+    if (state->terminal_process != NULL ||
+        axyne_debugger_is_active(&state->debugger)) {
+        const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\r\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
     status = axyne_runner_process_spec(&state->terminal_runner,
         axyne_terminal_output, axyne_terminal_exit, state, &spec, &error);
     if (status == AXYNE_STATUS_OK)
@@ -585,6 +613,68 @@ static void axyne_terminal_send(AxyneWindowState *state)
     free(text);
 }
 
+static void axyne_debugger_start(HWND window, AxyneWindowState *state)
+{
+    AxyneDocument *document;
+    AxyneError error;
+    if (axyne_debugger_is_active(&state->debugger)) return;
+    if (state->terminal_process != NULL) {
+        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\r\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
+    if (!axyne_capture_editor(state)) return;
+    document = axyne_active(state);
+    if (document == NULL || document->is_untitled || document->path == NULL ||
+        document->is_dirty) {
+        if (!axyne_save_active(window, state)) return;
+        document = axyne_active(state);
+    }
+    if (document == NULL || document->is_untitled || document->path == NULL ||
+        document->is_dirty) return;
+    if (axyne_debugger_start(&state->debugger, document,
+            axyne_terminal_output, axyne_terminal_exit, state, &error) !=
+            AXYNE_STATUS_OK) {
+        axyne_terminal_append(state->terminal_output, error.message,
+                              strlen(error.message), AXYNE_PROCESS_STDERR);
+        return;
+    }
+    axyne_terminal_append(state->terminal_output, "[debugger]\r\n", 12,
+                          AXYNE_PROCESS_STDOUT);
+    EnableWindow(state->debug_start, FALSE);
+    EnableWindow(state->debug_pause, TRUE);
+    EnableWindow(state->debug_continue, TRUE);
+    EnableWindow(state->debug_step_over, TRUE);
+    EnableWindow(state->debug_breakpoint, TRUE);
+    state->active_action = 4;
+}
+
+static void axyne_debugger_command_ui(AxyneWindowState *state,
+                                      AxyneDebuggerCommand command)
+{
+    AxyneError error;
+    if (axyne_debugger_command(&state->debugger, command, &error) !=
+        AXYNE_STATUS_OK)
+        axyne_terminal_append(state->terminal_output, error.message,
+                              strlen(error.message), AXYNE_PROCESS_STDERR);
+}
+
+static void axyne_debugger_toggle_current_breakpoint(AxyneWindowState *state)
+{
+    AxyneDocument *document = axyne_active(state);
+    AxyneError error;
+    size_t position;
+    size_t line;
+    if (document == NULL || document->path == NULL || state->editor == NULL)
+        return;
+    position = (size_t)SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION,
+                                (WPARAM)position, 0) + 1;
+    if (axyne_debugger_toggle_breakpoint(&state->debugger, document->path,
+                                         line, &error) != AXYNE_STATUS_OK)
+        axyne_terminal_append(state->terminal_output, error.message,
+                              strlen(error.message), AXYNE_PROCESS_STDERR);
 static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
                                size_t length)
 {
@@ -866,12 +956,33 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
     state->terminal_send = CreateWindowA("BUTTON", "Send",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_SEND, instance, NULL);
+    state->debug_start = CreateWindowA("BUTTON", "Debug",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_DEBUG_START, instance, NULL);
+    state->debug_pause = CreateWindowA("BUTTON", "Pause",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_DEBUG_PAUSE, instance, NULL);
+    state->debug_continue = CreateWindowA("BUTTON", "Continue",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_DEBUG_CONTINUE, instance, NULL);
+    state->debug_step_over = CreateWindowA("BUTTON", "Next",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_DEBUG_STEP_OVER, instance, NULL);
+    state->debug_breakpoint = CreateWindowA("BUTTON", "Breakpoint",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_DEBUG_BREAKPOINT, instance, NULL);
     EnableWindow(state->terminal_stop, FALSE);
+    EnableWindow(state->debug_pause, FALSE);
+    EnableWindow(state->debug_continue, FALSE);
+    EnableWindow(state->debug_step_over, FALSE);
+    EnableWindow(state->debug_breakpoint, FALSE);
     if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
         WM_SETFONT, (WPARAM)state->code_font, TRUE);
     if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
         WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     (void)axyne_terminal_configure_default(state);
+    (void)axyne_debugger_initialize(&state->debugger, NULL);
+    (void)axyne_debugger_configure_default(&state->debugger, NULL);
 }
 
 static void axyne_runner_values_free(char **values, size_t count)
@@ -2255,6 +2366,16 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                      56, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->terminal_send, NULL, width - 76, input_top,
                      64, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->debug_start, NULL, 12, bottom_top + 4,
+                     72, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->debug_pause, NULL, 88, bottom_top + 4,
+                     64, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->debug_continue, NULL, 156, bottom_top + 4,
+                     76, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->debug_step_over, NULL, 236, bottom_top + 4,
+                     56, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->debug_breakpoint, NULL, 296, bottom_top + 4,
+                     96, 22, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     InvalidateRect(window, NULL, FALSE);
 }
@@ -2490,6 +2611,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
         else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
+        else if (command == AXYNE_DEBUG_START) axyne_debugger_start(window, state);
+        else if (command == AXYNE_DEBUG_PAUSE)
+            axyne_debugger_command_ui(state, AXYNE_DEBUGGER_PAUSE);
+        else if (command == AXYNE_DEBUG_CONTINUE)
+            axyne_debugger_command_ui(state, AXYNE_DEBUGGER_CONTINUE);
+        else if (command == AXYNE_DEBUG_STEP_OVER)
+            axyne_debugger_command_ui(state, AXYNE_DEBUGGER_STEP_OVER);
+        else if (command == AXYNE_DEBUG_BREAKPOINT)
+            axyne_debugger_toggle_current_breakpoint(state);
         else if (command == AXYNE_CMD_NEW) axyne_new_document(window, state);
         else if (command == AXYNE_CMD_OPEN) axyne_open_document(window, state, NULL);
         else if (command == AXYNE_CMD_SAVE) (void)axyne_save_active(window, state);
@@ -2563,8 +2693,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     }
-    case AXYNE_WM_TERMINAL_EXIT:
-        state->last_exit_code = (int)w_param;
+    case AXYNE_WM_TERMINAL_EXIT: {
+        AxyneTerminalExitMessage *exit_message =
+            (AxyneTerminalExitMessage *)l_param;
+        if (exit_message == NULL) return 0;
+        state->last_exit_code = exit_message->exit_code;
         state->last_exit_failed = state->last_exit_code != 0;
         state->has_exit_status = 1;
         {
@@ -2576,13 +2709,20 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_terminal_append(state->terminal_output, message,
                                   strlen(message), AXYNE_PROCESS_STDOUT);
         }
-        if (state->terminal_process != NULL) {
+        if (state->terminal_process == exit_message->process) {
             axyne_process_release(state->terminal_process);
             state->terminal_process = NULL;
         }
+        axyne_debugger_release(&state->debugger);
+        free(exit_message);
         state->active_action = 0;
         EnableWindow(state->terminal_start, TRUE);
         EnableWindow(state->terminal_stop, FALSE);
+        EnableWindow(state->debug_start, TRUE);
+        EnableWindow(state->debug_pause, FALSE);
+        EnableWindow(state->debug_continue, FALSE);
+        EnableWindow(state->debug_step_over, FALSE);
+        EnableWindow(state->debug_breakpoint, FALSE);
         InvalidateRect(window, NULL, FALSE);
         return 0;
     case AXYNE_WM_GIT_COMPLETE:
@@ -2647,6 +2787,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 axyne_process_release(state->terminal_process);
                 state->terminal_process = NULL;
             }
+            axyne_debugger_destroy(&state->debugger);
             if (state->git_process != NULL) {
                 AxyneGitUiRun *run = state->git_run;
                 int release_message = 0;
