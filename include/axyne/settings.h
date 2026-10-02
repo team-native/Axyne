@@ -9,6 +9,10 @@ extern "C" {
 
 typedef struct AxyneSettings AxyneSettings;
 
+/* Creates an empty JSON object suitable for a new preferences document. */
+AxyneStatus axyne_settings_create(AxyneSettings **settings,
+                                  AxyneError *error);
+
 /*
  * json_pointer follows RFC 6901 (including ~0 and ~1 escaping). The empty
  * pointer addresses the complete document. A malformed pointer returns
