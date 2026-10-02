@@ -27,7 +27,36 @@ typedef struct ProcessState {
     int child_done;
     int child_status;
     int group_signaling_unsafe;
+    int release_requested;
+    int worker_finished;
+    int cleanup_claimed;
 } ProcessState;
+
+static void process_destroy(AxyneProcess *process)
+{
+    ProcessState *state = (ProcessState *)process->implementation;
+    (void)pthread_mutex_lock(&state->write_lock);
+    close(state->stdin_write);
+    (void)pthread_mutex_unlock(&state->write_lock);
+    (void)pthread_mutex_destroy(&state->child_lock);
+    (void)pthread_mutex_destroy(&state->write_lock);
+    free(state);
+    free(process);
+}
+
+static void process_try_deferred_destroy(AxyneProcess *process)
+{
+    ProcessState *state = (ProcessState *)process->implementation;
+    int destroy = 0;
+    (void)pthread_mutex_lock(&state->child_lock);
+    if (state->release_requested && state->worker_finished &&
+        !state->cleanup_claimed) {
+        state->cleanup_claimed = 1;
+        destroy = 1;
+    }
+    (void)pthread_mutex_unlock(&state->child_lock);
+    if (destroy) process_destroy(process);
+}
 
 static unsigned char ascii_fold(unsigned char value)
 {
@@ -140,7 +169,7 @@ static void *process_worker(void *opaque)
     AxyneProcess *process = (AxyneProcess *)opaque;
     ProcessState *state = (ProcessState *)process->implementation;
     int descriptors[2] = { state->stdout_read, state->stderr_read };
-    int eof[2] = { 0, 0 }, child_done = 0;
+    int eof[2] = { 0, 0 }, child_done = 0, pipe_error = 0;
     char buffer[4096];
     while (!child_done || !eof[0] || !eof[1]) {
         size_t stream;
@@ -158,8 +187,14 @@ static void *process_worker(void *opaque)
                     } else if (errno == EINTR) {
                         continue;
                     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        pipe_error = 1;
                         eof[stream] = 1;
                         close(descriptors[stream]);
+                        (void)pthread_mutex_lock(&state->child_lock);
+                        if (!state->group_signaling_unsafe &&
+                            kill(-state->child, SIGKILL) != 0 && errno != ESRCH)
+                            state->group_signaling_unsafe = 1;
+                        (void)pthread_mutex_unlock(&state->child_lock);
                     }
                     break;
                 }
@@ -198,7 +233,11 @@ static void *process_worker(void *opaque)
             (void)nanosleep(&pause, NULL);
         }
     }
-    axyne_process_dispatch_exit(process, state->child_status);
+    axyne_process_dispatch_exit(process, pipe_error ? -1 : state->child_status);
+    (void)pthread_mutex_lock(&state->child_lock);
+    state->worker_finished = 1;
+    (void)pthread_mutex_unlock(&state->child_lock);
+    process_try_deferred_destroy(process);
     return NULL;
 }
 
@@ -389,8 +428,15 @@ AxyneStatus axyne_process_terminate(AxyneProcess *process, AxyneError *error)
 void axyne_process_release(AxyneProcess *process)
 {
     ProcessState *state;
+    int destroy = 0;
     if (process == NULL) return;
     state = (ProcessState *)process->implementation;
+    if (pthread_equal(pthread_self(), state->worker)) {
+        (void)pthread_mutex_lock(&state->child_lock);
+        state->release_requested = 1;
+        (void)pthread_mutex_unlock(&state->child_lock);
+        return;
+    }
     (void)pthread_mutex_lock(&state->child_lock);
     if (!state->group_signaling_unsafe) (void)kill(-state->child, SIGKILL);
     (void)pthread_mutex_unlock(&state->child_lock);
@@ -399,10 +445,22 @@ void axyne_process_release(AxyneProcess *process)
        final group signal. If a host SIGCHLD handler reaped it, do not signal
        the potentially reused ID; waitpid below remains best-effort cleanup. */
     while (waitpid(state->child, NULL, 0) < 0 && errno == EINTR) { }
-    (void)pthread_mutex_lock(&state->write_lock);
-    close(state->stdin_write);
-    (void)pthread_mutex_unlock(&state->write_lock);
-    (void)pthread_mutex_destroy(&state->child_lock);
-    (void)pthread_mutex_destroy(&state->write_lock);
-    free(state); free(process);
+    (void)pthread_mutex_lock(&state->child_lock);
+    if (!state->cleanup_claimed) {
+        state->cleanup_claimed = 1;
+        destroy = 1;
+    }
+    (void)pthread_mutex_unlock(&state->child_lock);
+    if (destroy) process_destroy(process);
+}
+
+void axyne_process_release_deferred(AxyneProcess *process)
+{
+    ProcessState *state;
+    if (process == NULL) return;
+    state = (ProcessState *)process->implementation;
+    (void)pthread_mutex_lock(&state->child_lock);
+    state->release_requested = 1;
+    (void)pthread_mutex_unlock(&state->child_lock);
+    process_try_deferred_destroy(process);
 }
