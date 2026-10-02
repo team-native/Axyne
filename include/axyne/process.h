@@ -45,10 +45,13 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * reaps children. If the root is nevertheless observed reaped (ECHILD), the
  * API skips later group signals to avoid signaling a reused ID; termination of
  * remaining descendants is then not guaranteed. Do not call release from a
- * callback.
+ * callback; use release_deferred there, which schedules cleanup after the
+ * callback returns.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.
+ * An exit callback with exit_code -1 reports a process-output I/O failure;
+ * ordinary EOF is not reported as an error and preserves the child exit code.
  */
 
 typedef struct AxyneProcessSpec {
@@ -75,6 +78,7 @@ AxyneStatus axyne_process_write(AxyneProcess *process, const char *bytes,
 AxyneStatus axyne_process_terminate(AxyneProcess *process,
                                     AxyneError *error);
 void axyne_process_release(AxyneProcess *process);
+void axyne_process_release_deferred(AxyneProcess *process);
 
 #ifdef __cplusplus
 }
