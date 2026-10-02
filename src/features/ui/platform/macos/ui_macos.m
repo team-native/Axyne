@@ -1,4 +1,21 @@
 #import <AppKit/AppKit.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <math.h>
+
+#include "axyne/document.h"
+#include "Scintilla.h"
+
+enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
+       SCI_GETMODIFY = 2159, SCI_SETSAVEPOINT = 2014,
+       SCI_CLEARALL = 2004, SCI_ADDTEXT = 2001, SCI_GETDOCPOINTER = 2357,
+       SCI_SETDOCPOINTER = 2358, SCI_CREATEDOCUMENT = 2375,
+       SCI_RELEASEDOCUMENT = 2377 };
+
+@interface NSObject (AxyneScintillaMessages)
+- (NSInteger)message:(unsigned int)message wParam:(uintptr_t)wParam
+               lParam:(intptr_t)lParam;
+@end
 
 static const CGFloat AXYNE_SIDEBAR = 248.0;
 static const CGFloat AXYNE_TOOLBAR = 40.0;
@@ -17,10 +34,350 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 @interface AxyneWorkspaceView : NSView {
     NSView *_editorView;
     NSBundle *_scintillaBundle;
+    AxyneDocumentSet _documents;
+    NSMenu *_recentMenu;
+    BOOL _loadingEditor;
+    BOOL _editorDocumentInitialized;
 }
+- (void)newDocument:(id)sender;
+- (void)openDocument:(id)sender;
+- (void)saveDocument:(id)sender;
+- (void)saveDocumentAs:(id)sender;
+- (void)closeDocument:(id)sender;
+- (void)openRecent:(id)sender;
+- (BOOL)confirmCloseAll;
+- (void)notification:(SCNotification *)notification;
+- (void)setRecentMenu:(NSMenu *)menu;
+- (void)refreshRecentMenu;
+- (BOOL)captureEditor;
+- (BOOL)loadActiveDocument;
+- (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 @end
 
+static void axyne_install_menu(NSApplication *application,
+                               AxyneWorkspaceView *workspace);
+
 @implementation AxyneWorkspaceView
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        if (axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
+            [self release];
+            return nil;
+        }
+    }
+    return self;
+}
+
+- (AxyneDocument *)activeDocument
+{
+    if (_documents.count == 0 || _documents.active_index >= _documents.count)
+        return NULL;
+    return &_documents.documents[_documents.active_index];
+}
+
+- (NSInteger)sendEditorMessage:(unsigned int)message wParam:(uintptr_t)wParam
+                         lParam:(intptr_t)lParam
+{
+    if (_editorView == nil) return 0;
+    return [_editorView message:message wParam:wParam lParam:lParam];
+}
+
+- (BOOL)captureEditorSnapshot
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (doc == NULL || _editorView == nil) return YES;
+    NSInteger length = [self sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
+    if (length < 0 || (uint64_t)length >= SIZE_MAX) return NO;
+    char *text = malloc((size_t)length + 1);
+    if (text == NULL) return NO;
+    (void)[self sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)length + 1
+                            lParam:(intptr_t)text];
+    AxyneStatus status = axyne_documents_set_contents(&_documents,
+        _documents.active_index, text, (size_t)length, NULL);
+    free(text);
+    return status == AXYNE_STATUS_OK;
+}
+
+- (BOOL)captureEditor
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (doc == NULL || ([self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] == 0 &&
+                        !doc->is_dirty)) return YES;
+    if ([self captureEditorSnapshot]) return YES;
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:@"Could not capture editor contents"];
+    [alert setInformativeText:@"The operation was cancelled. Your edits remain open in the editor."];
+    [alert runModal];
+    return NO;
+}
+
+- (BOOL)loadActiveDocument
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (doc == NULL || _editorView == nil) return NO;
+    size_t previousIndex = _documents.active_index;
+    _loadingEditor = YES;
+    if (!_editorDocumentInitialized) {
+        doc->native_editor_document = (void *)(uintptr_t)[self
+            sendEditorMessage:SCI_GETDOCPOINTER wParam:0 lParam:0];
+        _editorDocumentInitialized = YES;
+    } else if (doc->native_editor_document == NULL) {
+        NSInteger created = [self sendEditorMessage:SCI_CREATEDOCUMENT
+            wParam:doc->length lParam:0];
+        if (created == 0) {
+            _loadingEditor = NO;
+            (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+            return NO;
+        }
+        doc->native_editor_document = (void *)(uintptr_t)created;
+        doc->owns_native_editor_document = 1;
+        (void)[self sendEditorMessage:SCI_SETDOCPOINTER wParam:0
+            lParam:(intptr_t)doc->native_editor_document];
+        (void)[self sendEditorMessage:SCI_ADDTEXT wParam:doc->length
+            lParam:(intptr_t)doc->contents];
+        if (!doc->is_dirty)
+            (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    } else {
+        (void)[self sendEditorMessage:SCI_SETDOCPOINTER wParam:0
+            lParam:(intptr_t)doc->native_editor_document];
+    }
+    _loadingEditor = NO;
+    [self setNeedsDisplay:YES];
+    [self updateWindowTitle];
+    return YES;
+}
+
+- (void)updateWindowTitle
+{
+    AxyneDocument *doc = [self activeDocument];
+    NSString *name = doc != NULL && doc->title != NULL
+        ? [NSString stringWithUTF8String:doc->title] : @"Untitled";
+    [[self window] setTitle:[NSString stringWithFormat:@"%@%@ - Axyne",
+        doc != NULL && doc->is_dirty ? @"● " : @"", name ?: @"Untitled"]];
+}
+
+- (void)notification:(SCNotification *)notification
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (_loadingEditor || notification == NULL || doc == NULL) return;
+    if (notification->nmhdr.code == SCN_MODIFIED &&
+        [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0) {
+        if (!doc->is_dirty) {
+            (void)axyne_documents_mark_dirty(&_documents, _documents.active_index, NULL);
+            [self setNeedsDisplay:YES];
+            [self updateWindowTitle];
+        }
+    } else if (notification->nmhdr.code == SCN_SAVEPOINTREACHED) {
+        (void)axyne_documents_mark_clean(&_documents,
+            _documents.active_index, NULL);
+        [self setNeedsDisplay:YES];
+        [self updateWindowTitle];
+    } else if (notification->nmhdr.code == SCN_SAVEPOINTLEFT) {
+        (void)axyne_documents_mark_dirty(&_documents,
+            _documents.active_index, NULL);
+        [self setNeedsDisplay:YES];
+        [self updateWindowTitle];
+    }
+}
+
+- (BOOL)saveActiveToPath:(NSString *)path
+{
+    if (![self captureEditor]) return NO;
+    const char *utf8Path = [path UTF8String];
+    AxyneError error;
+    AxyneStatus status = axyne_documents_save_as(&_documents,
+        _documents.active_index, utf8Path, &error);
+    if (status != AXYNE_STATUS_OK) {
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"Could not save file"];
+        [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
+        [alert runModal];
+        return NO;
+    }
+    (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self setNeedsDisplay:YES];
+    [self updateWindowTitle];
+    [self refreshRecentMenu];
+    return YES;
+}
+
+- (BOOL)saveActive
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (doc == NULL) return NO;
+    if (doc->is_untitled) {
+        NSSavePanel *panel = [NSSavePanel savePanel];
+        if ([panel runModal] != NSModalResponseOK) return NO;
+        return [self saveActiveToPath:[[panel URL] path]];
+    }
+    if (![self captureEditor]) return NO;
+    AxyneError error;
+    AxyneStatus status = axyne_documents_save(&_documents,
+        _documents.active_index, &error);
+    if (status != AXYNE_STATUS_OK) {
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"Could not save file"];
+        [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
+        [alert runModal];
+        return NO;
+    }
+    (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self setNeedsDisplay:YES];
+    [self updateWindowTitle];
+    [self refreshRecentMenu];
+    return YES;
+}
+
+- (void)newDocument:(id)sender
+{
+    (void)sender;
+    if (![self captureEditor]) return;
+    size_t previousIndex = _documents.active_index;
+    size_t index;
+    if (axyne_documents_new(&_documents, &index, NULL) == AXYNE_STATUS_OK) {
+        (void)axyne_documents_set_active(&_documents, index, NULL);
+        if (![self loadActiveDocument]) {
+            (void)axyne_documents_close(&_documents, index, NULL);
+            (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+        }
+    }
+}
+
+- (void)openPath:(NSString *)path
+{
+    if (path == nil) return;
+    if (![self captureEditor]) return;
+    size_t previousCount = _documents.count;
+    size_t previousIndex = _documents.active_index;
+    size_t index = 0;
+    AxyneError error;
+    AxyneStatus status = axyne_documents_open(&_documents,
+        [path UTF8String], &index, &error);
+    if (status != AXYNE_STATUS_OK) {
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"Could not open file"];
+        [alert setInformativeText:[NSString stringWithUTF8String:error.message] ?: @""];
+        [alert runModal];
+        return;
+    }
+    (void)axyne_documents_set_active(&_documents, index, NULL);
+    if (![self loadActiveDocument]) {
+        if (_documents.count > previousCount)
+            (void)axyne_documents_close(&_documents, index, NULL);
+        (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"Could not open file"];
+        [alert setInformativeText:@"Scintilla could not create the document."];
+        [alert runModal];
+        return;
+    }
+    [self refreshRecentMenu];
+}
+
+- (void)openDocument:(id)sender
+{
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    [panel setAllowsMultipleSelection:NO];
+    if ([panel runModal] == NSModalResponseOK)
+        [self openPath:[[panel URL] path]];
+}
+
+- (void)saveDocument:(id)sender
+{
+    (void)sender;
+    (void)[self saveActive];
+}
+
+- (void)saveDocumentAs:(id)sender
+{
+    (void)sender;
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    if ([panel runModal] == NSModalResponseOK)
+        (void)[self saveActiveToPath:[[panel URL] path]];
+}
+
+- (void)openRecent:(id)sender
+{
+    NSString *path = [sender representedObject];
+    [self openPath:path];
+}
+
+- (void)setRecentMenu:(NSMenu *)menu
+{
+    [_recentMenu release];
+    _recentMenu = [menu retain];
+    [self refreshRecentMenu];
+}
+
+- (void)refreshRecentMenu
+{
+    if (_recentMenu == nil) return;
+    [_recentMenu removeAllItems];
+    if (_documents.recent_count == 0) {
+        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"No Recent Files"
+            action:nil keyEquivalent:@""];
+        [empty setEnabled:NO];
+        [_recentMenu addItem:empty];
+        [empty release];
+        return;
+    }
+    for (size_t i = 0; i < _documents.recent_count; ++i) {
+        NSString *path = [NSString stringWithUTF8String:_documents.recent_paths[i]];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:path ?: @"(Invalid path)"
+            action:@selector(openRecent:) keyEquivalent:@""];
+        [item setTarget:self];
+        [item setRepresentedObject:path];
+        [_recentMenu addItem:item];
+        [item release];
+    }
+}
+
+- (BOOL)confirmCloseDocumentAtIndex:(size_t)index
+{
+    AxyneDocument *doc = &_documents.documents[index];
+    if (!doc->is_dirty) return YES;
+    NSString *name = [NSString stringWithUTF8String:doc->title ?: "Untitled"];
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:[NSString stringWithFormat:@"Save changes to %@?", name]];
+    [alert addButtonWithTitle:@"Save"];
+    [alert addButtonWithTitle:@"Discard"];
+    [alert addButtonWithTitle:@"Cancel"];
+    NSInteger result = [alert runModal];
+    if (result == NSAlertFirstButtonReturn) {
+        if (![self captureEditor]) return NO;
+        (void)axyne_documents_set_active(&_documents, index, NULL);
+        [self loadActiveDocument];
+        return [self saveActive];
+    }
+    return result == NSAlertSecondButtonReturn;
+}
+
+- (void)closeDocument:(id)sender
+{
+    (void)sender;
+    size_t index = _documents.active_index;
+    if (![self captureEditor]) return;
+    if (![self confirmCloseDocumentAtIndex:index]) return;
+    AxyneDocument *doc = &_documents.documents[index];
+    if (doc->owns_native_editor_document)
+        (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
+            lParam:(intptr_t)doc->native_editor_document];
+    (void)axyne_documents_close(&_documents, index, NULL);
+    (void)axyne_documents_set_active(&_documents, _documents.active_index, NULL);
+    [self loadActiveDocument];
+}
+
+- (BOOL)confirmCloseAll
+{
+    if (![self captureEditor]) return NO;
+    for (size_t i = 0; i < _documents.count; ++i)
+        if (![self confirmCloseDocumentAtIndex:i]) return NO;
+    return YES;
+}
 
 - (BOOL)isFlipped
 {
@@ -43,6 +400,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     Class scintillaClass = NSClassFromString(@"ScintillaView");
     if (scintillaClass != Nil) {
         _editorView = [[scintillaClass alloc] initWithFrame:NSZeroRect];
+        [(id)_editorView setDelegate:self];
         [_editorView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
         [self addSubview:_editorView];
         [self setNeedsLayout:YES];
@@ -53,6 +411,47 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 {
     [super viewDidMoveToWindow];
     [self loadScintillaView];
+    [self loadActiveDocument];
+}
+
+- (void)mouseDown:(NSEvent *)event
+{
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    if (point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS &&
+        point.x >= AXYNE_SIDEBAR + 12) {
+        CGFloat offset = point.x - AXYNE_SIDEBAR - 12;
+        size_t index = (size_t)(offset / 184);
+        if (index < _documents.count) {
+            if (![self captureEditor]) return;
+            if (fmod(offset, 184) >= 160) {
+                if ([self confirmCloseDocumentAtIndex:index]) {
+                    AxyneDocument *doc = &_documents.documents[index];
+                    if (doc->owns_native_editor_document)
+                        (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
+                            lParam:(intptr_t)doc->native_editor_document];
+                    (void)axyne_documents_close(&_documents, index, NULL);
+                    [self loadActiveDocument];
+                }
+            } else {
+                (void)axyne_documents_set_active(&_documents, index, NULL);
+                [self loadActiveDocument];
+            }
+            return;
+        }
+    }
+    [super mouseDown:event];
+}
+
+- (BOOL)performKeyEquivalent:(NSEvent *)event
+{
+    if (([event modifierFlags] & NSEventModifierFlagCommand) != 0) {
+        NSString *key = [[event charactersIgnoringModifiers] lowercaseString];
+        if ([key isEqualToString:@"n"]) { [self newDocument:nil]; return YES; }
+        if ([key isEqualToString:@"o"]) { [self openDocument:nil]; return YES; }
+        if ([key isEqualToString:@"s"]) { [self saveDocument:nil]; return YES; }
+        if ([key isEqualToString:@"w"]) { [self closeDocument:nil]; return YES; }
+    }
+    return [super performKeyEquivalent:event];
 }
 
 - (void)layout
@@ -123,9 +522,24 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     [axyne_color(182, 122, 246) setFill];
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR + 20, AXYNE_TOOLBAR + AXYNE_TABS,
                           1, AXYNE_TABS));
-    [self drawLabel:@"C   main.c     ×"
-                at:NSMakePoint(AXYNE_SIDEBAR + 32, AXYNE_TOOLBAR + 10)
-                size:12 color:text family:@"SF Pro Text"];
+    CGFloat tabX = AXYNE_SIDEBAR + 12;
+    for (size_t i = 0; i < _documents.count; ++i) {
+        AxyneDocument *doc = &_documents.documents[i];
+        if (i == _documents.active_index) {
+            [panel setFill];
+            NSRectFill(NSMakeRect(tabX, AXYNE_TOOLBAR, 184, AXYNE_TABS));
+            [axyne_color(182, 122, 246) setFill];
+            NSRectFill(NSMakeRect(tabX, AXYNE_TOOLBAR, 1, AXYNE_TABS));
+        }
+        NSString *title = [NSString stringWithUTF8String:doc->title ?: "Untitled"];
+        if (doc->is_dirty) title = [@"● " stringByAppendingString:title ?: @"Untitled"];
+        [self drawLabel:title at:NSMakePoint(tabX + 12, AXYNE_TOOLBAR + 10)
+                    size:12 color:i == _documents.active_index ? text : muted
+                 family:@"SF Pro Text"];
+        [self drawLabel:@"×" at:NSMakePoint(tabX + 163, AXYNE_TOOLBAR + 10)
+                    size:12 color:muted family:@"SF Pro Text"];
+        tabX += 184;
+    }
     [self drawLabel:@"탐색기" at:NSMakePoint(12, AXYNE_TOOLBAR + AXYNE_TABS + 10)
                 size:11 color:muted family:@"SF Pro Text"];
     [self drawLabel:@"⌄  axyne" at:NSMakePoint(16, AXYNE_TOOLBAR + AXYNE_TABS + 34)
@@ -154,6 +568,16 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 
 - (void)dealloc
 {
+    [_recentMenu release];
+    if (_editorView != nil) {
+        for (size_t i = 0; i < _documents.count; ++i) {
+            AxyneDocument *doc = &_documents.documents[i];
+            if (doc->owns_native_editor_document)
+                (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
+                    lParam:(intptr_t)doc->native_editor_document];
+        }
+    }
+    axyne_documents_destroy(&_documents);
     [_editorView release];
     [_scintillaBundle unload];
     [_scintillaBundle release];
@@ -165,8 +589,11 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 @interface AxyneApplicationDelegate : NSObject <NSApplicationDelegate> {
     NSWindow *_window;
     NSString *_appName;
+    BOOL _terminationConfirmed;
 }
 - (instancetype)initWithAppName:(NSString *)appName;
+- (BOOL)windowShouldClose:(NSWindow *)sender;
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
 @end
 
 @implementation AxyneApplicationDelegate
@@ -190,7 +617,11 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
         backing:NSBackingStoreBuffered defer:NO];
     [_window setTitle:_appName ?: @"Axyne"];
     [_window setMinSize:NSMakeSize(800, 560)];
-    [_window setContentView:[[[AxyneWorkspaceView alloc] initWithFrame:frame] autorelease]];
+    AxyneWorkspaceView *workspace = [[[AxyneWorkspaceView alloc]
+        initWithFrame:frame] autorelease];
+    [_window setContentView:workspace];
+    [_window setDelegate:self];
+    axyne_install_menu([NSApplication sharedApplication], workspace);
     [_window center];
     [_window makeKeyAndOrderFront:nil];
 }
@@ -199,6 +630,24 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 {
     (void)sender;
     return YES;
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender
+{
+    if (_terminationConfirmed) return YES;
+    _terminationConfirmed = [(AxyneWorkspaceView *)[sender contentView]
+        confirmCloseAll];
+    return _terminationConfirmed;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
+{
+    (void)sender;
+    if (_terminationConfirmed) return NSTerminateNow;
+    if (_window == nil || ![_window isVisible]) return NSTerminateNow;
+    _terminationConfirmed = [(AxyneWorkspaceView *)[_window contentView]
+        confirmCloseAll];
+    return _terminationConfirmed ? NSTerminateNow : NSTerminateCancel;
 }
 
 - (void)dealloc
@@ -210,7 +659,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 
 @end
 
-static void axyne_install_menu(NSApplication *application)
+static void axyne_install_menu(NSApplication *application,
+                               AxyneWorkspaceView *workspace)
 {
     NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
@@ -222,7 +672,36 @@ static void axyne_install_menu(NSApplication *application)
                  keyEquivalent:@"q"];
     [appItem setSubmenu:appMenu];
     [mainMenu addItem:appItem];
-    NSArray *titles = @[@"File", @"Edit", @"View", @"Build", @"Debug", @"Tools", @"Help"];
+    NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"File"
+        action:nil keyEquivalent:@""];
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+    NSMenuItem *newItem = [fileMenu addItemWithTitle:@"New"
+        action:@selector(newDocument:) keyEquivalent:@"n"];
+    [newItem setTarget:workspace];
+    NSMenuItem *openItem = [fileMenu addItemWithTitle:@"Open…"
+        action:@selector(openDocument:) keyEquivalent:@"o"];
+    [openItem setTarget:workspace];
+    NSMenuItem *saveItem = [fileMenu addItemWithTitle:@"Save"
+        action:@selector(saveDocument:) keyEquivalent:@"s"];
+    [saveItem setTarget:workspace];
+    NSMenuItem *saveAsItem = [fileMenu addItemWithTitle:@"Save As…"
+        action:@selector(saveDocumentAs:) keyEquivalent:@"S"];
+    [saveAsItem setTarget:workspace];
+    NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"Close Tab"
+        action:@selector(closeDocument:) keyEquivalent:@"w"];
+    [closeItem setTarget:workspace];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent"
+        action:nil keyEquivalent:@""];
+    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];
+    [recentItem setSubmenu:recentMenu];
+    [fileMenu addItem:recentItem];
+    [workspace setRecentMenu:recentMenu];
+    [fileItem setSubmenu:fileMenu];
+    [mainMenu addItem:fileItem];
+    [fileItem release]; [recentItem release];
+    [recentMenu release]; [fileMenu release];
+    NSArray *titles = @[@"Edit", @"View", @"Build", @"Debug", @"Tools", @"Help"];
     for (NSString *title in titles) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
@@ -241,7 +720,6 @@ int axyne_ui_run(const char *app_name)
     @autoreleasepool {
         NSApplication *application = [NSApplication sharedApplication];
         [application setActivationPolicy:NSApplicationActivationPolicyRegular];
-        axyne_install_menu(application);
         NSString *title = app_name != NULL
             ? [NSString stringWithUTF8String:app_name] : @"Axyne";
         AxyneApplicationDelegate *delegate =
