@@ -13,6 +13,8 @@
 #include "axyne/search.h"
 #include "axyne/explorer.h"
 #include "axyne/watcher.h"
+#include "axyne/process.h"
+#include "axyne/runner.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -21,6 +23,15 @@ enum {
     AXYNE_STATUS = 26,
     AXYNE_SIDEBAR = 248,
     AXYNE_BOTTOM = 158
+};
+
+enum {
+    AXYNE_TERMINAL_OUTPUT = 5001,
+    AXYNE_TERMINAL_INPUT,
+    AXYNE_TERMINAL_START,
+    AXYNE_TERMINAL_STOP,
+    AXYNE_TERMINAL_SEND,
+    AXYNE_RUNNER_CONFIGURE
 };
 
 enum {
@@ -56,6 +67,18 @@ typedef struct AxyneWindowState {
     int closing;
     int loading_editor;
     int editor_document_initialized;
+    AxyneRunnerConfig terminal_runner;
+    AxyneRunnerConfig action_runner;
+    AxyneProcess *terminal_process;
+    HWND terminal_output;
+    HWND terminal_input;
+    HWND terminal_start;
+    HWND terminal_stop;
+    HWND terminal_send;
+    int active_action;
+    int last_exit_code;
+    int last_exit_failed;
+    int has_exit_status;
 } AxyneWindowState;
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -73,15 +96,29 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_FIND = 1100, AXYNE_CMD_REPLACE, AXYNE_CMD_SEARCH_FOLDER,
        AXYNE_CMD_QUICK_FILE, AXYNE_CMD_WORKSPACE,
        AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
-       AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE };
+       AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE,
+       AXYNE_CMD_BUILD, AXYNE_CMD_RUN, AXYNE_CMD_CONFIGURE_RUNNER };
 
-enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21 };
+enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
+       AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
+       AXYNE_WM_TERMINAL_EXIT = WM_APP + 23 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
     char *path;
     char *old_path;
 } AxyneExplorerMessage;
+
+typedef struct AxyneTerminalMessage {
+    char *bytes;
+    size_t length;
+    AxyneProcessStream stream;
+} AxyneTerminalMessage;
+
+static AxyneDocument *axyne_active(AxyneWindowState *state);
+static int axyne_capture_editor(AxyneWindowState *state);
+static int axyne_save_active(HWND window, AxyneWindowState *state);
+static char *axyne_workspace_parent(const char *path);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -113,9 +150,476 @@ static char *axyne_utf8(const wchar_t *wide)
     return utf8;
 }
 
+static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
+                                  AxyneProcessStream stream)
+{
+    int old_length;
+    char *old_text;
+    char *combined;
+    size_t prefix_length = stream == AXYNE_PROCESS_STDERR ? 9 : 0;
+    size_t keep;
+    if (output == NULL || bytes == NULL || length == 0) return;
+    old_length = GetWindowTextLengthA(output);
+    if (old_length < 0) old_length = 0;
+    old_text = (char *)malloc((size_t)old_length + 1);
+    if (old_text == NULL) return;
+    GetWindowTextA(output, old_text, old_length + 1);
+    if (length > SIZE_MAX - (size_t)old_length - prefix_length - 1) {
+        free(old_text); return;
+    }
+    combined = (char *)malloc((size_t)old_length + prefix_length + length + 1);
+    if (combined == NULL) { free(old_text); return; }
+    memcpy(combined, old_text, (size_t)old_length);
+    if (prefix_length != 0) memcpy(combined + old_length, "[stderr] ", prefix_length);
+    memcpy(combined + old_length + prefix_length, bytes, length);
+    combined[old_length + prefix_length + length] = '\0';
+    keep = strlen(combined);
+    if (keep > 1024 * 1024) {
+        memmove(combined, combined + keep - 1024 * 1024, 1024 * 1024);
+        combined[1024 * 1024] = '\0';
+    }
+    SetWindowTextA(output, combined);
+    SendMessageA(output, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
+    free(combined);
+    free(old_text);
+}
+
+static void axyne_terminal_output(AxyneProcess *process,
+                                  AxyneProcessStream stream,
+                                  const char *bytes, size_t length,
+                                  void *user_data)
+{
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    AxyneTerminalMessage *message;
+    (void)process;
+    if (state == NULL || bytes == NULL || length == 0) return;
+    if (length > SIZE_MAX - sizeof(*message) - 1) return;
+    message = (AxyneTerminalMessage *)malloc(sizeof(*message) + length + 1);
+    if (message == NULL) return;
+    message->bytes = (char *)(message + 1);
+    memcpy(message->bytes, bytes, length);
+    message->bytes[length] = '\0';
+    message->length = length;
+    message->stream = stream;
+    if (!PostMessageA(state->terminal_output != NULL
+                          ? GetParent(state->terminal_output) : NULL,
+                      AXYNE_WM_TERMINAL_OUTPUT, 0, (LPARAM)message)) {
+        free(message);
+    }
+}
+
+static void axyne_terminal_exit(AxyneProcess *process, int exit_code,
+                                void *user_data)
+{
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    (void)process;
+    if (state != NULL) {
+        PostMessageA(state->terminal_output != NULL
+                         ? GetParent(state->terminal_output) : NULL,
+                     AXYNE_WM_TERMINAL_EXIT, (WPARAM)exit_code, 0);
+    }
+}
+
+static int axyne_terminal_configure_default(AxyneWindowState *state)
+{
+    wchar_t system_directory[MAX_PATH];
+    wchar_t command_path[MAX_PATH];
+    UINT length;
+    char *executable;
+    AxyneRunnerSpec spec;
+    if (axyne_runner_initialize(&state->terminal_runner, NULL) != AXYNE_STATUS_OK)
+        return 0;
+    if (axyne_runner_initialize(&state->action_runner, NULL) != AXYNE_STATUS_OK)
+        return 0;
+    length = GetSystemDirectoryW(system_directory, MAX_PATH);
+    if (length == 0 || length + 10 >= MAX_PATH) return 0;
+    memcpy(command_path, system_directory, ((size_t)length + 1) * sizeof(wchar_t));
+    memcpy(command_path + length, L"\\cmd.exe", 9 * sizeof(wchar_t));
+    executable = axyne_utf8(command_path);
+    if (executable == NULL) return 0;
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = executable;
+    spec.has_runtime = 0;
+    if (axyne_runner_configure(&state->terminal_runner, &spec, NULL) != AXYNE_STATUS_OK) {
+        free(executable); return 0;
+    }
+    free(executable);
+    return 1;
+}
+
+static void axyne_terminal_start(HWND window, AxyneWindowState *state)
+{
+    AxyneProcessSpec spec;
+    AxyneError error;
+    AxyneStatus status;
+    if (state->terminal_process != NULL) return;
+    status = axyne_runner_process_spec(&state->terminal_runner,
+        axyne_terminal_output, axyne_terminal_exit, state, &spec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_process_start(&spec, &state->terminal_process, &error);
+    if (status != AXYNE_STATUS_OK) {
+        state->last_exit_failed = 0;
+        state->has_exit_status = 0;
+        axyne_terminal_append(state->terminal_output, error.message,
+                              strlen(error.message), AXYNE_PROCESS_STDERR);
+        InvalidateRect(window, NULL, FALSE);
+        return;
+    }
+    EnableWindow(state->terminal_start, FALSE);
+    EnableWindow(state->terminal_stop, TRUE);
+    state->active_action = 3;
+    state->last_exit_failed = 0;
+    (void)window;
+}
+
+static void axyne_terminal_stop(AxyneWindowState *state)
+{
+    if (state->terminal_process != NULL)
+        (void)axyne_process_terminate(state->terminal_process, NULL);
+}
+
+static void axyne_terminal_send(AxyneWindowState *state)
+{
+    int length;
+    char *text;
+    AxyneError error;
+    if (state->terminal_process == NULL || state->terminal_input == NULL) return;
+    length = GetWindowTextLengthA(state->terminal_input);
+    if (length <= 0) return;
+    text = (char *)malloc((size_t)length + 3);
+    if (text == NULL) return;
+    GetWindowTextA(state->terminal_input, text, length + 1);
+    text[length] = '\r'; text[length + 1] = '\n'; text[length + 2] = '\0';
+    if (axyne_process_write(state->terminal_process, text, (size_t)length + 2,
+                            &error) != AXYNE_STATUS_OK)
+        axyne_terminal_append(state->terminal_output, error.message,
+                              strlen(error.message), AXYNE_PROCESS_STDERR);
+    else SetWindowTextA(state->terminal_input, "");
+    free(text);
+}
+
+static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
+                                           HINSTANCE instance)
+{
+    state->terminal_output = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+        WS_VSCROLL, 0, 0, 0, 0, window, (HMENU)AXYNE_TERMINAL_OUTPUT,
+        instance, NULL);
+    state->terminal_input = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0,
+        window, (HMENU)AXYNE_TERMINAL_INPUT, instance, NULL);
+    state->terminal_start = CreateWindowA("BUTTON", "Start Terminal",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_START, instance, NULL);
+    state->terminal_stop = CreateWindowA("BUTTON", "Stop",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_STOP, instance, NULL);
+    state->terminal_send = CreateWindowA("BUTTON", "Send",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_SEND, instance, NULL);
+    EnableWindow(state->terminal_stop, FALSE);
+    if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
+        WM_SETFONT, (WPARAM)state->code_font, TRUE);
+    if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
+        WM_SETFONT, (WPARAM)state->ui_font, TRUE);
+    (void)axyne_terminal_configure_default(state);
+}
+
+static void axyne_runner_values_free(char **values, size_t count)
+{
+    size_t i;
+    if (values == NULL) return;
+    for (i = 0; i < count; ++i) free(values[i]);
+    free(values);
+}
+
+static int axyne_runner_split_lines(char *text, char ***values,
+                                    size_t *count)
+{
+    char **items = NULL;
+    size_t item_count = 0;
+    char *cursor = text;
+    if (values == NULL || count == NULL) return 0;
+    *values = NULL;
+    *count = 0;
+    if (text == NULL) return 1;
+    while (*cursor != '\0') {
+        char *start = cursor;
+        char *end;
+        char *copy;
+        while (*cursor != '\0' && *cursor != '\r' && *cursor != '\n') ++cursor;
+        end = cursor;
+        if (end != start) {
+            copy = (char *)malloc((size_t)(end - start) + 1);
+            if (copy == NULL) {
+                axyne_runner_values_free(items, item_count);
+                return 0;
+            }
+            memcpy(copy, start, (size_t)(end - start));
+            copy[end - start] = '\0';
+            {
+                char **grown = (char **)realloc(items,
+                    (item_count + 1) * sizeof(*grown));
+                if (grown == NULL) {
+                    free(copy);
+                    axyne_runner_values_free(items, item_count);
+                    return 0;
+                }
+                items = grown;
+            }
+            items[item_count++] = copy;
+        }
+        while (*cursor == '\r' || *cursor == '\n') ++cursor;
+    }
+    *values = items;
+    *count = item_count;
+    return 1;
+}
+
+static char *axyne_edit_utf8(HWND edit)
+{
+    int length;
+    wchar_t *wide;
+    char *utf8;
+    if (edit == NULL) return NULL;
+    length = GetWindowTextLengthW(edit);
+    if (length < 0) return NULL;
+    wide = (wchar_t *)calloc((size_t)length + 1, sizeof(*wide));
+    if (wide == NULL) return NULL;
+    GetWindowTextW(edit, wide, length + 1);
+    utf8 = axyne_utf8(wide);
+    free(wide);
+    return utf8;
+}
+
+static void axyne_runner_copy_wide(const char *value, wchar_t *buffer,
+                                   size_t capacity)
+{
+    wchar_t *wide;
+    if (buffer == NULL || capacity == 0) return;
+    buffer[0] = L'\0';
+    if (value == NULL) return;
+    wide = axyne_wide(value);
+    if (wide != NULL && wcslen(wide) < capacity)
+        (void)wcscpy_s(buffer, capacity, wide);
+    free(wide);
+}
+
+static void axyne_runner_copy_lines_wide(char **values, size_t count,
+                                         wchar_t *buffer, size_t capacity)
+{
+    size_t i, used = 0;
+    if (buffer == NULL || capacity == 0) return;
+    buffer[0] = L'\0';
+    for (i = 0; i < count; ++i) {
+        wchar_t *wide = axyne_wide(values[i]);
+        size_t length;
+        if (wide == NULL) continue;
+        length = wcslen(wide);
+        if (used != 0 && used + 1 < capacity) buffer[used++] = L'\r';
+        if (used != 0 && used + 1 < capacity) buffer[used++] = L'\n';
+        if (used + length >= capacity) {
+            free(wide);
+            break;
+        }
+        memcpy(buffer + used, wide, (length + 1) * sizeof(*wide));
+        used += length;
+        free(wide);
+    }
+}
+
+static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
+{
+    enum {
+        AXYNE_RUNNER_EXECUTABLE_EDIT = 1001,
+        AXYNE_RUNNER_ARGUMENTS_EDIT = 1002,
+        AXYNE_RUNNER_WORKING_DIRECTORY_EDIT = 1003,
+        AXYNE_RUNNER_ENVIRONMENT_EDIT = 1004
+    };
+    wchar_t executable[32768] = L"";
+    wchar_t arguments[32768] = L"";
+    wchar_t working_directory[32768] = L"";
+    wchar_t environment[32768] = L"";
+    HWND dialog;
+    HWND executable_edit;
+    HWND arguments_edit;
+    HWND working_directory_edit;
+    HWND environment_edit;
+    int accepted = 0;
+    if (config == NULL) return 0;
+    axyne_runner_copy_wide(config->executable, executable,
+                           sizeof(executable) / sizeof(*executable));
+    axyne_runner_copy_lines_wide(config->arguments, config->argument_count,
+                                 arguments, sizeof(arguments) / sizeof(*arguments));
+    axyne_runner_copy_wide(config->working_directory, working_directory,
+                           sizeof(working_directory) / sizeof(*working_directory));
+    axyne_runner_copy_lines_wide(config->environment, config->environment_count,
+                                 environment, sizeof(environment) / sizeof(*environment));
+    dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+        L"#32770", L"Configure Build/Run Runner",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
+        640, 380, owner, NULL, GetModuleHandleW(NULL), NULL);
+    if (dialog == NULL) return 0;
+    CreateWindowW(L"STATIC", L"Executable", WS_CHILD | WS_VISIBLE,
+        12, 12, 120, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
+    executable_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", executable,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        140, 10, 470, 24, dialog, (HMENU)AXYNE_RUNNER_EXECUTABLE_EDIT,
+        GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"STATIC", L"Arguments (one per line)", WS_CHILD | WS_VISIBLE,
+        12, 45, 180, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
+    arguments_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", arguments,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
+        WS_VSCROLL, 12, 66, 598, 78, dialog, (HMENU)AXYNE_RUNNER_ARGUMENTS_EDIT,
+        GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"STATIC", L"Working directory (optional)", WS_CHILD | WS_VISIBLE,
+        12, 155, 200, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
+    working_directory_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
+        working_directory, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        12, 176, 598, 24, dialog, (HMENU)AXYNE_RUNNER_WORKING_DIRECTORY_EDIT,
+        GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"STATIC", L"Environment overrides (NAME=VALUE per line)",
+        WS_CHILD | WS_VISIBLE, 12, 211, 320, 20, dialog, NULL,
+        GetModuleHandleW(NULL), NULL);
+    environment_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", environment,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
+        WS_VSCROLL, 12, 232, 598, 78, dialog,
+        (HMENU)AXYNE_RUNNER_ENVIRONMENT_EDIT,
+        GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        BS_DEFPUSHBUTTON, 440, 325, 78, 28, dialog, (HMENU)IDOK,
+        GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        528, 325, 82, 28, dialog, (HMENU)IDCANCEL,
+        GetModuleHandleW(NULL), NULL);
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(executable_edit);
+    while (IsWindow(dialog)) {
+        MSG message;
+        int result = GetMessageW(&message, NULL, 0, 0);
+        if (result <= 0) break;
+        if (message.message == WM_COMMAND &&
+            (LOWORD(message.wParam) == IDOK ||
+             LOWORD(message.wParam) == IDCANCEL)) {
+            if (LOWORD(message.wParam) == IDCANCEL) {
+                DestroyWindow(dialog);
+                break;
+            }
+            {
+                char *executable_utf8 = axyne_edit_utf8(executable_edit);
+                char *arguments_utf8 = axyne_edit_utf8(arguments_edit);
+                char *working_directory_utf8 = axyne_edit_utf8(working_directory_edit);
+                char *environment_utf8 = axyne_edit_utf8(environment_edit);
+                char **argument_values = NULL;
+                char **environment_values = NULL;
+                size_t argument_count = 0;
+                size_t environment_count = 0;
+                AxyneRunnerSpec spec = {0};
+                AxyneError error;
+                AxyneStatus status = AXYNE_STATUS_OK;
+                if (executable_utf8 == NULL || executable_utf8[0] == '\0' ||
+                    arguments_utf8 == NULL || working_directory_utf8 == NULL ||
+                    environment_utf8 == NULL ||
+                    !axyne_runner_split_lines(arguments_utf8, &argument_values,
+                                              &argument_count) ||
+                    !axyne_runner_split_lines(environment_utf8, &environment_values,
+                                              &environment_count)) {
+                    status = AXYNE_STATUS_OUT_OF_MEMORY;
+                    (void)snprintf(error.message, sizeof(error.message),
+                                   "Unable to read runner configuration.");
+                } else {
+                    spec.executable = executable_utf8;
+                    spec.arguments = (const char *const *)argument_values;
+                    spec.argument_count = argument_count;
+                    spec.working_directory = working_directory_utf8[0] != '\0'
+                        ? working_directory_utf8 : NULL;
+                    spec.environment = (const char *const *)environment_values;
+                    spec.environment_count = environment_count;
+                    status = axyne_runner_configure(config, &spec, &error);
+                }
+                free(executable_utf8);
+                free(arguments_utf8);
+                free(working_directory_utf8);
+                free(environment_utf8);
+                axyne_runner_values_free(argument_values, argument_count);
+                axyne_runner_values_free(environment_values, environment_count);
+                if (status == AXYNE_STATUS_OK) {
+                    accepted = 1;
+                    DestroyWindow(dialog);
+                    break;
+                }
+                MessageBoxA(dialog, error.message[0] != '\0' ? error.message :
+                            "Invalid runner configuration.",
+                            "Axyne - Runner", MB_OK | MB_ICONERROR);
+            }
+        } else if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    return accepted;
+}
+
+static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
+{
+    AxyneDocument *doc = axyne_active(state);
+    AxyneProcessSpec process_spec;
+    AxyneError error;
+    AxyneStatus status;
+    if (state->terminal_process != NULL) {
+        const char *message = "Build or run is unavailable while a terminal session is active. Stop it first.\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
+    if (!axyne_capture_editor(state)) return;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty) {
+        if (!axyne_save_active(window, state)) {
+            const char *message = "Save the active document before building or running.\n";
+            axyne_terminal_append(state->terminal_output, message, strlen(message),
+                                  AXYNE_PROCESS_STDERR);
+            return;
+        }
+        doc = axyne_active(state);
+        if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty)
+            return;
+    }
+    if (state->action_runner.executable == NULL) {
+        const char *message = "Configure the Build/Run Runner before building or running.\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        return;
+    }
+    status = axyne_runner_process_spec(&state->action_runner,
+            axyne_terminal_output, axyne_terminal_exit, state,
+            &process_spec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_process_start(&process_spec, &state->terminal_process, &error);
+    if (status != AXYNE_STATUS_OK) {
+        state->last_exit_failed = 0;
+        state->has_exit_status = 0;
+        const char *message = error.message[0] != '\0' ? error.message :
+            "Build or run could not be started.\n";
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        InvalidateRect(window, NULL, FALSE);
+    } else {
+        SetWindowTextA(state->terminal_output, run ? "[run]\r\n" : "[build]\r\n");
+        state->active_action = run ? 2 : 1;
+        state->last_exit_failed = 0;
+        EnableWindow(state->terminal_start, FALSE);
+        EnableWindow(state->terminal_stop, TRUE);
+    }
+    (void)window;
+}
+
 static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
                         wchar_t *value, size_t capacity)
 {
+    enum { AXYNE_PROMPT_EDIT_ID = 1001 };
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
         WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
         440, 142, owner, NULL, GetModuleHandleW(NULL), NULL);
@@ -124,7 +628,7 @@ static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
                   dialog, NULL, GetModuleHandleW(NULL), NULL);
     HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 400, 24,
-        dialog, (HMENU)1, GetModuleHandleW(NULL), NULL);
+        dialog, (HMENU)AXYNE_PROMPT_EDIT_ID, GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         250, 75, 76, 26, dialog, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
     CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -133,7 +637,8 @@ static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
     EnableWindow(owner, FALSE); ShowWindow(dialog, SW_SHOW); SetFocus(edit);
     MSG msg; int accepted = 0;
     while (IsWindow(dialog) && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (msg.message == WM_COMMAND && (LOWORD(msg.wParam) == IDOK ||
+        if (msg.message == WM_COMMAND && HIWORD(msg.wParam) == BN_CLICKED &&
+            (LOWORD(msg.wParam) == IDOK ||
                                            LOWORD(msg.wParam) == IDCANCEL)) {
             accepted = LOWORD(msg.wParam) == IDOK;
             if (accepted && value != NULL) GetWindowTextW(edit, value, (int)capacity);
@@ -799,6 +1304,11 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE, L"Open Workspace Folder...");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_BUILD, L"Build\tCtrl+B");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_RUN, L"Run\tF5");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_CONFIGURE_RUNNER,
+                L"Configure Build/Run Runner...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_FIND, L"Find\tCtrl+F");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_REPLACE, L"Replace\tCtrl+H");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
@@ -928,6 +1438,22 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
         SetWindowPos(state->editor, NULL, editor_left, editor_top,
                      editor_width, editor_height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    if (state->terminal_output != NULL) {
+        int terminal_top = bottom_top + 30;
+        int terminal_height = AXYNE_BOTTOM - 62;
+        int input_top = status_top - 28;
+        SetWindowPos(state->terminal_output, NULL, 12, terminal_top,
+                     width - 24, terminal_height,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_input, NULL, 12, input_top,
+                     width - 260, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_start, NULL, width - 240, input_top,
+                     96, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_stop, NULL, width - 138, input_top,
+                     56, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_send, NULL, width - 76, input_top,
+                     64, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     InvalidateRect(window, NULL, FALSE);
 }
 
@@ -996,8 +1522,22 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     axyne_paint_explorer(dc, state, editor_top, bottom_top);
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, bottom_top + 9,
                L"출력    문제 1    터미널");
-    axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, status_top + 6,
-               L"✓ 빌드 준비됨");
+    {
+        wchar_t status[96];
+        if (state->last_exit_failed) {
+            (void)swprintf_s(status, 96, L"✗ 실행 실패 (exit %d)",
+                              state->last_exit_code);
+        } else if (state->active_action != 0) {
+            (void)swprintf_s(status, 96, L"● 실행 중");
+        } else if (state->has_exit_status) {
+            (void)swprintf_s(status, 96, L"✓ 실행 완료 (exit 0)");
+        } else {
+            (void)swprintf_s(status, 96, L"✓ 빌드 준비됨");
+        }
+        axyne_text(dc, state->ui_font,
+                   state->last_exit_failed ? RGB(220, 100, 100) : AXYNE_MUTED,
+                   12, status_top + 6, status);
+    }
     axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 250, status_top + 6,
                L"줄 1, 열 1     UTF-8    C17");
 
@@ -1030,8 +1570,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         axyne_open_scintilla(state, window, instance);
+        axyne_create_terminal_controls(window, state, instance);
         axyne_show_document(state, state->documents.active_index);
         axyne_update_title(window, state);
+        axyne_layout(window, state);
         return 0;
     }
     case WM_SIZE:
@@ -1052,7 +1594,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (w_param == 'F') { axyne_find(window, state, 0, 0); return 0; }
             if (w_param == 'H') { axyne_find(window, state, 1, 0); return 0; }
             if (w_param == 'P') { axyne_search_folder(window, state, 1); return 0; }
+            if (w_param == 'B') { axyne_start_action(window, state, 0); return 0; }
         }
+        if (w_param == VK_F5) { axyne_start_action(window, state, 1); return 0; }
         break;
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(l_param);
@@ -1125,7 +1669,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_COMMAND: {
         UINT command = LOWORD(w_param);
-        if (command == AXYNE_CMD_NEW) axyne_new_document(window, state);
+        if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
+        else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
+        else if (command == AXYNE_CMD_CONFIGURE_RUNNER)
+            (void)axyne_configure_runner(window, &state->action_runner);
+        else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
+        else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
+        else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
+        else if (command == AXYNE_CMD_NEW) axyne_new_document(window, state);
         else if (command == AXYNE_CMD_OPEN) axyne_open_document(window, state, NULL);
         else if (command == AXYNE_CMD_SAVE) (void)axyne_save_active(window, state);
         else if (command == AXYNE_CMD_SAVE_AS) {
@@ -1167,6 +1718,40 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     }
+    case AXYNE_WM_TERMINAL_OUTPUT: {
+        AxyneTerminalMessage *terminal_message =
+            (AxyneTerminalMessage *)l_param;
+        if (terminal_message != NULL) {
+            axyne_terminal_append(state->terminal_output,
+                                  terminal_message->bytes,
+                                  terminal_message->length,
+                                  terminal_message->stream);
+            free(terminal_message);
+        }
+        return 0;
+    }
+    case AXYNE_WM_TERMINAL_EXIT:
+        state->last_exit_code = (int)w_param;
+        state->last_exit_failed = state->last_exit_code != 0;
+        state->has_exit_status = 1;
+        {
+            char message[96];
+            (void)snprintf(message, sizeof(message),
+                state->last_exit_failed ? "[failed: exit %d]\r\n" :
+                                           "[exit %d]\r\n",
+                state->last_exit_code);
+            axyne_terminal_append(state->terminal_output, message,
+                                  strlen(message), AXYNE_PROCESS_STDOUT);
+        }
+        if (state->terminal_process != NULL) {
+            axyne_process_release(state->terminal_process);
+            state->terminal_process = NULL;
+        }
+        state->active_action = 0;
+        EnableWindow(state->terminal_start, TRUE);
+        EnableWindow(state->terminal_stop, FALSE);
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
     case WM_NOTIFY: {
         NMHDR *header = (NMHDR *)l_param;
         if (header != NULL && header->code == SCN_MODIFIED &&
@@ -1205,6 +1790,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 0;
     case WM_NCDESTROY:
         if (state != NULL) {
+            if (state->terminal_process != NULL) {
+                axyne_process_release(state->terminal_process);
+                state->terminal_process = NULL;
+            }
+            axyne_runner_destroy(&state->terminal_runner);
+            axyne_runner_destroy(&state->action_runner);
             if (state->watcher != NULL) {
                 axyne_watcher_stop(state->watcher);
                 axyne_watcher_release(state->watcher);
