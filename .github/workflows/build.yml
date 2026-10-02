@@ -77,14 +77,14 @@ jobs:
             -P packaging/validation/validate-install.cmake
           cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
 
-          $debugOutput = & cpack --config build/CPackConfig.cmake -C Debug -B $packageDirectory 2>&1
-          $debugExitCode = $LASTEXITCODE
-          if ($debugExitCode -eq 0) {
-            throw 'Debug packaging unexpectedly succeeded.'
-          }
+          $debugOutput = & cmake `
+            '-DAXYNE_CONFIGURATION=Debug' `
+            '-DAXYNE_PLATFORM=Windows' `
+            '-DAXYNE_INSTALL_ROOT=unused' `
+            '-P' 'packaging/validation/validate-install.cmake' 2>&1
           $debugMessage = $debugOutput -join "`n"
-          if ($debugMessage -notmatch 'Release-only') {
-            throw "Debug packaging failed for an unexpected reason:`n$debugMessage"
+          if ($LASTEXITCODE -eq 0 -or $debugMessage -notmatch 'Release-only') {
+            throw "Debug packaging validation failed unexpectedly:`n$debugMessage"
           }
 
           $package = Get-ChildItem -Path $packageDirectory -File |
@@ -111,7 +111,7 @@ jobs:
             -DAXYNE_APP_BUNDLE=Axyne.app \
             -DAXYNE_APP_EXECUTABLE=Axyne \
             -P packaging/validation/validate-install.cmake
-          cpack --config build/CPackConfig.cmake -C Release -B "$package_directory"
+          cpack --config build/CPackConfig.cmake -G productbuild -C Release -B "$package_directory"
 
           if cpack --config build/CPackConfig.cmake -C Debug -B "$package_directory" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
             echo 'Debug packaging unexpectedly succeeded.' >&2
