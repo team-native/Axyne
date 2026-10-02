@@ -6,6 +6,7 @@
 #include "utf8.h"
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,38 +98,70 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
                        watcher->utf8_directory, NULL);
             continue;
         }
-        item = (FILE_NOTIFY_INFORMATION *)buffer;
-        for (;;) {
-            int chars = (int)(item->FileNameLength / sizeof(wchar_t));
-            wchar_t *relative_wide = (wchar_t *)malloc(((size_t)chars + 1) * sizeof(wchar_t));
-            char *relative = NULL, *path = NULL;
-            if (relative_wide != NULL) {
-                memcpy(relative_wide, item->FileName, (size_t)chars * sizeof(wchar_t));
-                relative_wide[chars] = L'\0';
-                relative = axyne_watch_utf8(relative_wide);
-                free(relative_wide);
-            }
-            if (relative != NULL) path = axyne_watch_join(watcher->utf8_directory, relative);
-            free(relative);
-            if (path != NULL) {
-                switch (item->Action) {
-                case FILE_ACTION_ADDED:
-                    axyne_emit(watcher, AXYNE_WATCH_CREATED, path, NULL); break;
-                case FILE_ACTION_REMOVED:
-                    axyne_emit(watcher, AXYNE_WATCH_DELETED, path, NULL); break;
-                case FILE_ACTION_MODIFIED:
-                    axyne_emit(watcher, AXYNE_WATCH_CHANGED, path, NULL); break;
-                case FILE_ACTION_RENAMED_OLD_NAME:
-                    free(pending_old); pending_old = _strdup(path); break;
-                case FILE_ACTION_RENAMED_NEW_NAME:
-                    axyne_emit(watcher, AXYNE_WATCH_RENAMED, path, pending_old);
-                    free(pending_old); pending_old = NULL; break;
-                default: break;
+        {
+            const size_t record_header = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+            size_t offset = 0;
+            for (;;) {
+                size_t record_size;
+                int chars;
+                wchar_t *relative_wide;
+                char *relative = NULL, *path = NULL;
+                if ((size_t)bytes - offset < record_header) {
+                    free(pending_old); pending_old = NULL;
+                    axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                               watcher->utf8_directory, NULL);
+                    break;
                 }
-                free(path);
+                item = (FILE_NOTIFY_INFORMATION *)(buffer + offset);
+                if (item->FileNameLength % sizeof(wchar_t) != 0 ||
+                    (size_t)item->FileNameLength >
+                        (size_t)bytes - offset - record_header) {
+                    free(pending_old); pending_old = NULL;
+                    axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                               watcher->utf8_directory, NULL);
+                    break;
+                }
+                record_size = record_header + (size_t)item->FileNameLength;
+                if (item->NextEntryOffset != 0 &&
+                    ((size_t)item->NextEntryOffset < record_size ||
+                     (size_t)item->NextEntryOffset > (size_t)bytes - offset)) {
+                    free(pending_old); pending_old = NULL;
+                    axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                               watcher->utf8_directory, NULL);
+                    break;
+                }
+                chars = (int)(item->FileNameLength / sizeof(wchar_t));
+                relative_wide = (wchar_t *)malloc(((size_t)chars + 1) * sizeof(wchar_t));
+                if (relative_wide != NULL) {
+                    memcpy(relative_wide, item->FileName,
+                           (size_t)chars * sizeof(wchar_t));
+                    relative_wide[chars] = L'\0';
+                    relative = axyne_watch_utf8(relative_wide);
+                    free(relative_wide);
+                }
+                if (relative != NULL)
+                    path = axyne_watch_join(watcher->utf8_directory, relative);
+                free(relative);
+                if (path != NULL) {
+                    switch (item->Action) {
+                    case FILE_ACTION_ADDED:
+                        axyne_emit(watcher, AXYNE_WATCH_CREATED, path, NULL); break;
+                    case FILE_ACTION_REMOVED:
+                        axyne_emit(watcher, AXYNE_WATCH_DELETED, path, NULL); break;
+                    case FILE_ACTION_MODIFIED:
+                        axyne_emit(watcher, AXYNE_WATCH_CHANGED, path, NULL); break;
+                    case FILE_ACTION_RENAMED_OLD_NAME:
+                        free(pending_old); pending_old = _strdup(path); break;
+                    case FILE_ACTION_RENAMED_NEW_NAME:
+                        axyne_emit(watcher, AXYNE_WATCH_RENAMED, path, pending_old);
+                        free(pending_old); pending_old = NULL; break;
+                    default: break;
+                    }
+                    free(path);
+                }
+                if (item->NextEntryOffset == 0) break;
+                offset += item->NextEntryOffset;
             }
-            if (item->NextEntryOffset == 0) break;
-            item = (FILE_NOTIFY_INFORMATION *)((unsigned char *)item + item->NextEntryOffset);
         }
     }
     free(pending_old);

@@ -3,6 +3,7 @@ add_executable(axyne_tests
     test_documents_search.c
     test_settings_preferences.c
     test_runner_git_lsp.c
+    test_process_stability.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -34,9 +35,15 @@ add_test(
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/runner-git-lsp"
             "${CMAKE_SOURCE_DIR}"
 )
+add_test(
+    NAME axyne-process-stability
+    COMMAND $<TARGET_FILE:axyne_tests> process-stability
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/process-stability"
+)
 set_tests_properties(
     axyne-documents-search
     axyne-settings-preferences
     axyne-runner-git-lsp
+    axyne-process-stability
     PROPERTIES TIMEOUT 60
 )
