@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum { LINE_MAX_BYTES = 16384 };
+
 /* ---- helpers ------------------------------------------------------------ */
 
 static unsigned char fold(unsigned char c)
@@ -12,6 +14,8 @@ static unsigned char fold(unsigned char c)
 }
 
 static int is_separator(char c) { return c == '/' || c == '\\'; }
+
+static int is_digit(char c) { return c >= '0' && c <= '9'; }
 
 static int is_alpha(char c)
 {
@@ -703,4 +707,269 @@ done:
     if (status != AXYNE_STATUS_OK)
         return fail(error, status, "Unable to build problem rows");
     return succeed(error);
+}
+
+/* ---- build output parser ---------------------------------------------------- */
+
+static size_t strip_ansi(const char *line, size_t length, char *out)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < length;) {
+        unsigned char c = (unsigned char)line[i];
+        if (c == 0x1B && i + 1 < length && line[i + 1] == '[') {
+            i += 2;
+            while (i < length && (unsigned char)line[i] >= 0x30 &&
+                   (unsigned char)line[i] <= 0x3F) ++i;
+            while (i < length && (unsigned char)line[i] >= 0x20 &&
+                   (unsigned char)line[i] <= 0x2F) ++i;
+            if (i < length && (unsigned char)line[i] >= 0x40 &&
+                (unsigned char)line[i] <= 0x7E) ++i;
+            continue;
+        }
+        if (c == 0x1B) { ++i; continue; }
+        out[n++] = (char)c;
+        ++i;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+static size_t parse_digits(const char *s, size_t i, size_t length, size_t *value)
+{
+    size_t number = 0, start = i;
+    while (i < length && is_digit(s[i])) {
+        number = number * 10 + (size_t)(s[i] - '0');
+        if (number > 2147483647u) number = 2147483647u;
+        ++i;
+    }
+    *value = number;
+    return i - start;
+}
+
+static int word_at(const char *s, size_t i, size_t length, const char *word)
+{
+    size_t n = strlen(word);
+    if (i + n > length) return 0;
+    for (size_t k = 0; k < n; ++k)
+        if (fold((unsigned char)s[i + k]) != (unsigned char)word[k]) return 0;
+    return 1;
+}
+
+/* Reads a severity word at `i`; returns its length (0 when none) and the
+ * severity. The word must not be followed by a letter or digit. */
+static size_t read_severity(const char *s, size_t i, size_t length, int *severity)
+{
+    static const struct { const char *word; int severity; } words[] = {
+        { "fatal error", AXYNE_PROBLEM_ERROR },
+        { "error", AXYNE_PROBLEM_ERROR },
+        { "warning", AXYNE_PROBLEM_WARNING },
+        { "note", AXYNE_PROBLEM_INFORMATION },
+        { "remark", AXYNE_PROBLEM_INFORMATION }
+    };
+    for (size_t w = 0; w < sizeof(words) / sizeof(words[0]); ++w) {
+        size_t n = strlen(words[w].word);
+        if (word_at(s, i, length, words[w].word) &&
+            !(i + n < length && (is_alpha(s[i + n]) || is_digit(s[i + n])))) {
+            *severity = words[w].severity;
+            return n;
+        }
+    }
+    return 0;
+}
+
+typedef struct Parsed {
+    size_t path_length;
+    size_t line, column;
+    int severity;
+    size_t code_start, code_length;
+    size_t message_start, message_length;
+    const char *source;
+} Parsed;
+
+static size_t skip_spaces(const char *s, size_t i, size_t length)
+{
+    while (i < length && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return i;
+}
+
+static int parse_gnu(const char *s, size_t length, Parsed *parsed)
+{
+    if (length > 0 && s[0] == ':') return 0; /* no path */
+    for (size_t p = 1; p < length; ++p) {
+        size_t q, line = 0, column = 0, digits, word;
+        int severity;
+        if (s[p] != ':' || p + 1 >= length || !is_digit(s[p + 1])) continue;
+        q = p + 1;
+        digits = parse_digits(s, q, length, &line);
+        q += digits;
+        if (q + 1 < length && s[q] == ':' && is_digit(s[q + 1])) {
+            ++q;
+            q += parse_digits(s, q, length, &column);
+        }
+        if (q >= length || s[q] != ':') continue;
+        q = skip_spaces(s, q + 1, length);
+        word = read_severity(s, q, length, &severity);
+        if (word == 0) continue;
+        q += word;
+        if (q >= length || s[q] != ':') continue;
+        q = skip_spaces(s, q + 1, length);
+        parsed->path_length = p;
+        parsed->line = line;
+        parsed->column = column;
+        parsed->severity = severity;
+        parsed->message_start = q;
+        parsed->message_length = length - q;
+        parsed->code_start = 0;
+        parsed->code_length = 0;
+        parsed->source = "gnu";
+        /* trailing [-Wflag] */
+        if (parsed->message_length > 4 && s[length - 1] == ']') {
+            size_t open = length - 1;
+            while (open > q && s[open] != '[') --open;
+            if (s[open] == '[' && open + 3 < length - 1 && s[open + 1] == '-' &&
+                s[open + 2] == 'W') {
+                int spaced = 0;
+                for (size_t k = open + 1; k < length - 1; ++k)
+                    if (s[k] == ' ' || s[k] == '\t') spaced = 1;
+                if (!spaced) {
+                    parsed->code_start = open + 1;
+                    parsed->code_length = length - 1 - (open + 1);
+                    parsed->message_length = open - q;
+                    while (parsed->message_length > 0 &&
+                           (s[q + parsed->message_length - 1] == ' ' ||
+                            s[q + parsed->message_length - 1] == '\t'))
+                        --parsed->message_length;
+                }
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int parse_msvc(const char *s, size_t length, Parsed *parsed)
+{
+    for (size_t p = 1; p < length; ++p) {
+        size_t q, line = 0, column = 0, word, code_start = 0, code_length = 0;
+        int severity;
+        if (s[p] != '(' || p + 1 >= length || !is_digit(s[p + 1])) continue;
+        q = p + 1;
+        q += parse_digits(s, q, length, &line);
+        if (q < length && s[q] == ',') {
+            size_t digits;
+            ++q;
+            digits = parse_digits(s, q, length, &column);
+            if (digits == 0) continue;
+            q += digits;
+        }
+        while (q < length && (is_digit(s[q]) || s[q] == ',' || s[q] == '-')) ++q;
+        if (q >= length || s[q] != ')') continue;
+        q = skip_spaces(s, q + 1, length);
+        if (q >= length || s[q] != ':') continue;
+        q = skip_spaces(s, q + 1, length);
+        word = read_severity(s, q, length, &severity);
+        if (word == 0) continue;
+        q = skip_spaces(s, q + word, length);
+        if (q < length && s[q] != ':') {
+            size_t letters = 0, numbers = 0, start = q;
+            while (q < length && is_alpha(s[q])) { ++q; ++letters; }
+            while (q < length && is_digit(s[q])) { ++q; ++numbers; }
+            if (letters == 0 || numbers == 0) continue;
+            code_start = start;
+            code_length = q - start;
+            q = skip_spaces(s, q, length);
+        }
+        if (q >= length || s[q] != ':') continue;
+        q = skip_spaces(s, q + 1, length);
+        parsed->path_length = p;
+        while (parsed->path_length > 0 &&
+               (s[parsed->path_length - 1] == ' ' || s[parsed->path_length - 1] == '\t'))
+            --parsed->path_length;
+        parsed->line = line;
+        parsed->column = column;
+        parsed->severity = severity;
+        parsed->code_start = code_start;
+        parsed->code_length = code_length;
+        parsed->message_start = q;
+        parsed->message_length = length - q;
+        parsed->source = "msvc";
+        /* MSBuild appends " [C:\proj\x.vcxproj]" */
+        if (parsed->message_length > 0 && s[length - 1] == ']') {
+            size_t open = length - 1;
+            while (open > q && s[open] != '[') --open;
+            if (s[open] == '[' && open > q && s[open - 1] == ' ' &&
+                length - 1 - open > 7) {
+                size_t end = length - 1;
+                static const char *const suffixes[] = { ".vcxproj", ".proj", ".sln" };
+                for (size_t k = 0; k < sizeof(suffixes) / sizeof(suffixes[0]); ++k) {
+                    size_t n = strlen(suffixes[k]);
+                    if (end - (open + 1) >= n &&
+                        word_at(s, end - n, length, suffixes[k])) {
+                        parsed->message_length = open - q;
+                        while (parsed->message_length > 0 &&
+                               s[q + parsed->message_length - 1] == ' ')
+                            --parsed->message_length;
+                        break;
+                    }
+                }
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
+int axyne_problems_parse_build_line(const char *line, size_t length,
+                                    AxyneProblem *out)
+{
+    char *buffer;
+    size_t n, start = 0;
+    Parsed parsed;
+    int found;
+    const char *text;
+
+    if (out == NULL) return 0;
+    memset(out, 0, sizeof(*out));
+    if (line == NULL || length == 0) return 0;
+    if (length > LINE_MAX_BYTES) {
+        length = LINE_MAX_BYTES;
+        while (length > 0 && ((unsigned char)line[length] & 0xC0u) == 0x80u) --length;
+    }
+    buffer = (char *)malloc(length + 1);
+    if (buffer == NULL) return 0;
+    n = strip_ansi(line, length, buffer);
+    while (n > 0 && (buffer[n - 1] == '\r' || buffer[n - 1] == '\n' ||
+                     buffer[n - 1] == ' ' || buffer[n - 1] == '\t'))
+        --n;
+    buffer[n] = '\0';
+    /* MSBuild node prefix "12>" */
+    {
+        size_t i = 0, digits_start;
+        while (i < n && buffer[i] == ' ') ++i;
+        digits_start = i;
+        while (i < n && is_digit(buffer[i])) ++i;
+        if (i > digits_start && i < n && buffer[i] == '>') start = i + 1;
+    }
+    while (start < n && (buffer[start] == ' ' || buffer[start] == '\t')) ++start;
+    text = buffer + start;
+    n -= start;
+    memset(&parsed, 0, sizeof(parsed));
+    found = parse_gnu(text, n, &parsed) || parse_msvc(text, n, &parsed);
+    if (found) {
+        out->severity = parsed.severity;
+        out->origin = AXYNE_PROBLEM_ORIGIN_BUILD;
+        out->line = parsed.line == 0 ? 1 : parsed.line;
+        out->column = parsed.column == 0 ? 1 : parsed.column;
+        out->path = dup_n(text, parsed.path_length);
+        out->code = dup_n(text + parsed.code_start, parsed.code_length);
+        out->source = dup_text(parsed.source);
+        out->message = dup_n(text + parsed.message_start, parsed.message_length);
+        if (out->path == NULL || out->code == NULL || out->source == NULL ||
+            out->message == NULL) {
+            axyne_problem_destroy(out);
+            found = 0;
+        }
+    }
+    free(buffer);
+    return found;
 }
