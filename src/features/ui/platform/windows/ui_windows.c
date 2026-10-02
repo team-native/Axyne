@@ -675,6 +675,7 @@ static void axyne_debugger_toggle_current_breakpoint(AxyneWindowState *state)
                                          line, &error) != AXYNE_STATUS_OK)
         axyne_terminal_append(state->terminal_output, error.message,
                               strlen(error.message), AXYNE_PROCESS_STDERR);
+}
 static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
                                size_t length)
 {
