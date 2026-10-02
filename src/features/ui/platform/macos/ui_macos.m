@@ -3405,6 +3405,17 @@ else [_terminalInput setStringValue:@""];
     [self startAction:YES];
 }
 
+/* Tab badges hug their text (Figma: badge, 8px gap, name) instead of sitting
+ * in a fixed slot; untitled files reserve the width of the outline icon. */
+static CGFloat axyne_macos_tab_badge_width(const char *title)
+{
+    AxyneFileBadge badge = axyne_ui_file_badge(title);
+    if (badge.label[0] == '\0') return 8;
+    NSFont *font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
+    NSString *label = [NSString stringWithUTF8String:badge.label];
+    return ceil([label sizeWithAttributes:@{NSFontAttributeName:font}].width);
+}
+
 - (NSRect)tabFrameAtIndex:(size_t)index
 {
     CGFloat x = [self sidebarWidth] - _tabScroll;
@@ -3413,7 +3424,9 @@ else [_terminalInput setStringValue:@""];
         AxyneDocument *doc = &_documents.documents[i];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         CGFloat nameWidth = [title sizeWithAttributes:@{NSFontAttributeName:font}].width;
-        CGFloat width = MIN(240, MAX(100, nameWidth + 24 + 54));
+        /* 14 padding, badge, 8 gap, name, 8 gap, close glyph, 14 padding. */
+        CGFloat width = MIN(240, 14 + axyne_macos_tab_badge_width(doc->title) + 8 +
+            ceil(nameWidth) + 8 + 8 + 14);
         if (i == index) return NSMakeRect(x, AXYNE_TOOLBAR, width, AXYNE_TABS);
         x += width;
     }
@@ -3607,18 +3620,23 @@ else [_terminalInput setStringValue:@""];
             NSRectFill(NSMakeRect(NSMinX(frame), NSMinY(frame), NSWidth(frame), 2));
         }
         CGFloat badgeX = NSMinX(frame) + 14;
+        CGFloat badgeWidth = axyne_macos_tab_badge_width(doc->title);
+        CGFloat nameX = badgeX + badgeWidth + 8;
         [self drawFileBadge:(doc->path != NULL && doc->path[0] != '\0') ? doc->path : doc->title
-                     inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, 20, 16) tab:YES];
+            inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, badgeWidth, 16) tab:YES];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
-        NSRectClip(NSMakeRect(badgeX + 26, AXYNE_TOOLBAR + 4, NSWidth(frame) - 64, 28));
+        NSRectClip(NSMakeRect(nameX, AXYNE_TOOLBAR + 4, MAX(0, NSMaxX(frame) - 30 - nameX), 28));
         [self drawLabel:title != nil ? title : @"Untitled"
-            at:NSMakePoint(badgeX + 26, AXYNE_TOOLBAR + 10)
+            at:NSMakePoint(nameX, AXYNE_TOOLBAR + 10)
             size:12 color:active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted family:@"SF Pro Text"];
         [NSGraphicsContext restoreGraphicsState];
         [self drawLabel:doc->is_dirty ? @"●" : @"×"
-            at:NSMakePoint(NSMaxX(frame) - 20, AXYNE_TOOLBAR + 10)
-            size:doc->is_dirty ? 8 : 13 color:muted family:@"SF Pro Text"];
+            at:NSMakePoint(NSMaxX(frame) - (doc->is_dirty ? 19 : 22),
+                           AXYNE_TOOLBAR + (doc->is_dirty ? 13 : 10))
+            size:doc->is_dirty ? 7 : 13
+            color:doc->is_dirty && !light ? axyne_preference_color(0x4f535b) : muted
+            family:@"SF Pro Text"];
     }
     [NSGraphicsContext restoreGraphicsState];
     if (!_explorerHidden) {
