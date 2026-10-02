@@ -289,8 +289,24 @@ if(WIN32 OR APPLE)
     set(CPACK_PACKAGE_INSTALL_DIRECTORY "${AXYNE_DISPLAY_NAME}")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "A native offline desktop IDE for Windows and macOS")
-    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-    set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md")
+    # ProductBuild accepts only a small set of resource extensions. Keep the
+    # installed files unchanged while giving CPack portable .txt resources.
+    set(AXYNE_CPACK_LICENSE_FILE
+        "${CMAKE_CURRENT_BINARY_DIR}/Axyne-License.txt")
+    set(AXYNE_CPACK_README_FILE
+        "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Release-Notes.txt")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${AXYNE_CPACK_LICENSE_FILE}"
+        COPYONLY
+    )
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
+        "${AXYNE_CPACK_README_FILE}"
+        COPYONLY
+    )
+    set(CPACK_RESOURCE_FILE_LICENSE "${AXYNE_CPACK_LICENSE_FILE}")
+    set(CPACK_RESOURCE_FILE_README "${AXYNE_CPACK_README_FILE}")
     set(AXYNE_PACKAGING_CONFIGURED_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
     if(CMAKE_CONFIGURATION_TYPES)
         set(AXYNE_PACKAGING_MULTI_CONFIG TRUE)
