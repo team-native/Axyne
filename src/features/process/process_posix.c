@@ -169,7 +169,7 @@ static void *process_worker(void *opaque)
     AxyneProcess *process = (AxyneProcess *)opaque;
     ProcessState *state = (ProcessState *)process->implementation;
     int descriptors[2] = { state->stdout_read, state->stderr_read };
-    int eof[2] = { 0, 0 }, child_done = 0;
+    int eof[2] = { 0, 0 }, child_done = 0, pipe_error = 0;
     char buffer[4096];
     while (!child_done || !eof[0] || !eof[1]) {
         size_t stream;
@@ -187,8 +187,14 @@ static void *process_worker(void *opaque)
                     } else if (errno == EINTR) {
                         continue;
                     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        pipe_error = 1;
                         eof[stream] = 1;
                         close(descriptors[stream]);
+                        (void)pthread_mutex_lock(&state->child_lock);
+                        if (!state->group_signaling_unsafe &&
+                            kill(-state->child, SIGKILL) != 0 && errno != ESRCH)
+                            state->group_signaling_unsafe = 1;
+                        (void)pthread_mutex_unlock(&state->child_lock);
                     }
                     break;
                 }
@@ -227,7 +233,7 @@ static void *process_worker(void *opaque)
             (void)nanosleep(&pause, NULL);
         }
     }
-    axyne_process_dispatch_exit(process, state->child_status);
+    axyne_process_dispatch_exit(process, pipe_error ? -1 : state->child_status);
     (void)pthread_mutex_lock(&state->child_lock);
     state->worker_finished = 1;
     (void)pthread_mutex_unlock(&state->child_lock);
