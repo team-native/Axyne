@@ -121,8 +121,18 @@ jobs:
             -DAXYNE_APP_BUNDLE=Axyne.app \
             -DAXYNE_APP_EXECUTABLE=Axyne \
             -P packaging/validation/validate-install.cmake
-          mkdir -p "$package_directory/productbuild" "$package_directory/dragndrop"
-          cpack --config build/CPackConfig.cmake -G productbuild -C Release -B "$package_directory/productbuild"
+          mkdir -p "$package_directory/dragndrop"
+          pkgbuild \
+            --root "$staging_directory" \
+            --identifier com.axyne.ide \
+            --version 0.1.0 \
+            --install-location /Applications \
+            "$package_directory/Axyne-0.1.0-macOS.pkg"
+          package_payload="$(pkgutil --payload-files "$package_directory/Axyne-0.1.0-macOS.pkg")"
+          if ! grep -q 'Axyne.app/' <<< "$package_payload"; then
+            echo 'The macOS pkg has no Axyne.app payload.' >&2
+            exit 1
+          fi
           cpack --config build/CPackConfig.cmake -G DragNDrop -C Release \
             -D CPACK_PACKAGING_INSTALL_PREFIX=/ \
             -B "$package_directory/dragndrop"
@@ -137,14 +147,15 @@ jobs:
             exit 1
           fi
 
-          package="$(find "$package_directory" -type f \( -name '*.pkg' -o -name '*.dmg' \) -print -quit)"
-          if [[ -z "$package" ]]; then
-            echo 'CPack did not produce a macOS installer/package.' >&2
+          cp "$package_directory/Axyne-0.1.0-macOS.pkg" "$artifact_directory/"
+          find "$package_directory/dragndrop" \
+            -maxdepth 1 -type f -name '*.dmg' \
+            -exec cp {} "$artifact_directory/" \;
+          if ! find "$artifact_directory" -maxdepth 1 -type f \
+            \( -name '*.pkg' -o -name '*.dmg' \) | grep -q .; then
+            echo 'The macOS packaging step produced no artifacts.' >&2
             exit 1
           fi
-          find "$package_directory/productbuild" "$package_directory/dragndrop" \
-            -maxdepth 1 -type f \( -name '*.pkg' -o -name '*.dmg' \) \
-            -exec cp {} "$artifact_directory/" \;
           echo "path=$artifact_directory" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows build artifact

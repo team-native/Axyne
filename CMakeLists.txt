@@ -213,10 +213,16 @@ elseif(APPLE)
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.axyne.ide"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_ICON_FILE "Axyne.png"
         MACOSX_BUNDLE_COPYRIGHT "Copyright (C) ${AXYNE_AUTHOR}"
     )
     get_target_property(AXYNE_MACOS_BUNDLE_OUTPUT_NAME axyne OUTPUT_NAME)
     set(AXYNE_MACOS_BUNDLE_NAME "${AXYNE_MACOS_BUNDLE_OUTPUT_NAME}.app")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/install-scintilla-framework.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/install-scintilla-framework.cmake"
+        @ONLY
+    )
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Uninstall Axyne.command.in"
         "${CMAKE_CURRENT_BINARY_DIR}/Uninstall ${AXYNE_DISPLAY_NAME}.command"
@@ -227,14 +233,19 @@ elseif(APPLE)
     add_custom_command(TARGET axyne POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${AXYNE_SCINTILLA_FRAMEWORK}"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Scintilla.framework"
+        COMMAND /bin/cp -R
+            "${AXYNE_SCINTILLA_FRAMEWORK}"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:axyne_lexilla>"
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Lexilla.dylib"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/default.png"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/Axyne.png"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${axyne_scintilla_SOURCE_DIR}/License.txt"
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/Scintilla-LICENSE.txt"
@@ -307,6 +318,7 @@ if(WIN32 OR APPLE)
             "${CMAKE_CURRENT_BINARY_DIR}/version.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            "${CMAKE_CURRENT_SOURCE_DIR}/default.png"
             DESTINATION "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Resources"
             CONFIGURATIONS Release
         )
@@ -326,14 +338,11 @@ if(WIN32 OR APPLE)
             DESTINATION "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Resources"
             CONFIGURATIONS Release
         )
-        # CMake's bundle install traversal preserves the framework layout but
-        # can omit the versioned binary. Install that Release runtime
-        # explicitly into the already-installed framework.
-        install(FILES
-            "${AXYNE_SCINTILLA_FRAMEWORK}/Versions/A/Scintilla"
-            DESTINATION
-                "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks/Scintilla.framework/Versions/A"
-            CONFIGURATIONS Release
+        # CMake's generic bundle traversal can flatten framework symlinks.
+        # Re-copy the complete framework with macOS cp -R at install time so
+        # Versions/Current and the root framework links remain intact.
+        install(SCRIPT
+            "${CMAKE_CURRENT_BINARY_DIR}/install-scintilla-framework.cmake"
         )
     endif()
 endif()
