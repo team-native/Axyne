@@ -47,22 +47,70 @@ typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
 @interface AxyneChromeButton : NSButton
 @property(nonatomic, retain) NSColor *fillColor;
 @property(nonatomic, retain) NSColor *labelColor;
+@property(nonatomic, retain) NSColor *strokeColor;
+@property(nonatomic, retain) NSAttributedString *richTitle;
+@property(nonatomic, retain) NSAttributedString *trailingTitle;
+@property(nonatomic) CGFloat cornerRadius;
+@property(nonatomic) CGFloat contentInset;
+@property(nonatomic) BOOL leadingAligned;
 @end
 
 @implementation AxyneChromeButton
 @synthesize fillColor = _fillColor, labelColor = _labelColor;
+@synthesize strokeColor = _strokeColor, richTitle = _richTitle;
+@synthesize trailingTitle = _trailingTitle, cornerRadius = _cornerRadius;
+@synthesize contentInset = _contentInset, leadingAligned = _leadingAligned;
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self != nil) { _cornerRadius = 3; _contentInset = 4; }
+    return self;
+}
+- (void)drawRichTitleInBounds:(NSRect)bounds
+{
+    NSSize size = [_richTitle size];
+    NSSize trailing = _trailingTitle != nil ? [_trailingTitle size] : NSZeroSize;
+    CGFloat x = _leadingAligned ? _contentInset :
+        MAX(_contentInset, (NSWidth(bounds) - size.width) / 2);
+    CGFloat available = NSWidth(bounds) - x - _contentInset -
+        (trailing.width > 0 ? trailing.width + 8 : 0);
+    [NSGraphicsContext saveGraphicsState];
+    if (![self isEnabled])
+        CGContextSetAlpha([[NSGraphicsContext currentContext] CGContext], 0.45);
+    NSRectClip(bounds);
+    if (available > 0)
+        [_richTitle drawInRect:NSMakeRect(x, (NSHeight(bounds) - size.height) / 2,
+            available, size.height)];
+    if (trailing.width > 0)
+        [_trailingTitle drawAtPoint:NSMakePoint(
+            NSWidth(bounds) - _contentInset - trailing.width,
+            (NSHeight(bounds) - trailing.height) / 2)];
+    [NSGraphicsContext restoreGraphicsState];
+}
 - (void)drawRect:(NSRect)dirtyRect
 {
     (void)dirtyRect;
     NSRect bounds = [self bounds];
     if (_fillColor != nil) {
         [_fillColor setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:3 yRadius:3] fill];
+        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:_cornerRadius
+            yRadius:_cornerRadius] fill];
+    }
+    if (_strokeColor != nil) {
+        /* Stroke inside the button so its own fill cannot cover the border. */
+        NSBezierPath *outline = [NSBezierPath bezierPathWithRoundedRect:
+            NSInsetRect(bounds, 0.5, 0.5) xRadius:MAX(0, _cornerRadius - 0.5)
+            yRadius:MAX(0, _cornerRadius - 0.5)];
+        [outline setLineWidth:1];
+        [_strokeColor setStroke];
+        [outline stroke];
     }
     if ([[self cell] isHighlighted]) {
         [[NSColor colorWithWhite:1 alpha:0.08] setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:3 yRadius:3] fill];
+        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:_cornerRadius
+            yRadius:_cornerRadius] fill];
     }
+    if (_richTitle != nil) { [self drawRichTitleInBounds:bounds]; return; }
     NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
     [style setAlignment:NSTextAlignmentCenter];
     [style setLineBreakMode:NSLineBreakByTruncatingTail];
@@ -76,7 +124,8 @@ typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
 }
 - (void)dealloc
 {
-    [_fillColor release]; [_labelColor release]; [super dealloc];
+    [_fillColor release]; [_labelColor release]; [_strokeColor release];
+    [_richTitle release]; [_trailingTitle release]; [super dealloc];
 }
 @end
 
@@ -86,6 +135,20 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
                                      green:green / 255.0
                                       blue:blue / 255.0
                                      alpha:1.0];
+}
+
+/* Each segment is @[text, font, color]; lets one native button show the
+ * multi-color labels the Figma toolbar uses without extra subviews. */
+static NSAttributedString *axyne_macos_segments(NSArray *segments)
+{
+    NSMutableAttributedString *result = [[[NSMutableAttributedString alloc] init] autorelease];
+    for (NSArray *segment in segments) {
+        NSDictionary *attributes = @{ NSFontAttributeName: [segment objectAtIndex:1],
+            NSForegroundColorAttributeName: [segment objectAtIndex:2] };
+        [result appendAttributedString:[[[NSAttributedString alloc]
+            initWithString:[segment objectAtIndex:0] attributes:attributes] autorelease]];
+    }
+    return result;
 }
 
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
@@ -345,6 +408,7 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)showWorkspacePreferences:(id)sender;
 - (void)applyPreferences;
 - (void)applySystemAppearance;
+- (void)updateChromeTitles;
 - (void)applyEditorLexer;
 - (void)updateLineNumberMargin;
 - (void)updateBraceHighlight;
@@ -670,10 +734,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
-        _targetButton = axyne_macos_toolbar_button(@"▷  Runner 설정  ⌄", self, @selector(configureRunnerAction:));
-        _searchButton = axyne_macos_toolbar_button(@"⌕  파일 이동                         ⌘P", self, @selector(quickFile:));
+        _targetButton = axyne_macos_toolbar_button(@"Runner 설정", self, @selector(configureRunnerAction:));
+        _searchButton = axyne_macos_toolbar_button(@"파일 이동", self, @selector(quickFile:));
         _buildButton = axyne_macos_toolbar_button(@"빌드  ⌘B", self, @selector(buildDocument:));
-        _runButton = axyne_macos_toolbar_button(@"▷  실행  F5", self, @selector(runDocument:));
+        _runButton = axyne_macos_toolbar_button(@"실행  F5", self, @selector(runDocument:));
         [self addSubview:_newButton]; [self addSubview:_openButton];
         [self addSubview:_saveButton]; [self addSubview:_undoButton];
         [self addSubview:_redoButton]; [self addSubview:_buildButton];
@@ -739,6 +803,36 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return self;
 }
 
+- (void)updateChromeTitles
+{
+    BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
+    AxyneChromeButton *target = (AxyneChromeButton *)_targetButton;
+    AxyneChromeButton *run = (AxyneChromeButton *)_runButton;
+    AxyneChromeButton *search = (AxyneChromeButton *)_searchButton;
+    if (target == nil || run == nil || search == nil) return;
+    NSColor *muted = axyne_preference_color(_preferences.theme.muted);
+    NSColor *text = axyne_preference_color(_preferences.theme.text);
+    NSColor *placeholder = axyne_preference_color(reference ? 0x4f535b : _preferences.theme.muted);
+    NSColor *shortcut = axyne_preference_color(reference ? 0x6c727c : _preferences.theme.muted);
+    NSColor *onAccent = axyne_preference_color(reference ? 0x181a1f : _preferences.theme.background);
+    NSFont *small = [NSFont systemFontOfSize:11];
+    [target setLeadingAligned:YES]; [target setContentInset:10];
+    [target setRichTitle:axyne_macos_segments(@[
+        @[@"▷  ", small, text], @[[target title], small, muted],
+        @[@"  ⌄", [NSFont systemFontOfSize:10], muted]])];
+    [run setContentInset:14];
+    [run setRichTitle:axyne_macos_segments(@[
+        @[@"▷  ", small, onAccent],
+        @[@"실행  F5", [NSFont boldSystemFontOfSize:11], onAccent]])];
+    [search setLeadingAligned:YES]; [search setContentInset:10];
+    [search setRichTitle:axyne_macos_segments(@[
+        @[@"⌕  ", [NSFont systemFontOfSize:12], muted],
+        @[@"파일 이동", small, placeholder]])];
+    [search setTrailingTitle:axyne_macos_segments(@[
+        @[@"⌘P", [NSFont systemFontOfSize:10], shortcut]])];
+    for (NSButton *button in @[target, run, search]) [button setNeedsDisplay:YES];
+}
+
 - (AxyneDocument *)activeDocument
 {
     if (_documents.count == 0 || _documents.active_index >= _documents.count)
@@ -766,7 +860,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [_saveButton setEnabled:document != NULL];
     NSString *target = _actionRunner.executable == NULL ? @"Runner 설정" :
         [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
-    [_targetButton setTitle:[NSString stringWithFormat:@"▷  %@  ⌄", target]];
+    [_targetButton setTitle:target];
+    [self updateChromeTitles];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
 }
@@ -1087,6 +1182,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [(AxyneChromeButton *)_runButton setFillColor:axyne_preference_color(_preferences.theme.accent)];
     [(AxyneChromeButton *)_runButton setLabelColor:axyne_preference_color(_preferences.theme.background)];
     [(AxyneChromeButton *)_searchButton setFillColor:axyne_preference_color(_preferences.theme.background)];
+    BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
+    [(AxyneChromeButton *)_runButton setCornerRadius:4];
+    [(AxyneChromeButton *)_searchButton setCornerRadius:4];
+    [(AxyneChromeButton *)_searchButton setStrokeColor:axyne_preference_color(
+        reference ? 0x3a3d44 : _preferences.theme.border)];
+    [self updateChromeTitles];
     if (_editorView != nil) {
         [self sendEditorMessage:SCI_STYLESETFORE wParam:32
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
@@ -3368,7 +3469,9 @@ else [_terminalInput setStringValue:@""];
         if (++icon == 3) x += 2;
     }
     x += 2;
-    [_targetButton setFrame:NSMakeRect(x, 6, 170, 26)]; x += 178;
+    CGFloat targetWidth = MIN(220, MAX(96, ceil([[(AxyneChromeButton *)_targetButton
+        richTitle] size].width) + 20));
+    [_targetButton setFrame:NSMakeRect(x, 6, targetWidth, 26)]; x += targetWidth + 8;
     [_buildButton setFrame:NSMakeRect(x, 6, 88, 26)]; x += 96;
     [_runButton setFrame:NSMakeRect(x, 6, 86, 26)]; x += 94;
     CGFloat searchLeft = MAX(x + 8, width - 348);
