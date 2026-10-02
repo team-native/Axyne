@@ -16,6 +16,7 @@
 #include "axyne/process.h"
 #include "axyne/runner.h"
 #include "axyne/debugger.h"
+#include "axyne/lsp.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -91,6 +92,8 @@ typedef struct AxyneWindowState {
     int last_exit_code;
     int last_exit_failed;
     int has_exit_status;
+    AxyneLspClient *lsp;
+    char lsp_status[192];
 } AxyneWindowState;
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -103,6 +106,7 @@ enum { SCI_GETCURRENTPOS = 2008, SCI_LINEFROMPOSITION = 2166,
        SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
        SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170,
        SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
+enum { SCI_GETCOLUMN = 2129 };
 
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
@@ -110,11 +114,13 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_QUICK_FILE, AXYNE_CMD_WORKSPACE,
        AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
        AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE,
-       AXYNE_CMD_BUILD, AXYNE_CMD_RUN, AXYNE_CMD_CONFIGURE_RUNNER };
+       AXYNE_CMD_BUILD, AXYNE_CMD_RUN, AXYNE_CMD_CONFIGURE_RUNNER,
+       AXYNE_CMD_LSP_DEFINITION, AXYNE_CMD_LSP_REFERENCES };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
-       AXYNE_WM_TERMINAL_EXIT = WM_APP + 23 };
+       AXYNE_WM_TERMINAL_EXIT = WM_APP + 23,
+       AXYNE_WM_LSP_STATUS = WM_APP + 24 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -132,6 +138,65 @@ typedef struct AxyneTerminalExitMessage {
     AxyneProcess *process;
     int exit_code;
 } AxyneTerminalExitMessage;
+typedef struct AxyneLspStatusMessage {
+    char *text;
+} AxyneLspStatusMessage;
+
+static void axyne_free_lsp_status_message(AxyneLspStatusMessage *message)
+{
+    if (message == NULL) return;
+    free(message->text);
+    free(message);
+}
+
+static void axyne_lsp_status(AxyneWindowState *state, const char *text)
+{
+    AxyneLspStatusMessage *message;
+    if (state == NULL || text == NULL) return;
+    message = (AxyneLspStatusMessage *)malloc(sizeof(*message));
+    if (message == NULL) return;
+    message->text = _strdup(text);
+    if (message->text == NULL) { free(message); return; }
+    if (!PostMessageW(GetParent(state->editor), AXYNE_WM_LSP_STATUS, 0,
+                      (LPARAM)message)) {
+        axyne_free_lsp_status_message(message);
+    }
+}
+
+static void axyne_lsp_diagnostics(AxyneLspClient *client, const char *path,
+                                  const AxyneLspDiagnostic *diagnostics,
+                                  size_t count, void *user_data)
+{
+    char text[192];
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    (void)client; (void)diagnostics;
+    (void)snprintf(text, sizeof(text), "LSP: %zu diagnostics%s%s",
+                   count, path == NULL ? "" : " in ", path == NULL ? "" : path);
+    axyne_lsp_status(state, text);
+}
+
+static void axyne_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
+                                 const AxyneLspLocation *locations,
+                                 size_t count, void *user_data)
+{
+    char text[160];
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    (void)client; (void)locations;
+    (void)snprintf(text, sizeof(text), "LSP: request %llu returned %zu location%s",
+                   (unsigned long long)request_id, count, count == 1 ? "" : "s");
+    axyne_lsp_status(state, text);
+}
+
+static void axyne_lsp_error(AxyneLspClient *client, AxyneStatus status,
+                            const char *message, void *user_data)
+{
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    char text[192];
+    (void)client;
+    (void)snprintf(text, sizeof(text), "LSP error (%d): %s", (int)status,
+                   message == NULL ? "unknown error" : message);
+    axyne_lsp_status(state, text);
+}
 
 static AxyneDocument *axyne_active(AxyneWindowState *state);
 static int axyne_capture_editor(AxyneWindowState *state);
@@ -784,6 +849,88 @@ static AxyneDocument *axyne_active(AxyneWindowState *state)
     return &state->documents.documents[state->documents.active_index];
 }
 
+static int axyne_lsp_ensure(AxyneWindowState *state)
+{
+    const char *command = getenv("AXYNE_LSP_COMMAND");
+    AxyneLspConfig config;
+    AxyneError error;
+    if (state->lsp != NULL) return 1;
+    if (command == NULL || command[0] == '\0') {
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                       "LSP: set AXYNE_LSP_COMMAND to a local server executable");
+        return 0;
+    }
+    memset(&config, 0, sizeof(config));
+    config.command = command;
+    config.language_id = "plaintext";
+    config.on_diagnostics = axyne_lsp_diagnostics;
+    config.on_navigation = axyne_lsp_navigation;
+    config.on_error = axyne_lsp_error;
+    config.user_data = state;
+    if (axyne_lsp_create(&config, &state->lsp, &error) != AXYNE_STATUS_OK) {
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                       "LSP: %s", error.message);
+        return 0;
+    }
+    return 1;
+}
+
+static int axyne_lsp_open_active(AxyneWindowState *state)
+{
+    AxyneDocument *doc = axyne_active(state);
+    AxyneError error;
+    AxyneStatus status;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) return 0;
+    if (!axyne_lsp_ensure(state)) return 0;
+    status = axyne_lsp_did_open(state->lsp, doc, &error);
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY) {
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                       "LSP: %s", error.message);
+        return 0;
+    }
+    return 1;
+}
+
+static void axyne_lsp_sync_active(AxyneWindowState *state)
+{
+    AxyneDocument *doc = axyne_active(state);
+    AxyneError error;
+    AxyneStatus status;
+    if (state->lsp == NULL || doc == NULL || doc->is_untitled || doc->path == NULL) return;
+    status = axyne_lsp_did_change(state->lsp, doc, &error);
+    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(state->lsp, doc, &error);
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY)
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
+}
+
+static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int references)
+{
+    AxyneDocument *doc;
+    AxyneLspPosition position;
+    AxyneError error;
+    AxyneStatus status;
+    uint64_t request_id = 0;
+    LRESULT current, line_start;
+    (void)window;
+    if (!axyne_capture_editor(state) || !axyne_lsp_open_active(state)) return;
+    doc = axyne_active(state);
+    current = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION, current, 0);
+    line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, position.line, 0);
+    position.character = axyne_lsp_utf16_character(
+        doc->contents + (size_t)line_start, (size_t)(current - line_start),
+        (size_t)(current - line_start));
+    status = references ? axyne_lsp_references(state->lsp, doc, position,
+                                                &request_id, &error) :
+        axyne_lsp_definition(state->lsp, doc, position, &request_id, &error);
+    if (status != AXYNE_STATUS_OK)
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
+    else
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                       "LSP: request %llu sent", (unsigned long long)request_id);
+    InvalidateRect((HWND)GetParent(state->editor), NULL, FALSE);
+}
+
 static void axyne_update_title(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
@@ -833,6 +980,7 @@ static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
     AxyneStatus status = axyne_documents_set_contents(&state->documents,
         state->documents.active_index, text, (size_t)length, &error);
     free(text);
+    if (status == AXYNE_STATUS_OK) axyne_lsp_sync_active(state);
     return status == AXYNE_STATUS_OK;
 }
 
@@ -986,6 +1134,7 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
     if (index >= state->documents.count ||
         !axyne_confirm_document_close(window, state, index)) return;
     AxyneDocument *doc = &state->documents.documents[index];
+    if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
     if (doc->owns_native_editor_document && state->editor != NULL)
         SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
                      (LPARAM)doc->native_editor_document);
@@ -1428,6 +1577,11 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_LSP_DEFINITION,
+                L"LSP: Go to Definition\tCtrl+Alt+D");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_LSP_REFERENCES,
+                L"LSP: Find References\tCtrl+Alt+R");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     for (size_t i = 0; i < state->documents.recent_count; ++i) {
         wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
         if (path != NULL) {
@@ -1662,8 +1816,17 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                    state->last_exit_failed ? RGB(220, 100, 100) : AXYNE_MUTED,
                    12, status_top + 6, status);
     }
-    axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 250, status_top + 6,
-               L"줄 1, 열 1     UTF-8    C17");
+    if (state->lsp_status[0] != '\0') {
+        wchar_t *lsp_status = axyne_wide(state->lsp_status);
+        if (lsp_status != NULL) {
+            axyne_text(dc, state->ui_font, AXYNE_MUTED, 250, status_top + 6,
+                       lsp_status);
+            free(lsp_status);
+        }
+    } else {
+        axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 250, status_top + 6,
+                   L"줄 1, 열 1     UTF-8    C17");
+    }
 
     if (state->editor == NULL) {
         axyne_text(dc, state->code_font, AXYNE_MUTED, AXYNE_SIDEBAR + 24,
@@ -1719,6 +1882,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (w_param == 'H') { axyne_find(window, state, 1, 0); return 0; }
             if (w_param == 'P') { axyne_search_folder(window, state, 1); return 0; }
             if (w_param == 'B') { axyne_start_action(window, state, 0); return 0; }
+            if ((GetKeyState(VK_MENU) & 0x8000) != 0 && w_param == 'D') {
+                axyne_lsp_navigate(window, state, 0); return 0;
+            }
+            if ((GetKeyState(VK_MENU) & 0x8000) != 0 && w_param == 'R') {
+                axyne_lsp_navigate(window, state, 1); return 0;
+            }
         }
         if (w_param == VK_F5) { axyne_start_action(window, state, 1); return 0; }
         break;
@@ -1835,6 +2004,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_REPLACE) axyne_find(window, state, 1, 0);
         else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
         else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
+        else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
+        else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
             axyne_workspace_operation(window, state, command);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
@@ -1895,6 +2066,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_breakpoint, FALSE);
         InvalidateRect(window, NULL, FALSE);
         return 0;
+    case AXYNE_WM_LSP_STATUS: {
+        AxyneLspStatusMessage *message = (AxyneLspStatusMessage *)l_param;
+        if (message != NULL) {
+            (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "%s",
+                           message->text == NULL ? "LSP" : message->text);
+            axyne_free_lsp_status_message(message);
+            InvalidateRect(window, NULL, FALSE);
+        }
+        return 0;
     }
     case WM_NOTIFY: {
         NMHDR *header = (NMHDR *)l_param;
@@ -1939,6 +2119,19 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->terminal_process = NULL;
             }
             axyne_debugger_destroy(&state->debugger);
+            if (state->lsp != NULL) {
+                axyne_lsp_destroy(state->lsp);
+                state->lsp = NULL;
+            }
+            {
+                MSG pending_message;
+                while (PeekMessageW(&pending_message, window,
+                                    AXYNE_WM_LSP_STATUS,
+                                    AXYNE_WM_LSP_STATUS, PM_REMOVE)) {
+                    axyne_free_lsp_status_message(
+                        (AxyneLspStatusMessage *)pending_message.lParam);
+                }
+            }
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
             if (state->watcher != NULL) {

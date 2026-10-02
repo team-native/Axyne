@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 #include <dispatch/dispatch.h>
 
 #include "axyne/document.h"
@@ -12,6 +13,7 @@
 #include "axyne/process.h"
 #include "axyne/runner.h"
 #include "axyne/debugger.h"
+#include "axyne/lsp.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -21,6 +23,7 @@ enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_RELEASEDOCUMENT = 2377, SCI_GETCURRENTPOS = 2008,
        SCI_SETSEL = 2160, SCI_REPLACESEL = 2170,
        SCI_POSITIONFROMLINE = 2167, SCI_GOTOPOS = 2025,
+       SCI_LINEFROMPOSITION = 2166,
        SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
 
 @interface NSObject (AxyneScintillaMessages)
@@ -71,6 +74,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     int _lastExitCode;
     BOOL _lastExitFailed;
     BOOL _hasExitStatus;
+    AxyneLspClient *_lsp;
+    NSString *_lspStatus;
 }
 - (void)newDocument:(id)sender;
 - (void)openDocument:(id)sender;
@@ -112,6 +117,11 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)startDebugger:(id)sender;
 - (void)debugCommand:(id)sender;
 - (void)toggleBreakpoint:(id)sender;
+- (BOOL)ensureLsp;
+- (BOOL)openLspForActive;
+- (void)syncLspActive;
+- (void)navigateLspReferences:(id)sender;
+- (void)setLspStatus:(NSString *)status;
 @end
 
 static void axyne_install_menu(NSApplication *application,
@@ -127,6 +137,52 @@ typedef struct AxyneMacTerminalMessage {
     size_t length;
     AxyneProcessStream stream;
 } AxyneMacTerminalMessage;
+
+static void axyne_macos_lsp_status(AxyneWorkspaceView *view, const char *text)
+{
+    char *copy;
+    if (view == nil || text == NULL) return;
+    copy = strdup(text);
+    if (copy == NULL) return;
+    [view retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view setLspStatus:[NSString stringWithUTF8String:copy] ?: @"LSP"];
+        free(copy);
+        [view release];
+    });
+}
+
+static void axyne_macos_lsp_diagnostics(AxyneLspClient *client, const char *path,
+                                        const AxyneLspDiagnostic *diagnostics,
+                                        size_t count, void *user_data)
+{
+    char text[192];
+    (void)client; (void)diagnostics;
+    (void)snprintf(text, sizeof(text), "LSP: %zu diagnostics%s%s", count,
+                   path == NULL ? "" : " in ", path == NULL ? "" : path);
+    axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
+}
+
+static void axyne_macos_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
+                                       const AxyneLspLocation *locations,
+                                       size_t count, void *user_data)
+{
+    char text[160];
+    (void)client; (void)locations;
+    (void)snprintf(text, sizeof(text), "LSP: request %llu returned %zu location%s",
+                   (unsigned long long)request_id, count, count == 1 ? "" : "s");
+    axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
+}
+
+static void axyne_macos_lsp_error(AxyneLspClient *client, AxyneStatus status,
+                                  const char *message, void *user_data)
+{
+    char text[192];
+    (void)client;
+    (void)snprintf(text, sizeof(text), "LSP error (%d): %s", (int)status,
+                   message == NULL ? "unknown error" : message);
+    axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
+}
 
 static void axyne_macos_terminal_output(AxyneProcess *process,
                                          AxyneProcessStream stream,
@@ -359,7 +415,91 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     AxyneStatus status = axyne_documents_set_contents(&_documents,
         _documents.active_index, text, (size_t)length, NULL);
     free(text);
+    if (status == AXYNE_STATUS_OK) [self syncLspActive];
     return status == AXYNE_STATUS_OK;
+}
+
+- (void)setLspStatus:(NSString *)status
+{
+    [_lspStatus release];
+    _lspStatus = [status copy];
+    [self setNeedsDisplay:YES];
+}
+
+- (BOOL)ensureLsp
+{
+    const char *command = getenv("AXYNE_LSP_COMMAND");
+    AxyneLspConfig config = {0};
+    AxyneError error;
+    if (_lsp != NULL) return YES;
+    if (command == NULL || command[0] == '\0') {
+        [self setLspStatus:@"LSP: set AXYNE_LSP_COMMAND to a local server executable"];
+        return NO;
+    }
+    config.command = command;
+    config.language_id = "plaintext";
+    config.on_diagnostics = axyne_macos_lsp_diagnostics;
+    config.on_navigation = axyne_macos_lsp_navigation;
+    config.on_error = axyne_macos_lsp_error;
+    config.user_data = self;
+    if (axyne_lsp_create(&config, &_lsp, &error) != AXYNE_STATUS_OK) {
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL)openLspForActive
+{
+    AxyneDocument *doc = [self activeDocument];
+    AxyneError error;
+    AxyneStatus status;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL || ![self ensureLsp]) return NO;
+    status = axyne_lsp_did_open(_lsp, doc, &error);
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY) {
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
+        return NO;
+    }
+    return YES;
+}
+
+- (void)syncLspActive
+{
+    AxyneDocument *doc = [self activeDocument];
+    AxyneError error;
+    AxyneStatus status;
+    if (_lsp == NULL || doc == NULL || doc->is_untitled || doc->path == NULL) return;
+    status = axyne_lsp_did_change(_lsp, doc, &error);
+    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(_lsp, doc, &error);
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY)
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
+}
+
+- (void)navigateLspReferences:(id)sender
+{
+    AxyneDocument *doc;
+    AxyneLspPosition position;
+    AxyneError error;
+    AxyneStatus status;
+    uint64_t requestID = 0;
+    NSInteger current, line, lineStart;
+    BOOL references = [sender tag] != 0;
+    if (![self captureEditor] || ![self openLspForActive]) return;
+    doc = [self activeDocument];
+    current = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:(uintptr_t)current lParam:0];
+    lineStart = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)line lParam:0];
+    position.line = (size_t)line;
+    position.character = axyne_lsp_utf16_character(
+        doc->contents + (size_t)lineStart, (size_t)(current - lineStart),
+        (size_t)(current - lineStart));
+    status = references ? axyne_lsp_references(_lsp, doc, position, &requestID, &error) :
+        axyne_lsp_definition(_lsp, doc, position, &requestID, &error);
+    if (status != AXYNE_STATUS_OK)
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
+    else
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: request %llu sent",
+                            (unsigned long long)requestID]];
 }
 
 - (BOOL)captureEditor
@@ -794,6 +934,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     if (![self captureEditor]) return;
     if (![self confirmCloseDocumentAtIndex:index]) return;
     AxyneDocument *doc = &_documents.documents[index];
+    if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
     if (doc->owns_native_editor_document)
         (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
             lParam:(intptr_t)doc->native_editor_document];
@@ -857,6 +998,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
             if (fmod(offset, 184) >= 160) {
                 if ([self confirmCloseDocumentAtIndex:index]) {
                     AxyneDocument *doc = &_documents.documents[index];
+                    if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
                     if (doc->owns_native_editor_document)
                         (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
                             lParam:(intptr_t)doc->native_editor_document];
@@ -1536,7 +1678,7 @@ else [_terminalInput setStringValue:@""];
            : (_hasExitStatus ? @"✓ 실행 완료 (exit 0)" : @"✓ 빌드 준비됨"));
     [self drawLabel:status
                 at:NSMakePoint(12, statusTop + 6) size:10 color:muted family:@"SF Pro Text"];
-    [self drawLabel:@"줄 1, 열 1     UTF-8    C17"
+    [self drawLabel:_lspStatus != nil ? _lspStatus : @"줄 1, 열 1     UTF-8    C17"
                 at:NSMakePoint(MAX(12, width - 250), statusTop + 6)
                 size:10 color:muted family:@"SF Pro Text"];
 
@@ -1549,6 +1691,10 @@ else [_terminalInput setStringValue:@""];
 
 - (void)dealloc
 {
+    if (_lsp != NULL) {
+        axyne_lsp_destroy(_lsp);
+        _lsp = NULL;
+    }
     if (_terminalProcess != NULL) {
         axyne_process_release(_terminalProcess);
         _terminalProcess = NULL;
@@ -1582,6 +1728,7 @@ else [_terminalInput setStringValue:@""];
     [_debugNext release];
     [_debugBreakpoint release];
     axyne_debugger_destroy(&_debugger);
+    [_lspStatus release];
     [_scintillaBundle unload];
     [_scintillaBundle release];
     [super dealloc];
@@ -1734,6 +1881,14 @@ static void axyne_install_menu(NSApplication *application,
             NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
                 action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
             [toggle setTarget:workspace];
+        } else if ([title isEqualToString:@"Tools"]) {
+            NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: Go to Definition"
+                action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
+            NSMenuItem *references = [submenu addItemWithTitle:@"LSP: Find References"
+                action:@selector(navigateLspReferences:) keyEquivalent:@"r"];
+            [definition setTarget:workspace]; [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+            [references setTarget:workspace]; [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+            [references setTag:1];
         }
         [item setSubmenu:submenu];
         [submenu release];
