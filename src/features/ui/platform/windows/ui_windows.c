@@ -66,6 +66,11 @@ static COLORREF AXYNE_STATUS_BG;
 static COLORREF AXYNE_INDICATOR;
 static COLORREF AXYNE_SEARCH_BORDER;
 static COLORREF AXYNE_RUN_TEXT;
+/* Figma-specific surfaces. Custom palettes keep their configured colours;
+ * only the default dark palette picks up the reference's extra tones. */
+static int AXYNE_REFERENCE;
+static COLORREF AXYNE_MENU_BG;
+static COLORREF AXYNE_MENU_ACTIVE;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -121,6 +126,7 @@ typedef struct AxyneWindowState {
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
     char lsp_status[192];
+    int menu_active; /* 1-based index of the menu bar item whose popup is open */
 } AxyneWindowState;
 
 typedef struct AxyneScNotificationPrefix {
@@ -318,6 +324,9 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
     AXYNE_INDICATOR = AXYNE_ACCENT;
     AXYNE_SEARCH_BORDER = AXYNE_BORDER;
     AXYNE_RUN_TEXT = AXYNE_BG;
+    AXYNE_REFERENCE = 0;
+    AXYNE_MENU_BG = AXYNE_BG;
+    AXYNE_MENU_ACTIVE = AXYNE_BORDER;
     if (theme->background == 0x16171a && theme->panel == 0x1f2126 &&
         theme->toolbar == 0x1c1e22) {
         AXYNE_BUTTON_BG = axyne_theme_color(0x24262b);
@@ -328,6 +337,9 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
         AXYNE_INDICATOR = axyne_theme_color(0xa66bf0);
         AXYNE_SEARCH_BORDER = axyne_theme_color(0x3a3d44);
         AXYNE_RUN_TEXT = axyne_theme_color(0x181a1f);
+        AXYNE_REFERENCE = 1;
+        AXYNE_MENU_BG = axyne_theme_color(0x131417);
+        AXYNE_MENU_ACTIVE = axyne_theme_color(0x2a2e35);
     }
     if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
         DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
@@ -2463,6 +2475,62 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
     free(query); free(root);
 }
 
+enum { AXYNE_MENU_COUNT = 7 };
+static const wchar_t *const AXYNE_MENU_LABELS[AXYNE_MENU_COUNT] = {
+    L"파일(F)", L"편집(E)", L"보기(V)", L"빌드(B)", L"디버그(D)", L"도구(T)",
+    L"도움말(H)"
+};
+
+static int axyne_measure_text(HFONT font, const wchar_t *text)
+{
+    HDC dc = CreateCompatibleDC(NULL);
+    HGDIOBJ previous;
+    SIZE size = {0, 0};
+    if (dc == NULL) return 0;
+    previous = SelectObject(dc, font);
+    GetTextExtentPoint32W(dc, text, (int)wcslen(text), &size);
+    SelectObject(dc, previous);
+    DeleteDC(dc);
+    return size.cx;
+}
+
+/* Figma menu bar: 8px leading inset, items padded 8px either side, 2px gaps.
+ * Painting, popup anchoring and hit-testing all use this one geometry. */
+static RECT axyne_menu_bar_rect(AxyneWindowState *state, int index)
+{
+    int x = 8;
+    int i;
+    RECT rect = {0, 0, 0, AXYNE_TOP_MENU};
+    for (i = 0; i < AXYNE_MENU_COUNT; ++i) {
+        int width = 16 + axyne_measure_text(state->ui_font, AXYNE_MENU_LABELS[i]);
+        if (i == index) {
+            rect.left = x;
+            rect.right = x + width;
+            break;
+        }
+        x += width + 2;
+    }
+    return rect;
+}
+
+static int axyne_menu_bar_hit(AxyneWindowState *state, int x, int y)
+{
+    int i;
+    if (y < 0 || y >= AXYNE_TOP_MENU) return -1;
+    for (i = 0; i < AXYNE_MENU_COUNT; ++i) {
+        RECT rect = axyne_menu_bar_rect(state, i);
+        if (x >= rect.left && x < rect.right) return i;
+    }
+    return -1;
+}
+
+static POINT axyne_menu_anchor(AxyneWindowState *state, int index)
+{
+    RECT rect = axyne_menu_bar_rect(state, index);
+    POINT point = {rect.left, AXYNE_TOP_MENU};
+    return point;
+}
+
 static void axyne_file_popup(HWND window, AxyneWindowState *state)
 {
     HMENU menu = CreatePopupMenu();
@@ -2537,7 +2605,7 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     if (state->documents.recent_count == 0)
         AppendMenuW(recent, MF_STRING | MF_GRAYED, 0, L"No Recent Files");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)recent, L"Open Recent");
-    POINT point = {4, AXYNE_TOP_MENU};
+    POINT point = axyne_menu_anchor(state, 0);
     ClientToScreen(window, &point);
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
                    point.x, point.y, 0, window, NULL);
@@ -2563,7 +2631,7 @@ static void axyne_edit_popup(HWND window, AxyneWindowState *state)
     EnableMenuItem(menu, AXYNE_CMD_PASTE, MF_BYCOMMAND | has_editor);
     EnableMenuItem(menu, AXYNE_CMD_SELECT_ALL, MF_BYCOMMAND | has_editor);
     {
-        POINT point = {80, AXYNE_TOP_MENU};
+        POINT point = axyne_menu_anchor(state, 1);
         ClientToScreen(window, &point);
         TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
                        point.x, point.y, 0, window, NULL);
@@ -2575,7 +2643,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
                                int menu_index)
 {
     HMENU menu = CreatePopupMenu();
-    POINT point = {14 + menu_index * 64, AXYNE_TOP_MENU};
+    POINT point = axyne_menu_anchor(state, menu_index);
     if (menu == NULL) return;
     if (menu_index == 2) {
         AppendMenuW(menu, MF_STRING, AXYNE_CMD_PANEL_OUTPUT, L"출력");
@@ -2623,6 +2691,22 @@ static void axyne_fill(HDC dc, int left, int top, int right, int bottom,
         FillRect(dc, &rect, brush);
         DeleteObject(brush);
     }
+}
+
+/* Rounded rectangle with a 1px outline; pass the fill colour as the border
+ * for borderless shapes. The right/bottom edges are exclusive, like FillRect. */
+static void axyne_round_fill(HDC dc, int left, int top, int right, int bottom,
+                             int radius, COLORREF fill, COLORREF border)
+{
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ previous_brush = SelectObject(dc, brush);
+    HGDIOBJ previous_pen = SelectObject(dc, pen);
+    RoundRect(dc, left, top, right, bottom, radius * 2, radius * 2);
+    SelectObject(dc, previous_pen);
+    SelectObject(dc, previous_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
 }
 
 static void axyne_text(HDC dc, HFONT font, COLORREF color, int x, int y,
@@ -2890,7 +2974,8 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
 
     axyne_fill(dc, 0, 0, width, height, AXYNE_BG);
-    axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, AXYNE_BG);
+    axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, AXYNE_MENU_BG);
+    axyne_fill(dc, 0, AXYNE_TOP_MENU - 1, width, AXYNE_TOP_MENU, AXYNE_BORDER);
     axyne_fill(dc, 0, AXYNE_TOP_MENU, width, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
                AXYNE_TOOLBAR_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR, width, editor_top,
@@ -2905,12 +2990,14 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     axyne_fill(dc, AXYNE_SIDEBAR, bottom_top, width, bottom_top + 1, AXYNE_BORDER);
 
     {
-        const wchar_t *labels[] = {L"파일(F)", L"편집(E)", L"보기(V)",
-            L"빌드(B)", L"디버그(D)", L"도구(T)", L"도움말(H)"};
         size_t i;
-        for (i = 0; i < sizeof(labels) / sizeof(*labels); ++i) {
-            RECT rect = {14 + (int)i * 64, 0, 78 + (int)i * 64, AXYNE_TOP_MENU};
-            axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect, labels[i], DT_LEFT);
+        for (i = 0; i < AXYNE_MENU_COUNT; ++i) {
+            RECT rect = axyne_menu_bar_rect(state, (int)i);
+            if (state->menu_active == (int)i + 1)
+                axyne_round_fill(dc, rect.left, rect.top, rect.right,
+                    rect.bottom - 1, 3, AXYNE_MENU_ACTIVE, AXYNE_MENU_ACTIVE);
+            axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect,
+                            AXYNE_MENU_LABELS[i], DT_CENTER);
         }
     }
     {
@@ -3128,12 +3215,19 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         RECT client;
         POINT point = {x, y};
         GetClientRect(window, &client);
-        if (y >= 0 && y < AXYNE_TOP_MENU && x >= 14 && x < 14 + 7 * 64) {
-            int index = (x - 14) / 64;
-            if (index == 0) axyne_file_popup(window, state);
-            else if (index == 1) axyne_edit_popup(window, state);
-            else axyne_chrome_popup(window, state, index);
-            return 0;
+        {
+            int index = axyne_menu_bar_hit(state, x, y);
+            if (index >= 0) {
+                state->menu_active = index + 1;
+                InvalidateRect(window, NULL, FALSE);
+                UpdateWindow(window);
+                if (index == 0) axyne_file_popup(window, state);
+                else if (index == 1) axyne_edit_popup(window, state);
+                else axyne_chrome_popup(window, state, index);
+                state->menu_active = 0;
+                InvalidateRect(window, NULL, FALSE);
+                return 0;
+            }
         }
         if (y >= AXYNE_TOP_MENU && y < AXYNE_TOP_MENU + AXYNE_TOOLBAR) {
             size_t i;
