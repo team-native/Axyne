@@ -261,6 +261,7 @@ static int axyne_perf_target_iteration(const char *target,
     pid_t process;
     int status;
     int success = 0;
+    int cleanup_ok = 1;
     int launched = 0;
     int null_input;
     posix_spawn_file_actions_t file_actions;
@@ -338,10 +339,21 @@ cleanup:
         }
         if (launched != 0) {
             (void)kill(process, SIGKILL);
-            while (waitpid(process, &status, 0) < 0 && errno == EINTR) {}
+            {
+                unsigned long waited_ms = 0;
+                int reaped = 0;
+                while (waited_ms < 5000) {
+                    pid_t waited = waitpid(process, &status, WNOHANG);
+                    if (waited == process) { reaped = 1; break; }
+                    if (waited < 0 && errno != EINTR) break;
+                    axyne_perf_sleep(10);
+                    waited_ms += 10;
+                }
+                cleanup_ok = reaped;
+            }
         }
     }
-    return success;
+    return success && cleanup_ok;
 }
 #else
 #error "The performance benchmark requires Windows or macOS"
