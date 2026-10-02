@@ -348,6 +348,12 @@ foreach(AXYNE_FEATURE_MODULE IN LISTS AXYNE_FEATURE_MODULES)
 endforeach()
 
 include(CTest)
+option(AXYNE_BUILD_PERF_BENCHMARK
+    "Build the opt-in startup and memory budget benchmark" OFF)
+if(AXYNE_BUILD_PERF_BENCHMARK AND (WIN32 OR APPLE))
+    add_subdirectory(tools/perf/benchmarks)
+endif()
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

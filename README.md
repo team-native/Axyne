@@ -33,6 +33,9 @@ cmake -S . -B build \
   -DAXYNE_VERSION="0.1.0"
 ```
 
+시작 시간과 100MB 기본 메모리 목표를 반복 측정하는 opt-in 도구와 Windows/macOS
+실행 명령은 [성능 예산 측정 문서](docs/PERFORMANCE_BUDGET.md)를 참고하세요.
+
 패키지 기본값도 명시적으로 고정되어 있습니다. Windows 패키지는 upstream
 Scintilla를 Release 구성으로 빌드하고 `Scintilla.dll`과
 `Scintilla-LICENSE.txt`를 `axyne.exe` 옆에 설치합니다. macOS 패키지는
