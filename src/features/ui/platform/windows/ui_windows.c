@@ -50,12 +50,32 @@ enum {
     SCI_STYLESETBACK = 2052,
     SCI_STYLESETSIZE = 2055,
     SCI_STYLESETFONT = 2056,
+    SCI_SETSELFORE = 2067,
+    SCI_SETSELBACK = 2068,
+    SCI_SETCARETFORE = 2069,
     SCI_SETMARGINWIDTHN = 2242,
+    SCI_SETMARGINTYPEN = 2240,
+    SCI_SETMARGINMASKN = 2244,
+    SCI_SETMARGINSENSITIVEN = 2246,
     SCI_SETCODEPAGE = 2037,
     SCI_SETWRAPMODE = 2268,
     SCI_SETINDENT = 2122,
     SCI_SETUSETABS = 2124,
-    SCI_SETVIEWWS = 2021
+    SCI_SETVIEWWS = 2021,
+    SCI_SETINDENTATIONGUIDES = 2132,
+    SCI_SETLINEINDENTATION = 2126,
+    SCI_GETLINEINDENTATION = 2127,
+    SCI_SETBACKSPACEUNINDENTS = 2262,
+    SCI_SETTABINDENTS = 2260,
+    SCI_GETLINECOUNT = 2154,
+    SCI_TEXTWIDTH = 2276,
+    SCI_GETCHARAT = 2007,
+    SCI_SETCARETLINEVISIBLE = 2096,
+    SCI_BRACEHIGHLIGHT = 2351,
+    SCI_BRACEBADLIGHT = 2352,
+    SCI_BRACEMATCH = 2353,
+    SCI_SETILEXER = 4033,
+    SCI_COLOURISE = 4003
 };
 
 static const wchar_t AXYNE_WINDOW_CLASS[] = L"AxyneWindow";
@@ -72,6 +92,8 @@ typedef struct AxyneGitUiRun AxyneGitUiRun;
 
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
+    HMODULE lexilla_module;
+    AxyneCreateLexer create_lexer;
     HWND editor;
     HFONT ui_font;
     HFONT code_font;
@@ -112,6 +134,12 @@ typedef struct AxyneWindowState {
     char lsp_status[192];
 } AxyneWindowState;
 
+typedef struct AxyneScNotificationPrefix {
+    NMHDR nmhdr;
+    intptr_t position;
+    int ch;
+} AxyneScNotificationPrefix;
+
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_GETMODIFY = 2159, SCI_SETSAVEPOINT = 2014,
        SCI_CLEARALL = 2004, SCI_ADDTEXT = 2001, SCI_GETDOCPOINTER = 2357,
@@ -123,6 +151,7 @@ enum { SCI_GETCURRENTPOS = 2008, SCI_LINEFROMPOSITION = 2166,
        SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170,
        SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
 enum { SCI_GETCOLUMN = 2129 };
+enum { AXYNE_SCN_CHARADDED = 2001, AXYNE_SCN_UPDATEUI = 2007 };
 
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
@@ -134,7 +163,9 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_PREFERENCES, AXYNE_CMD_WORKSPACE_PREFERENCES,
        AXYNE_CMD_GIT_STATUS, AXYNE_CMD_GIT_DIFF, AXYNE_CMD_GIT_STAGE_ALL,
        AXYNE_CMD_GIT_UNSTAGE_ALL, AXYNE_CMD_LSP_DEFINITION,
-       AXYNE_CMD_LSP_REFERENCES };
+       AXYNE_CMD_LSP_REFERENCES, AXYNE_CMD_UNDO, AXYNE_CMD_REDO,
+       AXYNE_CMD_CUT, AXYNE_CMD_COPY, AXYNE_CMD_PASTE,
+       AXYNE_CMD_SELECT_ALL };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -251,6 +282,7 @@ static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
+typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
 
 static wchar_t *axyne_wide(const char *utf8)
 {
@@ -359,6 +391,155 @@ static char *axyne_workspace_preferences_path(const char *root)
     return axyne_utf8(path);
 }
 
+static const char *axyne_editor_lexer(const char *path)
+{
+    const char *extension;
+    const char *slash;
+    if (path == NULL || path[0] == '\0') return "cpp";
+    extension = strrchr(path, '.');
+    slash = strrchr(path, '/');
+    {
+        const char *backslash = strrchr(path, '\\');
+        if (backslash != NULL && (slash == NULL || backslash > slash))
+            slash = backslash;
+    }
+    if (extension == NULL || (slash != NULL && extension < slash)) return "cpp";
+    if (_stricmp(extension, ".c") == 0 || _stricmp(extension, ".h") == 0 ||
+        _stricmp(extension, ".cc") == 0 || _stricmp(extension, ".cpp") == 0 ||
+        _stricmp(extension, ".cxx") == 0 || _stricmp(extension, ".hpp") == 0 ||
+        _stricmp(extension, ".m") == 0 || _stricmp(extension, ".mm") == 0)
+        return "cpp";
+    if (_stricmp(extension, ".py") == 0) return "python";
+    if (_stricmp(extension, ".js") == 0 || _stricmp(extension, ".jsx") == 0 ||
+        _stricmp(extension, ".ts") == 0 || _stricmp(extension, ".tsx") == 0)
+        return "javascript";
+    if (_stricmp(extension, ".json") == 0) return "json";
+    if (_stricmp(extension, ".html") == 0 || _stricmp(extension, ".htm") == 0 ||
+        _stricmp(extension, ".xml") == 0) return "hypertext";
+    if (_stricmp(extension, ".css") == 0) return "css";
+    if (_stricmp(extension, ".sh") == 0 || _stricmp(extension, ".bash") == 0)
+        return "bash";
+    if (_stricmp(extension, ".md") == 0 || _stricmp(extension, ".markdown") == 0)
+        return "markdown";
+    return "null";
+}
+
+static void axyne_apply_editor_lexer(AxyneWindowState *state,
+                                     const AxyneDocument *document)
+{
+    const char *language;
+    void *lexer;
+    if (state == NULL || state->editor == NULL || state->create_lexer == NULL)
+        return;
+    language = axyne_editor_lexer(document == NULL ? NULL : document->path);
+    lexer = state->create_lexer(language);
+    if (lexer == NULL && strcmp(language, "null") != 0)
+        lexer = state->create_lexer("null");
+    if (lexer != NULL) {
+        SendMessageA(state->editor, SCI_SETILEXER, 0, (LPARAM)lexer);
+        SendMessageA(state->editor, SCI_COLOURISE, 0, (LPARAM)-1);
+    }
+}
+
+static void axyne_update_line_number_margin(AxyneWindowState *state)
+{
+    char digits[32];
+    LRESULT line_count;
+    LRESULT width;
+    if (state == NULL || state->editor == NULL) return;
+    line_count = SendMessageA(state->editor, SCI_GETLINECOUNT, 0, 0);
+    if (line_count < 1) line_count = 1;
+    (void)snprintf(digits, sizeof(digits), "%lld", (long long)line_count);
+    width = SendMessageA(state->editor, SCI_TEXTWIDTH, 33, (LPARAM)digits);
+    if (width < 1) width = 32;
+    SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, width + 10);
+}
+
+static int axyne_is_brace(int character)
+{
+    return character == '{' || character == '}' ||
+           character == '(' || character == ')' ||
+           character == '[' || character == ']';
+}
+
+static void axyne_update_brace_highlight(AxyneWindowState *state)
+{
+    LRESULT caret;
+    LRESULT brace = -1;
+    LRESULT match;
+    if (state == NULL || state->editor == NULL) return;
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    if (caret >= 0 && axyne_is_brace((int)SendMessageA(
+            state->editor, SCI_GETCHARAT, (WPARAM)caret, 0))) {
+        brace = caret;
+    } else if (caret > 0 && axyne_is_brace((int)SendMessageA(
+            state->editor, SCI_GETCHARAT, (WPARAM)(caret - 1), 0))) {
+        brace = caret - 1;
+    }
+    if (brace < 0) {
+        SendMessageA(state->editor, SCI_BRACEHIGHLIGHT, (WPARAM)-1,
+                     (LPARAM)-1);
+        return;
+    }
+    match = SendMessageA(state->editor, SCI_BRACEMATCH, (WPARAM)brace, 0);
+    if (match >= 0)
+        SendMessageA(state->editor, SCI_BRACEHIGHLIGHT, (WPARAM)brace,
+                     (LPARAM)match);
+    else
+        SendMessageA(state->editor, SCI_BRACEBADLIGHT, (WPARAM)brace, 0);
+}
+
+static void axyne_auto_indent(AxyneWindowState *state,
+                              const AxyneScNotificationPrefix *notification)
+{
+    LRESULT line;
+    LRESULT previous_line;
+    LRESULT indentation;
+    LRESULT line_start;
+    LRESULT previous_start;
+    LRESULT position;
+    int last_character = 0;
+    unsigned int tab_width;
+    if (state == NULL || state->editor == NULL || notification == NULL)
+        return;
+    tab_width = state->preferences.editor.tab_width;
+    if (tab_width == 0) tab_width = 4;
+    if (notification->ch == '\n') {
+        line = SendMessageA(state->editor, SCI_LINEFROMPOSITION,
+                            (WPARAM)(notification->position + 1), 0);
+        if (line <= 0) return;
+        previous_line = line - 1;
+        indentation = SendMessageA(state->editor, SCI_GETLINEINDENTATION,
+                                    (WPARAM)previous_line, 0);
+        line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE,
+                                  (WPARAM)line, 0);
+        previous_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE,
+                                      (WPARAM)previous_line, 0);
+        position = line_start - 1;
+        while (position >= previous_start) {
+            int character = (int)SendMessageA(state->editor, SCI_GETCHARAT,
+                                               (WPARAM)position, 0);
+            if (character != ' ' && character != '\t' && character != '\r' &&
+                character != '\n') {
+                last_character = character;
+                break;
+            }
+            --position;
+        }
+        if (last_character == '{') indentation += (LRESULT)tab_width;
+        SendMessageA(state->editor, SCI_SETLINEINDENTATION, (WPARAM)line,
+                     indentation);
+    } else if (notification->ch == '}') {
+        line = SendMessageA(state->editor, SCI_LINEFROMPOSITION,
+                            (WPARAM)notification->position, 0);
+        indentation = SendMessageA(state->editor, SCI_GETLINEINDENTATION,
+                                   (WPARAM)line, 0);
+        if (indentation >= (LRESULT)tab_width)
+            SendMessageA(state->editor, SCI_SETLINEINDENTATION, (WPARAM)line,
+                         indentation - (LRESULT)tab_width);
+    }
+}
+
 static void axyne_apply_editor_preferences(AxyneWindowState *state)
 {
     wchar_t *font_name = NULL;
@@ -382,11 +563,20 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)editor_font);
     SendMessageA(state->editor, SCI_STYLESETFORE, 33, (LPARAM)axyne_theme_color(state->preferences.theme.muted));
-    SendMessageA(state->editor, SCI_STYLESETBACK, 33, (LPARAM)axyne_theme_color(state->preferences.theme.editor_background));
+    SendMessageA(state->editor, SCI_STYLESETBACK, 33, (LPARAM)axyne_theme_color(state->preferences.theme.panel));
+    SendMessageA(state->editor, SCI_STYLESETFORE, 34, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
+    SendMessageA(state->editor, SCI_STYLESETBACK, 34, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
+    SendMessageA(state->editor, SCI_STYLESETFORE, 35, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
+    SendMessageA(state->editor, SCI_STYLESETBACK, 35, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
+    SendMessageA(state->editor, SCI_SETSELFORE, 0, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
+    SendMessageA(state->editor, SCI_SETSELBACK, 1, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
+    SendMessageA(state->editor, SCI_SETCARETFORE, 0, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
     SendMessageA(state->editor, SCI_SETINDENT, state->preferences.editor.tab_width, 0);
     SendMessageA(state->editor, SCI_SETUSETABS, state->preferences.editor.insert_spaces ? 0 : 1, 0);
     SendMessageA(state->editor, SCI_SETWRAPMODE, state->preferences.editor.word_wrap ? 1 : 0, 0);
     SendMessageA(state->editor, SCI_SETVIEWWS, state->preferences.editor.show_whitespace ? 1 : 0, 0);
+    axyne_update_line_number_margin(state);
+    axyne_update_brace_highlight(state);
     free(font_name);
 }
 
@@ -1751,6 +1941,9 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
                          (LPARAM)doc->native_editor_document);
         }
         state->loading_editor = 0;
+        axyne_apply_editor_lexer(state, doc);
+        axyne_update_line_number_margin(state);
+        axyne_update_brace_highlight(state);
     }
     axyne_refresh_action_controls(state);
     return 1;
@@ -2308,6 +2501,33 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     DestroyMenu(menu);
 }
 
+static void axyne_edit_popup(HWND window, AxyneWindowState *state)
+{
+    HMENU menu = CreatePopupMenu();
+    UINT has_editor = state->editor != NULL ? MF_ENABLED : MF_GRAYED;
+    if (menu == NULL) return;
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_UNDO, L"Undo\tCtrl+Z");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_REDO, L"Redo\tCtrl+Y");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_CUT, L"Cut\tCtrl+X");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_COPY, L"Copy\tCtrl+C");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_PASTE, L"Paste\tCtrl+V");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_SELECT_ALL, L"Select All\tCtrl+A");
+    EnableMenuItem(menu, AXYNE_CMD_UNDO, MF_BYCOMMAND | has_editor);
+    EnableMenuItem(menu, AXYNE_CMD_REDO, MF_BYCOMMAND | has_editor);
+    EnableMenuItem(menu, AXYNE_CMD_CUT, MF_BYCOMMAND | has_editor);
+    EnableMenuItem(menu, AXYNE_CMD_COPY, MF_BYCOMMAND | has_editor);
+    EnableMenuItem(menu, AXYNE_CMD_PASTE, MF_BYCOMMAND | has_editor);
+    EnableMenuItem(menu, AXYNE_CMD_SELECT_ALL, MF_BYCOMMAND | has_editor);
+    {
+        POINT point = {80, AXYNE_TOP_MENU};
+        ClientToScreen(window, &point);
+        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                       point.x, point.y, 0, window, NULL);
+    }
+    DestroyMenu(menu);
+}
+
 static void axyne_fill(HDC dc, int left, int top, int right, int bottom,
                        COLORREF color)
 {
@@ -2357,13 +2577,32 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
         return;
     }
 
+    SetWindowTextW(state->editor, L"Source editor");
+    state->lexilla_module = LoadLibraryExW(
+        L"Lexilla.dll", NULL,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (state->lexilla_module != NULL) {
+        state->create_lexer = (AxyneCreateLexer)(uintptr_t)GetProcAddress(
+            state->lexilla_module, "CreateLexer");
+        if (state->create_lexer == NULL) {
+            FreeLibrary(state->lexilla_module);
+            state->lexilla_module = NULL;
+        }
+    }
+
     SendMessageA(state->editor, SCI_SETCODEPAGE, 65001, 0);
     SendMessageA(state->editor, SCI_SETWRAPMODE, 0, 0);
-    SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, 44);
+    SendMessageA(state->editor, SCI_SETMARGINTYPEN, 0, 1);
+    SendMessageA(state->editor, SCI_SETMARGINMASKN, 0, 0);
+    SendMessageA(state->editor, SCI_SETMARGINSENSITIVEN, 0, 0);
     SendMessageA(state->editor, SCI_STYLECLEARALL, 0, 0);
     SendMessageA(state->editor, SCI_STYLESETSIZE, 32, 11);
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)"Cascadia Mono");
+    SendMessageA(state->editor, SCI_SETINDENTATIONGUIDES, 3, 0);
+    SendMessageA(state->editor, SCI_SETBACKSPACEUNINDENTS, 1, 0);
+    SendMessageA(state->editor, SCI_SETTABINDENTS, 1, 0);
+    SendMessageA(state->editor, SCI_SETCARETLINEVISIBLE, 0, 0);
 }
 
 static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
@@ -2566,6 +2805,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_show_document(state, state->documents.active_index);
         axyne_update_title(window, state);
         axyne_layout(window, state);
+        if (state->editor != NULL) SetFocus(state->editor);
         return 0;
     }
     case WM_SIZE:
@@ -2590,6 +2830,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         int y = GET_Y_LPARAM(l_param);
         if (y < AXYNE_TOP_MENU && x < 80) {
             axyne_file_popup(window, state);
+            return 0;
+        }
+        if (y < AXYNE_TOP_MENU && x < 160) {
+            axyne_edit_popup(window, state);
             return 0;
         }
         if (x < AXYNE_SIDEBAR &&
@@ -2716,6 +2960,17 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_git_start(window, state, "All changes unstaged.", command);
         else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
         else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
+        else if (state->editor != NULL &&
+                 (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO ||
+                  command == AXYNE_CMD_CUT || command == AXYNE_CMD_COPY ||
+                  command == AXYNE_CMD_PASTE)) {
+            UINT message_id = command == AXYNE_CMD_UNDO ? WM_UNDO :
+                command == AXYNE_CMD_CUT ? WM_CUT :
+                command == AXYNE_CMD_COPY ? WM_COPY :
+                command == AXYNE_CMD_PASTE ? WM_PASTE : WM_REDO;
+            SendMessageW(state->editor, message_id, 0, 0);
+        } else if (command == AXYNE_CMD_SELECT_ALL && state->editor != NULL)
+            SendMessageA(state->editor, 2013, 0, 0);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
             axyne_workspace_operation(window, state, command);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
@@ -2804,6 +3059,16 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_NOTIFY: {
         NMHDR *header = (NMHDR *)l_param;
+        const AxyneScNotificationPrefix *notification =
+            (const AxyneScNotificationPrefix *)l_param;
+        if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_CHARADDED &&
+            !state->loading_editor)
+            axyne_auto_indent(state, notification);
+        if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_UPDATEUI &&
+            !state->loading_editor) {
+            axyne_update_line_number_margin(state);
+            axyne_update_brace_highlight(state);
+        }
         if (header != NULL && header->code == SCN_MODIFIED &&
             !state->loading_editor) {
             AxyneDocument *doc = axyne_active(state);
@@ -2903,6 +3168,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             if (state->editor != NULL) {
                 DestroyWindow(state->editor);
+            }
+            if (state->lexilla_module != NULL) {
+                FreeLibrary(state->lexilla_module);
             }
             axyne_documents_destroy(&state->documents);
             if (state->scintilla_module != NULL) {

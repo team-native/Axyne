@@ -41,6 +41,52 @@ if(NOT axyne_scintilla_POPULATED)
     cmake_policy(POP)
 endif()
 
+# Scintilla 5 keeps language lexers in the companion Lexilla library. Build
+# only the platform-native shared library so the editor can load lexers on
+# demand without moving any C++ editor dependency into the shared C core.
+if(WIN32 OR APPLE)
+    FetchContent_Declare(axyne_lexilla
+        GIT_REPOSITORY https://github.com/ScintillaOrg/lexilla.git
+        GIT_TAG        3e6f317eed854bc312b4c4453206189d381c7ae7
+        GIT_PROGRESS   TRUE
+    )
+    FetchContent_GetProperties(axyne_lexilla)
+    if(NOT axyne_lexilla_POPULATED)
+        cmake_policy(PUSH)
+        if(POLICY CMP0169)
+            cmake_policy(SET CMP0169 OLD)
+        endif()
+        FetchContent_Populate(axyne_lexilla)
+        cmake_policy(POP)
+    endif()
+    enable_language(CXX)
+    file(GLOB AXYNE_LEXILLA_SOURCES CONFIGURE_DEPENDS
+        "${axyne_lexilla_SOURCE_DIR}/src/*.cxx"
+        "${axyne_lexilla_SOURCE_DIR}/lexlib/*.cxx"
+        "${axyne_lexilla_SOURCE_DIR}/lexers/*.cxx"
+    )
+    add_library(axyne_lexilla SHARED ${AXYNE_LEXILLA_SOURCES})
+    set_target_properties(axyne_lexilla PROPERTIES
+        OUTPUT_NAME "Lexilla"
+        PREFIX ""
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+    target_include_directories(axyne_lexilla SYSTEM PRIVATE
+        "${axyne_lexilla_SOURCE_DIR}/include"
+        "${axyne_lexilla_SOURCE_DIR}/lexlib"
+        "${axyne_scintilla_SOURCE_DIR}/include"
+    )
+    if(MSVC)
+        target_compile_options(axyne_lexilla PRIVATE /utf-8)
+        target_link_options(axyne_lexilla PRIVATE
+            "/DEF:${axyne_lexilla_SOURCE_DIR}/src/Lexilla.def")
+    else()
+        target_compile_options(axyne_lexilla PRIVATE -fvisibility=hidden)
+    endif()
+endif()
+
 add_library(axyne_core STATIC
     src/core/app.c
 )
@@ -110,13 +156,18 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/axyne_version.rc"
     )
     target_link_libraries(axyne PRIVATE axyne_core user32)
-    add_dependencies(axyne axyne_scintilla)
+    add_dependencies(axyne axyne_scintilla axyne_lexilla)
     add_custom_command(TARGET axyne POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${AXYNE_SCINTILLA_DLL}" "$<TARGET_FILE_DIR:axyne>/Scintilla.dll"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:axyne_lexilla>" "$<TARGET_FILE_DIR:axyne>/Lexilla.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${axyne_scintilla_SOURCE_DIR}/License.txt"
             "$<TARGET_FILE_DIR:axyne>/Scintilla-LICENSE.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${axyne_lexilla_SOURCE_DIR}/License.txt"
+            "$<TARGET_FILE_DIR:axyne>/Lexilla-LICENSE.txt"
         VERBATIM
     )
 elseif(APPLE)
@@ -172,18 +223,24 @@ elseif(APPLE)
         @ONLY
     )
     target_link_libraries(axyne PRIVATE axyne_core "-framework AppKit")
-    add_dependencies(axyne axyne_scintilla)
+    add_dependencies(axyne axyne_scintilla axyne_lexilla)
     add_custom_command(TARGET axyne POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${AXYNE_SCINTILLA_FRAMEWORK}"
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Scintilla.framework"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:axyne_lexilla>"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Frameworks/Lexilla.dylib"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${axyne_scintilla_SOURCE_DIR}/License.txt"
             "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/Scintilla-LICENSE.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${axyne_lexilla_SOURCE_DIR}/License.txt"
+            "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/Lexilla-LICENSE.txt"
         VERBATIM
     )
 else()
@@ -225,9 +282,19 @@ if(WIN32 OR APPLE)
             DESTINATION .
             CONFIGURATIONS Release
         )
+        install(TARGETS axyne_lexilla
+            RUNTIME DESTINATION .
+            CONFIGURATIONS Release
+        )
         install(FILES
             "${axyne_scintilla_SOURCE_DIR}/License.txt"
             RENAME Scintilla-LICENSE.txt
+            DESTINATION .
+            CONFIGURATIONS Release
+        )
+        install(FILES
+            "${axyne_lexilla_SOURCE_DIR}/License.txt"
+            RENAME Lexilla-LICENSE.txt
             DESTINATION .
             CONFIGURATIONS Release
         )
@@ -246,6 +313,17 @@ if(WIN32 OR APPLE)
         install(PROGRAMS
             "${CMAKE_CURRENT_BINARY_DIR}/Uninstall ${AXYNE_DISPLAY_NAME}.command"
             DESTINATION .
+            CONFIGURATIONS Release
+        )
+        install(TARGETS axyne_lexilla
+            LIBRARY DESTINATION
+                "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks"
+            CONFIGURATIONS Release
+        )
+        install(FILES
+            "${axyne_lexilla_SOURCE_DIR}/License.txt"
+            RENAME Lexilla-LICENSE.txt
+            DESTINATION "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Resources"
             CONFIGURATIONS Release
         )
         # CMake's bundle install traversal preserves the framework layout but
