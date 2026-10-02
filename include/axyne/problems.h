@@ -193,6 +193,26 @@ AxyneStatus axyne_problems_rows(const AxyneProblemList *list,
                                 AxyneError *error);
 void axyne_problems_rows_destroy(AxyneProblemRow *rows, size_t count);
 
+/* ---- build output --------------------------------------------------------- */
+
+/* Parses one line of compiler output. Recognized (an ANSI colour escape is
+ * stripped, a trailing "\r"/"\n" is ignored, lines longer than 16 KiB are
+ * truncated):
+ *   gcc/clang: path:line:col: error|fatal error|warning|note|remark: message [-Wflag]
+ *              path:line: warning: message          (column 1)
+ *   MSVC:      path(line,col): error C2065: message
+ *              path(line): warning C4244: message
+ *              (also "1>" MSBuild prefixes and a trailing " [project.vcxproj]")
+ * Paths may start with a drive letter ("C:\x\y.c", "C:/x/y.c"). note and
+ * remark map to information. On success returns 1 and fills `*out` (origin
+ * BUILD, source "gnu" or "msvc", code "-Wflag" / "C2065" or "") with owned
+ * strings that the caller releases with axyne_problem_destroy; otherwise
+ * returns 0 and leaves `*out` zeroed. Lines that merely mention "error" are
+ * not diagnostics. The path is returned exactly as printed; resolve relative
+ * paths with axyne_problems_resolve_path. */
+int axyne_problems_parse_build_line(const char *line, size_t length,
+                                    AxyneProblem *out);
+
 #ifdef __cplusplus
 }
 #endif
