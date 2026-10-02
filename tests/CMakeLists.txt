@@ -104,10 +104,10 @@ elseif(WIN32)
     add_dependencies(axyne_editor_runtime_tests axyne)
     add_custom_command(TARGET axyne_editor_runtime_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE_DIR:axyne>/Scintilla.dll"
+            "${AXYNE_SCINTILLA_DLL}"
             "$<TARGET_FILE_DIR:axyne_editor_runtime_tests>/Scintilla.dll"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE_DIR:axyne>/Lexilla.dll"
+            "$<TARGET_FILE:axyne_lexilla>"
             "$<TARGET_FILE_DIR:axyne_editor_runtime_tests>/Lexilla.dll"
         VERBATIM)
     add_test(NAME axyne-editor-runtime COMMAND $<TARGET_FILE:axyne_editor_runtime_tests>)
