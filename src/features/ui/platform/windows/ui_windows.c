@@ -89,6 +89,7 @@ static COLORREF AXYNE_ACCENT;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
+typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
 
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
@@ -282,7 +283,6 @@ static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
-typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
 
 static wchar_t *axyne_wide(const char *utf8)
 {
