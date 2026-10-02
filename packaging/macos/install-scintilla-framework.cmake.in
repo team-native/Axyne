@@ -4,6 +4,11 @@ set(_axyne_framework_destination
 set(_axyne_framework_target
     "${_axyne_framework_destination}/Scintilla.framework")
 
+if(DEFINED CMAKE_INSTALL_CONFIG_NAME
+   AND NOT CMAKE_INSTALL_CONFIG_NAME STREQUAL "Release")
+    return()
+endif()
+
 if(NOT EXISTS "${_axyne_framework_source}")
     message(FATAL_ERROR
         "Scintilla.framework source is missing: ${_axyne_framework_source}")
