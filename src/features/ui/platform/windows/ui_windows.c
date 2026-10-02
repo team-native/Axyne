@@ -71,6 +71,10 @@ static COLORREF AXYNE_RUN_TEXT;
 static int AXYNE_REFERENCE;
 static COLORREF AXYNE_MENU_BG;
 static COLORREF AXYNE_MENU_ACTIVE;
+static COLORREF AXYNE_ICON;
+static COLORREF AXYNE_ICON_OFF;
+static COLORREF AXYNE_PLACEHOLDER;
+static COLORREF AXYNE_SHORTCUT;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -85,6 +89,12 @@ typedef struct AxyneWindowState {
     HFONT code_font;
     HFONT badge_font;
     HFONT tab_badge_font;
+    HFONT font_small;   /* 11px: toolbar chips, explorer header, panel tabs */
+    HFONT font_tiny;    /* 10px: shortcut hints */
+    HFONT font_bold;    /* 11px bold: accent run label */
+    HFONT font_glyph13; /* 13px: tab close glyph, toolbar glyphs */
+    HFONT font_glyph14; /* 14px: toolbar glyphs */
+    HFONT font_dot;     /* 7px: dirty marker */
     AxyneDocumentSet documents;
     AxyneExplorer explorer;
     AxyneWatcher *watcher;
@@ -327,6 +337,10 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
     AXYNE_REFERENCE = 0;
     AXYNE_MENU_BG = AXYNE_BG;
     AXYNE_MENU_ACTIVE = AXYNE_BORDER;
+    AXYNE_ICON = AXYNE_TEXT;
+    AXYNE_ICON_OFF = AXYNE_MUTED;
+    AXYNE_PLACEHOLDER = AXYNE_MUTED;
+    AXYNE_SHORTCUT = AXYNE_MUTED;
     if (theme->background == 0x16171a && theme->panel == 0x1f2126 &&
         theme->toolbar == 0x1c1e22) {
         AXYNE_BUTTON_BG = axyne_theme_color(0x24262b);
@@ -340,6 +354,10 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
         AXYNE_REFERENCE = 1;
         AXYNE_MENU_BG = axyne_theme_color(0x131417);
         AXYNE_MENU_ACTIVE = axyne_theme_color(0x2a2e35);
+        AXYNE_ICON = axyne_theme_color(0x737780);
+        AXYNE_ICON_OFF = axyne_theme_color(0x4f535b);
+        AXYNE_PLACEHOLDER = axyne_theme_color(0x4f535b);
+        AXYNE_SHORTCUT = axyne_theme_color(0x6c727c);
     }
     if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
         DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
@@ -2475,6 +2493,13 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
     free(query); free(root);
 }
 
+static HFONT axyne_make_ui_font(int height, int weight)
+{
+    return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
 enum { AXYNE_MENU_COUNT = 7 };
 static const wchar_t *const AXYNE_MENU_LABELS[AXYNE_MENU_COUNT] = {
     L"파일(F)", L"편집(E)", L"보기(V)", L"빌드(B)", L"디버그(D)", L"도구(T)",
@@ -2693,6 +2718,13 @@ static void axyne_fill(HDC dc, int left, int top, int right, int bottom,
     }
 }
 
+static COLORREF axyne_blend(COLORREF from, COLORREF to, int percent)
+{
+    return RGB((GetRValue(from) * (100 - percent) + GetRValue(to) * percent) / 100,
+               (GetGValue(from) * (100 - percent) + GetGValue(to) * percent) / 100,
+               (GetBValue(from) * (100 - percent) + GetBValue(to) * percent) / 100);
+}
+
 /* Rounded rectangle with a 1px outline; pass the fill colour as the border
  * for borderless shapes. The right/bottom edges are exclusive, like FillRect. */
 static void axyne_round_fill(HDC dc, int left, int top, int right, int bottom,
@@ -2760,25 +2792,66 @@ static const UINT AXYNE_TOOLBAR_COMMANDS[] = {
     AXYNE_CMD_RUN, AXYNE_CMD_QUICK_FILE
 };
 
-/* Painting and command dispatch share these exact button bounds. */
-static RECT axyne_toolbar_rect(size_t index, int width)
+/* Run-target label: the configured runner's file name, or a prompt. The
+ * caller owns the returned string. */
+static wchar_t *axyne_runner_label(const AxyneWindowState *state)
 {
-    static const int lefts[] = {8, 38, 68, 114, 144, 184, 342, 454};
-    static const int widths[] = {28, 28, 28, 28, 28, 150, 104, 92};
-    RECT rect = {0, AXYNE_TOP_MENU + 6, 0, AXYNE_TOP_MENU + 32};
-    if (index < sizeof(lefts) / sizeof(*lefts)) {
-        rect.left = lefts[index];
-        rect.right = rect.left + widths[index];
-        if (index < 5) {
-            --rect.top;
-            ++rect.bottom;
-        }
-    } else {
-        rect.left = width - 352;
-        rect.right = width - 12;
-        if (rect.left < 558) rect.left = rect.right;
+    const char *name;
+    const char *slash;
+    const char *backslash;
+    wchar_t *label;
+    if (state->action_runner.executable == NULL) return axyne_wide("실행 구성");
+    name = state->action_runner.executable;
+    slash = strrchr(name, '/');
+    backslash = strrchr(name, '\\');
+    if (slash != NULL) name = slash + 1;
+    if (backslash != NULL && backslash + 1 > name) name = backslash + 1;
+    label = axyne_wide(name);
+    return label != NULL ? label : axyne_wide("실행 구성");
+}
+
+enum { AXYNE_TOOLBAR_BUTTONS = 9, AXYNE_TOOLBAR_SEARCH_WIDTH = 340 };
+
+/* Figma toolbar (38px): 8px inset, three 28px file tools, 4px, undo/redo,
+ * 4px, then run chips separated by 8px. The search field is right aligned
+ * and disappears when it would collide with the chips. Painting and click
+ * dispatch share these exact bounds. */
+static void axyne_toolbar_layout(AxyneWindowState *state, int width,
+                                 RECT rects[AXYNE_TOOLBAR_BUTTONS])
+{
+    static const int icon_lefts[] = {8, 38, 68, 100, 130};
+    wchar_t *runner = axyne_runner_label(state);
+    int runner_width = runner != NULL ? axyne_measure_text(state->font_small, runner) : 0;
+    int x;
+    size_t i;
+    if (runner_width > 160) runner_width = 160;
+    for (i = 0; i < 5; ++i) {
+        rects[i].left = icon_lefts[i];
+        rects[i].right = icon_lefts[i] + 28;
+        rects[i].top = AXYNE_TOP_MENU + 5;
+        rects[i].bottom = rects[i].top + 28;
     }
-    return rect;
+    x = 162;
+    rects[5].left = x;
+    rects[5].right = x + 10 + axyne_measure_text(state->font_small, L"▷") + 6 +
+        runner_width + 6 + axyne_measure_text(state->font_tiny, L"⌄") + 10;
+    x = rects[5].right + 8;
+    rects[6].left = x;
+    rects[6].right = x + 14 + axyne_measure_text(state->font_small, L"빌드  Ctrl+B") + 14;
+    x = rects[6].right + 8;
+    rects[7].left = x;
+    rects[7].right = x + 14 + axyne_measure_text(state->font_small, L"▷") + 6 +
+        axyne_measure_text(state->font_bold, L"실행  F5") + 14;
+    for (i = 5; i < 8; ++i) {
+        rects[i].top = AXYNE_TOP_MENU + 6;
+        rects[i].bottom = rects[i].top + 26;
+    }
+    rects[8].right = width - 8;
+    rects[8].left = rects[8].right - AXYNE_TOOLBAR_SEARCH_WIDTH;
+    rects[8].top = AXYNE_TOP_MENU + 6;
+    rects[8].bottom = rects[8].top + 26;
+    if (rects[8].left < rects[7].right + 8) rects[8].left = rects[8].right;
+    free(runner);
 }
 
 static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
@@ -3001,52 +3074,66 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         }
     }
     {
-        const wchar_t *labels[] = {L"▱", L"▰", L"▣", L"↶", L"↷",
-            L"실행 구성", L"빌드", L"▷ 실행"};
+        static const wchar_t *const icons[] = {L"▱", L"▰", L"▣", L"↶", L"↷"};
+        RECT rects[AXYNE_TOOLBAR_BUTTONS];
+        wchar_t *runner = axyne_runner_label(state);
         size_t i;
-        for (i = 0; i < sizeof(labels) / sizeof(*labels); ++i) {
-            RECT rect = axyne_toolbar_rect(i, width);
-            RECT text_rect = rect;
+        axyne_toolbar_layout(state, width, rects);
+        for (i = 0; i < 5; ++i) {
             COLORREF color = axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i])
-                ? AXYNE_TEXT : AXYNE_MUTED;
-            wchar_t *runner = NULL;
-            if (i >= 5) {
-                axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom,
-                           i == 7 ? AXYNE_ACCENT : AXYNE_BUTTON_BG);
-                text_rect.left += 8;
-                text_rect.right -= i == 5 ? 20 : 44;
-            }
-            if (i == 5 && state->action_runner.executable != NULL) {
-                const char *name = state->action_runner.executable;
-                const char *slash = strrchr(name, '/');
-                const char *backslash = strrchr(name, '\\');
-                if (slash != NULL) name = slash + 1;
-                if (backslash != NULL && backslash + 1 > name) name = backslash + 1;
-                runner = axyne_wide(name);
-            }
-            if (i == 7) color = AXYNE_RUN_TEXT;
-            axyne_text_rect(dc, state->ui_font, color, text_rect,
-                           runner != NULL ? runner : labels[i], i < 5 ? DT_CENTER : DT_LEFT);
-            free(runner);
-            if (i >= 5) {
-                RECT hint = {rect.right - (i == 5 ? 20 : 44), rect.top,
-                             rect.right - 8, rect.bottom};
-                axyne_text_rect(dc, state->ui_font, i == 7 ? AXYNE_RUN_TEXT : AXYNE_MUTED,
-                    hint, i == 5 ? L"▾" : i == 6 ? L"Ctrl+B" : L"F5", DT_RIGHT);
-            }
+                ? AXYNE_ICON : AXYNE_ICON_OFF;
+            axyne_text_rect(dc, i == 0 || i >= 3 ? state->font_glyph14 : state->font_glyph13,
+                            color, rects[i], icons[i], DT_CENTER);
         }
-        axyne_fill(dc, 104, AXYNE_TOP_MENU + 9, 105, AXYNE_TOP_MENU + 29, AXYNE_BORDER);
-        axyne_fill(dc, 178, AXYNE_TOP_MENU + 9, 179, AXYNE_TOP_MENU + 29, AXYNE_BORDER);
         {
-            RECT rect = axyne_toolbar_rect(8, width);
-            if (rect.right > rect.left) {
-                RECT label = {rect.left + 12, rect.top, rect.right - 62, rect.bottom};
-                RECT hint = {rect.right - 60, rect.top, rect.right - 10, rect.bottom};
-                axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom, AXYNE_SEARCH_BORDER);
-                axyne_fill(dc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1, AXYNE_BG);
-                axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, label, L"⌕  파일 이동", DT_LEFT);
-                axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, hint, L"Ctrl+P", DT_RIGHT);
-            }
+            RECT rect = rects[5];
+            RECT part = {rect.left + 10, rect.top, rect.right, rect.bottom};
+            int arrow = axyne_measure_text(state->font_tiny, L"⌄");
+            axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 3,
+                             AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
+            axyne_text_rect(dc, state->font_small, AXYNE_TEXT, part, L"▷", DT_LEFT);
+            part.left += axyne_measure_text(state->font_small, L"▷") + 6;
+            part.right = rect.right - 10 - arrow - 6;
+            axyne_text_rect(dc, state->font_small, AXYNE_MUTED, part,
+                            runner != NULL ? runner : L"실행 구성", DT_LEFT);
+            part.left = rect.right - 10 - arrow;
+            part.right = rect.right - 10;
+            axyne_text_rect(dc, state->font_tiny, AXYNE_MUTED, part, L"⌄", DT_LEFT);
+        }
+        {
+            COLORREF color = axyne_toolbar_enabled(state, AXYNE_CMD_BUILD)
+                ? AXYNE_TEXT : AXYNE_MUTED;
+            axyne_round_fill(dc, rects[6].left, rects[6].top, rects[6].right,
+                             rects[6].bottom, 3, AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
+            axyne_text_rect(dc, state->font_small, color, rects[6], L"빌드  Ctrl+B",
+                            DT_CENTER);
+        }
+        {
+            RECT rect = rects[7];
+            RECT part = {rect.left + 14, rect.top, rect.right - 14, rect.bottom};
+            COLORREF color = axyne_toolbar_enabled(state, AXYNE_CMD_RUN)
+                ? AXYNE_RUN_TEXT : axyne_blend(AXYNE_RUN_TEXT, AXYNE_ACCENT, 45);
+            axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 4,
+                             AXYNE_ACCENT, AXYNE_ACCENT);
+            axyne_text_rect(dc, state->font_small, color, part, L"▷", DT_LEFT);
+            part.left += axyne_measure_text(state->font_small, L"▷") + 6;
+            axyne_text_rect(dc, state->font_bold, color, part, L"실행  F5", DT_LEFT);
+        }
+        free(runner);
+        if (rects[8].right > rects[8].left) {
+            RECT rect = rects[8];
+            RECT part = {rect.left + 10, rect.top, rect.right - 10, rect.bottom};
+            int shortcut = axyne_measure_text(state->font_tiny, L"Ctrl+P");
+            axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 4,
+                             AXYNE_BG, AXYNE_SEARCH_BORDER);
+            axyne_text_rect(dc, state->ui_font, AXYNE_ICON, part, L"⌕", DT_LEFT);
+            part.left += axyne_measure_text(state->ui_font, L"⌕") + 8;
+            part.right = rect.right - 10 - shortcut - 8;
+            axyne_text_rect(dc, state->font_small, AXYNE_PLACEHOLDER, part,
+                            L"파일 이동", DT_LEFT);
+            part.left = rect.right - 10 - shortcut;
+            part.right = rect.right - 10;
+            axyne_text_rect(dc, state->font_tiny, AXYNE_SHORTCUT, part, L"Ctrl+P", DT_RIGHT);
         }
     }
     int tab_left = AXYNE_SIDEBAR;
@@ -3175,6 +3262,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->tab_badge_font = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
+        state->font_small = axyne_make_ui_font(-11, FW_NORMAL);
+        state->font_tiny = axyne_make_ui_font(-10, FW_NORMAL);
+        state->font_bold = axyne_make_ui_font(-11, FW_BOLD);
+        state->font_glyph13 = axyne_make_ui_font(-13, FW_NORMAL);
+        state->font_glyph14 = axyne_make_ui_font(-14, FW_NORMAL);
+        state->font_dot = axyne_make_ui_font(-7, FW_NORMAL);
         axyne_open_scintilla(state, window, instance);
         axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
@@ -3230,9 +3323,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
         }
         if (y >= AXYNE_TOP_MENU && y < AXYNE_TOP_MENU + AXYNE_TOOLBAR) {
+            RECT rects[AXYNE_TOOLBAR_BUTTONS];
             size_t i;
+            axyne_toolbar_layout(state, client.right, rects);
             for (i = 0; i < sizeof(AXYNE_TOOLBAR_COMMANDS) / sizeof(*AXYNE_TOOLBAR_COMMANDS); ++i) {
-                RECT rect = axyne_toolbar_rect(i, client.right);
+                RECT rect = rects[i];
                 if (PtInRect(&rect, point)) {
                     if (axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i]))
                         SendMessageW(window, WM_COMMAND, AXYNE_TOOLBAR_COMMANDS[i], 0);
@@ -3718,6 +3813,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->code_font != NULL) DeleteObject(state->code_font);
             if (state->badge_font != NULL) DeleteObject(state->badge_font);
             if (state->tab_badge_font != NULL) DeleteObject(state->tab_badge_font);
+            if (state->font_small != NULL) DeleteObject(state->font_small);
+            if (state->font_tiny != NULL) DeleteObject(state->font_tiny);
+            if (state->font_bold != NULL) DeleteObject(state->font_bold);
+            if (state->font_glyph13 != NULL) DeleteObject(state->font_glyph13);
+            if (state->font_glyph14 != NULL) DeleteObject(state->font_glyph14);
+            if (state->font_dot != NULL) DeleteObject(state->font_dot);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
