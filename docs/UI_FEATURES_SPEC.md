@@ -24,6 +24,16 @@ build `24:14516`, debug `24:14603`, tools `24:14695`, help `39:2402`.
 | Menus | Windows popup menus match the Figma menu frames; macOS keeps the system menu | AGENT | ASSUMED |
 | Problems ordering | problems sorted by severity, line, column; other-file groups ordered by their most severe problem, then file name (case-insensitive); groups default expanded, UI keeps the collapsed set; summary counts hints as information; list capped at 20000 problems | AGENT | ASSUMED |
 | Palette rows | file rows match the base name only (detail = directory relative to the workspace root); command rows match the Korean title and English keywords and show the shortcut (Ctrl or Cmd) as detail; symbol rows show kind badge f/#/T/v and "줄 N"; shortcuts follow the existing accelerators, macOS may differ per entry | AGENT | ASSUMED |
+| Problems icon colors | error #ec6a72, warning #e5a445, information #7db5e3, hint #666c76 (information glyph); the Figma SVG stroke colors could not be fetched, the values come from the Figma text colors of the same node and the task brief; icons are drawn natively (outline circle-x, triangle-alert, info, chevrons, filter) | AGENT | ASSUMED |
+| Problems build feed | the build and the run action both feed stdout and stderr (split on newlines across chunks, streams kept apart) through the build parser; the BUILD problems are cleared when either starts and the partial last line is parsed when the process exits; the raw output tab is unchanged | AGENT | ASSUMED |
+| Problems path and columns | relative build paths resolve against the runner working directory, else the workspace root; LSP columns are UTF-16 units and converted to a byte offset in the line, build columns are bytes; both clamp to the line end | AGENT | ASSUMED |
+| Problems lifetime | LSP problems of a file are replaced on every publishDiagnostics and removed when its document closes; BUILD problems stay until the next build or run | AGENT | ASSUMED |
+| Problems refresh | model changes from streaming output or LSP are coalesced into one list rebuild per 150 ms; switching the active document, filter edits and collapsing rebuild immediately; the selected row is kept by kind, path, line, column and message | AGENT | ASSUMED |
+| Problems interaction | click selects and activates (problem opens the file and centers the caret line in the editor, focus moves to the editor; group toggles); Up/Down/Enter work in the list and in the filter field; Esc clears the filter; wheel scrolls the list; the problems tab takes keyboard focus when selected | AGENT | ASSUMED |
+| Problems tab label | "문제" without problems, "문제  N" with N = errors+warnings+information+hints; the tab box widens and the terminal tab moves right | USER (Figma) | CONFIRMED |
+| Problems LSP status text | macOS no longer shows the LSP status string in the panel (it is the tooltip of the list); Windows keeps it in the status bar | AGENT | ASSUMED |
+| Problems editor squiggles | not implemented (no INDIC_SQUIGGLE marks in the editor); needs invalidation on every edit and per-theme indicator colors | AGENT | ASSUMED |
+| Problems Windows filter | the filter edit is shown only while it has text or focus; otherwise the shell paints the placeholder (no comctl32 v6 cue banner without a manifest) | AGENT | ASSUMED |
 
 ## Workflow rules (from AGENTS.md)
 
