@@ -174,6 +174,25 @@ void axyne_preferences_select_theme(AxyneThemePreferences *theme,
 void axyne_preferences_restore_binding(AxynePreferences *preferences,
                                        AxynePreferenceAction action);
 
+/* Change tracking for settings editors. Returns the field bits whose value
+ * differs between `before` and `after` (a preset change reports only
+ * AXYNE_PREFERENCE_THEME_PRESET; individual palette colors are reported only
+ * when they differ on their own). When `bindings_changed` is not NULL it
+ * receives, per action, whether key, modifiers or enabled differ. */
+uint32_t axyne_preferences_changed_fields(
+    const AxynePreferences *before, const AxynePreferences *after,
+    unsigned char bindings_changed[AXYNE_ACTION_COUNT]);
+
+/* Builds the profile an editor must persist. `base` is the profile as it was
+ * when editing started (for a workspace its present_fields and
+ * binding_present describe what the workspace file already overrides).
+ * Global profiles are written completely. Workspace profiles keep the
+ * existing overrides and add only what the user changed. */
+void axyne_preferences_prepare_save(AxynePreferences *out,
+                                    const AxynePreferences *base,
+                                    const AxynePreferences *edited,
+                                    int workspace);
+
 const AxyneKeyBinding *axyne_preferences_find_binding(
     const AxynePreferences *preferences, AxynePreferenceAction action);
 const char *axyne_preferences_action_name(AxynePreferenceAction action);
