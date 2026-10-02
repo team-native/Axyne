@@ -271,6 +271,19 @@ static intptr_t axyne_editor_color(uint32_t rgb)
     return (intptr_t)(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff));
 }
 
+/* Subtle current-line tint: editor background nudged 8% toward the text. */
+static uint32_t axyne_macos_caret_line_color(const AxyneThemePreferences *theme)
+{
+    uint32_t result = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+        uint32_t back = (theme->editor_background >> shift) & 0xffu;
+        uint32_t text = (theme->editor_text >> shift) & 0xffu;
+        uint32_t mixed = (back * 92u + text * 8u) / 100u;
+        result |= (mixed & 0xffu) << shift;
+    }
+    return result;
+}
+
 static void axyne_macos_select_theme(AxyneThemePreferences *theme,
                                      AxyneThemePreset preset)
 {
@@ -1091,6 +1104,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     NSInteger width;
     char digits[32];
     if (_editorView == nil) return;
+    if (!_preferences.editor.line_numbers) {
+        (void)[self sendEditorMessage:SCI_SETMARGINWIDTHN wParam:0 lParam:0];
+        return;
+    }
     lineCount = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
     if (lineCount < 1) lineCount = 1;
     (void)snprintf(digits, sizeof(digits), "%lld", (long long)lineCount);
@@ -1148,6 +1165,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     unsigned int tabWidth = _preferences.editor.tab_width;
     int lastCharacter = 0;
     if (_editorView == nil || notification == NULL) return;
+    if (!_preferences.editor.auto_indent) return;
     if (tabWidth == 0) tabWidth = 4;
     if (notification->ch == '\n') {
         line = [self sendEditorMessage:SCI_LINEFROMPOSITION
@@ -1294,6 +1312,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
         [self sendEditorMessage:SCI_SETWRAPMODE wParam:_preferences.editor.word_wrap ? 1 : 0 lParam:0];
         [self sendEditorMessage:SCI_SETVIEWWS wParam:_preferences.editor.show_whitespace ? 1 : 0 lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEBACK
+                         wParam:(uintptr_t)axyne_editor_color(axyne_macos_caret_line_color(&_preferences.theme))
+                         lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEVISIBLE
+                         wParam:_preferences.editor.highlight_current_line ? 1 : 0
+                         lParam:0];
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
         [self applyEditorLexer];
