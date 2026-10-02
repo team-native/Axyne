@@ -2964,11 +2964,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                  (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO ||
                   command == AXYNE_CMD_CUT || command == AXYNE_CMD_COPY ||
                   command == AXYNE_CMD_PASTE)) {
-            UINT message_id = command == AXYNE_CMD_UNDO ? WM_UNDO :
-                command == AXYNE_CMD_CUT ? WM_CUT :
-                command == AXYNE_CMD_COPY ? WM_COPY :
-                command == AXYNE_CMD_PASTE ? WM_PASTE : WM_REDO;
-            SendMessageW(state->editor, message_id, 0, 0);
+            if (command == AXYNE_CMD_UNDO)
+                SendMessageA(state->editor, 2176, 0, 0);
+            else if (command == AXYNE_CMD_REDO)
+                SendMessageA(state->editor, 2011, 0, 0);
+            else {
+                UINT message_id = command == AXYNE_CMD_CUT ? WM_CUT :
+                    command == AXYNE_CMD_COPY ? WM_COPY : WM_PASTE;
+                SendMessageW(state->editor, message_id, 0, 0);
+            }
         } else if (command == AXYNE_CMD_SELECT_ALL && state->editor != NULL)
             SendMessageA(state->editor, 2013, 0, 0);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
