@@ -1,0 +1,89 @@
+name: Build CI
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -A x64 -DAXYNE_AUTHOR=Native
+
+      - name: Configure macOS
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAXYNE_AUTHOR=Native
+
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release --parallel
+
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        run: cmake --build build --config Release --parallel
+
+      - name: Package Windows app output
+        if: runner.os == 'Windows'
+        id: package-windows
+        run: |
+          $outputDirectory = Join-Path $env:GITHUB_WORKSPACE 'build/Release'
+          if (-not (Test-Path (Join-Path $outputDirectory 'axyne.exe'))) {
+            throw 'Windows app executable was not produced.'
+          }
+          $archive = Join-Path $env:RUNNER_TEMP 'Axyne-windows.zip'
+          Compress-Archive -Path (Join-Path $outputDirectory '*') -DestinationPath $archive -Force
+          "path=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Package macOS app bundle
+        if: runner.os == 'macOS'
+        id: package-macos
+        shell: bash
+        run: |
+          app_bundle="$(find build -type d -name '*.app' -print -quit)"
+          if [[ -z "$app_bundle" ]]; then
+            echo 'macOS app bundle was not produced.' >&2
+            exit 1
+          fi
+          archive="$RUNNER_TEMP/Axyne-macos.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$archive"
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Windows build artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Axyne-windows-${{ github.sha }}
+          path: ${{ steps.package-windows.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload macOS build artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Axyne-macos-${{ github.sha }}
+          path: ${{ steps.package-macos.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
