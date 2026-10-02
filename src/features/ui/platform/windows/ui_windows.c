@@ -2139,9 +2139,11 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
 
 static int axyne_workspace_row_at(AxyneWindowState *state, int y)
 {
-    int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + 31;
-    int row = (y - top) / 22;
-    if (y < top || row < 0 || (size_t)row >= state->explorer.count) return -1;
+    const int explorer_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + 31;
+    int row;
+    if (y < explorer_top) return -1;
+    row = (y - explorer_top) / 22;
+    if (row < 0 || (size_t)row >= state->explorer.count) return -1;
     return row;
 }
 
@@ -2743,10 +2745,20 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             toolbar_x += toolbar_width + 4;
         }
     }
-    axyne_fill(dc, width - 360, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 6,
-               width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30, AXYNE_BG);
-    axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 346,
-               AXYNE_TOP_MENU + AXYNE_TOOLBAR + 11, L"⌕  파일 이동, > 명령 실행");
+    {
+        int toolbar_right = 10 + 42 + 4 + 42 + 4 + 42 + 4 + 42 + 4 + 42 +
+            4 + 132 + 4 + 58 + 4 + 58;
+        int search_left = width - 360;
+        if (search_left < toolbar_right + 8) search_left = toolbar_right + 8;
+        if (width - search_left - 12 >= 120) {
+            axyne_fill(dc, search_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 6,
+                       width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30,
+                       AXYNE_BG);
+            axyne_text(dc, state->ui_font, AXYNE_MUTED, search_left + 14,
+                       AXYNE_TOP_MENU + AXYNE_TOOLBAR + 11,
+                       L"⌕  파일 이동, > 명령 실행");
+        }
+    }
     axyne_fill(dc, AXYNE_SIDEBAR + 20,
                AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS,
                AXYNE_SIDEBAR + 21, editor_top, AXYNE_ACCENT);
