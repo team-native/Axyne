@@ -11,6 +11,8 @@
 #include "axyne/ui.h"
 #include "axyne/document.h"
 #include "axyne/search.h"
+#include "axyne/explorer.h"
+#include "axyne/watcher.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -47,6 +49,10 @@ typedef struct AxyneWindowState {
     HFONT ui_font;
     HFONT code_font;
     AxyneDocumentSet documents;
+    AxyneExplorer explorer;
+    AxyneWatcher *watcher;
+    size_t explorer_selection;
+    int explorer_has_selection;
     int closing;
     int loading_editor;
     int editor_document_initialized;
@@ -65,7 +71,17 @@ enum { SCI_GETCURRENTPOS = 2008, SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
        AXYNE_CMD_FIND = 1100, AXYNE_CMD_REPLACE, AXYNE_CMD_SEARCH_FOLDER,
-       AXYNE_CMD_QUICK_FILE };
+       AXYNE_CMD_QUICK_FILE, AXYNE_CMD_WORKSPACE,
+       AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
+       AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE };
+
+enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21 };
+
+typedef struct AxyneExplorerMessage {
+    AxyneWatchEventKind kind;
+    char *path;
+    char *old_path;
+} AxyneExplorerMessage;
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -369,6 +385,240 @@ static char *axyne_prompt_utf8(HWND window, const wchar_t *title,
     return axyne_utf8(value);
 }
 
+static char *axyne_workspace_join(const char *parent, const char *name)
+{
+    size_t parent_length, name_length, separator;
+    char *path;
+    if (parent == NULL || name == NULL || name[0] == '\0') return NULL;
+    parent_length = strlen(parent);
+    name_length = strlen(name);
+    separator = parent_length > 0 &&
+        (parent[parent_length - 1] == '\\' || parent[parent_length - 1] == '/')
+        ? 0 : 1;
+    path = (char *)malloc(parent_length + separator + name_length + 1);
+    if (path == NULL) return NULL;
+    memcpy(path, parent, parent_length);
+    if (separator != 0) path[parent_length] = '\\';
+    memcpy(path + parent_length + separator, name, name_length + 1);
+    return path;
+}
+
+static char *axyne_workspace_parent(const char *path)
+{
+    const char *slash;
+    size_t length;
+    char *parent;
+    if (path == NULL) return NULL;
+    slash = strrchr(path, '\\');
+    {
+        const char *other = strrchr(path, '/');
+        if (other != NULL && (slash == NULL || other > slash)) slash = other;
+    }
+    if (slash == NULL) return NULL;
+    length = (size_t)(slash - path);
+    if (length == 0) length = 1;
+    parent = (char *)malloc(length + 1);
+    if (parent == NULL) return NULL;
+    memcpy(parent, path, length); parent[length] = '\0';
+    return parent;
+}
+
+static AxyneExplorerMessage *axyne_workspace_message_copy(
+    const AxyneWatchEvent *event)
+{
+    AxyneExplorerMessage *message;
+    size_t path_length, old_length = 0;
+    if (event == NULL || event->path == NULL) return NULL;
+    message = (AxyneExplorerMessage *)calloc(1, sizeof(*message));
+    if (message == NULL) return NULL;
+    path_length = strlen(event->path);
+    if (event->old_path != NULL) old_length = strlen(event->old_path);
+    message->path = (char *)malloc(path_length + 1);
+    if (old_length != 0) message->old_path = (char *)malloc(old_length + 1);
+    if (message->path == NULL || (old_length != 0 && message->old_path == NULL)) {
+        free(message->path); free(message->old_path); free(message); return NULL;
+    }
+    memcpy(message->path, event->path, path_length + 1);
+    if (message->old_path != NULL) memcpy(message->old_path, event->old_path, old_length + 1);
+    message->kind = event->kind;
+    return message;
+}
+
+static void axyne_workspace_message_destroy(AxyneExplorerMessage *message)
+{
+    if (message == NULL) return;
+    free(message->path); free(message->old_path); free(message);
+}
+
+static void CALLBACK axyne_workspace_watch_callback(const AxyneWatchEvent *event,
+                                                    void *user_data)
+{
+    AxyneExplorerMessage *message = axyne_workspace_message_copy(event);
+    HWND window = (HWND)user_data;
+    if (message == NULL || !PostMessageW(window, AXYNE_WM_EXPLORER_EVENT,
+                                          0, (LPARAM)message))
+        axyne_workspace_message_destroy(message);
+}
+
+static void axyne_workspace_show_error(HWND window, const char *prefix,
+                                       const AxyneError *error)
+{
+    char message[640];
+    (void)snprintf(message, sizeof(message), "%s: %s", prefix,
+                   error != NULL ? error->message : "operation failed");
+    MessageBoxA(window, message, "Axyne - Workspace", MB_OK | MB_ICONERROR);
+}
+
+static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
+{
+    char *root = NULL;
+    AxyneWatcher *watcher = NULL;
+    AxyneError error;
+    AxyneStatus status;
+    if (!axyne_choose_folder(window, &root)) return 0;
+    status = axyne_watcher_start(root, axyne_workspace_watch_callback, window,
+                                 &watcher, &error);
+    if (status != AXYNE_STATUS_OK) {
+        axyne_workspace_show_error(window, "Unable to watch workspace", &error);
+        free(root); return 0;
+    }
+    status = axyne_explorer_set_root(&state->explorer, root, &error);
+    if (status != AXYNE_STATUS_OK) {
+        axyne_watcher_stop(watcher); axyne_watcher_release(watcher);
+        axyne_workspace_show_error(window, "Unable to open workspace", &error);
+        free(root); return 0;
+    }
+    if (state->watcher != NULL) {
+        axyne_watcher_stop(state->watcher);
+        axyne_watcher_release(state->watcher);
+    }
+    state->watcher = watcher;
+    state->explorer_has_selection = 0;
+    free(root);
+    InvalidateRect(window, NULL, FALSE);
+    return 1;
+}
+
+static int axyne_workspace_row_at(AxyneWindowState *state, int y)
+{
+    int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + 31;
+    int row = (y - top) / 22;
+    if (y < top || row < 0 || (size_t)row >= state->explorer.count) return -1;
+    return row;
+}
+
+static void axyne_workspace_open_selected(HWND window,
+                                          AxyneWindowState *state, size_t index)
+{
+    AxyneExplorerNode *node;
+    if (index >= state->explorer.count) return;
+    node = &state->explorer.nodes[index];
+    state->explorer_selection = index; state->explorer_has_selection = 1;
+    if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+        if (axyne_explorer_toggle(&state->explorer, index, NULL) != AXYNE_STATUS_OK)
+            MessageBoxA(window, "Unable to read the workspace folder.",
+                        "Axyne - Workspace", MB_OK | MB_ICONERROR);
+    } else {
+        axyne_open_document(window, state, node->path);
+    }
+    InvalidateRect(window, NULL, FALSE);
+}
+
+static int axyne_workspace_refresh(HWND window, AxyneWindowState *state)
+{
+    AxyneError error;
+    if (state->explorer.root == NULL) return 0;
+    if (axyne_explorer_reload(&state->explorer, &error) != AXYNE_STATUS_OK) {
+        axyne_workspace_show_error(window, "Unable to refresh workspace", &error);
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
+    } else if (state->explorer_has_selection &&
+               state->explorer_selection >= state->explorer.count) {
+        state->explorer_has_selection = 0;
+    }
+    InvalidateRect(window, NULL, FALSE);
+    return 1;
+}
+
+static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
+                                      UINT command)
+{
+    AxyneExplorerNode *node = NULL;
+    const char *parent;
+    char *name = NULL, *old_path = NULL, *owned_parent = NULL;
+    AxyneError error;
+    AxyneStatus status;
+    if (command == AXYNE_CMD_WORKSPACE) {
+        (void)axyne_workspace_select_root(window, state); return;
+    }
+    if (!state->explorer.root) return;
+    if (state->explorer_has_selection && state->explorer_selection < state->explorer.count)
+        node = &state->explorer.nodes[state->explorer_selection];
+    if (node != NULL && node->path != NULL &&
+        strcmp(node->path, state->explorer.root) == 0 &&
+        (command == AXYNE_CMD_EXPLORER_RENAME ||
+         command == AXYNE_CMD_EXPLORER_REMOVE)) {
+        MessageBoxA(window, "The workspace root cannot be renamed or deleted.",
+                    "Axyne - Workspace", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    owned_parent = node != NULL && node->kind != AXYNE_FILE_KIND_DIRECTORY
+        ? axyne_workspace_parent(node->path) : NULL;
+    parent = node != NULL && node->kind == AXYNE_FILE_KIND_DIRECTORY
+        ? node->path : (node != NULL ? owned_parent : state->explorer.root);
+    if (parent == NULL) return;
+    if (command == AXYNE_CMD_EXPLORER_NEW_FILE ||
+        command == AXYNE_CMD_EXPLORER_NEW_FOLDER) {
+        name = axyne_prompt_utf8(window,
+            command == AXYNE_CMD_EXPLORER_NEW_FILE ? L"New File" : L"New Folder",
+            L"Name:");
+        if (name != NULL) {
+            if (!axyne_explorer_is_safe_child_name(name)) {
+                MessageBoxA(window,
+                    "Use one valid file or folder name without separators, . or ..",
+                    "Axyne - Workspace", MB_OK | MB_ICONWARNING);
+                free(name); free(owned_parent);
+                return;
+            }
+            status = command == AXYNE_CMD_EXPLORER_NEW_FILE
+                ? axyne_fs_create_file_at(parent, name, &error)
+                : axyne_fs_create_directory_at(parent, name, &error);
+        } else status = AXYNE_STATUS_OK;
+    } else if (node != NULL && command == AXYNE_CMD_EXPLORER_RENAME) {
+        name = axyne_prompt_utf8(window, L"Rename", L"New name:");
+        if (name != NULL && !axyne_explorer_is_safe_child_name(name)) {
+            MessageBoxA(window,
+                "Use one valid file or folder name without separators, . or ..",
+                "Axyne - Workspace", MB_OK | MB_ICONWARNING);
+            free(name); free(old_path); free(owned_parent);
+            return;
+        }
+        old_path = axyne_workspace_parent(node->path);
+        status = name == NULL ? AXYNE_STATUS_OK :
+            (old_path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
+             axyne_fs_rename_at(old_path, node->name, name, &error));
+    } else if (node != NULL && command == AXYNE_CMD_EXPLORER_REMOVE) {
+        old_path = axyne_workspace_parent(node->path);
+        status = old_path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
+            axyne_fs_remove_at(old_path, node->name, &error);
+    } else status = AXYNE_STATUS_OK;
+    if (status != AXYNE_STATUS_OK) {
+        if (status == AXYNE_STATUS_OUT_OF_MEMORY)
+            MessageBoxA(window, "Unable to allocate the requested path.",
+                        "Axyne - Workspace", MB_OK | MB_ICONERROR);
+        else axyne_workspace_show_error(window, "Workspace operation failed", &error);
+    } else if (command == AXYNE_CMD_EXPLORER_REMOVE ||
+               ((command == AXYNE_CMD_EXPLORER_NEW_FILE ||
+                 command == AXYNE_CMD_EXPLORER_NEW_FOLDER ||
+                 command == AXYNE_CMD_EXPLORER_RENAME) && name != NULL)) {
+        if (axyne_workspace_refresh(window, state)) {
+            state->explorer_has_selection = 0;
+            InvalidateRect(window, NULL, FALSE);
+        }
+    }
+    free(name); free(old_path); free(owned_parent);
+}
+
 static void axyne_find(HWND window, AxyneWindowState *state, int replace,
                        int all)
 {
@@ -547,6 +797,8 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SAVE_AS, L"Save As...");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_CLOSE, L"Close Tab\tCtrl+W");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE, L"Open Workspace Folder...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_FIND, L"Find\tCtrl+F");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_REPLACE, L"Replace\tCtrl+H");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
@@ -632,6 +884,32 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     SendMessageA(state->editor, SCI_STYLESETBACK, 33, RGB(26, 28, 32));
 }
 
+static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
+                                 int editor_top, int bottom_top)
+{
+    int y = editor_top + 31;
+    size_t i;
+    if (state->explorer.root == NULL) {
+        axyne_text(dc, state->ui_font, AXYNE_TEXT, 16, y,
+                   L"폴더 열기...");
+        return;
+    }
+    for (i = 0; i < state->explorer.count && y + 22 < bottom_top; ++i) {
+        AxyneExplorerNode *node = &state->explorer.nodes[i];
+        wchar_t *name = axyne_wide(node->name);
+        wchar_t label[512];
+        int x = 16 + (int)node->depth * 16;
+        if (state->explorer_has_selection && state->explorer_selection == i)
+            axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, RGB(47, 52, 60));
+        (void)swprintf_s(label, 512, L"%lc %ls", node->kind == AXYNE_FILE_KIND_DIRECTORY
+            ? (axyne_explorer_is_expanded(&state->explorer, node->path) ? L'⌄' : L'›') : L'·',
+            name != NULL ? name : L"(invalid name)");
+        axyne_text(dc, state->ui_font, AXYNE_TEXT, x, y, label);
+        free(name);
+        y += 22;
+    }
+}
+
 static void axyne_layout(HWND window, AxyneWindowState *state)
 {
     RECT client;
@@ -715,11 +993,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         if (tab_left > AXYNE_SIDEBAR + 12 + 920) break;
     }
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, editor_top + 12, L"탐색기");
-    axyne_text(dc, state->ui_font, AXYNE_TEXT, 16, editor_top + 38, L"⌄  axyne");
-    axyne_text(dc, state->ui_font, AXYNE_TEXT, 32, editor_top + 61, L"⌄  src");
-    axyne_fill(dc, 0, editor_top + 66, AXYNE_SIDEBAR, editor_top + 88,
-               RGB(47, 52, 60));
-    axyne_text(dc, state->ui_font, AXYNE_TEXT, 52, editor_top + 69, L"C  main.c");
+    axyne_paint_explorer(dc, state, editor_top, bottom_top);
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, bottom_top + 9,
                L"출력    문제 1    터미널");
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, status_top + 6,
@@ -787,6 +1061,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_file_popup(window, state);
             return 0;
         }
+        if (x < AXYNE_SIDEBAR &&
+            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
+            int row = axyne_workspace_row_at(state, y);
+            if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row);
+            else if (state->explorer.root == NULL)
+                (void)axyne_workspace_select_root(window, state);
+            return 0;
+        }
         int tab_y = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
         if (y >= tab_y && y < tab_y + AXYNE_TABS) {
             int left = AXYNE_SIDEBAR + 12;
@@ -802,6 +1084,42 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 }
                 left += 184;
             }
+        }
+        break;
+    }
+    case WM_RBUTTONUP: {
+        int x = GET_X_LPARAM(l_param);
+        int y = GET_Y_LPARAM(l_param);
+        if (x < AXYNE_SIDEBAR &&
+            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS) {
+            int row = axyne_workspace_row_at(state, y);
+            HMENU menu = CreatePopupMenu();
+            POINT point = {x, y};
+            if (row >= 0) {
+                state->explorer_selection = (size_t)row;
+                state->explorer_has_selection = 1;
+            }
+            if (menu != NULL) {
+                AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE,
+                            L"Open Workspace Folder...");
+                AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+                AppendMenuW(menu, MF_STRING, AXYNE_CMD_EXPLORER_NEW_FILE,
+                            L"New File");
+                AppendMenuW(menu, MF_STRING, AXYNE_CMD_EXPLORER_NEW_FOLDER,
+                            L"New Folder");
+                if (row >= 0) {
+                    AppendMenuW(menu, MF_STRING, AXYNE_CMD_EXPLORER_RENAME,
+                                L"Rename");
+                    AppendMenuW(menu, MF_STRING, AXYNE_CMD_EXPLORER_REMOVE,
+                                L"Delete");
+                }
+                ClientToScreen(window, &point);
+                TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN |
+                               TPM_RIGHTBUTTON, point.x, point.y, 0, window, NULL);
+                DestroyMenu(menu);
+            }
+            InvalidateRect(window, NULL, FALSE);
+            return 0;
         }
         break;
     }
@@ -833,10 +1151,20 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_REPLACE) axyne_find(window, state, 1, 0);
         else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
         else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
+        else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
+            axyne_workspace_operation(window, state, command);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
                  command - AXYNE_CMD_RECENT_BASE < state->documents.recent_count)
             axyne_open_document(window, state,
                 state->documents.recent_paths[command - AXYNE_CMD_RECENT_BASE]);
+        return 0;
+    }
+    case AXYNE_WM_EXPLORER_EVENT: {
+        AxyneExplorerMessage *event_message = (AxyneExplorerMessage *)l_param;
+        if (event_message != NULL) {
+            axyne_workspace_refresh(window, state);
+            axyne_workspace_message_destroy(event_message);
+        }
         return 0;
     }
     case WM_NOTIFY: {
@@ -877,6 +1205,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 0;
     case WM_NCDESTROY:
         if (state != NULL) {
+            if (state->watcher != NULL) {
+                axyne_watcher_stop(state->watcher);
+                axyne_watcher_release(state->watcher);
+            }
+            axyne_explorer_destroy(&state->explorer);
             if (state->editor != NULL) {
                 for (size_t i = 0; i < state->documents.count; ++i) {
                     AxyneDocument *doc = &state->documents.documents[i];
@@ -926,7 +1259,14 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
+    if (axyne_explorer_initialize(&state->explorer, NULL) != AXYNE_STATUS_OK) {
+        HeapFree(GetProcessHeap(), 0, state);
+        UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
+        DeleteObject(window_class.hbrBackground);
+        return 1;
+    }
     if (axyne_documents_initialize(&state->documents, NULL) != AXYNE_STATUS_OK) {
+        axyne_explorer_destroy(&state->explorer);
         HeapFree(GetProcessHeap(), 0, state);
         UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
         DeleteObject(window_class.hbrBackground);
