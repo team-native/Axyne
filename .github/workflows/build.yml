@@ -44,6 +44,14 @@ jobs:
         if: runner.os == 'macOS'
         run: cmake --build build --config Release --parallel
 
+      - name: Run CTest on Windows
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Run CTest on macOS
+        if: runner.os == 'macOS'
+        run: ctest --test-dir build --output-on-failure
+
       - name: Package Windows app output
         if: runner.os == 'Windows'
         id: package-windows
