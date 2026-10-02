@@ -28,10 +28,24 @@ typedef void (*AxyneProcessExitFn)(AxyneProcess *process, int exit_code,
  * Every accepted process emits exactly one exit callback when on_exit is
  * non-NULL. Both output streams are drained through EOF before that callback.
  * Output bytes are valid only for the duration of the callback. Terminate
- * requests OS-level termination and returns without waiting; callbacks may
- * still arrive until the child exits. Release is safe while the child is
- * running: it requests termination and blocks until the child and callbacks
- * have finished. Do not call release from one of this process's callbacks.
+ * requests forced termination of the process tree and returns without waiting;
+ * callbacks may still arrive until the root exits and inherited output pipes
+ * reach EOF. Release is safe while the child is running: it force-terminates
+ * the process tree and blocks until the root and callbacks have finished. On
+ * Windows the root is assigned to a kill-on-close Job Object before it is
+ * resumed; on macOS/POSIX it starts in a dedicated process group before exec.
+ * Startup fails if the Windows job cannot be assigned. POSIX descendants that
+ * deliberately leave the process group (for example with setsid) are outside
+ * the tree that this API can terminate and may keep inherited output pipes
+ * open, causing release to wait for them. On POSIX, the root remains an
+ * unreaped zombie until release so its process-group ID stays reserved while
+ * the group is signaled. For the lifetime of a POSIX process handle, callers
+ * must not externally wait for or reap Axyne-managed PIDs, set SIGCHLD to
+ * SIG_IGN, enable SA_NOCLDWAIT, or install a SIGCHLD handler that broadly
+ * reaps children. If the root is nevertheless observed reaped (ECHILD), the
+ * API skips later group signals to avoid signaling a reused ID; termination of
+ * remaining descendants is then not guaranteed. Do not call release from a
+ * callback.
  * The start call consumes the executable, working directory, argument, and
  * environment strings before it returns; callers may release those inputs
  * afterward. user_data is borrowed and must remain valid until release returns.
@@ -50,8 +64,9 @@ typedef struct AxyneProcessSpec {
 } AxyneProcessSpec;
 
 /* Environment entries use NAME=VALUE. The child inherits the current process
- * environment, then applies these overrides. Duplicate names are invalid when
- * they match using ASCII case-insensitive comparison on every supported OS. */
+ * environment, then applies these overrides. An override replaces an inherited
+ * entry when names match using ASCII case-insensitive comparison, including on
+ * POSIX. Duplicate override names are invalid under the same comparison. */
 
 AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
                                 AxyneProcess **process, AxyneError *error);
