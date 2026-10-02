@@ -16,6 +16,13 @@ typedef enum AxyneThemePreset {
     AXYNE_THEME_SYSTEM
 } AxyneThemePreset;
 
+/* Text rendering technology. Only the Windows UI acts on it; other
+ * platforms preserve the value but ignore it. */
+typedef enum AxyneRenderingMode {
+    AXYNE_RENDERING_DIRECTWRITE = 0,
+    AXYNE_RENDERING_GDI
+} AxyneRenderingMode;
+
 typedef enum AxynePreferenceAction {
     AXYNE_ACTION_NEW = 0,
     AXYNE_ACTION_OPEN,
@@ -48,6 +55,10 @@ typedef struct AxyneEditorPreferences {
     int insert_spaces;
     int word_wrap;
     int show_whitespace;
+    int line_numbers;
+    int highlight_current_line;
+    int auto_indent;
+    AxyneRenderingMode rendering;
     char font_family[AXYNE_PREFERENCE_TEXT_MAX];
 } AxyneEditorPreferences;
 
@@ -98,10 +109,14 @@ enum {
     AXYNE_PREFERENCE_THEME_MUTED = 1u << 12,
     AXYNE_PREFERENCE_THEME_ACCENT = 1u << 13,
     AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND = 1u << 14,
-    AXYNE_PREFERENCE_THEME_EDITOR_TEXT = 1u << 15
+    AXYNE_PREFERENCE_THEME_EDITOR_TEXT = 1u << 15,
+    AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS = 1u << 16,
+    AXYNE_PREFERENCE_EDITOR_HIGHLIGHT_CURRENT_LINE = 1u << 17,
+    AXYNE_PREFERENCE_EDITOR_AUTO_INDENT = 1u << 18,
+    AXYNE_PREFERENCE_EDITOR_RENDERING = 1u << 19
 };
 
-#define AXYNE_PREFERENCE_ALL_FIELDS ((uint32_t)((1u << 16) - 1u))
+#define AXYNE_PREFERENCE_ALL_FIELDS ((uint32_t)((1u << 20) - 1u))
 
 /* Defaults are intentionally small and reversible; platform adapters may
  * choose a native font when font_family is empty. */
