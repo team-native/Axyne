@@ -103,7 +103,7 @@ int axyne_test_process_stability(const char *root)
         spec.argument_count = sizeof(arguments) / sizeof(arguments[0]);
 #else
     {
-        const char *arguments[] = { "/c", "exit 0" };
+        const char *arguments[] = { "/c", "ver" };
         /* Use the system command interpreter's canonical path.  Passing
          * cmd.exe as an application name relies on CreateProcess' PATH
          * search, which is not guaranteed for a test launched by CTest. */
