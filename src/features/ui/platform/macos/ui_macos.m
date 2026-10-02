@@ -19,6 +19,7 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/palette_controller.h"
 #include "axyne/ui_design.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
@@ -87,6 +88,387 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
                                      alpha:1.0];
 }
 
+/* ---- command palette overlay (Figma 80:70) ---------------------------------
+ * AxynePaletteOverlay covers the whole workspace view: below the toolbar it
+ * dims the body to ~45% and draws the 561px popup (header, rows, footer) from
+ * the shared AxynePaletteController. Clicks outside the popup dismiss it. The
+ * text field lives in AxyneWorkspaceView, over the toolbar search field. */
+enum {
+    AXYNE_PAL_WIDTH = 561,
+    AXYNE_PAL_HEADER = 31,
+    AXYNE_PAL_ROW = 32,
+    AXYNE_PAL_LIST_PAD = 4,
+    AXYNE_PAL_FOOTER = 33,
+    AXYNE_PAL_MARGIN = 7,
+    AXYNE_PAL_GAP = 3
+};
+
+@protocol AxynePaletteOwner <NSObject>
+- (void)paletteActivateRow:(size_t)row;
+- (void)paletteChipClicked:(NSInteger)mode;
+- (void)paletteDismiss;
+/* YES when the point belongs to the toolbar search field (not an outside click). */
+- (BOOL)paletteClaimsPoint:(NSPoint)point;
+@end
+
+static NSColor *axyne_palette_rgb(uint32_t rgb, CGFloat alpha)
+{
+    return [NSColor colorWithSRGBRed:(CGFloat)((rgb >> 16) & 0xff) / 255.0
+                               green:(CGFloat)((rgb >> 8) & 0xff) / 255.0
+                                blue:(CGFloat)(rgb & 0xff) / 255.0
+                               alpha:alpha];
+}
+
+static NSString *axyne_palette_string(const char *utf8, size_t length)
+{
+    NSString *value = [[[NSString alloc] initWithBytes:utf8 length:length
+                                              encoding:NSUTF8StringEncoding] autorelease];
+    return value != nil ? value : @"";
+}
+
+static CGFloat axyne_palette_text_width(NSString *text, NSFont *font)
+{
+    return [text sizeWithAttributes:@{NSFontAttributeName:font}].width;
+}
+
+/* Single line, vertically centered in `rect`, truncated with an ellipsis. */
+static void axyne_palette_draw_text(NSString *text, NSFont *font, NSColor *color,
+                                    NSRect rect, NSTextAlignment alignment)
+{
+    if ([text length] == 0 || NSWidth(rect) <= 0) return;
+    NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [style setAlignment:alignment];
+    [style setLineBreakMode:NSLineBreakByTruncatingTail];
+    CGFloat height = [text sizeWithAttributes:@{NSFontAttributeName:font}].height;
+    NSRect target = NSMakeRect(NSMinX(rect), NSMinY(rect) + (NSHeight(rect) - height) / 2,
+                               NSWidth(rect), height);
+    [text drawInRect:target withAttributes:@{NSFontAttributeName:font,
+        NSForegroundColorAttributeName:color, NSParagraphStyleAttributeName:style}];
+}
+
+/* Footer chips in popup-local coordinates (mode order: file, >, @, :). */
+static NSRect axyne_palette_chip_rect(NSInteger index, CGFloat popupHeight)
+{
+    static const CGFloat widths[] = {36, 45, 45, 58};
+    CGFloat left = 8;
+    for (NSInteger i = 0; i < index; ++i) left += widths[i] + 4;
+    return NSMakeRect(left, popupHeight - 28, widths[index], 22);
+}
+
+typedef NS_ENUM(NSInteger, AxynePaletteHit) {
+    AxynePaletteHitNone = 0, AxynePaletteHitRow, AxynePaletteHitChip
+};
+
+@interface AxynePaletteOverlay : NSView {
+    AxynePaletteController *_controller;
+    id<AxynePaletteOwner> _owner;
+    NSTrackingArea *_tracking;
+    CGFloat _wheelRemainder;
+}
+@property(nonatomic, assign) AxynePaletteController *controller;
+@property(nonatomic, assign) id<AxynePaletteOwner> owner;
+- (NSRect)popupRect;
+@end
+
+@implementation AxynePaletteOverlay
+@synthesize controller = _controller, owner = _owner;
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        [self setWantsLayer:YES];
+        [self setAccessibilityElement:YES];
+        [self setAccessibilityRole:NSAccessibilityListRole];
+        [self setAccessibilityLabel:@"명령 팔레트 결과"];
+    }
+    return self;
+}
+
+- (void)dealloc
+{
+    if (_tracking != nil) {
+        [self removeTrackingArea:_tracking];
+        [_tracking release];
+    }
+    [super dealloc];
+}
+
+- (void)updateTrackingAreas
+{
+    [super updateTrackingAreas];
+    if (_tracking != nil) {
+        [self removeTrackingArea:_tracking];
+        [_tracking release];
+        _tracking = nil;
+    }
+    _tracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+        options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+        owner:self userInfo:nil];
+    [self addTrackingArea:_tracking];
+}
+
+- (NSRect)popupRect
+{
+    NSRect bounds = [self bounds];
+    CGFloat rows = _controller != NULL ? (CGFloat)axyne_palette_ctl_visible_rows(_controller) : 1;
+    CGFloat width = MIN((CGFloat)AXYNE_PAL_WIDTH, NSWidth(bounds) - 16);
+    CGFloat height = 2 + AXYNE_PAL_HEADER + 2 * AXYNE_PAL_LIST_PAD +
+        rows * AXYNE_PAL_ROW + AXYNE_PAL_FOOTER;
+    if (width < 0) width = 0;
+    return NSMakeRect(NSWidth(bounds) - AXYNE_PAL_MARGIN - width,
+                      AXYNE_UI_TOOLBAR + AXYNE_PAL_GAP, width, height);
+}
+
+- (AxynePaletteHit)hitAtPoint:(NSPoint)point index:(size_t *)index
+{
+    NSRect popup = [self popupRect];
+    NSPoint local = NSMakePoint(point.x - NSMinX(popup), point.y - NSMinY(popup));
+    if (_controller == NULL || !NSPointInRect(point, popup)) return AxynePaletteHitNone;
+    for (NSInteger i = 0; i < 4; ++i) {
+        if (NSPointInRect(local, axyne_palette_chip_rect(i, NSHeight(popup)))) {
+            *index = (size_t)i;
+            return AxynePaletteHitChip;
+        }
+    }
+    CGFloat rowsTop = 1 + AXYNE_PAL_HEADER + AXYNE_PAL_LIST_PAD;
+    CGFloat rows = (CGFloat)axyne_palette_ctl_visible_rows(_controller);
+    if (local.y >= rowsTop && local.y < rowsTop + rows * AXYNE_PAL_ROW) {
+        size_t row = _controller->scroll + (size_t)((local.y - rowsTop) / AXYNE_PAL_ROW);
+        if (row < axyne_palette_ctl_row_count(_controller)) {
+            *index = row;
+            return AxynePaletteHitRow;
+        }
+    }
+    return AxynePaletteHitNone;
+}
+
+- (void)mouseMoved:(NSEvent *)event
+{
+    size_t index = 0;
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    if (_controller != NULL && _controller->list.count > 0 &&
+        [self hitAtPoint:point index:&index] == AxynePaletteHitRow &&
+        index != _controller->selection) {
+        axyne_palette_ctl_select(_controller, index);
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)mouseDown:(NSEvent *)event
+{
+    size_t index = 0;
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    AxynePaletteHit hit = [self hitAtPoint:point index:&index];
+    /* The owner may remove this view while handling the click. */
+    [[self retain] autorelease];
+    if (hit == AxynePaletteHitRow) [_owner paletteActivateRow:index];
+    else if (hit == AxynePaletteHitChip) [_owner paletteChipClicked:(NSInteger)index];
+    else if ([_owner paletteClaimsPoint:point]) return;
+    else if (!NSPointInRect(point, [self popupRect])) [_owner paletteDismiss];
+}
+
+- (void)rightMouseDown:(NSEvent *)event
+{
+    (void)event;
+    [[self retain] autorelease];
+    [_owner paletteDismiss];
+}
+
+- (void)scrollWheel:(NSEvent *)event
+{
+    CGFloat delta = [event scrollingDeltaY];
+    if (![event hasPreciseScrollingDeltas]) delta *= AXYNE_PAL_ROW;
+    _wheelRemainder += delta;
+    NSInteger rows = (NSInteger)(_wheelRemainder / AXYNE_PAL_ROW);
+    if (rows != 0 && _controller != NULL) {
+        _wheelRemainder -= (CGFloat)rows * AXYNE_PAL_ROW;
+        axyne_palette_ctl_scroll(_controller, (int)-rows);
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)drawRow:(const AxynePaletteItem *)item inRect:(NSRect)row selected:(BOOL)selected
+{
+    NSFont *regular11 = [NSFont systemFontOfSize:11];
+    NSFont *regular13 = [NSFont systemFontOfSize:13];
+    NSFont *semibold13 = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    CGFloat right = NSMaxX(row) - 10;
+    if (selected) {
+        [axyne_palette_rgb(0x3b2d55, 1) setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:row xRadius:4 yRadius:4] fill];
+    }
+    NSRect badge = NSMakeRect(NSMinX(row) + 10, NSMinY(row), 24, NSHeight(row));
+    if (item->badge != NULL && item->badge[0] != '\0') {
+        axyne_palette_draw_text(axyne_palette_string(item->badge, strlen(item->badge)),
+            [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightBold],
+            axyne_palette_rgb(item->badge_color, 1), badge, NSTextAlignmentCenter);
+    } else if (item->kind == AXYNE_PALETTE_ITEM_FILE) {
+        NSRect icon = NSMakeRect(NSMinX(badge) + 8, NSMinY(badge) + (NSHeight(badge) - 10) / 2, 8, 10);
+        [axyne_palette_rgb(item->badge_color, 1) setStroke];
+        [[NSBezierPath bezierPathWithRect:NSInsetRect(icon, 0.5, 0.5)] stroke];
+    }
+    CGFloat x = NSMinX(row) + 10 + 24 + 10;
+    if (item->kind == AXYNE_PALETTE_ITEM_COMMAND && item->detail != NULL && item->detail[0] != '\0') {
+        /* shortcut hint at the right edge keeps command labels aligned */
+        NSString *shortcut = axyne_palette_string(item->detail, strlen(item->detail));
+        CGFloat width = ceil(axyne_palette_text_width(shortcut, regular11));
+        axyne_palette_draw_text(shortcut, regular11, axyne_palette_rgb(0x8b919b, 1),
+            NSMakeRect(right - width, NSMinY(row), width, NSHeight(row)), NSTextAlignmentRight);
+        right -= width + 12;
+    }
+    /* label with the matched part emphasized (byte offsets are UTF-8) */
+    size_t length = strlen(item->label), start = item->match_start, count = item->match_len;
+    if (count == 0 || start > length || count > length - start) { start = 0; count = 0; }
+    NSMutableAttributedString *label = [[[NSMutableAttributedString alloc] init] autorelease];
+    size_t offsets[3] = {0, start, start + count};
+    size_t lengths[3] = {start, count, length - start - count};
+    for (int piece = 0; piece < 3; ++piece) {
+        if (lengths[piece] == 0) continue;
+        NSString *text = axyne_palette_string(item->label + offsets[piece], lengths[piece]);
+        NSDictionary *attributes = @{
+            NSFontAttributeName: piece == 1 ? semibold13 : regular13,
+            NSForegroundColorAttributeName: piece == 1 ? axyne_palette_rgb(0xc9a2f7, 1)
+                                                       : axyne_palette_rgb(0xd5d8dd, 1)};
+        [label appendAttributedString:[[[NSAttributedString alloc]
+            initWithString:text attributes:attributes] autorelease]];
+    }
+    CGFloat labelWidth = MIN(ceil([label size].width), MAX(0, right - x));
+    CGFloat labelHeight = [label size].height;
+    if (labelWidth > 0) {
+        NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+        [style setLineBreakMode:NSLineBreakByTruncatingTail];
+        [label addAttribute:NSParagraphStyleAttributeName value:style
+                      range:NSMakeRange(0, [label length])];
+        [label drawInRect:NSMakeRect(x, NSMinY(row) + (NSHeight(row) - labelHeight) / 2,
+                                     labelWidth, labelHeight)];
+    }
+    if (item->kind != AXYNE_PALETTE_ITEM_COMMAND && item->detail != NULL &&
+        item->detail[0] != '\0' && x + labelWidth + 10 < right) {
+        axyne_palette_draw_text(axyne_palette_string(item->detail, strlen(item->detail)),
+            regular11, axyne_palette_rgb(0x8b919b, 1),
+            NSMakeRect(x + labelWidth + 10, NSMinY(row), right - x - labelWidth - 10, NSHeight(row)),
+            NSTextAlignmentLeft);
+    }
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    if (_controller == NULL || !_controller->active) return;
+    NSRect bounds = [self bounds];
+    const AxynePaletteController *c = _controller;
+    /* the body below the toolbar is dimmed; the toolbar stays untouched */
+    [axyne_palette_rgb(0x16171a, 0.55) setFill];
+    NSRectFillUsingOperation(NSMakeRect(0, AXYNE_UI_TOOLBAR, NSWidth(bounds),
+        MAX(0, NSHeight(bounds) - AXYNE_UI_TOOLBAR)), NSCompositingOperationSourceOver);
+
+    NSRect popup = [self popupRect];
+    NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(popup, 0.5, 0.5)
+                                                          xRadius:6 yRadius:6];
+    [NSGraphicsContext saveGraphicsState];
+    [axyne_palette_rgb(0x202328, 1) setFill];
+    [shape fill];
+    [shape addClip];
+    CGFloat rows = (CGFloat)axyne_palette_ctl_visible_rows(c);
+    CGFloat rowsTop = NSMinY(popup) + 1 + AXYNE_PAL_HEADER + AXYNE_PAL_LIST_PAD;
+
+    /* header: mode title and match count */
+    NSRect header = NSMakeRect(NSMinX(popup) + 14, NSMinY(popup) + 1,
+                               NSWidth(popup) - 28, AXYNE_PAL_HEADER - 1);
+    axyne_palette_draw_text(axyne_palette_string(axyne_palette_ctl_title(c->mode),
+            strlen(axyne_palette_ctl_title(c->mode))),
+        [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
+        axyne_palette_rgb(0xc9a2f7, 1), header, NSTextAlignmentLeft);
+    if (c->list.count > 0) {
+        axyne_palette_draw_text([NSString stringWithFormat:@"%zu개 일치", c->list.count],
+            [NSFont systemFontOfSize:11], axyne_palette_rgb(0x8b919b, 1), header,
+            NSTextAlignmentRight);
+    }
+    [axyne_palette_rgb(0x2a2d33, 1) setFill];
+    NSRectFill(NSMakeRect(NSMinX(popup) + 1, NSMinY(popup) + AXYNE_PAL_HEADER,
+                          NSWidth(popup) - 2, 1));
+
+    /* rows, or one message row (no results, unsupported file, line hint) */
+    if (c->list.count > 0) {
+        for (NSInteger i = 0; i < (NSInteger)rows; ++i) {
+            size_t index = c->scroll + (size_t)i;
+            if (index >= c->list.count) break;
+            NSRect row = NSMakeRect(NSMinX(popup) + 1 + AXYNE_PAL_LIST_PAD,
+                rowsTop + i * AXYNE_PAL_ROW, NSWidth(popup) - 2 - 2 * AXYNE_PAL_LIST_PAD,
+                AXYNE_PAL_ROW - 1);
+            [self drawRow:&c->list.items[index] inRect:row selected:index == c->selection];
+        }
+        if (c->list.count > (size_t)rows) {
+            CGFloat track = rows * AXYNE_PAL_ROW;
+            CGFloat thumb = MAX(16, track * rows / (CGFloat)c->list.count);
+            CGFloat top = rowsTop + (track - thumb) * (CGFloat)c->scroll /
+                (CGFloat)(c->list.count - (size_t)rows);
+            [axyne_palette_rgb(0x3a3e46, 1) setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(NSMaxX(popup) - 6, top, 3, thumb)
+                xRadius:1.5 yRadius:1.5] fill];
+        }
+    } else if (c->message[0] != '\0') {
+        NSRect row = NSMakeRect(NSMinX(popup) + 1 + AXYNE_PAL_LIST_PAD, rowsTop,
+            NSWidth(popup) - 2 - 2 * AXYNE_PAL_LIST_PAD, AXYNE_PAL_ROW - 1);
+        if (c->message_actionable) {
+            [axyne_palette_rgb(0x3b2d55, 1) setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:row xRadius:4 yRadius:4] fill];
+        }
+        axyne_palette_draw_text(axyne_palette_string(c->message, strlen(c->message)),
+            [NSFont systemFontOfSize:13],
+            c->message_actionable ? axyne_palette_rgb(0xd5d8dd, 1) : axyne_palette_rgb(0x8b919b, 1),
+            NSInsetRect(row, 10, 0), NSTextAlignmentLeft);
+    }
+
+    /* footer: filter chips (file, >, @, :) and key hints */
+    [axyne_palette_rgb(0x2a2d33, 1) setFill];
+    NSRectFill(NSMakeRect(NSMinX(popup) + 1, NSMaxY(popup) - 1 - 32 - 1, NSWidth(popup) - 2, 1));
+    {
+        NSArray *glyphs = @[@"", @">", @"@", @":"];
+        NSArray *labels = @[@"파일", @"명령", @"기호", @"줄 이동"];
+        NSFont *mono = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+        NSFont *sans = [NSFont systemFontOfSize:11];
+        CGFloat chipsRight = 0;
+        for (NSInteger i = 0; i < 4; ++i) {
+            NSRect chip = axyne_palette_chip_rect(i, NSHeight(popup));
+            chip.origin.x += NSMinX(popup);
+            chip.origin.y += NSMinY(popup);
+            NSString *glyph = glyphs[(NSUInteger)i], *label = labels[(NSUInteger)i];
+            CGFloat glyphWidth = [glyph length] > 0 ? ceil(axyne_palette_text_width(glyph, mono)) : 0;
+            CGFloat labelWidth = ceil(axyne_palette_text_width(label, sans));
+            CGFloat gap = glyphWidth > 0 ? 3 : 0;
+            CGFloat x = NSMinX(chip) + (NSWidth(chip) - (glyphWidth + gap + labelWidth)) / 2;
+            [(i == (NSInteger)c->mode ? axyne_palette_rgb(0x3b2d55, 1)
+                                      : axyne_palette_rgb(0x2a2e35, 1)) setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:chip xRadius:3 yRadius:3] fill];
+            if (glyphWidth > 0)
+                axyne_palette_draw_text(glyph, mono, axyne_palette_rgb(0xc9a2f7, 1),
+                    NSMakeRect(x, NSMinY(chip), glyphWidth + 2, NSHeight(chip)), NSTextAlignmentLeft);
+            axyne_palette_draw_text(label, sans, axyne_palette_rgb(0xc4c8ce, 1),
+                NSMakeRect(x + glyphWidth + gap, NSMinY(chip), NSMaxX(chip) - x - glyphWidth - gap - 2,
+                           NSHeight(chip)), NSTextAlignmentLeft);
+            chipsRight = NSMaxX(chip);
+        }
+        NSString *hint = c->mode == AXYNE_PALETTE_MODE_COMMAND ? @"↑↓ 이동 · Enter 실행 · Esc 닫기"
+            : (c->mode == AXYNE_PALETTE_MODE_FILE ? @"↑↓ 이동 · Enter 열기 · Esc 닫기"
+                                                  : @"↑↓ 이동 · Enter 이동 · Esc 닫기");
+        axyne_palette_draw_text(hint, sans, axyne_palette_rgb(0x8b919b, 1),
+            NSMakeRect(chipsRight + 12, NSMaxY(popup) - 28, NSMaxX(popup) - 8 - chipsRight - 12, 22),
+            NSTextAlignmentRight);
+    }
+    [NSGraphicsContext restoreGraphicsState];
+    [axyne_palette_rgb(0x3a3e46, 1) setStroke];
+    [shape setLineWidth:1];
+    [shape stroke];
+}
+
+@end
+
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     NSBundle *_scintillaBundle;
@@ -144,6 +526,10 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     unsigned char _workspaceBindingPresent[AXYNE_ACTION_COUNT];
     AxyneLspClient *_lsp;
     NSString *_lspStatus;
+    AxynePaletteController _palette;
+    AxynePaletteOverlay *_paletteOverlay;
+    NSTextField *_paletteField;
+    NSTimer *_paletteTimer;
 }
 @end
 
@@ -273,6 +659,28 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
     return [expected isEqualToString:[key lowercaseString]];
 }
 
+/* Cmd+Shift+P: the quick-file binding plus Shift opens the palette with ">". */
+static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preferences,
+                                              NSString *key, NSEvent *event)
+{
+    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
+        preferences, AXYNE_ACTION_QUICK_FILE);
+    unsigned int modifiers = 0;
+    if (binding == NULL || !binding->enabled || (binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0)
+        return NO;
+    if (([event modifierFlags] & NSEventModifierFlagCommand) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_COMMAND;
+    if (([event modifierFlags] & NSEventModifierFlagControl) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+    if (([event modifierFlags] & NSEventModifierFlagShift) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+    if (([event modifierFlags] & NSEventModifierFlagOption) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_ALT;
+    if (modifiers != (binding->modifiers | AXYNE_KEY_MODIFIER_SHIFT)) return NO;
+    return [[[NSString stringWithUTF8String:binding->key] lowercaseString]
+        isEqualToString:[key lowercaseString]];
+}
+
 @interface AxyneWorkspaceView (AxyneActions)
 - (void)newDocument:(id)sender;
 - (void)openDocument:(id)sender;
@@ -353,6 +761,25 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)navigateLspReferences:(id)sender;
 - (void)setLspStatus:(NSString *)status;
 @end
+
+@interface AxyneWorkspaceView (AxynePalette) <AxynePaletteOwner, NSTextFieldDelegate>
+- (void)openPaletteWithInput:(NSString *)input;
+- (void)closePaletteRestoringFocus:(BOOL)restore;
+- (void)layoutPalette;
+- (void)drawPaletteFieldInRect:(NSRect)box;
+- (void)paletteSyncInput;
+- (void)paletteSetText:(NSString *)text;
+- (void)paletteTick:(NSTimer *)timer;
+- (void)paletteEnter;
+- (void)paletteDismissWithoutFocus;
+- (void)paletteFocusField;
+- (void)paletteGotoLine:(size_t)line column:(size_t)column;
+- (void)paletteRunCommand:(AxynePaletteCommandId)command;
+@end
+
+static int axyne_macos_palette_document(void *user, char **path, char **text,
+                                        size_t *length, size_t *lineCount);
+
 
 static intptr_t axyne_macos_editor_message(void *editor, unsigned int message,
                                            uintptr_t wParam, intptr_t lParam)
@@ -596,6 +1023,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     self = [super initWithFrame:frame];
     if (self != nil) {
+        axyne_palette_ctl_init(&_palette, 1, axyne_macos_palette_document, self);
         if (axyne_explorer_initialize(&_explorer, NULL) != AXYNE_STATUS_OK ||
             axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
             axyne_explorer_destroy(&_explorer);
@@ -759,7 +1187,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self setNeedsDisplay:YES];
 }
 
-- (void)quickFile:(id)sender { (void)sender; [self searchFolder:YES]; }
+- (void)quickFile:(id)sender { (void)sender; [self openPaletteWithInput:@""]; }
 - (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
 - (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
 - (void)selectPanel:(id)sender
@@ -1835,10 +2263,11 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (BOOL)performKeyEquivalent:(NSEvent *)event
 {
     NSString *key = [event charactersIgnoringModifiers];
+    if (axyne_macos_palette_shift_matches(&_preferences, key, event)) { [self openPaletteWithInput:@">"]; return YES; }
     if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_SEARCH_WORKSPACE, key, event)) { [self searchFolder:NO]; return YES; }
     if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_FIND, key, event)) { [self findOrReplace:NO]; return YES; }
     if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_REPLACE, key, event)) { [self findOrReplace:YES]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_QUICK_FILE, key, event)) { [self searchFolder:YES]; return YES; }
+    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_QUICK_FILE, key, event)) { [self openPaletteWithInput:@""]; return YES; }
     if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_NEW, key, event)) { [self newDocument:nil]; return YES; }
     if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_OPEN, key, event)) { [self openDocument:nil]; return YES; }
     if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_SAVE, key, event)) { [self saveDocument:nil]; return YES; }
@@ -2293,34 +2722,19 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 
 - (void)searchFolder:(BOOL)quickFile
 {
+    /* Quick file lookup lives in the command palette; this method keeps the
+     * text search over a chosen folder. */
+    if (quickFile) { [self openPaletteWithInput:@""]; return; }
     NSOpenPanel *folder = [NSOpenPanel openPanel];
     [folder setCanChooseDirectories:YES]; [folder setCanChooseFiles:NO];
     [folder setAllowsMultipleSelection:NO];
     if ([folder runModal] != NSModalResponseOK) return;
-    NSString *query = [self askForText:quickFile ? @"Quick File" : @"Search Folder"
-                                  label:quickFile ? @"Filename contains" : @"Search text"];
+    NSString *query = [self askForText:@"Search Folder" label:@"Search text"];
     if ([query length] == 0) return;
     NSPopUpButton *choices = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 480, 28)
                                                         pullsDown:NO] autorelease];
     size_t selectedLine = 0;
-    if (quickFile) {
-        char **paths = NULL; size_t count = 0;
-        if (axyne_search_files([[[folder URL] path] UTF8String], [query UTF8String],
-                               &paths, &count, NULL) == AXYNE_STATUS_OK) {
-            for (size_t i = 0; i < count; ++i) {
-                NSString *path = [NSString stringWithUTF8String:paths[i]];
-                [choices addItemWithTitle:path != nil ? path : @"(invalid path)"];
-            }
-            if (count > 0) {
-                NSAlert *pick = [[[NSAlert alloc] init] autorelease];
-                [pick setMessageText:@"Choose a file to open"]; [pick setAccessoryView:choices];
-                [pick addButtonWithTitle:@"Open"]; [pick addButtonWithTitle:@"Cancel"];
-                if ([pick runModal] == NSAlertFirstButtonReturn)
-                    [self openPath:[choices titleOfSelectedItem]];
-            }
-            axyne_search_paths_destroy(paths, count);
-        }
-    } else {
+    {
         AxyneSearchResults results = {0};
         if (axyne_search_workspace([[[folder URL] path] UTF8String], [query UTF8String],
                                    0, &results, NULL) == AXYNE_STATUS_OK) {
@@ -2779,6 +3193,7 @@ else [_terminalInput setStringValue:@""];
         else if (NSMinX(active) < AXYNE_SIDEBAR)
             _tabScroll = MAX(0, _tabScroll - AXYNE_SIDEBAR + NSMinX(active));
     }
+    [self layoutPalette];
 }
 
 - (void)drawLabel:(NSString *)label at:(NSPoint)point
@@ -2852,6 +3267,7 @@ else [_terminalInput setStringValue:@""];
     [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
         [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
     }
+    if (_palette.active) [self drawPaletteFieldInRect:[_searchButton frame]];
     NSButton *selected = _panelMode == 0 ? _outputTab : (_panelMode == 1 ? _problemsTab : _terminalTab);
     [axyne_preference_color(reference ? 0xa66bf0 : _preferences.theme.accent) setFill];
     NSRectFill(NSMakeRect(NSMinX([selected frame]), bottomTop + 29, NSWidth([selected frame]), 3));
@@ -2940,6 +3356,8 @@ else [_terminalInput setStringValue:@""];
 }
 - (void)dealloc
 {
+    [self closePaletteRestoringFocus:NO];
+    axyne_palette_ctl_destroy(&_palette);
     if (_gitRun != NULL) {
         AxyneMacGitRun *run = _gitRun;
         (void)pthread_mutex_lock(&run->lock);
@@ -3011,6 +3429,351 @@ else [_terminalInput setStringValue:@""];
     free(_globalPreferencesPath);
     free(_workspacePreferencesPath);
     [super dealloc];
+}
+
+@end
+
+/* ---- command palette controller glue ---------------------------------------
+ * The shared AxynePaletteController owns mode, rows, selection and actions.
+ * AxyneWorkspaceView adds a real NSTextField over the toolbar search field
+ * (first responder while the palette is open) and an AxynePaletteOverlay. */
+
+static int axyne_macos_palette_document(void *user, char **path, char **text,
+                                        size_t *length, size_t *lineCount)
+{
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user;
+    AxyneDocument *document = view != nil ? [view activeDocument] : NULL;
+    NSInteger size, lines;
+    char *buffer;
+    if (document == NULL) return 0;
+    size = [view sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
+    lines = [view sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
+    if (size < 0) return 0;
+    buffer = (char *)malloc((size_t)size + 1);
+    if (buffer == NULL) return 0;
+    buffer[0] = '\0';
+    (void)[view sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)size + 1
+                           lParam:(intptr_t)buffer];
+    buffer[size] = '\0';
+    *path = (document->is_untitled || document->path == NULL) ? NULL : strdup(document->path);
+    *text = buffer;
+    *length = (size_t)size;
+    *lineCount = lines > 0 ? (size_t)lines : 1;
+    return 1;
+}
+
+@implementation AxyneWorkspaceView (AxynePalette)
+
+- (void)openPaletteWithInput:(NSString *)input
+{
+    NSString *initial = input != nil ? input : @"";
+    if (_palette.active) {
+        if (axyne_palette_parse_mode([initial UTF8String], NULL) != _palette.mode)
+            [self paletteSetText:initial];
+        [self paletteFocusField];
+        return;
+    }
+    const char **paths = (const char **)calloc(_documents.count + 1, sizeof(*paths));
+    size_t count = 0;
+    if (paths == NULL) return;
+    for (size_t i = 0; i < _documents.count; ++i) {
+        const AxyneDocument *document = &_documents.documents[i];
+        if (!document->is_untitled && document->path != NULL) paths[count++] = document->path;
+    }
+    AxyneStatus status = axyne_palette_ctl_open(&_palette, _explorer.root,
+        (const char *const *)paths, count, [initial UTF8String]);
+    free(paths);
+    if (status != AXYNE_STATUS_OK) return;
+
+    _paletteOverlay = [[AxynePaletteOverlay alloc] initWithFrame:[self bounds]];
+    [_paletteOverlay setController:&_palette];
+    [_paletteOverlay setOwner:self];
+    [self addSubview:_paletteOverlay];
+
+    _paletteField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    [_paletteField setBordered:NO];
+    [_paletteField setBezeled:NO];
+    [_paletteField setDrawsBackground:NO];
+    [_paletteField setFocusRingType:NSFocusRingTypeNone];
+    [_paletteField setFont:[NSFont systemFontOfSize:12]];
+    [_paletteField setTextColor:[NSColor whiteColor]];
+    [[_paletteField cell] setUsesSingleLineMode:YES];
+    [[_paletteField cell] setScrollable:YES];
+    [[_paletteField cell] setWraps:NO];
+    [_paletteField setAccessibilityLabel:@"파일, 명령, 기호 검색"];
+    [_paletteField setStringValue:initial];
+    [_paletteField setDelegate:self];
+    [self addSubview:_paletteField positioned:NSWindowAbove relativeTo:_paletteOverlay];
+    [_searchButton setHidden:YES];
+    [self layoutPalette];
+    [self paletteFocusField];
+    {
+        NSText *editor = [_paletteField currentEditor];
+        if (editor != nil) [editor setSelectedRange:NSMakeRange([initial length], 0)];
+    }
+    if (axyne_palette_ctl_walk_running(&_palette))
+        _paletteTimer = [NSTimer scheduledTimerWithTimeInterval:0.015 target:self
+            selector:@selector(paletteTick:) userInfo:nil repeats:YES];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)closePaletteRestoringFocus:(BOOL)restore
+{
+    if (!_palette.active) return;
+    [_paletteTimer invalidate];
+    _paletteTimer = nil;
+    /* inactive first: the field's end-editing callback then does nothing */
+    axyne_palette_ctl_close(&_palette);
+    [_paletteField setDelegate:nil];
+    [_paletteField removeFromSuperview];
+    [_paletteField autorelease];
+    _paletteField = nil;
+    [_paletteOverlay setController:NULL];
+    [_paletteOverlay setOwner:nil];
+    [_paletteOverlay removeFromSuperview];
+    [_paletteOverlay autorelease];
+    _paletteOverlay = nil;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+    if (restore && _editorView != nil) [[self window] makeFirstResponder:_editorView];
+}
+
+- (void)layoutPalette
+{
+    if (!_palette.active) return;
+    NSRect box = [_searchButton frame];
+    [_paletteOverlay setFrame:[self bounds]];
+    [_paletteOverlay setNeedsDisplay:YES];
+    [_searchButton setHidden:YES];
+    [_paletteField setFrame:NSMakeRect(NSMinX(box) + 32, NSMinY(box) + 4,
+        MAX(0, NSWidth(box) - 32 - 40), 18)];
+}
+
+/* Toolbar field while open: accent border, dark fill, search glyph and the
+ * "Esc" hint; the NSTextField supplies the text. */
+- (void)drawPaletteFieldInRect:(NSRect)box
+{
+    if (NSWidth(box) < 60) return;
+    NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(box, 0.5, 0.5)
+                                                          xRadius:4 yRadius:4];
+    [axyne_palette_rgb(0x131417, 1) setFill];
+    [shape fill];
+    [axyne_palette_rgb(0xa66bf0, 1) setStroke];
+    [shape setLineWidth:1];
+    [shape stroke];
+    NSBezierPath *glyph = [NSBezierPath bezierPathWithOvalInRect:
+        NSMakeRect(NSMinX(box) + 11, NSMinY(box) + 7.5, 8, 8)];
+    [glyph moveToPoint:NSMakePoint(NSMinX(box) + 17.5, NSMinY(box) + 14)];
+    [glyph lineToPoint:NSMakePoint(NSMinX(box) + 21, NSMinY(box) + 17.5)];
+    [glyph setLineWidth:1.2];
+    [axyne_palette_rgb(0x8b919b, 1) setStroke];
+    [glyph stroke];
+    axyne_palette_draw_text(@"Esc",
+        [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular],
+        axyne_palette_rgb(0x8b919b, 1),
+        NSMakeRect(NSMaxX(box) - 11 - 24, NSMinY(box), 24, NSHeight(box)),
+        NSTextAlignmentRight);
+}
+
+- (void)paletteSyncInput
+{
+    if (!_palette.active) return;
+    const char *text = [[_paletteField stringValue] UTF8String];
+    (void)axyne_palette_ctl_set_input(&_palette, text != NULL ? text : "");
+    [_paletteOverlay setNeedsDisplay:YES];
+}
+
+- (void)paletteSetText:(NSString *)text
+{
+    if (!_palette.active) return;
+    [_paletteField setStringValue:text];
+    NSText *editor = [_paletteField currentEditor];
+    if (editor != nil) [editor setSelectedRange:NSMakeRange([text length], 0)];
+    [self paletteSyncInput];
+}
+
+- (void)paletteTick:(NSTimer *)timer
+{
+    int changed = 0;
+    if (!_palette.active) { [timer invalidate]; _paletteTimer = nil; return; }
+    if (!axyne_palette_ctl_walk_step(&_palette, 1500, &changed)) {
+        [timer invalidate];
+        _paletteTimer = nil;
+    }
+    if (changed) [_paletteOverlay setNeedsDisplay:YES];
+}
+
+- (void)paletteEnter
+{
+    [self paletteActivateRow:(size_t)-1];
+}
+
+- (void)paletteDismiss
+{
+    [self closePaletteRestoringFocus:YES];
+}
+
+- (void)paletteChipClicked:(NSInteger)mode
+{
+    if (mode < 0 || mode > (NSInteger)AXYNE_PALETTE_MODE_LINE) return;
+    [self paletteSetText:[NSString stringWithUTF8String:
+        axyne_palette_mode_prefix((AxynePaletteMode)mode)]];
+    [self paletteFocusField];
+}
+
+- (BOOL)paletteClaimsPoint:(NSPoint)point
+{
+    if (!NSPointInRect(point, [_searchButton frame])) return NO;
+    [self paletteFocusField];
+    return YES;
+}
+
+/* The field editor's caret follows the control text color, which is dark in a
+ * light appearance; the toolbar field is always dark, so force a white caret. */
+- (void)paletteFocusField
+{
+    [[self window] makeFirstResponder:_paletteField];
+    NSText *editor = [_paletteField currentEditor];
+    if ([editor isKindOfClass:[NSTextView class]])
+        [(NSTextView *)editor setInsertionPointColor:[NSColor whiteColor]];
+}
+
+/* NSTextFieldDelegate */
+- (void)controlTextDidChange:(NSNotification *)notification
+{
+    if ([notification object] == _paletteField) [self paletteSyncInput];
+}
+
+- (void)controlTextDidEndEditing:(NSNotification *)notification
+{
+    /* focus left the field (click elsewhere, window deactivated) */
+    if (_palette.active && [notification object] == _paletteField)
+        [self performSelector:@selector(paletteDismissWithoutFocus) withObject:nil afterDelay:0];
+}
+
+- (void)paletteDismissWithoutFocus
+{
+    [self closePaletteRestoringFocus:NO];
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView
+    doCommandBySelector:(SEL)selector
+{
+    (void)textView;
+    if (control != _paletteField || !_palette.active) return NO;
+    if (selector == @selector(moveUp:) || selector == @selector(moveDown:)) {
+        axyne_palette_ctl_move(&_palette, selector == @selector(moveUp:) ? -1 : 1);
+        [_paletteOverlay setNeedsDisplay:YES];
+        return YES;
+    }
+    if (selector == @selector(pageUp:) || selector == @selector(pageDown:) ||
+        selector == @selector(scrollPageUp:) || selector == @selector(scrollPageDown:)) {
+        size_t step = AXYNE_PALETTE_VISIBLE_ROWS;
+        BOOL up = selector == @selector(pageUp:) || selector == @selector(scrollPageUp:);
+        axyne_palette_ctl_select(&_palette, up
+            ? (_palette.selection > step ? _palette.selection - step : 0)
+            : _palette.selection + step);
+        [_paletteOverlay setNeedsDisplay:YES];
+        return YES;
+    }
+    if (selector == @selector(insertNewline:)) {
+        [self performSelector:@selector(paletteEnter) withObject:nil afterDelay:0];
+        return YES;
+    }
+    if (selector == @selector(cancelOperation:) || selector == @selector(complete:)) {
+        [self performSelector:@selector(paletteDismiss) withObject:nil afterDelay:0];
+        return YES;
+    }
+    if (selector == @selector(insertTab:) || selector == @selector(insertBacktab:)) return YES;
+    return NO;
+}
+
+/* Enter or a click: closes the palette and runs what the controller returns. */
+- (void)paletteActivateRow:(size_t)row
+{
+    AxynePaletteAction action;
+    if (!_palette.active) return;
+    if (!axyne_palette_ctl_activate(&_palette, row, &action)) return;
+    if (action.kind == AXYNE_PALETTE_ACTION_SET_INPUT) {
+        [self paletteSetText:[NSString stringWithUTF8String:action.text]];
+        axyne_palette_action_destroy(&action);
+        return;
+    }
+    [self closePaletteRestoringFocus:YES];
+    if (action.kind == AXYNE_PALETTE_ACTION_OPEN_FILE && action.path != NULL) {
+        NSString *path = [NSString stringWithUTF8String:action.path];
+        if (path != nil) [self openPath:path];
+    } else if (action.kind == AXYNE_PALETTE_ACTION_GOTO) {
+        [self paletteGotoLine:action.line column:action.column];
+    } else if (action.kind == AXYNE_PALETTE_ACTION_COMMAND) {
+        [self paletteRunCommand:action.command];
+    }
+    axyne_palette_action_destroy(&action);
+}
+
+- (void)paletteGotoLine:(size_t)line column:(size_t)column
+{
+    if (_editorView == nil) return;
+    NSInteger count = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
+    line = axyne_palette_clamp_line(line, count > 0 ? (size_t)count : 1);
+    NSInteger start = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:line - 1 lParam:0];
+    NSInteger end = [self sendEditorMessage:SCI_GETLINEENDPOSITION wParam:line - 1 lParam:0];
+    column = axyne_palette_clamp_column(column, end > start ? (size_t)(end - start) : 0);
+    (void)[self sendEditorMessage:SCI_GOTOPOS wParam:(uintptr_t)start + column - 1 lParam:0];
+    (void)[self sendEditorMessage:SCI_SCROLLCARET wParam:0 lParam:0];
+    [[self window] makeFirstResponder:_editorView];
+}
+
+- (void)paletteRunCommand:(AxynePaletteCommandId)command
+{
+    AxyneDocument *document = [self activeDocument];
+    BOOL gitReady = _explorer.root != NULL && _gitProcess == NULL;
+    switch (command) {
+    case AXYNE_PALETTE_COMMAND_NEW_FILE: [self newDocument:nil]; break;
+    case AXYNE_PALETTE_COMMAND_OPEN_FILE: [self openDocument:nil]; break;
+    case AXYNE_PALETTE_COMMAND_OPEN_FOLDER: [self openWorkspace:nil]; break;
+    case AXYNE_PALETTE_COMMAND_SAVE: if (document != NULL) [self saveDocument:nil]; break;
+    case AXYNE_PALETTE_COMMAND_SAVE_AS: if (document != NULL) [self saveDocumentAs:nil]; break;
+    case AXYNE_PALETTE_COMMAND_CLOSE_TAB: if (document != NULL) [self closeDocument:nil]; break;
+    case AXYNE_PALETTE_COMMAND_FIND: [self findOrReplace:NO]; break;
+    case AXYNE_PALETTE_COMMAND_REPLACE: [self findOrReplace:YES]; break;
+    case AXYNE_PALETTE_COMMAND_BUILD: if ([_buildButton isEnabled]) [self buildDocument:nil]; break;
+    case AXYNE_PALETTE_COMMAND_RUN: if ([_runButton isEnabled]) [self runDocument:nil]; break;
+    case AXYNE_PALETTE_COMMAND_START_DEBUGGING: [self startDebugger:nil]; break;
+    case AXYNE_PALETTE_COMMAND_GIT_STATUS:
+    case AXYNE_PALETTE_COMMAND_GIT_DIFF:
+    case AXYNE_PALETTE_COMMAND_GIT_STAGE_ALL:
+    case AXYNE_PALETTE_COMMAND_GIT_UNSTAGE_ALL:
+        if (!gitReady) {
+            [self showWorkspaceMessage:_explorer.root == NULL
+                ? @"Open a workspace folder before using Git commands."
+                : @"A Git command is already running."];
+        } else if (command == AXYNE_PALETTE_COMMAND_GIT_STATUS) [self showGitStatus:nil];
+        else if (command == AXYNE_PALETTE_COMMAND_GIT_DIFF) [self showGitDiff:nil];
+        else if (command == AXYNE_PALETTE_COMMAND_GIT_STAGE_ALL) [self stageAllGitChanges:nil];
+        else [self unstageAllGitChanges:nil];
+        break;
+    case AXYNE_PALETTE_COMMAND_PREFERENCES: [self showGlobalPreferences:nil]; break;
+    case AXYNE_PALETTE_COMMAND_WORKSPACE_SETTINGS:
+        if (_workspacePreferencesPath != NULL) [self showWorkspacePreferences:nil];
+        else [self showWorkspaceMessage:@"Open a workspace folder before editing workspace settings."];
+        break;
+    case AXYNE_PALETTE_COMMAND_PANEL_OUTPUT:
+    case AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS:
+    case AXYNE_PALETTE_COMMAND_PANEL_TERMINAL:
+        _panelMode = command == AXYNE_PALETTE_COMMAND_PANEL_OUTPUT ? 0 :
+            (command == AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS ? 1 : 2);
+        [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
+        [self setNeedsLayout:YES];
+        [self setNeedsDisplay:YES];
+        break;
+    case AXYNE_PALETTE_COMMAND_CLEAR_OUTPUT: [self clearOutput:nil]; break;
+    case AXYNE_PALETTE_COMMAND_NONE:
+    case AXYNE_PALETTE_COMMAND_QUICK_FILE:
+    case AXYNE_PALETTE_COMMAND_GO_TO_LINE:
+    case AXYNE_PALETTE_COMMAND_GO_TO_SYMBOL:
+        break;
+    }
 }
 
 @end
