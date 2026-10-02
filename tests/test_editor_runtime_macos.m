@@ -34,7 +34,8 @@
 } while (0)
 
 typedef NS_ENUM(int, LoadFault) {
-    LoadFaultNone, LoadFaultCreate, LoadFaultShortInsert, LoadFaultInsertStatus
+    LoadFaultNone, LoadFaultCreate, LoadFaultShortInsert, LoadFaultInsertStatus,
+    LoadFaultBindStatus
 };
 static LoadFault loadFault;
 static size_t alertCount;
@@ -54,6 +55,12 @@ static NSInteger test_message(id workspace, SEL selector, unsigned int message,
     if (message == SCI_RELEASEDOCUMENT) --documentReferences;
     if (loadFault == LoadFaultInsertStatus && message == SCI_ADDTEXT)
         productionMessage(workspace, selector, SCI_SETSTATUS, SC_STATUS_BADALLOC, 0);
+    if (loadFault == LoadFaultBindStatus && message == SCI_SETDOCPOINTER) {
+        // Scintilla may install the pointer before allocating its line state.
+        // The resulting pointer equality must not hide the allocation error.
+        loadFault = LoadFaultNone;
+        productionMessage(workspace, selector, SCI_SETSTATUS, SC_STATUS_BADALLOC, 0);
+    }
     return result;
 }
 
@@ -270,6 +277,20 @@ static int run_tests(NSString *pngPath)
         CHECK(!documents->documents[documents->active_index].is_dirty);
         CHECK(documentReferences == (int)documents->count);
 
+        previousIndex = documents->active_index;
+        previousPointer = editor_message(workspace, SCI_GETDOCPOINTER, 0, 0);
+        loadFault = LoadFaultBindStatus;
+        CHECK(![workspace selectDocumentAtIndex:1]);
+        loadFault = LoadFaultNone;
+        CHECK(documents->active_index == previousIndex);
+        CHECK(editor_message(workspace, SCI_GETDOCPOINTER, 0, 0) == previousPointer);
+        CHECK(editor_equals(workspace, "", 0));
+        CHECK(documentReferences == (int)documents->count);
+        editor_message(workspace, SCI_SETSTATUS, SC_STATUS_BADALLOC, 0);
+        CHECK([workspace selectDocumentAtIndex:1]);
+        CHECK(editor_equals(workspace, second, sizeof(second) - 1));
+        CHECK(editor_message(workspace, SCI_GETSTATUS, 0, 0) == SC_STATUS_OK);
+
         // Opening before AppKit attaches the view must also load the saved
         // bytes, then retain that first native document across tab switches.
         NSView *earlyWorkspace = [[testClass alloc] initWithFrame:NSZeroRect];
@@ -279,6 +300,18 @@ static int run_tests(NSString *pngPath)
         CHECK(earlyDocuments->count == 2 && earlyDocuments->active_index == 1);
         CHECK(editor_equals(earlyWorkspace, edited, sizeof(edited) - 1));
         CHECK(earlyDocuments->documents[1].owns_native_editor_document);
+        intptr_t earlyPointer = editor_message(earlyWorkspace, SCI_GETDOCPOINTER, 0, 0);
+        int earlyReferences = documentReferences;
+        for (int faultIndex = 0; faultIndex < 2; ++faultIndex) {
+            loadFault = faultIndex == 0 ? LoadFaultCreate : LoadFaultBindStatus;
+            [earlyWorkspace closeDocument:nil];
+            loadFault = LoadFaultNone;
+            CHECK(earlyDocuments->count == 2 && earlyDocuments->active_index == 1);
+            CHECK(earlyDocuments->documents[0].native_editor_document == NULL);
+            CHECK(editor_message(earlyWorkspace, SCI_GETDOCPOINTER, 0, 0) == earlyPointer);
+            CHECK(editor_equals(earlyWorkspace, edited, sizeof(edited) - 1));
+            CHECK(documentReferences == earlyReferences);
+        }
         loadFault = LoadFaultCreate;
         CHECK(![earlyWorkspace selectDocumentAtIndex:0]);
         loadFault = LoadFaultNone;

@@ -1497,6 +1497,9 @@ static NSString *axyne_macos_file_badge(const char *name)
             (void)axyne_documents_set_active(&_documents, index, NULL);
             return;
         }
+    } else if (_documents.active_index == index) {
+        size_t successor = index + 1 < _documents.count ? index + 1 : index - 1;
+        if (![self selectDocumentAtIndex:successor]) return;
     }
     AxyneDocument *doc = &_documents.documents[index];
     if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);

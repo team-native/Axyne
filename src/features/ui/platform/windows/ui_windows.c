@@ -1961,6 +1961,9 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
             (void)axyne_documents_set_active(&state->documents, index, NULL);
             return;
         }
+    } else if (state->documents.active_index == index) {
+        size_t successor = index + 1 < state->documents.count ? index + 1 : index - 1;
+        if (!axyne_show_document(state, successor)) return;
     }
     AxyneDocument *doc = &state->documents.documents[index];
     if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
