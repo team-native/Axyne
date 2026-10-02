@@ -13,6 +13,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/debugger.h"
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
@@ -67,6 +68,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     BOOL _editorDocumentInitialized;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
+    AxyneDebugger _debugger;
     AxyneProcess *_terminalProcess;
     AxyneProcess *_gitProcess;
     AxyneMacGitRun *_gitRun;
@@ -75,6 +77,11 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     NSButton *_terminalStart;
     NSButton *_terminalStop;
     NSButton *_terminalSend;
+    NSButton *_debugStart;
+    NSButton *_debugPause;
+    NSButton *_debugContinue;
+    NSButton *_debugNext;
+    NSButton *_debugBreakpoint;
     int _activeAction;
     int _lastExitCode;
     BOOL _lastExitFailed;
@@ -205,10 +212,13 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)sendTerminal:(id)sender;
 - (void)terminalAppend:(const char *)bytes length:(size_t)length
                 stream:(AxyneProcessStream)stream;
-- (void)terminalExited:(int)exitCode;
+- (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode;
 - (BOOL)configureRunner;
 - (void)buildDocument:(id)sender;
 - (void)runDocument:(id)sender;
+- (void)startDebugger:(id)sender;
+- (void)debugCommand:(id)sender;
+- (void)toggleBreakpoint:(id)sender;
 - (void)showGlobalPreferences:(id)sender;
 - (void)showWorkspacePreferences:(id)sender;
 - (void)applyPreferences;
@@ -347,11 +357,10 @@ static void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code,
                                       void *user_data)
 {
     AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
-    (void)process;
     if (view == nil) return;
     [view retain];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [view terminalExited:exit_code];
+        [view terminalExited:process exitCode:exit_code];
         [view release];
     });
 }
@@ -467,6 +476,15 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
                 return nil;
             }
         }
+        if (axyne_debugger_initialize(&_debugger, NULL) != AXYNE_STATUS_OK ||
+            axyne_debugger_configure_default(&_debugger, NULL) != AXYNE_STATUS_OK) {
+            axyne_runner_destroy(&_terminalRunner);
+            axyne_runner_destroy(&_actionRunner);
+            axyne_documents_destroy(&_documents);
+            axyne_explorer_destroy(&_explorer);
+            [self release];
+            return nil;
+        }
         {
             AxyneError preferenceError;
             AxyneStatus status;
@@ -502,6 +520,26 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         [_terminalSend setTitle:@"Send"]; [_terminalSend setTarget:self];
         [_terminalSend setAction:@selector(sendTerminal:)];
         [self addSubview:_terminalSend];
+        _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_debugStart setTitle:@"Debug"]; [_debugStart setTarget:self];
+        [_debugStart setAction:@selector(startDebugger:)];
+        [self addSubview:_debugStart];
+        _debugPause = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_debugPause setTitle:@"Pause"]; [_debugPause setTarget:self];
+        [_debugPause setAction:@selector(debugCommand:)]; [_debugPause setTag:1];
+        [_debugPause setEnabled:NO]; [self addSubview:_debugPause];
+        _debugContinue = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_debugContinue setTitle:@"Continue"]; [_debugContinue setTarget:self];
+        [_debugContinue setAction:@selector(debugCommand:)]; [_debugContinue setTag:0];
+        [_debugContinue setEnabled:NO]; [self addSubview:_debugContinue];
+        _debugNext = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_debugNext setTitle:@"Next"]; [_debugNext setTarget:self];
+        [_debugNext setAction:@selector(debugCommand:)]; [_debugNext setTag:2];
+        [_debugNext setEnabled:NO]; [self addSubview:_debugNext];
+        _debugBreakpoint = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_debugBreakpoint setTitle:@"Breakpoint"]; [_debugBreakpoint setTarget:self];
+        [_debugBreakpoint setAction:@selector(toggleBreakpoint:)];
+        [_debugBreakpoint setEnabled:NO]; [self addSubview:_debugBreakpoint];
         [self applyPreferences];
     }
     return self;
@@ -1795,7 +1833,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     [_terminalOutput scrollRangeToVisible:NSMakeRange([storage length], 0)];
 }
 
-- (void)terminalExited:(int)exitCode
+- (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode
 {
     char message[96];
     _lastExitCode = exitCode;
@@ -1805,14 +1843,78 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         _lastExitFailed ? "[failed: exit %d]\n" : "[exit %d]\n", exitCode);
     [self terminalAppend:message length:strlen(message)
                    stream:AXYNE_PROCESS_STDOUT];
-    if (_terminalProcess != NULL) {
+    if (_terminalProcess == process) {
         axyne_process_release(_terminalProcess);
         _terminalProcess = NULL;
     }
+    axyne_debugger_release(&_debugger);
     _activeAction = 0;
     [_terminalStart setEnabled:YES];
     [_terminalStop setEnabled:NO];
+    [_debugStart setEnabled:YES];
+    [_debugPause setEnabled:NO];
+    [_debugContinue setEnabled:NO];
+    [_debugNext setEnabled:NO];
+    [_debugBreakpoint setEnabled:NO];
     [self setNeedsDisplay:YES];
+}
+
+- (void)startDebugger:(id)sender
+{
+    AxyneDocument *document;
+    AxyneError error;
+    (void)sender;
+    if (axyne_debugger_is_active(&_debugger) || ![self captureEditor]) return;
+    if (_terminalProcess != NULL) {
+        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    document = [self activeDocument];
+    if (document == NULL || document->is_untitled || document->path == NULL ||
+        document->is_dirty) {
+        if (![self saveActive]) return;
+        document = [self activeDocument];
+    }
+    if (document == NULL || document->is_untitled || document->path == NULL ||
+        document->is_dirty) return;
+    if (axyne_debugger_start(&_debugger, document,
+            axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
+            &error) != AXYNE_STATUS_OK) {
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    [self terminalAppend:"[debugger]\n" length:12 stream:AXYNE_PROCESS_STDOUT];
+    [_debugStart setEnabled:NO]; [_debugPause setEnabled:YES];
+    [_debugContinue setEnabled:YES]; [_debugNext setEnabled:YES];
+    [_debugBreakpoint setEnabled:YES]; _activeAction = 4;
+}
+
+- (void)debugCommand:(id)sender
+{
+    AxyneDebuggerCommand command = (AxyneDebuggerCommand)[sender tag];
+    AxyneError error;
+    if (axyne_debugger_command(&_debugger, command, &error) != AXYNE_STATUS_OK)
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+}
+
+- (void)toggleBreakpoint:(id)sender
+{
+    AxyneDocument *document = [self activeDocument];
+    AxyneError error;
+    size_t position;
+    size_t line;
+    (void)sender;
+    if (document == NULL || document->path == NULL) return;
+    position = (size_t)[self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    line = (size_t)[self sendEditorMessage:2166 wParam:position lParam:0] + 1;
+    if (axyne_debugger_toggle_breakpoint(&_debugger, document->path, line,
+                                         &error) != AXYNE_STATUS_OK)
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
 }
 
 - (void)startTerminal:(id)sender
@@ -1821,7 +1923,12 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     AxyneError error;
     AxyneStatus status;
     (void)sender;
-    if (_terminalProcess != NULL) return;
+    if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
     status = axyne_runner_process_spec(&_terminalRunner,
         axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
         &spec, &error);
@@ -2050,6 +2157,11 @@ else [_terminalInput setStringValue:@""];
         56.0, 22.0)];
     [_terminalSend setFrame:NSMakeRect(NSWidth(bounds) - 76.0, inputTop,
         64.0, 22.0)];
+    [_debugStart setFrame:NSMakeRect(12.0, bottomTop + 4.0, 72.0, 22.0)];
+    [_debugPause setFrame:NSMakeRect(88.0, bottomTop + 4.0, 64.0, 22.0)];
+    [_debugContinue setFrame:NSMakeRect(156.0, bottomTop + 4.0, 76.0, 22.0)];
+    [_debugNext setFrame:NSMakeRect(236.0, bottomTop + 4.0, 56.0, 22.0)];
+    [_debugBreakpoint setFrame:NSMakeRect(296.0, bottomTop + 4.0, 96.0, 22.0)];
 }
 
 - (void)drawLabel:(NSString *)label at:(NSPoint)point
@@ -2213,6 +2325,12 @@ else [_terminalInput setStringValue:@""];
     [_terminalStart release];
     [_terminalStop release];
     [_terminalSend release];
+    [_debugStart release];
+    [_debugPause release];
+    [_debugContinue release];
+    [_debugNext release];
+    [_debugBreakpoint release];
+    axyne_debugger_destroy(&_debugger);
     [_lspStatus release];
     [_scintillaBundle unload];
     [_scintillaBundle release];
@@ -2373,6 +2491,18 @@ static void axyne_install_menu(NSApplication *application,
                 action:@selector(configureRunner) keyEquivalent:@"configure"];
             [build setTarget:workspace]; [run setTarget:workspace];
             [configure setTarget:workspace];
+        } else if ([title isEqualToString:@"Debug"]) {
+            NSMenuItem *start = [submenu addItemWithTitle:@"Start Debugger"
+                action:@selector(startDebugger:) keyEquivalent:@"F5"];
+            NSMenuItem *pause = [submenu addItemWithTitle:@"Pause"
+                action:@selector(debugCommand:) keyEquivalent:@"F6"];
+            NSMenuItem *next = [submenu addItemWithTitle:@"Step Over"
+                action:@selector(debugCommand:) keyEquivalent:@"F10"];
+            [start setTarget:workspace]; [pause setTarget:workspace];
+            [next setTarget:workspace]; [pause setTag:1]; [next setTag:2];
+            NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
+                action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
+            [toggle setTarget:workspace];
         } else if ([title isEqualToString:@"Tools"]) {
             NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: Go to Definition"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
