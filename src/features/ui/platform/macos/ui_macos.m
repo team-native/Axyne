@@ -9,6 +9,8 @@
 #include "axyne/search.h"
 #include "axyne/explorer.h"
 #include "axyne/watcher.h"
+#include "axyne/process.h"
+#include "axyne/runner.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
@@ -50,6 +52,18 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     NSMenu *_recentMenu;
     BOOL _loadingEditor;
     BOOL _editorDocumentInitialized;
+    AxyneRunnerConfig _terminalRunner;
+    AxyneRunnerConfig _actionRunner;
+    AxyneProcess *_terminalProcess;
+    NSTextView *_terminalOutput;
+    NSTextField *_terminalInput;
+    NSButton *_terminalStart;
+    NSButton *_terminalStop;
+    NSButton *_terminalSend;
+    int _activeAction;
+    int _lastExitCode;
+    BOOL _lastExitFailed;
+    BOOL _hasExitStatus;
 }
 - (void)newDocument:(id)sender;
 - (void)openDocument:(id)sender;
@@ -79,6 +93,15 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
 - (void)performExplorerOperation:(AxyneFileKind)kind;
 - (NSString *)askForText:(NSString *)title label:(NSString *)label;
+- (void)startTerminal:(id)sender;
+- (void)stopTerminal:(id)sender;
+- (void)sendTerminal:(id)sender;
+- (void)terminalAppend:(const char *)bytes length:(size_t)length
+                stream:(AxyneProcessStream)stream;
+- (void)terminalExited:(int)exitCode;
+- (BOOL)configureRunner;
+- (void)buildDocument:(id)sender;
+- (void)runDocument:(id)sender;
 @end
 
 static void axyne_install_menu(NSApplication *application,
@@ -88,6 +111,51 @@ typedef struct AxyneMacWorkspaceEvent {
     AxyneWatchEventKind kind;
     char *path;
 } AxyneMacWorkspaceEvent;
+
+typedef struct AxyneMacTerminalMessage {
+    char *bytes;
+    size_t length;
+    AxyneProcessStream stream;
+} AxyneMacTerminalMessage;
+
+static void axyne_macos_terminal_output(AxyneProcess *process,
+                                         AxyneProcessStream stream,
+                                         const char *bytes, size_t length,
+                                         void *user_data)
+{
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
+    AxyneMacTerminalMessage *message;
+    (void)process;
+    if (view == nil || bytes == NULL || length == 0 ||
+        length > SIZE_MAX - sizeof(*message) - 1) return;
+    message = (AxyneMacTerminalMessage *)malloc(sizeof(*message) + length + 1);
+    if (message == NULL) return;
+    message->bytes = (char *)(message + 1);
+    memcpy(message->bytes, bytes, length);
+    message->bytes[length] = '\0';
+    message->length = length;
+    message->stream = stream;
+    [view retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view terminalAppend:message->bytes length:message->length
+                       stream:message->stream];
+        [view release];
+        free(message);
+    });
+}
+
+static void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code,
+                                      void *user_data)
+{
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
+    (void)process;
+    if (view == nil) return;
+    [view retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view terminalExited:exit_code];
+        [view release];
+    });
+}
 
 static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
                                        void *user_data)
@@ -110,6 +178,72 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     });
 }
 
+static void axyne_macos_runner_values_free(char **values, size_t count)
+{
+    size_t i;
+    if (values == NULL) return;
+    for (i = 0; i < count; ++i) free(values[i]);
+    free(values);
+}
+
+static int axyne_macos_runner_split_lines(char *text, char ***values,
+                                          size_t *count)
+{
+    char **items = NULL;
+    size_t item_count = 0;
+    char *cursor = text;
+    if (values == NULL || count == NULL) return 0;
+    *values = NULL;
+    *count = 0;
+    if (text == NULL) return 1;
+    while (*cursor != '\0') {
+        char *start = cursor;
+        char *copy;
+        while (*cursor != '\0' && *cursor != '\r' && *cursor != '\n') ++cursor;
+        if (cursor != start) {
+            copy = (char *)malloc((size_t)(cursor - start) + 1);
+            if (copy == NULL) {
+                axyne_macos_runner_values_free(items, item_count);
+                return 0;
+            }
+            memcpy(copy, start, (size_t)(cursor - start));
+            copy[cursor - start] = '\0';
+            {
+                char **grown = (char **)realloc(items,
+                    (item_count + 1) * sizeof(*grown));
+                if (grown == NULL) {
+                    free(copy);
+                    axyne_macos_runner_values_free(items, item_count);
+                    return 0;
+                }
+                items = grown;
+            }
+            items[item_count++] = copy;
+        }
+        while (*cursor == '\r' || *cursor == '\n') ++cursor;
+    }
+    *values = items;
+    *count = item_count;
+    return 1;
+}
+
+static NSString *axyne_macos_runner_lines(char **values, size_t count)
+{
+    NSMutableString *result = [NSMutableString string];
+    for (size_t i = 0; i < count; ++i) {
+        if (i != 0) [result appendString:@"\n"];
+        [result appendString:[NSString stringWithUTF8String:values[i]] ?: @""];
+    }
+    return result;
+}
+
+static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
+{
+    NSTextField *field = [NSTextField labelWithString:text];
+    [field setFrame:NSMakeRect(0, y, 460, 20)];
+    return field;
+}
+
 @implementation AxyneWorkspaceView
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -122,6 +256,40 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
             [self release];
             return nil;
         }
+        {
+            AxyneRunnerSpec spec = {0};
+            spec.executable = "/bin/sh";
+            if (axyne_runner_initialize(&_terminalRunner, NULL) != AXYNE_STATUS_OK ||
+                axyne_runner_configure(&_terminalRunner, &spec, NULL) != AXYNE_STATUS_OK ||
+                axyne_runner_initialize(&_actionRunner, NULL) != AXYNE_STATUS_OK) {
+                axyne_documents_destroy(&_documents);
+                axyne_explorer_destroy(&_explorer);
+                [self release];
+                return nil;
+            }
+        }
+        _terminalOutput = [[NSTextView alloc] initWithFrame:NSZeroRect];
+        [_terminalOutput setEditable:NO];
+        [_terminalOutput setSelectable:YES];
+        [_terminalOutput setFont:[NSFont fontWithName:@"Menlo" size:11]];
+        [_terminalOutput setTextColor:axyne_color(199, 201, 206)];
+        [_terminalOutput setBackgroundColor:axyne_color(22, 23, 26)];
+        [self addSubview:_terminalOutput];
+        _terminalInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
+        [_terminalInput setPlaceholderString:@"Terminal input"];
+        [self addSubview:_terminalInput];
+        _terminalStart = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_terminalStart setTitle:@"Start Terminal"];
+        [_terminalStart setTarget:self]; [_terminalStart setAction:@selector(startTerminal:)];
+        [self addSubview:_terminalStart];
+        _terminalStop = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_terminalStop setTitle:@"Stop"]; [_terminalStop setTarget:self];
+        [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
+        [self addSubview:_terminalStop];
+        _terminalSend = [[NSButton alloc] initWithFrame:NSZeroRect];
+        [_terminalSend setTitle:@"Send"]; [_terminalSend setTarget:self];
+        [_terminalSend setAction:@selector(sendTerminal:)];
+        [self addSubview:_terminalSend];
     }
     return self;
 }
@@ -876,6 +1044,258 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     }
 }
 
+- (void)terminalAppend:(const char *)bytes length:(size_t)length
+                stream:(AxyneProcessStream)stream
+{
+    if (_terminalOutput == nil || bytes == NULL || length == 0) return;
+    NSString *text = [[[NSString alloc] initWithBytes:bytes length:length
+                                             encoding:NSUTF8StringEncoding] autorelease];
+    if (text == nil) text = @"(invalid UTF-8 output)";
+    if (stream == AXYNE_PROCESS_STDERR) text = [@"[stderr] " stringByAppendingString:text];
+    NSTextStorage *storage = [_terminalOutput textStorage];
+    [storage appendAttributedString:[[[NSAttributedString alloc]
+        initWithString:text attributes:@{ NSFontAttributeName:
+            [NSFont fontWithName:@"Menlo" size:11],
+            NSForegroundColorAttributeName:axyne_color(199, 201, 206) }]
+        autorelease]];
+    if ([storage length] > 1024 * 1024)
+        [storage deleteCharactersInRange:NSMakeRange(0, [storage length] - 1024 * 1024)];
+    [_terminalOutput scrollRangeToVisible:NSMakeRange([storage length], 0)];
+}
+
+- (void)terminalExited:(int)exitCode
+{
+    char message[96];
+    _lastExitCode = exitCode;
+    _lastExitFailed = exitCode != 0;
+    _hasExitStatus = YES;
+    (void)snprintf(message, sizeof(message),
+        _lastExitFailed ? "[failed: exit %d]\n" : "[exit %d]\n", exitCode);
+    [self terminalAppend:message length:strlen(message)
+                   stream:AXYNE_PROCESS_STDOUT];
+    if (_terminalProcess != NULL) {
+        axyne_process_release(_terminalProcess);
+        _terminalProcess = NULL;
+    }
+    _activeAction = 0;
+    [_terminalStart setEnabled:YES];
+    [_terminalStop setEnabled:NO];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)startTerminal:(id)sender
+{
+    AxyneProcessSpec spec;
+    AxyneError error;
+    AxyneStatus status;
+    (void)sender;
+    if (_terminalProcess != NULL) return;
+    status = axyne_runner_process_spec(&_terminalRunner,
+        axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
+        &spec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_process_start(&spec, &_terminalProcess, &error);
+    if (status != AXYNE_STATUS_OK) {
+        _lastExitFailed = NO;
+        _hasExitStatus = NO;
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    [_terminalStart setEnabled:NO];
+    [_terminalStop setEnabled:YES];
+    _activeAction = 3;
+    _lastExitFailed = NO;
+}
+
+- (void)stopTerminal:(id)sender
+{
+    (void)sender;
+    if (_terminalProcess != NULL) (void)axyne_process_terminate(_terminalProcess, NULL);
+}
+
+- (void)sendTerminal:(id)sender
+{
+    const char *value;
+    NSMutableData *data;
+    AxyneError error;
+    (void)sender;
+    if (_terminalProcess == NULL || [[_terminalInput stringValue] length] == 0) return;
+    value = [[_terminalInput stringValue] UTF8String];
+    data = [NSMutableData dataWithBytes:value length:strlen(value)];
+    [data appendBytes:"\n" length:1];
+    if (axyne_process_write(_terminalProcess, [data bytes], [data length], &error) != AXYNE_STATUS_OK)
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+else [_terminalInput setStringValue:@""];
+}
+
+- (BOOL)configureRunner
+{
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 280)];
+    NSTextField *executable = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 246, 460, 24)];
+    NSTextField *workingDirectory = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 201, 460, 24)];
+    NSTextView *arguments = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 70)];
+    NSTextView *environment = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 70)];
+    NSScrollView *argumentsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 122, 460, 70)];
+    NSScrollView *environmentScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 32, 460, 70)];
+    NSString *initialExecutable = _actionRunner.executable != NULL
+        ? [NSString stringWithUTF8String:_actionRunner.executable] : @"";
+    NSString *initialWorkingDirectory = _actionRunner.working_directory != NULL
+        ? [NSString stringWithUTF8String:_actionRunner.working_directory] : @"";
+    [executable setStringValue:initialExecutable ?: @""];
+    [workingDirectory setStringValue:initialWorkingDirectory ?: @""];
+    [arguments setString:axyne_macos_runner_lines(_actionRunner.arguments,
+                                                   _actionRunner.argument_count)];
+    [environment setString:axyne_macos_runner_lines(_actionRunner.environment,
+                                                     _actionRunner.environment_count)];
+    [arguments setFont:[NSFont userFixedPitchFontOfSize:11]];
+    [environment setFont:[NSFont userFixedPitchFontOfSize:11]];
+    [argumentsScroll setHasVerticalScroller:YES];
+    [argumentsScroll setDocumentView:arguments];
+    [environmentScroll setHasVerticalScroller:YES];
+    [environmentScroll setDocumentView:environment];
+    [accessory addSubview:axyne_macos_label(@"Executable", 224)];
+    [accessory addSubview:executable];
+    [accessory addSubview:axyne_macos_label(@"Arguments (one per line)", 194)];
+    [accessory addSubview:argumentsScroll];
+    [accessory addSubview:axyne_macos_label(@"Working directory (optional)", 179)];
+    [accessory addSubview:workingDirectory];
+    [accessory addSubview:axyne_macos_label(
+        @"Environment overrides (NAME=VALUE per line)", 104)];
+    [accessory addSubview:environmentScroll];
+    [alert setMessageText:@"Configure Build/Run Runner"];
+    [alert setInformativeText:@"Arguments are passed directly to the executable; no shell is used."];
+    [alert setAccessoryView:accessory];
+    [alert addButtonWithTitle:@"Save"];
+    [alert addButtonWithTitle:@"Cancel"];
+    NSInteger response = [alert runModal];
+    BOOL accepted = NO;
+    if (response == NSAlertFirstButtonReturn) {
+        char *executableUTF8 = strdup([[executable stringValue] UTF8String] ?: "");
+        char *argumentsUTF8 = strdup([[arguments string] UTF8String] ?: "");
+        char *workingDirectoryUTF8 = strdup([[workingDirectory stringValue] UTF8String] ?: "");
+        char *environmentUTF8 = strdup([[environment string] UTF8String] ?: "");
+        char **argumentValues = NULL;
+        char **environmentValues = NULL;
+        size_t argumentCount = 0;
+        size_t environmentCount = 0;
+        AxyneRunnerSpec spec = {0};
+        AxyneError error = {0};
+        AxyneStatus status = AXYNE_STATUS_OK;
+        if (executableUTF8 == NULL || executableUTF8[0] == '\0' ||
+            argumentsUTF8 == NULL || workingDirectoryUTF8 == NULL ||
+            environmentUTF8 == NULL ||
+            !axyne_macos_runner_split_lines(argumentsUTF8, &argumentValues,
+                                            &argumentCount) ||
+            !axyne_macos_runner_split_lines(environmentUTF8, &environmentValues,
+                                            &environmentCount)) {
+            status = AXYNE_STATUS_OUT_OF_MEMORY;
+            (void)snprintf(error.message, sizeof(error.message),
+                           "Unable to read runner configuration.");
+        } else {
+            spec.executable = executableUTF8;
+            spec.arguments = (const char *const *)argumentValues;
+            spec.argument_count = argumentCount;
+            spec.working_directory = workingDirectoryUTF8[0] != '\0'
+                ? workingDirectoryUTF8 : NULL;
+            spec.environment = (const char *const *)environmentValues;
+            spec.environment_count = environmentCount;
+            status = axyne_runner_configure(&_actionRunner, &spec, &error);
+        }
+        free(executableUTF8);
+        free(argumentsUTF8);
+        free(workingDirectoryUTF8);
+        free(environmentUTF8);
+        axyne_macos_runner_values_free(argumentValues, argumentCount);
+        axyne_macos_runner_values_free(environmentValues, environmentCount);
+        if (status == AXYNE_STATUS_OK) {
+            accepted = YES;
+        } else {
+            NSAlert *errorAlert = [[[NSAlert alloc] init] autorelease];
+            [errorAlert setMessageText:@"Invalid runner configuration"];
+            [errorAlert setInformativeText:[NSString stringWithUTF8String:
+                error.message[0] != '\0' ? error.message :
+                "Unable to configure runner."] ?: @""];
+            [errorAlert addButtonWithTitle:@"OK"];
+            [errorAlert runModal];
+        }
+    }
+    [executable release];
+    [workingDirectory release];
+    [arguments release];
+    [environment release];
+    [argumentsScroll release];
+    [environmentScroll release];
+    [accessory release];
+    return accepted;
+}
+
+- (void)startAction:(BOOL)run
+{
+    AxyneDocument *doc = [self activeDocument];
+    AxyneProcessSpec processSpec;
+    AxyneError error;
+    AxyneStatus status;
+    if (_terminalProcess != NULL) {
+        const char *message = "Build or run is unavailable while a terminal session is active. Stop it first.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    if (![self captureEditor]) return;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty) {
+        if (![self saveActive]) {
+            const char *message = "Save the active document before building or running.\n";
+            [self terminalAppend:message length:strlen(message)
+                           stream:AXYNE_PROCESS_STDERR];
+            return;
+        }
+        doc = [self activeDocument];
+        if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty)
+            return;
+    }
+    if (_actionRunner.executable == NULL) {
+        const char *message = "Configure the Build/Run Runner before building or running.\n";
+        [self terminalAppend:message length:strlen(message)
+                       stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    status = axyne_runner_process_spec(&_actionRunner,
+            axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
+            &processSpec, &error);
+    if (status == AXYNE_STATUS_OK)
+        status = axyne_process_start(&processSpec, &_terminalProcess, &error);
+    if (status != AXYNE_STATUS_OK) {
+        _lastExitFailed = NO;
+        _hasExitStatus = NO;
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+        [self setNeedsDisplay:YES];
+    } else {
+        [_terminalOutput setString:(run ? @"[run]\n" : @"[build]\n")];
+        _activeAction = run ? 2 : 1;
+        _lastExitFailed = NO;
+        [_terminalStart setEnabled:NO];
+        [_terminalStop setEnabled:YES];
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)buildDocument:(id)sender
+{
+    (void)sender;
+    [self startAction:NO];
+}
+
+- (void)runDocument:(id)sender
+{
+    (void)sender;
+    [self startAction:YES];
+}
+
 - (void)layout
 {
     [super layout];
@@ -886,6 +1306,18 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
         MAX(0.0, NSWidth(bounds) - AXYNE_SIDEBAR),
         MAX(0.0, bottomTop - editorTop));
     [_editorView setFrame:editorFrame];
+    CGFloat terminalTop = bottomTop + 30.0;
+    CGFloat inputTop = bottomTop + AXYNE_BOTTOM - 28.0;
+    [_terminalOutput setFrame:NSMakeRect(12.0, terminalTop,
+        MAX(0.0, NSWidth(bounds) - 24.0), AXYNE_BOTTOM - 62.0)];
+    [_terminalInput setFrame:NSMakeRect(12.0, inputTop,
+        MAX(0.0, NSWidth(bounds) - 260.0), 22.0)];
+    [_terminalStart setFrame:NSMakeRect(NSWidth(bounds) - 240.0, inputTop,
+        96.0, 22.0)];
+    [_terminalStop setFrame:NSMakeRect(NSWidth(bounds) - 138.0, inputTop,
+        56.0, 22.0)];
+    [_terminalSend setFrame:NSMakeRect(NSWidth(bounds) - 76.0, inputTop,
+        64.0, 22.0)];
 }
 
 - (void)drawLabel:(NSString *)label at:(NSPoint)point
@@ -986,7 +1418,11 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     }
     [self drawLabel:@"출력     문제 1     터미널"
                 at:NSMakePoint(12, bottomTop + 9) size:11 color:muted family:@"SF Pro Text"];
-    [self drawLabel:@"✓ 빌드 준비됨"
+    NSString *status = _lastExitFailed
+        ? [NSString stringWithFormat:@"✗ 실행 실패 (exit %d)", _lastExitCode]
+        : (_activeAction != 0 ? @"● 실행 중"
+           : (_hasExitStatus ? @"✓ 실행 완료 (exit 0)" : @"✓ 빌드 준비됨"));
+    [self drawLabel:status
                 at:NSMakePoint(12, statusTop + 6) size:10 color:muted family:@"SF Pro Text"];
     [self drawLabel:@"줄 1, 열 1     UTF-8    C17"
                 at:NSMakePoint(MAX(12, width - 250), statusTop + 6)
@@ -1001,6 +1437,12 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
 
 - (void)dealloc
 {
+    if (_terminalProcess != NULL) {
+        axyne_process_release(_terminalProcess);
+        _terminalProcess = NULL;
+    }
+    axyne_runner_destroy(&_terminalRunner);
+    axyne_runner_destroy(&_actionRunner);
     if (_watcher != NULL) {
         axyne_watcher_stop(_watcher);
         axyne_watcher_release(_watcher);
@@ -1017,6 +1459,11 @@ static void axyne_macos_watch_callback(const AxyneWatchEvent *event,
     }
     axyne_documents_destroy(&_documents);
     [_editorView release];
+    [_terminalOutput release];
+    [_terminalInput release];
+    [_terminalStart release];
+    [_terminalStop release];
+    [_terminalSend release];
     [_scintillaBundle unload];
     [_scintillaBundle release];
     [super dealloc];
@@ -1147,7 +1594,19 @@ static void axyne_install_menu(NSApplication *application,
     for (NSString *title in titles) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
-        [item setSubmenu:[[NSMenu alloc] initWithTitle:title]];
+        NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
+        if ([title isEqualToString:@"Build"]) {
+            NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
+                action:@selector(buildDocument:) keyEquivalent:@"b"];
+            NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
+                action:@selector(runDocument:) keyEquivalent:@"r"];
+            NSMenuItem *configure = [submenu addItemWithTitle:@"Configure Build/Run Runner…"
+                action:@selector(configureRunner) keyEquivalent:@"configure"];
+            [build setTarget:workspace]; [run setTarget:workspace];
+            [configure setTarget:workspace];
+        }
+        [item setSubmenu:submenu];
+        [submenu release];
         [mainMenu addItem:item];
         [item release];
     }
