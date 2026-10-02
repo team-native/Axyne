@@ -1,0 +1,7 @@
+{
+  "name": "@AXYNE_DISPLAY_NAME@",
+  "version": "@PROJECT_VERSION@",
+  "author": "@AXYNE_AUTHOR@",
+  "release_notes": "RELEASE_NOTES.md",
+  "offline": true
+}
