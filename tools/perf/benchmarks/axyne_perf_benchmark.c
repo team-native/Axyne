@@ -12,7 +12,7 @@
 #include <windows.h>
 #include <psapi.h>
 #include <wchar.h>
-#else
+#elif defined(__APPLE__)
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -173,7 +173,7 @@ static int axyne_perf_target_iteration(const char *target,
         wait_result = WaitForInputIdle(process.hProcess, 10000);
         *startup_ms = axyne_perf_now_ms() - begin;
     }
-    if (wait_result == WAIT_FAILED) goto cleanup;
+    if (wait_result != WAIT_OBJECT_0) goto cleanup;
     axyne_perf_sleep(settle_ms);
     if (!axyne_perf_target_memory(process.hProcess, memory_bytes)) goto cleanup;
     result = 1;
@@ -260,6 +260,7 @@ static int axyne_perf_target_iteration(const char *target,
 {
     pid_t process;
     int status;
+    int success = 0;
     int launched = 0;
     int null_input;
     posix_spawn_file_actions_t file_actions;
@@ -320,15 +321,30 @@ static int axyne_perf_target_iteration(const char *target,
     }
     *memory_bytes = maximum_memory;
     launched = 2;
+    success = 1;
 
 cleanup:
     if (launched != 0) {
-        if (launched == 2) (void)kill(process, SIGTERM);
-        if (launched == 1) (void)kill(process, SIGKILL);
-        while (waitpid(process, &status, 0) < 0 && errno == EINTR) {}
+        if (launched == 2) {
+            unsigned long waited_ms = 0;
+            (void)kill(process, SIGTERM);
+            while (waited_ms < 5000) {
+                pid_t waited = waitpid(process, &status, WNOHANG);
+                if (waited == process) { launched = 0; break; }
+                if (waited < 0 && errno != EINTR) break;
+                axyne_perf_sleep(10);
+                waited_ms += 10;
+            }
+        }
+        if (launched != 0) {
+            (void)kill(process, SIGKILL);
+            while (waitpid(process, &status, 0) < 0 && errno == EINTR) {}
+        }
     }
-    return launched == 2;
+    return success;
 }
+#else
+#error "The performance benchmark requires Windows or macOS"
 #endif
 
 static void axyne_perf_print_usage(const char *program)
@@ -451,8 +467,11 @@ static int axyne_perf_run_headless(const AxynePerfOptions *options,
         double begin = axyne_perf_now_ms();
         uint64_t memory_bytes;
         if (!axyne_app_initialize(&app)) return 0;
+        if (!axyne_perf_memory(&memory_bytes)) {
+            axyne_app_shutdown(&app);
+            return 0;
+        }
         axyne_app_shutdown(&app);
-        if (!axyne_perf_memory(&memory_bytes)) return 0;
         axyne_perf_record(results, axyne_perf_now_ms() - begin, memory_bytes);
     }
     return 1;

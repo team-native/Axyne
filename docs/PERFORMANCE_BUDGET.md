@@ -13,14 +13,16 @@ Scintilla configure/build 요구사항은 그대로 적용되며, 측정 도구�
 macOS:
 
 ```sh
-cmake -S . -B build-perf -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake -S . -B build-perf -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+  -DAXYNE_BUILD_PERF_BENCHMARK=ON
 cmake --build build-perf --config Release --target axyne_perf_benchmark axyne
 ```
 
 Windows PowerShell:
 
 ```powershell
-cmake -S . -B build-perf -A x64 -DBUILD_TESTING=ON
+cmake -S . -B build-perf -A x64 -DBUILD_TESTING=ON \
+  -DAXYNE_BUILD_PERF_BENCHMARK=ON
 cmake --build build-perf --config Release --target axyne_perf_benchmark axyne
 ```
 
