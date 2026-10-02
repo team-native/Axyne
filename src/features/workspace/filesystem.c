@@ -605,8 +605,10 @@ int axyne_workspace_open_directory_nofollow(const char *utf8_parent,
         free(component);
         if (next < 0) {
             close(current);
-            return axyne_system_error(error, axyne_errno_status(saved),
-                                      "open parent component");
+            axyne_system_error(error, axyne_errno_status(saved),
+                               "open parent component");
+            errno = saved;
+            return -1;
         }
         close(current);
         current = next;
