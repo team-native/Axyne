@@ -98,6 +98,13 @@
 - Native Windows and macOS UI adapters expose LSP diagnostics and definition/references commands through the status bar. The current Scintilla/document adapters do not provide a shared URI-to-document/position navigation command, so definition and references report the returned location count and request id rather than opening a target; the limitation is intentional and confined to the UI adapter. The local server executable is supplied through `AXYNE_LSP_COMMAND` until a preferences surface exists.
 - Validation for this unit includes source-level C17 checks, `git diff --check`, and the available Windows build/check path. macOS compilation and runtime verification require a macOS host.
 
+## Native integration audit status
+
+- Windows and macOS native action controls now refresh from the active document and current terminal/debugger session. Saved-document-only actions remain unavailable for untitled tabs, and terminal/debugger mutual exclusion is reflected in both controls and menus without starting optional services.
+- Build and Run now reject debugger sessions as well as terminal sessions, preserving the existing session-local runner and saved-document gate.
+- Editor savepoint notifications, dirty-state capture, active-tab switching, and native process teardown remain on the existing UI-thread/callback paths; this audit added only state refresh and teardown-safe action gating.
+- Validation on the available macOS host: the `axyne_ui` AppKit target compiles without warnings, `git diff --check` passes, and the full CMake build is blocked only when the pinned Scintilla framework invokes `xcodebuild` without full Xcode installed. Windows native compilation and runtime verification still require a Windows/MSVC host.
+
 ## Implementation units and dependencies
 
 | ID | Unit | Dependencies | Status |
