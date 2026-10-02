@@ -38,6 +38,7 @@ int main(int argc, char **argv)
         return atoi(argv[2]);
     if (argc < 3) {
  
+ 
         fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|preview-tabs|palette-problems|palette-controller|problems-feed> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
     }
@@ -61,6 +62,7 @@ int main(int argc, char **argv)
         return axyne_test_preview_tabs(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "palette-problems") == 0)
         return axyne_test_palette_problems(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+ 
     if (strcmp(argv[1], "palette-controller") == 0)
         return axyne_test_palette_controller(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "problems-feed") == 0)
