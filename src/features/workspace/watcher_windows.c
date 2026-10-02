@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include "axyne/watcher.h"
+#include "workspace_safety.h"
 #include "utf8.h"
 
 #include <stdint.h>
@@ -15,7 +16,6 @@ struct AxyneWatcher {
     HANDLE thread;
     AxyneWatchCallback callback;
     void *user_data;
-    wchar_t *wide_directory;
     char *utf8_directory;
     volatile LONG stopping;
 };
@@ -26,19 +26,6 @@ static void axyne_watch_error(AxyneError *error, AxyneStatus code,
     if (error == NULL) return;
     error->code = code;
     (void)snprintf(error->message, sizeof(error->message), "%s", message);
-}
-
-static wchar_t *axyne_watch_wide(const char *text)
-{
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
-    wchar_t *out;
-    if (n <= 0) return NULL;
-    out = (wchar_t *)malloc((size_t)n * sizeof(*out));
-    if (out != NULL && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                           text, -1, out, n) <= 0) {
-        free(out); return NULL;
-    }
-    return out;
 }
 
 static char *axyne_watch_utf8(const wchar_t *text)
@@ -85,6 +72,7 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
     char *pending_old = NULL;
     while (!InterlockedCompareExchange(&watcher->stopping, 0, 0)) {
         DWORD bytes = 0;
+        DWORD read_error;
         FILE_NOTIFY_INFORMATION *item;
         if (!ReadDirectoryChangesW(watcher->directory, buffer, sizeof(buffer),
                                    TRUE, FILE_NOTIFY_CHANGE_FILE_NAME |
@@ -92,8 +80,19 @@ static DWORD WINAPI axyne_watch_thread(void *argument)
                                    FILE_NOTIFY_CHANGE_SIZE |
                                    FILE_NOTIFY_CHANGE_LAST_WRITE |
                                    FILE_NOTIFY_CHANGE_CREATION,
-                                   &bytes, NULL, NULL)) break;
+                                   &bytes, NULL, NULL)) {
+            read_error = GetLastError();
+            free(pending_old); pending_old = NULL;
+            if (!InterlockedCompareExchange(&watcher->stopping, 0, 0) &&
+                read_error != ERROR_OPERATION_ABORTED) {
+                axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
+                           watcher->utf8_directory, NULL);
+                if (read_error == ERROR_NOTIFY_ENUM_DIR) continue;
+            }
+            break;
+        }
         if (bytes == 0) {
+            free(pending_old); pending_old = NULL;
             axyne_emit(watcher, AXYNE_WATCH_RESCAN_REQUIRED,
                        watcher->utf8_directory, NULL);
             continue;
@@ -142,7 +141,8 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
                                 AxyneError *error)
 {
     AxyneWatcher *watcher;
-    DWORD attributes;
+    AxyneError safety_error;
+    AxyneStatus safety_status;
     if (watcher_out == NULL || utf8_directory == NULL || utf8_directory[0] == '\0' ||
         !axyne_workspace_utf8_is_valid(utf8_directory) || callback == NULL) {
         axyne_watch_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "directory, callback, and output are required");
@@ -151,27 +151,18 @@ AxyneStatus axyne_watcher_start(const char *utf8_directory,
     *watcher_out = NULL;
     watcher = (AxyneWatcher *)calloc(1, sizeof(*watcher));
     if (watcher == NULL) { axyne_watch_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); return AXYNE_STATUS_OUT_OF_MEMORY; }
-    watcher->wide_directory = axyne_watch_wide(utf8_directory);
     watcher->utf8_directory = _strdup(utf8_directory);
     watcher->callback = callback; watcher->user_data = user_data;
-    if (watcher->wide_directory == NULL || watcher->utf8_directory == NULL) {
-        axyne_watcher_release(watcher); axyne_watch_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid UTF-8 path or out of memory"); return AXYNE_STATUS_INVALID_ARGUMENT;
+    if (watcher->utf8_directory == NULL) {
+        axyne_watcher_release(watcher); axyne_watch_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory"); return AXYNE_STATUS_OUT_OF_MEMORY;
     }
-    attributes = GetFileAttributesW(watcher->wide_directory);
-    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        DWORD e = GetLastError();
+    memset(&safety_error, 0, sizeof(safety_error));
+    safety_status = axyne_workspace_open_directory_nofollow(
+        utf8_directory, &watcher->directory, &safety_error);
+    if (safety_status != AXYNE_STATUS_OK) {
         axyne_watcher_release(watcher);
-        axyne_watch_error(error, e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_NOT_FOUND, "workspace directory is unavailable");
-        return e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_NOT_FOUND;
-    }
-    watcher->directory = CreateFileW(watcher->wide_directory, FILE_LIST_DIRECTORY,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (watcher->directory == INVALID_HANDLE_VALUE) {
-        DWORD e = GetLastError(); watcher->directory = NULL;
-        axyne_watcher_release(watcher);
-        axyne_watch_error(error, e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_IO_ERROR, "unable to open workspace directory");
-        return e == ERROR_ACCESS_DENIED ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_IO_ERROR;
+        if (error != NULL) *error = safety_error;
+        return safety_status;
     }
     watcher->thread = CreateThread(NULL, 0, axyne_watch_thread, watcher, 0, NULL);
     if (watcher->thread == NULL) {
@@ -196,5 +187,5 @@ void axyne_watcher_release(AxyneWatcher *watcher)
     if (watcher == NULL) return;
     axyne_watcher_stop(watcher);
     if (watcher->directory != NULL) CloseHandle(watcher->directory);
-    free(watcher->wide_directory); free(watcher->utf8_directory); free(watcher);
+    free(watcher->utf8_directory); free(watcher);
 }
