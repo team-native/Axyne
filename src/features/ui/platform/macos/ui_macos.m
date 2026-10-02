@@ -1047,7 +1047,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                               lParam:(intptr_t)digits];
     if (width < 1) width = 32;
     (void)[self sendEditorMessage:SCI_SETMARGINWIDTHN wParam:0
-                             lParam:width + 10];
+                             lParam:MAX(52, width + 10)];
 }
 
 - (void)updateBraceHighlight
@@ -1199,9 +1199,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_STYLECLEARALL wParam:0 lParam:0];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:33
-                              lParam:axyne_editor_color(_preferences.theme.muted)];
+                              lParam:axyne_editor_color(reference ? 0x5a606a : _preferences.theme.muted)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:33
-                              lParam:axyne_editor_color(_preferences.theme.panel)];
+                              lParam:axyne_editor_color(reference
+                                  ? _preferences.theme.editor_background : _preferences.theme.panel)];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:STYLE_BRACELIGHT
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:STYLE_BRACELIGHT
@@ -1214,8 +1215,27 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_SETSELBACK wParam:1
                               lParam:axyne_editor_color(_preferences.theme.accent)];
-        [self sendEditorMessage:SCI_SETCARETFORE wParam:0
-                              lParam:axyne_editor_color(_preferences.theme.accent)];
+        /* SCI_SETCARETFORE takes the colour in wParam; lParam is ignored. */
+        [self sendEditorMessage:SCI_SETCARETFORE
+                              wParam:(uintptr_t)axyne_editor_color(_preferences.theme.accent)
+                              lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEVISIBLE wParam:1 lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEBACK
+                              wParam:(uintptr_t)axyne_editor_color(reference
+                                  ? 0x202328 : _preferences.theme.toolbar)
+                              lParam:0];
+        /* Figma code rows are 19px at 13pt; scale that ratio to the chosen
+         * size by padding the font's natural line height. */
+        [self sendEditorMessage:SCI_SETEXTRAASCENT wParam:0 lParam:0];
+        [self sendEditorMessage:SCI_SETEXTRADESCENT wParam:0 lParam:0];
+        NSInteger naturalHeight = [self sendEditorMessage:SCI_TEXTHEIGHT wParam:0 lParam:0];
+        NSInteger extraHeight = (NSInteger)lround(fontSize * 19.0 / 13.0) - naturalHeight;
+        if (extraHeight > 0) {
+            [self sendEditorMessage:SCI_SETEXTRAASCENT
+                                  wParam:(uintptr_t)((extraHeight + 1) / 2) lParam:0];
+             [self sendEditorMessage:SCI_SETEXTRADESCENT
+                                   wParam:(uintptr_t)(extraHeight / 2) lParam:0];
+         }
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETTABWIDTH wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
