@@ -87,6 +87,94 @@ int axyne_test_settings_preferences(const char *root)
     AXYNE_TEST_CHECK(effective.editor.tab_width == 8 &&
                      effective.editor.font_size == defaults.editor.font_size);
 
+    /* New editor settings: defaults, round trip, workspace overrides. */
+    AXYNE_TEST_CHECK(defaults.editor.line_numbers == 1 &&
+                     defaults.editor.highlight_current_line == 1 &&
+                     defaults.editor.auto_indent == 1 &&
+                     defaults.editor.rendering == AXYNE_RENDERING_DIRECTWRITE);
+    AXYNE_TEST_CHECK(loaded_preferences.editor.line_numbers == 1 &&
+                     loaded_preferences.editor.rendering ==
+                         AXYNE_RENDERING_DIRECTWRITE);
+    {
+        AxynePreferences changed = defaults;
+        char legacy_path[512], bad_path[512];
+        changed.editor.line_numbers = 0;
+        changed.editor.highlight_current_line = 0;
+        changed.editor.auto_indent = 0;
+        changed.editor.rendering = AXYNE_RENDERING_GDI;
+        AXYNE_TEST_STATUS(axyne_preferences_save_global(&changed,
+                              preferences_path, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_preferences_load_global(preferences_path,
+                              &loaded_preferences, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(loaded_preferences.editor.line_numbers == 0 &&
+                         loaded_preferences.editor.highlight_current_line == 0 &&
+                         loaded_preferences.editor.auto_indent == 0 &&
+                         loaded_preferences.editor.rendering ==
+                             AXYNE_RENDERING_GDI);
+        AXYNE_TEST_CHECK((loaded_preferences.present_fields &
+                          AXYNE_PREFERENCE_EDITOR_RENDERING) != 0);
+
+        /* Workspace saves only present fields. */
+        memset(&workspace, 0, sizeof(workspace));
+        workspace.editor.line_numbers = 0;
+        workspace.present_fields = AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS;
+        AXYNE_TEST_STATUS(axyne_preferences_save_workspace(&workspace,
+                              preferences_path, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_preferences_load(preferences_path,
+                              &loaded_preferences, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(loaded_preferences.present_fields ==
+                         AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS);
+        effective = defaults;
+        axyne_preferences_apply_workspace(&effective, &loaded_preferences);
+        AXYNE_TEST_CHECK(effective.editor.line_numbers == 0 &&
+                         effective.editor.auto_indent == 1 &&
+                         effective.editor.rendering ==
+                             AXYNE_RENDERING_DIRECTWRITE);
+
+        /* Legacy files without the new keys keep the defaults. */
+        AXYNE_TEST_CHECK(axyne_test_path(legacy_path, sizeof(legacy_path),
+                                         preferences_directory, "legacy.json"));
+        AXYNE_TEST_STATUS(axyne_settings_create(&settings, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_settings_set_json(settings, "/editor",
+                              "{\"tabWidth\":2}", &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_settings_save(settings, legacy_path, &error),
+                          AXYNE_STATUS_OK);
+        axyne_settings_destroy(settings);
+        settings = NULL;
+        AXYNE_TEST_STATUS(axyne_preferences_load(legacy_path,
+                              &loaded_preferences, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(loaded_preferences.editor.tab_width == 2 &&
+                         loaded_preferences.editor.line_numbers == 1 &&
+                         loaded_preferences.editor.auto_indent == 1 &&
+                         loaded_preferences.present_fields ==
+                             AXYNE_PREFERENCE_EDITOR_TAB_WIDTH);
+
+        /* Invalid values are rejected. */
+        AXYNE_TEST_CHECK(axyne_test_path(bad_path, sizeof(bad_path),
+                                         preferences_directory, "bad.json"));
+        AXYNE_TEST_STATUS(axyne_settings_create(&settings, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_settings_set_json(settings, "/editor",
+                              "{\"rendering\":\"opengl\"}", &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_settings_save(settings, bad_path, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_preferences_load(bad_path,
+                              &loaded_preferences, &error),
+                          AXYNE_STATUS_INVALID_ARGUMENT);
+        AXYNE_TEST_STATUS(axyne_settings_set_json(settings, "/editor",
+                              "{\"lineNumbers\":1}", &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_settings_save(settings, bad_path, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_STATUS(axyne_preferences_load(bad_path,
+                              &loaded_preferences, &error),
+                          AXYNE_STATUS_INVALID_ARGUMENT);
+        axyne_settings_destroy(settings);
+        settings = NULL;
+    }
+
     axyne_test_remove_tree(root);
     return 1;
 }
