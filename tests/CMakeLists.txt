@@ -5,6 +5,7 @@ add_executable(axyne_tests
     test_runner_git_lsp.c
     test_process_stability.c
     test_palette_problems.c
+    test_outline.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -52,12 +53,18 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> palette-problems
             "${AXYNE_TEST_FIXTURE_DIR}/palette-problems"
 )
+add_test(
+    NAME axyne-outline
+    COMMAND $<TARGET_FILE:axyne_tests> outline
+            "${AXYNE_TEST_FIXTURE_DIR}/outline"
+)
 set_tests_properties(
     axyne-documents-search
     axyne-settings-preferences
     axyne-runner-git-lsp
     axyne-process-stability
     axyne-palette-problems
+    axyne-outline
     PROPERTIES TIMEOUT 60
 )
 
