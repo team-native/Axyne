@@ -1,0 +1,28 @@
+set(_axyne_framework_source "@AXYNE_SCINTILLA_FRAMEWORK@")
+set(_axyne_framework_destination
+    "${CMAKE_INSTALL_PREFIX}/@AXYNE_MACOS_BUNDLE_NAME@/Contents/Frameworks")
+set(_axyne_framework_target
+    "${_axyne_framework_destination}/Scintilla.framework")
+
+if(NOT EXISTS "${_axyne_framework_source}")
+    message(FATAL_ERROR
+        "Scintilla.framework source is missing: ${_axyne_framework_source}")
+endif()
+
+file(MAKE_DIRECTORY "${_axyne_framework_destination}")
+file(REMOVE_RECURSE "${_axyne_framework_target}")
+execute_process(
+    COMMAND /bin/cp -R "${_axyne_framework_source}" "${_axyne_framework_destination}/"
+    RESULT_VARIABLE _axyne_copy_result
+    OUTPUT_VARIABLE _axyne_copy_stdout
+    ERROR_VARIABLE _axyne_copy_stderr
+)
+if(NOT _axyne_copy_result EQUAL 0)
+    message(FATAL_ERROR
+        "Failed to install Scintilla.framework: ${_axyne_copy_stderr}")
+endif()
+
+if(NOT IS_SYMLINK "${_axyne_framework_target}/Versions/Current")
+    message(FATAL_ERROR
+        "Installed Scintilla.framework lost Versions/Current symlink")
+endif()
