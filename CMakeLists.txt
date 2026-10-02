@@ -121,6 +121,14 @@ if(WIN32)
     )
 elseif(APPLE)
     enable_language(OBJC)
+    set(AXYNE_SCINTILLA_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
+    if(AXYNE_SCINTILLA_ARCHITECTURES STREQUAL "")
+        set(AXYNE_SCINTILLA_ARCHITECTURES "arm64")
+    endif()
+    set(AXYNE_SCINTILLA_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(AXYNE_SCINTILLA_DEPLOYMENT_TARGET STREQUAL "")
+        set(AXYNE_SCINTILLA_DEPLOYMENT_TARGET "12.0")
+    endif()
     set(AXYNE_SCINTILLA_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/scintilla")
     set(AXYNE_SCINTILLA_FRAMEWORK
         "${AXYNE_SCINTILLA_OUTPUT_DIR}/Scintilla.framework")
@@ -130,8 +138,8 @@ elseif(APPLE)
         COMMAND xcodebuild
             -project "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla/Scintilla.xcodeproj"
             -target Scintilla -configuration Release -sdk macosx
-            "ARCHS=${CMAKE_OSX_ARCHITECTURES}"
-            "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            "ARCHS=${AXYNE_SCINTILLA_ARCHITECTURES}"
+            "MACOSX_DEPLOYMENT_TARGET=${AXYNE_SCINTILLA_DEPLOYMENT_TARGET}"
             "CONFIGURATION_BUILD_DIR=${AXYNE_SCINTILLA_OUTPUT_DIR}"
         WORKING_DIRECTORY "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla"
         DEPENDS
