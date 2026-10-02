@@ -2,15 +2,20 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 
 #include "axyne/document.h"
+#include "axyne/search.h"
 #include "Scintilla.h"
 
 enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_GETMODIFY = 2159, SCI_SETSAVEPOINT = 2014,
        SCI_CLEARALL = 2004, SCI_ADDTEXT = 2001, SCI_GETDOCPOINTER = 2357,
        SCI_SETDOCPOINTER = 2358, SCI_CREATEDOCUMENT = 2375,
-       SCI_RELEASEDOCUMENT = 2377 };
+       SCI_RELEASEDOCUMENT = 2377, SCI_GETCURRENTPOS = 2008,
+       SCI_SETSEL = 2160, SCI_REPLACESEL = 2170,
+       SCI_POSITIONFROMLINE = 2167, SCI_GOTOPOS = 2025,
+       SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
 
 @interface NSObject (AxyneScintillaMessages)
 - (NSInteger)message:(unsigned int)message wParam:(uintptr_t)wParam
@@ -52,6 +57,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (BOOL)captureEditor;
 - (BOOL)loadActiveDocument;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
+- (void)findOrReplace:(BOOL)replace;
+- (void)searchFolder:(BOOL)quickFile;
 @end
 
 static void axyne_install_menu(NSApplication *application,
@@ -446,12 +453,158 @@ static void axyne_install_menu(NSApplication *application,
 {
     if (([event modifierFlags] & NSEventModifierFlagCommand) != 0) {
         NSString *key = [[event charactersIgnoringModifiers] lowercaseString];
+        BOOL shift = ([event modifierFlags] & NSEventModifierFlagShift) != 0;
+        if ([key isEqualToString:@"f"] && shift) { [self searchFolder:NO]; return YES; }
+        if ([key isEqualToString:@"f"]) { [self findOrReplace:NO]; return YES; }
+        if ([key isEqualToString:@"h"]) { [self findOrReplace:YES]; return YES; }
+        if ([key isEqualToString:@"p"]) { [self searchFolder:YES]; return YES; }
         if ([key isEqualToString:@"n"]) { [self newDocument:nil]; return YES; }
         if ([key isEqualToString:@"o"]) { [self openDocument:nil]; return YES; }
         if ([key isEqualToString:@"s"]) { [self saveDocument:nil]; return YES; }
         if ([key isEqualToString:@"w"]) { [self closeDocument:nil]; return YES; }
     }
     return [super performKeyEquivalent:event];
+}
+
+- (NSString *)askForText:(NSString *)title label:(NSString *)label
+{
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:title];
+    NSTextField *field = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)] autorelease];
+    [field setPlaceholderString:label];
+    [alert setAccessoryView:field];
+    [alert addButtonWithTitle:@"Continue"]; [alert addButtonWithTitle:@"Cancel"];
+    return [alert runModal] == NSAlertFirstButtonReturn ? [field stringValue] : nil;
+}
+
+- (void)findOrReplace:(BOOL)replace
+{
+    NSString *q = [self askForText:replace ? @"Replace" : @"Find" label:@"Find text"];
+    if ([q length] == 0 || ![self captureEditor]) return;
+    NSString *r = replace ? [self askForText:@"Replace" label:@"Replace with"] : nil;
+    if (replace && r == nil) return;
+    BOOL replaceAll = NO;
+    if (replace) {
+        NSAlert *choice = [[[NSAlert alloc] init] autorelease];
+        [choice setMessageText:@"Replace all occurrences?"];
+        [choice addButtonWithTitle:@"Replace All"];
+        [choice addButtonWithTitle:@"Replace Next"];
+        [choice addButtonWithTitle:@"Cancel"];
+        NSInteger answer = [choice runModal];
+        if (answer == NSAlertThirdButtonReturn) return;
+        replaceAll = answer == NSAlertFirstButtonReturn;
+    }
+    size_t length = (size_t)[self sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
+    char *text = malloc(length + 1);
+    if (text == NULL) return;
+    (void)[self sendEditorMessage:SCI_GETTEXT wParam:length + 1 lParam:(intptr_t)text];
+    const char *query = [q UTF8String]; size_t at;
+    if (replaceAll) {
+        char *output = NULL; size_t outputLength = 0, count = 0;
+        if (axyne_search_replace_all(text, length, query, strlen(query),
+                [r UTF8String], strlen([r UTF8String]), 0, &output,
+                &outputLength, &count, NULL) == AXYNE_STATUS_OK) {
+            if (count > 0) {
+                (void)[self sendEditorMessage:SCI_BEGINUNDOACTION wParam:0 lParam:0];
+                size_t queryLength = strlen(query), replacementLength = strlen([r UTF8String]);
+                size_t searchStart = 0, previousSourceEnd = 0, previousLiveEnd = 0;
+                size_t match = 0; BOOL first = YES;
+                while (axyne_search_find(text, length, query, queryLength,
+                                         searchStart, 0, &match) && match >= searchStart) {
+                    size_t liveAt = first ? match : previousLiveEnd +
+                        (match - previousSourceEnd);
+                    (void)[self sendEditorMessage:SCI_SETSEL wParam:liveAt
+                        lParam:liveAt + queryLength];
+                    (void)[self sendEditorMessage:SCI_REPLACESEL wParam:0
+                        lParam:(intptr_t)[r UTF8String]];
+                    previousSourceEnd = match + queryLength;
+                    previousLiveEnd = liveAt + replacementLength;
+                    searchStart = previousSourceEnd;
+                    first = NO;
+                }
+                (void)[self sendEditorMessage:SCI_ENDUNDOACTION wParam:0 lParam:0];
+            }
+            free(output);
+        }
+        free(text); return;
+    }
+    size_t start = (size_t)[self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    if (axyne_search_find(text, length, query, strlen(query), start, 0, &at)) {
+        (void)[self sendEditorMessage:SCI_SETSEL wParam:at lParam:at + strlen(query)];
+        if (replace) (void)[self sendEditorMessage:SCI_REPLACESEL wParam:0 lParam:(intptr_t)[r UTF8String]];
+    } else {
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"No match found"]; [alert runModal];
+    }
+    free(text);
+}
+
+- (void)searchFolder:(BOOL)quickFile
+{
+    NSOpenPanel *folder = [NSOpenPanel openPanel];
+    [folder setCanChooseDirectories:YES]; [folder setCanChooseFiles:NO];
+    [folder setAllowsMultipleSelection:NO];
+    if ([folder runModal] != NSModalResponseOK) return;
+    NSString *query = [self askForText:quickFile ? @"Quick File" : @"Search Folder"
+                                  label:quickFile ? @"Filename contains" : @"Search text"];
+    if ([query length] == 0) return;
+    NSPopUpButton *choices = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 480, 28)
+                                                        pullsDown:NO] autorelease];
+    size_t selectedLine = 0;
+    if (quickFile) {
+        char **paths = NULL; size_t count = 0;
+        if (axyne_search_files([[[folder URL] path] UTF8String], [query UTF8String],
+                               &paths, &count, NULL) == AXYNE_STATUS_OK) {
+            for (size_t i = 0; i < count; ++i)
+                [choices addItemWithTitle:[NSString stringWithUTF8String:paths[i]] ?: @"(invalid path)"];
+            if (count > 0) {
+                NSAlert *pick = [[[NSAlert alloc] init] autorelease];
+                [pick setMessageText:@"Choose a file to open"]; [pick setAccessoryView:choices];
+                [pick addButtonWithTitle:@"Open"]; [pick addButtonWithTitle:@"Cancel"];
+                if ([pick runModal] == NSAlertFirstButtonReturn)
+                    [self openPath:[choices titleOfSelectedItem]];
+            }
+            axyne_search_paths_destroy(paths, count);
+        }
+    } else {
+        AxyneSearchResults results = {0};
+        if (axyne_search_workspace([[[folder URL] path] UTF8String], [query UTF8String],
+                                   0, &results, NULL) == AXYNE_STATUS_OK) {
+            for (size_t i = 0; i < results.count; ++i) {
+                NSString *path = [NSString stringWithUTF8String:results.items[i].path] ?: @"";
+                NSString *preview = [NSString stringWithUTF8String:results.items[i].preview] ?: @"";
+                [choices addItemWithTitle:[NSString stringWithFormat:@"%@:%zu  %@", path,
+                    results.items[i].line, preview]];
+                NSDictionary *match = @{
+                    @"path": path,
+                    @"line": [NSNumber numberWithUnsignedLong:results.items[i].line]
+                };
+                [[choices itemAtIndex:(NSInteger)i] setRepresentedObject:match];
+            }
+            if (results.count > 0) {
+                NSAlert *pick = [[[NSAlert alloc] init] autorelease];
+                [pick setMessageText:[NSString stringWithFormat:@"%zu matches", results.count]];
+                [pick setAccessoryView:choices]; [pick addButtonWithTitle:@"Open Match"];
+                [pick addButtonWithTitle:@"Cancel"];
+                if ([pick runModal] == NSAlertFirstButtonReturn) {
+                    NSDictionary *match = [[choices selectedItem] representedObject];
+                    NSString *path = [match objectForKey:@"path"];
+                    selectedLine = (size_t)[[match objectForKey:@"line"] unsignedLongValue];
+                    if (path != nil && selectedLine > 0) {
+                        [self openPath:path];
+                        AxyneDocument *opened = [self activeDocument];
+                        if (opened != NULL && opened->path != NULL &&
+                            strcmp(opened->path, [path UTF8String]) == 0) {
+                            NSInteger pos = [self sendEditorMessage:SCI_POSITIONFROMLINE
+                                wParam:selectedLine > 0 ? selectedLine - 1 : 0 lParam:0];
+                            (void)[self sendEditorMessage:SCI_GOTOPOS wParam:(uintptr_t)pos lParam:0];
+                        }
+                    }
+                }
+            }
+            axyne_search_results_destroy(&results);
+        }
+    }
 }
 
 - (void)layout

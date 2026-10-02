@@ -4,10 +4,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <string.h>
 #include <commdlg.h>
+#include <shlobj.h>
 
 #include "axyne/ui.h"
 #include "axyne/document.h"
+#include "axyne/search.h"
 
 enum {
     AXYNE_TOP_MENU = 28,
@@ -55,6 +58,14 @@ enum { SCI_GETTEXT = 2182, SCI_GETTEXTLENGTH = 2183, SCI_SETTEXT = 2181,
        SCI_SETDOCPOINTER = 2358, SCI_CREATEDOCUMENT = 2375,
        SCI_RELEASEDOCUMENT = 2377, SCN_SAVEPOINTREACHED = 2002,
        SCN_SAVEPOINTLEFT = 2003, SCN_MODIFIED = 2008 };
+enum { SCI_GETCURRENTPOS = 2008, SCI_GOTOPOS = 2025, SCI_SETSEL = 2160,
+       SCI_POSITIONFROMLINE = 2167, SCI_REPLACESEL = 2170,
+       SCI_BEGINUNDOACTION = 2078, SCI_ENDUNDOACTION = 2079 };
+
+enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
+       AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
+       AXYNE_CMD_FIND = 1100, AXYNE_CMD_REPLACE, AXYNE_CMD_SEARCH_FOLDER,
+       AXYNE_CMD_QUICK_FILE };
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -84,6 +95,51 @@ static char *axyne_utf8(const wchar_t *wide)
         return NULL;
     }
     return utf8;
+}
+
+static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
+                        wchar_t *value, size_t capacity)
+{
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
+        440, 142, owner, NULL, GetModuleHandleW(NULL), NULL);
+    if (dialog == NULL) return 0;
+    CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, 12, 12, 400, 20,
+                  dialog, NULL, GetModuleHandleW(NULL), NULL);
+    HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 400, 24,
+        dialog, (HMENU)1, GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        250, 75, 76, 26, dialog, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
+    CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        336, 75, 76, 26, dialog, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+    SetWindowTextW(edit, value != NULL ? value : L"");
+    EnableWindow(owner, FALSE); ShowWindow(dialog, SW_SHOW); SetFocus(edit);
+    MSG msg; int accepted = 0;
+    while (IsWindow(dialog) && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_COMMAND && (LOWORD(msg.wParam) == IDOK ||
+                                           LOWORD(msg.wParam) == IDCANCEL)) {
+            accepted = LOWORD(msg.wParam) == IDOK;
+            if (accepted && value != NULL) GetWindowTextW(edit, value, (int)capacity);
+            DestroyWindow(dialog); break;
+        }
+        if (!IsDialogMessageW(dialog, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    }
+    EnableWindow(owner, TRUE); SetForegroundWindow(owner);
+    return accepted;
+}
+
+static int axyne_choose_folder(HWND owner, char **root)
+{
+    BROWSEINFOW info = {0}; info.hwndOwner = owner;
+    info.lpszTitle = L"Choose search folder";
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info);
+    if (item == NULL) return 0;
+    wchar_t path[32768]; int ok = SHGetPathFromIDListW(item, path);
+    CoTaskMemFree(item);
+    if (!ok) return 0;
+    *root = axyne_utf8(path); return *root != NULL;
 }
 
 static AxyneDocument *axyne_active(AxyneWindowState *state)
@@ -303,8 +359,178 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
     axyne_update_title(window, state);
 }
 
-enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
-       AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000 };
+static char *axyne_prompt_utf8(HWND window, const wchar_t *title,
+                               const wchar_t *label)
+{
+    wchar_t value[1024] = L"";
+    if (!axyne_prompt(window, title, label, value,
+                      sizeof(value) / sizeof(value[0])) || value[0] == L'\0')
+        return NULL;
+    return axyne_utf8(value);
+}
+
+static void axyne_find(HWND window, AxyneWindowState *state, int replace,
+                       int all)
+{
+    char *query = axyne_prompt_utf8(window, replace ? L"Replace" : L"Find",
+                                    replace ? L"Find text:" : L"Find text:");
+    if (query == NULL || !axyne_capture_editor(state)) { free(query); return; }
+    char *replacement = replace ? axyne_prompt_utf8(window, L"Replace",
+                                                     L"Replace with:") : NULL;
+    if (replace && replacement == NULL) { free(query); return; }
+    if (replace) {
+        int choice = MessageBoxW(window, L"Replace all occurrences? Choose No to replace only the next match.",
+                                 L"Replace", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (choice == IDCANCEL) { free(query); free(replacement); return; }
+        all = choice == IDYES;
+    }
+    size_t length = (size_t)SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
+    char *text = (char *)malloc(length + 1);
+    if (text == NULL) { free(query); free(replacement); return; }
+    SendMessageA(state->editor, SCI_GETTEXT, length + 1, (LPARAM)text);
+    if (all) {
+        char *output = NULL; size_t output_length = 0, count = 0;
+        AxyneError error;
+        if (axyne_search_replace_all(text, length, query, strlen(query),
+                replacement, strlen(replacement), 0, &output, &output_length,
+                &count, &error) == AXYNE_STATUS_OK) {
+            if (count > 0) {
+                SendMessageA(state->editor, SCI_BEGINUNDOACTION, 0, 0);
+                size_t query_length = strlen(query), replacement_length = strlen(replacement);
+                size_t search_start = 0, previous_source_end = 0, previous_live_end = 0;
+                size_t at = 0; int first = 1;
+                while (axyne_search_find(text, length, query, query_length,
+                                         search_start, 0, &at) && at >= search_start) {
+                    size_t live_at = first ? at : previous_live_end +
+                        (at - previous_source_end);
+                    SendMessageA(state->editor, SCI_SETSEL, live_at,
+                                 live_at + query_length);
+                    SendMessageA(state->editor, SCI_REPLACESEL, 0, (LPARAM)replacement);
+                    previous_source_end = at + query_length;
+                    previous_live_end = live_at + replacement_length;
+                    search_start = previous_source_end;
+                    first = 0;
+                }
+                SendMessageA(state->editor, SCI_ENDUNDOACTION, 0, 0);
+            }
+            free(output);
+            wchar_t message[128]; swprintf_s(message, 128, L"Replaced %zu occurrence(s).", count);
+            MessageBoxW(window, message, L"Axyne", MB_OK | MB_ICONINFORMATION);
+        }
+    } else {
+        size_t at = 0; size_t start = (size_t)SendMessageA(state->editor,
+                                                SCI_GETCURRENTPOS, 0, 0);
+        if (axyne_search_find(text, length, query, strlen(query), start, 0, &at)) {
+            SendMessageA(state->editor, SCI_SETSEL, at, at + strlen(query));
+            if (replace) SendMessageA(state->editor, SCI_REPLACESEL, 0, (LPARAM)replacement);
+        } else MessageBoxW(window, L"No match found.", L"Axyne", MB_OK);
+    }
+    free(text); free(query); free(replacement);
+}
+
+static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
+{
+    char *root = NULL;
+    if (!axyne_choose_folder(window, &root)) return;
+    char *query = axyne_prompt_utf8(window, files ? L"Quick File" : L"Search Folder",
+                                   files ? L"Filename contains:" : L"Search text:");
+    if (query == NULL) { free(root); return; }
+    wchar_t summary[32768] = L"";
+    if (files) {
+        char **paths = NULL; size_t count = 0;
+        if (axyne_search_files(root, query, &paths, &count, NULL) == AXYNE_STATUS_OK) {
+            if (count == 0) MessageBoxW(window, L"No files found.", L"Axyne", MB_OK);
+            else {
+                size_t chosen = 0;
+                size_t listed = count < 40 ? count : 40;
+                wchar_t *listing = (wchar_t *)calloc(32768, sizeof(wchar_t));
+                if (listing == NULL) {
+                    MessageBoxW(window, L"Unable to allocate the file result list.",
+                                L"Quick File", MB_OK | MB_ICONERROR);
+                    axyne_search_paths_destroy(paths, count);
+                    free(query); free(root); return;
+                }
+                size_t used = 0;
+                size_t path_indices[40], displayed = 0;
+                for (size_t i = 0; i < listed && used < 30000; ++i) {
+                    wchar_t *path = axyne_wide(paths[i]);
+                    int n = path != NULL ? swprintf_s(listing + used, 32768 - used,
+                        L"%zu. %ls\n", displayed + 1, path) : -1;
+                    free(path);
+                    if (n > 0) {
+                        used += (size_t)n;
+                        path_indices[displayed++] = i;
+                    }
+                }
+                if (displayed == 0) {
+                    MessageBoxW(window, L"File matches could not be displayed.",
+                                L"Quick File", MB_OK | MB_ICONERROR);
+                } else {
+                    MessageBoxW(window, listing, L"Quick File Matches", MB_OK | MB_ICONINFORMATION);
+                    wchar_t prompt[256]; swprintf_s(prompt, 256, L"Enter a displayed result number (1-%zu):", displayed);
+                    if (axyne_prompt(window, L"Quick File", prompt, summary, 32768) &&
+                        swscanf_s(summary, L"%zu", &chosen) == 1 && chosen > 0 && chosen <= displayed)
+                        axyne_open_document(window, state, paths[path_indices[chosen - 1]]);
+                }
+                free(listing);
+            }
+        }
+        axyne_search_paths_destroy(paths, count);
+    } else {
+        AxyneSearchResults results = {0};
+        if (axyne_search_workspace(root, query, 0, &results, NULL) == AXYNE_STATUS_OK) {
+            size_t shown = results.count < 20 ? results.count : 20;
+            if (shown == 0) MessageBoxW(window, L"No text matches found.", L"Axyne", MB_OK);
+            else {
+                wchar_t *listing = (wchar_t *)calloc(32768, sizeof(wchar_t));
+                if (listing == NULL) {
+                    MessageBoxW(window, L"Unable to allocate the search result list.",
+                                L"Search Results", MB_OK | MB_ICONERROR);
+                    axyne_search_results_destroy(&results);
+                    free(query); free(root); return;
+                }
+                size_t used = 0;
+                size_t display_indices[20], displayed = 0;
+                for (size_t i = 0; i < shown && used < 30000; ++i) {
+                    wchar_t *path = axyne_wide(results.items[i].path);
+                    int n = path != NULL
+                        ? swprintf_s(listing + used, 32768 - used,
+                            L"%zu. %ls:%zu\n", displayed + 1, path,
+                            results.items[i].line) : -1;
+                    free(path);
+                    if (n > 0) {
+                        used += (size_t)n;
+                        display_indices[displayed++] = i;
+                    }
+                }
+                if (displayed == 0) {
+                    MessageBoxW(window, L"Search results could not be displayed.",
+                                L"Search Results", MB_OK | MB_ICONERROR);
+                } else {
+                    MessageBoxW(window, listing, L"Search Results", MB_OK | MB_ICONINFORMATION);
+                    size_t chosen = 0;
+                    wchar_t prompt[256], answer[64] = L"";
+                    swprintf_s(prompt, 256, L"Enter a result number (1-%zu) to open at its line:", displayed);
+                    if (axyne_prompt(window, L"Open Search Match", prompt, answer, 64) &&
+                        swscanf_s(answer, L"%zu", &chosen) == 1 && chosen > 0 && chosen <= displayed) {
+                        AxyneSearchResult *hit = &results.items[display_indices[chosen - 1]];
+                        axyne_open_document(window, state, hit->path);
+                        AxyneDocument *opened = axyne_active(state);
+                        if (opened != NULL && opened->path != NULL &&
+                            strcmp(opened->path, hit->path) == 0) {
+                            LRESULT position = SendMessageA(state->editor,
+                                SCI_POSITIONFROMLINE, hit->line > 0 ? hit->line - 1 : 0, 0);
+                            SendMessageA(state->editor, SCI_GOTOPOS, (WPARAM)position, 0);
+                        }
+                    }
+                }
+                free(listing);
+            }
+        }
+        axyne_search_results_destroy(&results);
+    }
+    free(query); free(root);
+}
 
 static void axyne_file_popup(HWND window, AxyneWindowState *state)
 {
@@ -320,6 +546,11 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SAVE, L"Save\tCtrl+S");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SAVE_AS, L"Save As...");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_CLOSE, L"Close Tab\tCtrl+W");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_FIND, L"Find\tCtrl+F");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_REPLACE, L"Replace\tCtrl+H");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     for (size_t i = 0; i < state->documents.recent_count; ++i) {
         wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
@@ -541,6 +772,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 axyne_close_tab(window, state, state->documents.active_index);
                 return 0;
             }
+            if (w_param == 'F' && (GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+                axyne_search_folder(window, state, 0); return 0;
+            }
+            if (w_param == 'F') { axyne_find(window, state, 0, 0); return 0; }
+            if (w_param == 'H') { axyne_find(window, state, 1, 0); return 0; }
+            if (w_param == 'P') { axyne_search_folder(window, state, 1); return 0; }
         }
         break;
     case WM_LBUTTONDOWN: {
@@ -592,6 +829,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
         } else if (command == AXYNE_CMD_CLOSE)
             axyne_close_tab(window, state, state->documents.active_index);
+        else if (command == AXYNE_CMD_FIND) axyne_find(window, state, 0, 0);
+        else if (command == AXYNE_CMD_REPLACE) axyne_find(window, state, 1, 0);
+        else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
+        else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
                  command - AXYNE_CMD_RECENT_BASE < state->documents.recent_count)
             axyne_open_document(window, state,
@@ -718,6 +959,12 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                 axyne_close_tab(window, current, current->documents.active_index);
                 continue;
             }
+            if (message.wParam == 'F' && (GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+                axyne_search_folder(window, current, 0); continue;
+            }
+            if (message.wParam == 'F') { axyne_find(window, current, 0, 0); continue; }
+            if (message.wParam == 'H') { axyne_find(window, current, 1, 0); continue; }
+            if (message.wParam == 'P') { axyne_search_folder(window, current, 1); continue; }
         }
         TranslateMessage(&message);
         DispatchMessageW(&message);
