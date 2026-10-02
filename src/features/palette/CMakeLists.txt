@@ -3,9 +3,11 @@
 target_sources(axyne_core PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/palette.c"
     "${CMAKE_CURRENT_LIST_DIR}/symbols.c"
+    "${CMAKE_CURRENT_LIST_DIR}/palette_controller.c"
 )
 if(MSVC)
     # The command table contains UTF-8 Korean titles.
     set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/palette.c"
+        "${CMAKE_CURRENT_LIST_DIR}/palette_controller.c"
         PROPERTIES COMPILE_OPTIONS "/utf-8")
 endif()
