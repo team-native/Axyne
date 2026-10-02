@@ -14,11 +14,11 @@ if(APPLE)
     # for a host-specific release build.
     if(NOT CMAKE_OSX_ARCHITECTURES)
         set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING
-            "macOS package architecture")
+            "macOS package architecture" FORCE)
     endif()
     if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
-            "Minimum macOS deployment target")
+            "Minimum macOS deployment target" FORCE)
     endif()
 endif()
 
