@@ -613,7 +613,7 @@ static void axyne_terminal_send(AxyneWindowState *state)
     free(text);
 }
 
-static void axyne_debugger_start(HWND window, AxyneWindowState *state)
+static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *document;
     AxyneError error;
@@ -2612,7 +2612,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
         else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
-        else if (command == AXYNE_DEBUG_START) axyne_debugger_start(window, state);
+        else if (command == AXYNE_DEBUG_START) axyne_windows_debugger_start(window, state);
         else if (command == AXYNE_DEBUG_PAUSE)
             axyne_debugger_command_ui(state, AXYNE_DEBUGGER_PAUSE);
         else if (command == AXYNE_DEBUG_CONTINUE)
