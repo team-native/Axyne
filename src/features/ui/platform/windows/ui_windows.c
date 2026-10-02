@@ -2726,6 +2726,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_breakpoint, FALSE);
         InvalidateRect(window, NULL, FALSE);
         return 0;
+    }
     case AXYNE_WM_GIT_COMPLETE:
         if (state->git_run == (AxyneGitUiRun *)l_param)
             axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
