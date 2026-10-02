@@ -41,6 +41,61 @@ static AxyneStatus axyne_git_error(AxyneError *error, AxyneStatus status,
     return status;
 }
 
+#ifdef _WIN32
+static AxyneStatus axyne_git_find_executable(char **path, AxyneError *error)
+{
+    wchar_t *wide_path = NULL;
+    DWORD capacity = MAX_PATH;
+    DWORD length;
+    int utf8_length;
+    char *utf8_path;
+
+    if (path == NULL)
+        return axyne_git_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "Git executable output is required");
+    *path = NULL;
+    for (;;) {
+        wide_path = (wchar_t *)malloc((size_t)capacity * sizeof(*wide_path));
+        if (wide_path == NULL)
+            return axyne_git_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                   "Unable to allocate Git executable path");
+        length = SearchPathW(NULL, L"git.exe", NULL, capacity, wide_path,
+                             NULL);
+        if (length == 0) {
+            free(wide_path);
+            return axyne_git_error(error, AXYNE_STATUS_IO_ERROR,
+                                   "Git executable was not found on PATH");
+        }
+        if (length < capacity) break;
+        free(wide_path);
+        capacity = length + 1;
+    }
+    utf8_length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                      wide_path, -1, NULL, 0, NULL, NULL);
+    if (utf8_length <= 0) {
+        free(wide_path);
+        return axyne_git_error(error, AXYNE_STATUS_IO_ERROR,
+                               "Unable to convert Git executable path");
+    }
+    utf8_path = (char *)malloc((size_t)utf8_length);
+    if (utf8_path == NULL) {
+        free(wide_path);
+        return axyne_git_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                               "Unable to allocate Git executable path");
+    }
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide_path, -1,
+                            utf8_path, utf8_length, NULL, NULL) <= 0) {
+        free(utf8_path);
+        free(wide_path);
+        return axyne_git_error(error, AXYNE_STATUS_IO_ERROR,
+                               "Unable to convert Git executable path");
+    }
+    free(wide_path);
+    *path = utf8_path;
+    return AXYNE_STATUS_OK;
+}
+#endif
+
 static int axyne_git_append(AxyneGitRun *run, const char *bytes, size_t length)
 {
     size_t required;
@@ -139,6 +194,9 @@ static AxyneStatus axyne_git_run(const char *workspace,
     AxyneProcessSpec spec;
     AxyneProcess *process = NULL;
     AxyneStatus status;
+#ifdef _WIN32
+    char *windows_executable = NULL;
+#endif
 
     if (workspace == NULL || workspace[0] == '\0' || result == NULL ||
         (argument_count != 0 && arguments == NULL)) {
@@ -167,8 +225,19 @@ static AxyneStatus axyne_git_run(const char *workspace,
                                "Unable to create Git condition");
     }
 #endif
+#ifdef _WIN32
+    status = axyne_git_find_executable(&windows_executable, error);
+    if (status != AXYNE_STATUS_OK) {
+        axyne_git_run_cleanup(&run);
+        return status;
+    }
+#endif
     memset(&spec, 0, sizeof(spec));
+#ifdef _WIN32
+    spec.executable = windows_executable;
+#else
     spec.executable = "git";
+#endif
     spec.arguments = arguments;
     spec.argument_count = argument_count;
     spec.working_directory = workspace;
@@ -176,6 +245,9 @@ static AxyneStatus axyne_git_run(const char *workspace,
     spec.on_exit = axyne_git_exit;
     spec.user_data = &run;
     status = axyne_process_start(&spec, &process, error);
+#ifdef _WIN32
+    free(windows_executable);
+#endif
     if (status != AXYNE_STATUS_OK) {
         axyne_git_run_cleanup(&run);
         return status;
