@@ -1308,10 +1308,10 @@ static NSString *axyne_macos_file_badge(const char *name)
 
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
 {
-    CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + 31.0;
+    const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + 31.0;
     NSInteger row;
-    if (_explorer.root == NULL || point.y < top) return NSNotFound;
-    row = (NSInteger)((point.y - top) / 22.0);
+    if (_explorer.root == NULL || point.y < explorerTop) return NSNotFound;
+    row = (NSInteger)((point.y - explorerTop) / 22.0);
     return row >= 0 && (size_t)row < _explorer.count ? row : NSNotFound;
 }
 
@@ -2586,15 +2586,23 @@ else [_terminalInput setStringValue:@""];
                           1, bottomTop - AXYNE_TOOLBAR - AXYNE_TABS));
     NSRectFill(NSMakeRect(0, bottomTop, width, 1));
 
-    [self drawLabel:@"▱   ▣    ↶   ↷       ▷  Debug · x64             빌드  ⌘B"
-                at:NSMakePoint(14, 13) size:12 color:muted family:@"SF Pro Text"];
-    NSRect search = NSMakeRect(MAX(400, width - 360), 7, 348, 26);
-    [background setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:search xRadius:4 yRadius:4] fill];
-    [border setStroke];
-    [[NSBezierPath bezierPathWithRoundedRect:search xRadius:4 yRadius:4] stroke];
-    [self drawLabel:@"⌕  파일 이동, > 명령 실행"
-                at:NSMakePoint(NSMinX(search) + 10, 13) size:11 color:muted family:@"SF Pro Text"];
+    CGFloat toolbarRight = 8.0;
+    for (NSButton *button in @[_newButton, _openButton, _saveButton,
+                               _undoButton, _redoButton, _buildButton, _runButton]) {
+        if ([button superview] == self)
+            toolbarRight = NSMaxX([button frame]) + 2.0;
+    }
+    CGFloat searchLeft = MAX(toolbarRight + 8.0, width - 360.0);
+    CGFloat searchWidth = width - searchLeft - 12.0;
+    if (searchWidth >= 120.0) {
+        NSRect search = NSMakeRect(searchLeft, 7, searchWidth, 26);
+        [background setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:search xRadius:4 yRadius:4] fill];
+        [border setStroke];
+        [[NSBezierPath bezierPathWithRoundedRect:search xRadius:4 yRadius:4] stroke];
+        [self drawLabel:@"⌕  파일 이동, > 명령 실행"
+                    at:NSMakePoint(NSMinX(search) + 10, 13) size:11 color:muted family:@"SF Pro Text"];
+    }
 
     [axyne_preference_color(_preferences.theme.accent) setFill];
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR + 20, AXYNE_TOOLBAR + AXYNE_TABS,
