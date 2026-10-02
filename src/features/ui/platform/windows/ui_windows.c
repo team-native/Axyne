@@ -738,6 +738,32 @@ static void axyne_refresh_terminal_theme(AxyneWindowState *state)
     UpdateWindow(state->terminal_output);
 }
 
+/* The native caption stays (system move/resize/snap behaviour), but on
+ * Windows 11 it is tinted to the Figma title bar: #131417 with #737780 text
+ * and a #292c32 frame. dwmapi is loaded lazily; older systems ignore it. */
+static void axyne_style_title_bar(HWND window)
+{
+    typedef HRESULT (WINAPI *SetAttribute)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE module;
+    SetAttribute set_attribute;
+    BOOL dark;
+    COLORREF caption = AXYNE_MENU_BG;
+    COLORREF text = AXYNE_MUTED;
+    COLORREF border = AXYNE_BORDER;
+    if (window == NULL) return;
+    module = LoadLibraryExW(L"dwmapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (module == NULL) return;
+    set_attribute = (SetAttribute)(uintptr_t)GetProcAddress(module, "DwmSetWindowAttribute");
+    if (set_attribute != NULL) {
+        dark = (GetRValue(AXYNE_BG) + GetGValue(AXYNE_BG) + GetBValue(AXYNE_BG)) < 384;
+        (void)set_attribute(window, 20, &dark, sizeof(dark));
+        (void)set_attribute(window, 35, &caption, sizeof(caption));
+        (void)set_attribute(window, 36, &text, sizeof(text));
+        (void)set_attribute(window, 34, &border, sizeof(border));
+    }
+    FreeLibrary(module);
+}
+
 static void axyne_apply_preferences(AxyneWindowState *state)
 {
     if (state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
@@ -748,6 +774,7 @@ static void axyne_apply_preferences(AxyneWindowState *state)
     axyne_apply_theme(&state->preferences.theme);
     axyne_apply_editor_preferences(state);
     axyne_refresh_terminal_theme(state);
+    if (state->editor != NULL) axyne_style_title_bar(GetParent(state->editor));
 }
 
 static void axyne_load_global_preferences(AxyneWindowState *state)
