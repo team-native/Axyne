@@ -56,27 +56,69 @@ jobs:
         if: runner.os == 'Windows'
         id: package-windows
         run: |
-          $outputDirectory = Join-Path $env:GITHUB_WORKSPACE 'build/Release'
-          if (-not (Test-Path (Join-Path $outputDirectory 'axyne.exe'))) {
-            throw 'Windows app executable was not produced.'
+          $stagingDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-install'
+          $packageDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-packages'
+          New-Item -ItemType Directory -Force -Path $stagingDirectory, $packageDirectory | Out-Null
+          cmake --install build --config Release --prefix $stagingDirectory
+          cmake `
+            -DAXYNE_INSTALL_ROOT=$stagingDirectory `
+            -DAXYNE_PLATFORM=Windows `
+            -DAXYNE_CONFIGURATION=Release `
+            -P packaging/validation/validate-install.cmake
+          cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
+
+          $debugOutput = & cpack --config build/CPackConfig.cmake -C Debug -B $packageDirectory 2>&1
+          $debugExitCode = $LASTEXITCODE
+          if ($debugExitCode -eq 0) {
+            throw 'Debug packaging unexpectedly succeeded.'
           }
-          $archive = Join-Path $env:RUNNER_TEMP 'Axyne-windows.zip'
-          Compress-Archive -Path (Join-Path $outputDirectory '*') -DestinationPath $archive -Force
-          "path=$archive" >> $env:GITHUB_OUTPUT
+          $debugMessage = $debugOutput -join "`n"
+          if ($debugMessage -notmatch 'Release-only') {
+            throw "Debug packaging failed for an unexpected reason:`n$debugMessage"
+          }
+
+          $package = Get-ChildItem -Path $packageDirectory -File |
+            Where-Object { $_.Extension -eq '.exe' } |
+            Select-Object -First 1
+          if ($null -eq $package) {
+            throw 'CPack did not produce a Windows installer.'
+          }
+          "path=$packageDirectory" >> $env:GITHUB_OUTPUT
 
       - name: Package macOS app bundle
         if: runner.os == 'macOS'
         id: package-macos
         shell: bash
         run: |
-          app_bundle="$(find build -type d -name '*.app' -print -quit)"
-          if [[ -z "$app_bundle" ]]; then
-            echo 'macOS app bundle was not produced.' >&2
+          staging_directory="$RUNNER_TEMP/Axyne-macos-install"
+          package_directory="$RUNNER_TEMP/Axyne-macos-packages"
+          mkdir -p "$staging_directory" "$package_directory"
+          cmake --install build --config Release --prefix "$staging_directory"
+          cmake \
+            -DAXYNE_INSTALL_ROOT="$staging_directory" \
+            -DAXYNE_PLATFORM=macOS \
+            -DAXYNE_CONFIGURATION=Release \
+            -DAXYNE_APP_BUNDLE=Axyne.app \
+            -DAXYNE_APP_EXECUTABLE=Axyne \
+            -P packaging/validation/validate-install.cmake
+          cpack --config build/CPackConfig.cmake -C Release -B "$package_directory"
+
+          if cpack --config build/CPackConfig.cmake -C Debug -B "$package_directory" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
+            echo 'Debug packaging unexpectedly succeeded.' >&2
             exit 1
           fi
-          archive="$RUNNER_TEMP/Axyne-macos.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$archive"
-          echo "path=$archive" >> "$GITHUB_OUTPUT"
+          if ! grep -q 'Release-only' "$RUNNER_TEMP/axyne-cpack-debug.log"; then
+            cat "$RUNNER_TEMP/axyne-cpack-debug.log" >&2
+            echo 'Debug packaging failed for an unexpected reason.' >&2
+            exit 1
+          fi
+
+          package="$(find "$package_directory" -type f \( -name '*.pkg' -o -name '*.dmg' \) -print -quit)"
+          if [[ -z "$package" ]]; then
+            echo 'CPack did not produce a macOS installer/package.' >&2
+            exit 1
+          fi
+          echo "path=$package_directory" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows build artifact
         if: runner.os == 'Windows'
