@@ -13,6 +13,7 @@
 #include <psapi.h>
 #include <wchar.h>
 #else
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
 #include <time.h>
@@ -122,6 +123,8 @@ static int axyne_perf_target_iteration(const char *target,
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
     DWORD wait_result;
+    SECURITY_ATTRIBUTES security;
+    HANDLE null_output;
     int result = 0;
 
     wide_target = axyne_perf_utf8_to_wide(target);
@@ -139,16 +142,34 @@ static int axyne_perf_target_iteration(const char *target,
 
     memset(&startup, 0, sizeof(startup));
     startup.cb = sizeof(startup);
+    memset(&security, 0, sizeof(security));
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+    null_output = CreateFileW(L"NUL", GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &security, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (null_output == INVALID_HANDLE_VALUE) {
+        free(command_line);
+        free(wide_target);
+        return 0;
+    }
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = null_output;
+    startup.hStdError = null_output;
     memset(&process, 0, sizeof(process));
     {
         double begin = axyne_perf_now_ms();
-        if (!CreateProcessW(wide_target, command_line, NULL, NULL, FALSE,
+        if (!CreateProcessW(wide_target, command_line, NULL, NULL, TRUE,
                             CREATE_NEW_PROCESS_GROUP, NULL, NULL, &startup,
                             &process)) {
+            CloseHandle(null_output);
             free(command_line);
             free(wide_target);
             return 0;
         }
+        CloseHandle(null_output);
         wait_result = WaitForInputIdle(process.hProcess, 10000);
         *startup_ms = axyne_perf_now_ms() - begin;
     }
@@ -240,15 +261,37 @@ static int axyne_perf_target_iteration(const char *target,
     pid_t process;
     int status;
     int launched = 0;
+    int null_input;
+    posix_spawn_file_actions_t file_actions;
     unsigned long elapsed_ms = 0;
     uint64_t maximum_memory = 0;
     const unsigned long poll_ms = 10;
     char *const arguments[] = {(char *)target, NULL};
 
+    null_input = open("/dev/null", O_WRONLY);
+    if (null_input < 0) return 0;
+    if (posix_spawn_file_actions_init(&file_actions) != 0) {
+        close(null_input);
+        return 0;
+    }
+    if (posix_spawn_file_actions_adddup2(&file_actions, null_input,
+                                         STDOUT_FILENO) != 0 ||
+        posix_spawn_file_actions_adddup2(&file_actions, null_input,
+                                         STDERR_FILENO) != 0) {
+        posix_spawn_file_actions_destroy(&file_actions);
+        close(null_input);
+        return 0;
+    }
     {
         uint64_t begin = axyne_perf_now_ns();
-        if (posix_spawn(&process, target, NULL, NULL, arguments, environ) != 0)
+        if (posix_spawn(&process, target, &file_actions, NULL, arguments,
+                        environ) != 0) {
+            posix_spawn_file_actions_destroy(&file_actions);
+            close(null_input);
             return 0;
+        }
+        posix_spawn_file_actions_destroy(&file_actions);
+        close(null_input);
         launched = 1;
     while (elapsed_ms < 10000 && !axyne_perf_process_is_running(process)) {
             axyne_perf_sleep(poll_ms);
