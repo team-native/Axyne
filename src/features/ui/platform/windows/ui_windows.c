@@ -613,7 +613,7 @@ static void axyne_terminal_send(AxyneWindowState *state)
     free(text);
 }
 
-static void axyne_debugger_start(HWND window, AxyneWindowState *state)
+static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *document;
     AxyneError error;
@@ -675,6 +675,7 @@ static void axyne_debugger_toggle_current_breakpoint(AxyneWindowState *state)
                                          line, &error) != AXYNE_STATUS_OK)
         axyne_terminal_append(state->terminal_output, error.message,
                               strlen(error.message), AXYNE_PROCESS_STDERR);
+}
 static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
                                size_t length)
 {
@@ -2611,7 +2612,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
         else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
-        else if (command == AXYNE_DEBUG_START) axyne_debugger_start(window, state);
+        else if (command == AXYNE_DEBUG_START) axyne_windows_debugger_start(window, state);
         else if (command == AXYNE_DEBUG_PAUSE)
             axyne_debugger_command_ui(state, AXYNE_DEBUGGER_PAUSE);
         else if (command == AXYNE_DEBUG_CONTINUE)
@@ -2725,6 +2726,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_breakpoint, FALSE);
         InvalidateRect(window, NULL, FALSE);
         return 0;
+    }
     case AXYNE_WM_GIT_COMPLETE:
         if (state->git_run == (AxyneGitUiRun *)l_param)
             axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
