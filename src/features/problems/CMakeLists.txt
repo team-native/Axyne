@@ -2,6 +2,7 @@
 # no OS API, so every platform builds the same source.
 target_sources(axyne_core PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/problems.c"
+    "${CMAKE_CURRENT_LIST_DIR}/problems_feed.c"
 )
 if(MSVC)
     # The summary text contains UTF-8 Korean.
