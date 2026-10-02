@@ -21,8 +21,10 @@
 #include "axyne/lsp.h"
 #include "axyne/ui_design.h"
 #include "Scintilla.h"
+#include "../../editor_document.h"
 
 @interface NSObject (AxyneScintillaMessages)
+- (NSView *)content;
 - (NSInteger)message:(unsigned int)message wParam:(uintptr_t)wParam
                lParam:(intptr_t)lParam;
 @end
@@ -115,7 +117,6 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
     BOOL _loadingEditor;
-    BOOL _editorDocumentInitialized;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
     AxyneDebugger _debugger;
@@ -280,6 +281,7 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)undo:(id)sender;
 - (void)redo:(id)sender;
 - (void)closeDocument:(id)sender;
+- (void)closeDocumentAtIndex:(size_t)index;
 - (void)openRecent:(id)sender;
 - (BOOL)confirmCloseAll;
 - (void)notification:(SCNotification *)notification;
@@ -289,6 +291,9 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)refreshActionControls;
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem;
 - (BOOL)loadActiveDocument;
+- (BOOL)selectDocumentAtIndex:(size_t)index;
+- (NSInteger)sendEditorMessage:(unsigned int)message wParam:(uintptr_t)wParam
+                        lParam:(intptr_t)lParam;
 - (void)loadScintillaView;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 - (void)findOrReplace:(BOOL)replace;
@@ -348,6 +353,13 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)navigateLspReferences:(id)sender;
 - (void)setLspStatus:(NSString *)status;
 @end
+
+static intptr_t axyne_macos_editor_message(void *editor, unsigned int message,
+                                           uintptr_t wParam, intptr_t lParam)
+{
+    return [(AxyneWorkspaceView *)editor sendEditorMessage:message
+        wParam:wParam lParam:lParam];
+}
 
 struct AxyneMacGitRun {
     AxyneWorkspaceView *view;
@@ -1005,6 +1017,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
         [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
+        [self sendEditorMessage:SCI_SETTABWIDTH wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
         [self sendEditorMessage:SCI_SETWRAPMODE wParam:_preferences.editor.word_wrap ? 1 : 0 lParam:0];
         [self sendEditorMessage:SCI_SETVIEWWS wParam:_preferences.editor.show_whitespace ? 1 : 0 lParam:0];
@@ -1041,10 +1054,16 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (text == NULL) return NO;
     (void)[self sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)length + 1
                             lParam:(intptr_t)text];
-    AxyneStatus status = axyne_documents_set_contents(&_documents,
-        _documents.active_index, text, (size_t)length, NULL);
+    BOOL changed = doc->length != (size_t)length ||
+        memcmp(doc->contents, text, (size_t)length) != 0;
+    BOOL modified = [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0;
+    AxyneStatus status = changed ? axyne_documents_set_contents(&_documents,
+        _documents.active_index, text, (size_t)length, NULL) : AXYNE_STATUS_OK;
     free(text);
-    if (status == AXYNE_STATUS_OK) [self syncLspActive];
+    if (status == AXYNE_STATUS_OK) {
+        doc->is_dirty = modified;
+        if (changed) [self syncLspActive];
+    }
     return status == AXYNE_STATUS_OK;
 }
 
@@ -1135,8 +1154,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (BOOL)captureEditor
 {
     AxyneDocument *doc = [self activeDocument];
-    if (doc == NULL || ([self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] == 0 &&
-                        !doc->is_dirty)) return YES;
+    if (doc == NULL || doc->native_editor_document == NULL) return YES;
     if ([self captureEditorSnapshot]) return YES;
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     [alert setMessageText:@"Could not capture editor contents"];
@@ -1149,40 +1167,30 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     AxyneDocument *doc = [self activeDocument];
     if (doc == NULL || _editorView == nil) return NO;
-    size_t previousIndex = _documents.active_index;
     _loadingEditor = YES;
-    if (!_editorDocumentInitialized) {
-        doc->native_editor_document = (void *)(uintptr_t)[self
-            sendEditorMessage:SCI_GETDOCPOINTER wParam:0 lParam:0];
-        _editorDocumentInitialized = YES;
-    } else if (doc->native_editor_document == NULL) {
-        NSInteger created = [self sendEditorMessage:SCI_CREATEDOCUMENT
-            wParam:doc->length lParam:0];
-        if (created == 0) {
-            _loadingEditor = NO;
-            (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
-            return NO;
-        }
-        doc->native_editor_document = (void *)(uintptr_t)created;
-        doc->owns_native_editor_document = 1;
-        (void)[self sendEditorMessage:SCI_SETDOCPOINTER wParam:0
-            lParam:(intptr_t)doc->native_editor_document];
-        (void)[self sendEditorMessage:SCI_ADDTEXT wParam:doc->length
-            lParam:(intptr_t)doc->contents];
-        if (!doc->is_dirty)
-            (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
-    } else {
-        (void)[self sendEditorMessage:SCI_SETDOCPOINTER wParam:0
-            lParam:(intptr_t)doc->native_editor_document];
-    }
+    BOOL loaded = axyne_editor_load_document(doc, axyne_macos_editor_message, self);
     _loadingEditor = NO;
+    if (!loaded) return NO;
+    [self applyPreferences];
     [self applyEditorLexer];
     [self updateLineNumberMargin];
     [self updateBraceHighlight];
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
+    if ([self window] != nil)
+        [[self window] makeFirstResponder:[(id)_editorView content]];
     return YES;
+}
+
+- (BOOL)selectDocumentAtIndex:(size_t)index
+{
+    size_t previousIndex = _documents.active_index;
+    if (axyne_documents_set_active(&_documents, index, NULL) != AXYNE_STATUS_OK)
+        return NO;
+    if ([self loadActiveDocument]) return YES;
+    (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+    return NO;
 }
 
 - (void)updateWindowTitle
@@ -1638,8 +1646,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     NSInteger result = [alert runModal];
     if (result == NSAlertFirstButtonReturn) {
         if (![self captureEditor]) return NO;
-        (void)axyne_documents_set_active(&_documents, index, NULL);
-        [self loadActiveDocument];
+        if (![self selectDocumentAtIndex:index]) return NO;
         return [self saveActive];
     }
     return result == NSAlertSecondButtonReturn;
@@ -1648,9 +1655,29 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)closeDocument:(id)sender
 {
     (void)sender;
-    size_t index = _documents.active_index;
+    [self closeDocumentAtIndex:_documents.active_index];
+}
+
+- (void)closeDocumentAtIndex:(size_t)index
+{
+    if (index >= _documents.count) return;
     if (![self captureEditor]) return;
     if (![self confirmCloseDocumentAtIndex:index]) return;
+    /* Prepare the replacement before dropping the last tab. Allocation or
+     * native initialization failure must leave the current document open. */
+    if (_documents.count == 1) {
+        size_t replacement;
+        if (axyne_documents_new(&_documents, &replacement, NULL) != AXYNE_STATUS_OK)
+            return;
+        if (![self loadActiveDocument]) {
+            (void)axyne_documents_close(&_documents, replacement, NULL);
+            (void)axyne_documents_set_active(&_documents, index, NULL);
+            return;
+        }
+    } else if (_documents.active_index == index) {
+        size_t successor = index + 1 < _documents.count ? index + 1 : index - 1;
+        if (![self selectDocumentAtIndex:successor]) return;
+    }
     AxyneDocument *doc = &_documents.documents[index];
     if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
     if (doc->owns_native_editor_document)
@@ -1679,13 +1706,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (_editorView != nil) {
         return;
     }
-    NSString *frameworkPath = [[NSBundle mainBundle] pathForResource:@"Scintilla"
-                                                               ofType:@"framework"
-                                                          inDirectory:@"Frameworks"];
-    if (frameworkPath != nil) {
-        _scintillaBundle = [[NSBundle bundleWithPath:frameworkPath] retain];
-        [_scintillaBundle load];
-    }
+    NSString *frameworksPath = [[NSBundle mainBundle] privateFrameworksPath];
+    NSString *frameworkPath = [frameworksPath
+        stringByAppendingPathComponent:@"Scintilla.framework"];
+    NSBundle *bundle = [NSBundle bundleWithPath:frameworkPath];
+    if (bundle == nil || ![bundle load]) return;
+    _scintillaBundle = [bundle retain];
 
     Class scintillaClass = NSClassFromString(@"ScintillaView");
     if (scintillaClass != Nil) {
@@ -1709,8 +1735,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self addSubview:_editorView];
         [self setNeedsLayout:YES];
 
-        NSString *lexillaPath = [[NSBundle mainBundle]
-            pathForResource:@"Lexilla" ofType:@"dylib" inDirectory:@"Frameworks"];
+        NSString *lexillaPath = [frameworksPath
+            stringByAppendingPathComponent:@"Lexilla.dylib"];
         if (lexillaPath != nil) {
             _lexillaModule = dlopen([lexillaPath fileSystemRepresentation],
                                     RTLD_NOW | RTLD_LOCAL);
@@ -1730,8 +1756,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [super viewDidMoveToWindow];
     [self loadScintillaView];
     [self applyPreferences];
-    if ([self loadActiveDocument] && _editorView != nil && [self window] != nil)
-        [[self window] makeFirstResponder:_editorView];
+    [self loadActiveDocument];
 }
 
 - (void)mouseDown:(NSEvent *)event
@@ -1744,18 +1769,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             if (!NSPointInRect(point, tab)) continue;
             if (![self captureEditor]) return;
             if (point.x >= NSMaxX(tab) - 24) {
-                if ([self confirmCloseDocumentAtIndex:index]) {
-                    AxyneDocument *doc = &_documents.documents[index];
-                    if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
-                    if (doc->owns_native_editor_document)
-                        (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
-                            lParam:(intptr_t)doc->native_editor_document];
-                    (void)axyne_documents_close(&_documents, index, NULL);
-                    [self loadActiveDocument];
-                }
+                [self closeDocumentAtIndex:index];
             } else {
-                (void)axyne_documents_set_active(&_documents, index, NULL);
-                [self loadActiveDocument];
+                [self selectDocumentAtIndex:index];
             }
             return;
         }
@@ -2961,8 +2977,15 @@ else [_terminalInput setStringValue:@""];
                     lParam:(intptr_t)doc->native_editor_document];
         }
     }
+    /* Scintilla's active buffer also holds a reference to its Lexilla lexer.
+     * Destroy it before unloading Lexilla, including when AppKit retains the
+     * editor subview until the superclass tears down its children. */
+    [(id)_editorView setDelegate:nil];
+    (void)[self sendEditorMessage:SCI_SETILEXER wParam:0 lParam:0];
     axyne_documents_destroy(&_documents);
+    [_editorView removeFromSuperview];
     [_editorView release];
+    _editorView = nil;
     [_newButton release]; [_openButton release]; [_saveButton release];
     [_undoButton release]; [_redoButton release];
     [_buildButton release]; [_runButton release];
