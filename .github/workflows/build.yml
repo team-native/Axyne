@@ -52,31 +52,100 @@ jobs:
         if: runner.os == 'macOS'
         run: ctest --test-dir build --output-on-failure
 
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $env:Path = "C:\Program Files (x86)\NSIS;$env:Path"
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            throw 'NSIS compiler was not installed.'
+          }
+
       - name: Package Windows app output
         if: runner.os == 'Windows'
         id: package-windows
         run: |
-          $outputDirectory = Join-Path $env:GITHUB_WORKSPACE 'build/Release'
-          if (-not (Test-Path (Join-Path $outputDirectory 'axyne.exe'))) {
-            throw 'Windows app executable was not produced.'
+          $stagingDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-install'
+          $packageDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-packages'
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'Axyne-windows-artifacts'
+          New-Item -ItemType Directory -Force -Path $stagingDirectory, $packageDirectory, $artifactDirectory | Out-Null
+          cmake --install build --config Release --prefix $stagingDirectory
+          cmake `
+            "-DAXYNE_INSTALL_ROOT=$stagingDirectory" `
+            '-DAXYNE_PLATFORM=Windows' `
+            '-DAXYNE_CONFIGURATION=Release' `
+            -P packaging/validation/validate-install.cmake
+          cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
+
+          $debugStdout = Join-Path $env:RUNNER_TEMP 'axyne-cmake-debug.stdout.log'
+          $debugStderr = Join-Path $env:RUNNER_TEMP 'axyne-cmake-debug.stderr.log'
+          $debugProcess = Start-Process `
+            -FilePath 'cmake' `
+            -ArgumentList @('-DAXYNE_CONFIGURATION=Debug', '-DAXYNE_PLATFORM=Windows', '-DAXYNE_INSTALL_ROOT=unused', '-P', 'packaging/validation/validate-install.cmake') `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $debugStdout `
+            -RedirectStandardError $debugStderr
+          $debugMessage = @(
+            (Get-Content -Path $debugStdout -ErrorAction SilentlyContinue)
+            (Get-Content -Path $debugStderr -ErrorAction SilentlyContinue)
+          ) -join "`n"
+          Write-Host $debugMessage
+          if ($debugProcess.ExitCode -eq 0 -or $debugMessage -notmatch 'Release-only') {
+            throw "Debug packaging validation failed unexpectedly:`n$debugMessage"
           }
-          $archive = Join-Path $env:RUNNER_TEMP 'Axyne-windows.zip'
-          Compress-Archive -Path (Join-Path $outputDirectory '*') -DestinationPath $archive -Force
-          "path=$archive" >> $env:GITHUB_OUTPUT
+
+          $package = Get-ChildItem -Path $packageDirectory -File |
+            Where-Object { $_.Extension -eq '.exe' } |
+            Select-Object -First 1
+          if ($null -eq $package) {
+            throw 'CPack did not produce a Windows installer.'
+          }
+          Copy-Item -LiteralPath $package.FullName -Destination $artifactDirectory
+          "path=$artifactDirectory" >> $env:GITHUB_OUTPUT
 
       - name: Package macOS app bundle
         if: runner.os == 'macOS'
         id: package-macos
         shell: bash
         run: |
-          app_bundle="$(find build -type d -name '*.app' -print -quit)"
-          if [[ -z "$app_bundle" ]]; then
-            echo 'macOS app bundle was not produced.' >&2
+          staging_directory="$RUNNER_TEMP/Axyne-macos-install"
+          package_directory="$RUNNER_TEMP/Axyne-macos-packages"
+          artifact_directory="$RUNNER_TEMP/Axyne-macos-artifacts"
+          mkdir -p "$staging_directory" "$package_directory" "$artifact_directory"
+          cmake --install build --config Release --prefix "$staging_directory"
+          cmake \
+            -DAXYNE_INSTALL_ROOT="$staging_directory" \
+            -DAXYNE_PLATFORM=macOS \
+            -DAXYNE_CONFIGURATION=Release \
+            -DAXYNE_APP_BUNDLE=Axyne.app \
+            -DAXYNE_APP_EXECUTABLE=Axyne \
+            -P packaging/validation/validate-install.cmake
+          mkdir -p "$package_directory/productbuild" "$package_directory/dragndrop"
+          cpack --config build/CPackConfig.cmake -G productbuild -C Release -B "$package_directory/productbuild"
+          cpack --config build/CPackConfig.cmake -G DragNDrop -C Release \
+            -D CPACK_PACKAGING_INSTALL_PREFIX=/ \
+            -B "$package_directory/dragndrop"
+
+          if cpack --config build/CPackConfig.cmake -G productbuild -C Debug -B "$package_directory/debug" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
+            echo 'Debug packaging unexpectedly succeeded.' >&2
             exit 1
           fi
-          archive="$RUNNER_TEMP/Axyne-macos.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$archive"
-          echo "path=$archive" >> "$GITHUB_OUTPUT"
+          if ! grep -q 'Release-only' "$RUNNER_TEMP/axyne-cpack-debug.log"; then
+            cat "$RUNNER_TEMP/axyne-cpack-debug.log" >&2
+            echo 'Debug packaging failed for an unexpected reason.' >&2
+            exit 1
+          fi
+
+          package="$(find "$package_directory" -type f \( -name '*.pkg' -o -name '*.dmg' \) -print -quit)"
+          if [[ -z "$package" ]]; then
+            echo 'CPack did not produce a macOS installer/package.' >&2
+            exit 1
+          fi
+          find "$package_directory/productbuild" "$package_directory/dragndrop" \
+            -maxdepth 1 -type f \( -name '*.pkg' -o -name '*.dmg' \) \
+            -exec cp {} "$artifact_directory/" \;
+          echo "path=$artifact_directory" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows build artifact
         if: runner.os == 'Windows'

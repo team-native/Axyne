@@ -14,11 +14,11 @@ if(APPLE)
     # for a host-specific release build.
     if(NOT CMAKE_OSX_ARCHITECTURES)
         set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING
-            "macOS package architecture")
+            "macOS package architecture" FORCE)
     endif()
     if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
-            "Minimum macOS deployment target")
+            "Minimum macOS deployment target" FORCE)
     endif()
 endif()
 
@@ -121,6 +121,14 @@ if(WIN32)
     )
 elseif(APPLE)
     enable_language(OBJC)
+    set(AXYNE_SCINTILLA_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
+    if(AXYNE_SCINTILLA_ARCHITECTURES STREQUAL "")
+        set(AXYNE_SCINTILLA_ARCHITECTURES "arm64")
+    endif()
+    set(AXYNE_SCINTILLA_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(AXYNE_SCINTILLA_DEPLOYMENT_TARGET STREQUAL "")
+        set(AXYNE_SCINTILLA_DEPLOYMENT_TARGET "12.0")
+    endif()
     set(AXYNE_SCINTILLA_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/scintilla")
     set(AXYNE_SCINTILLA_FRAMEWORK
         "${AXYNE_SCINTILLA_OUTPUT_DIR}/Scintilla.framework")
@@ -130,9 +138,12 @@ elseif(APPLE)
         COMMAND xcodebuild
             -project "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla/Scintilla.xcodeproj"
             -target Scintilla -configuration Release -sdk macosx
-            "ARCHS=${CMAKE_OSX_ARCHITECTURES}"
-            "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            "ARCHS=${AXYNE_SCINTILLA_ARCHITECTURES}"
+            "MACOSX_DEPLOYMENT_TARGET=${AXYNE_SCINTILLA_DEPLOYMENT_TARGET}"
             "CONFIGURATION_BUILD_DIR=${AXYNE_SCINTILLA_OUTPUT_DIR}"
+        COMMAND ${CMAKE_COMMAND}
+            "-DAXYNE_SCINTILLA_FRAMEWORK=${AXYNE_SCINTILLA_FRAMEWORK}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/packaging/validation/ensure-framework-runtime.cmake"
         WORKING_DIRECTORY "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla"
         DEPENDS
             "${axyne_scintilla_SOURCE_DIR}/cocoa/Scintilla/Scintilla.xcodeproj/project.pbxproj"
@@ -237,6 +248,15 @@ if(WIN32 OR APPLE)
             DESTINATION .
             CONFIGURATIONS Release
         )
+        # CMake's bundle install traversal preserves the framework layout but
+        # can omit the versioned binary. Install that Release runtime
+        # explicitly into the already-installed framework.
+        install(FILES
+            "${AXYNE_SCINTILLA_FRAMEWORK}/Versions/A/Scintilla"
+            DESTINATION
+                "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Frameworks/Scintilla.framework/Versions/A"
+            CONFIGURATIONS Release
+        )
     endif()
 endif()
 
@@ -269,8 +289,24 @@ if(WIN32 OR APPLE)
     set(CPACK_PACKAGE_INSTALL_DIRECTORY "${AXYNE_DISPLAY_NAME}")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "A native offline desktop IDE for Windows and macOS")
-    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-    set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md")
+    # ProductBuild accepts only a small set of resource extensions. Keep the
+    # installed files unchanged while giving CPack portable .txt resources.
+    set(AXYNE_CPACK_LICENSE_FILE
+        "${CMAKE_CURRENT_BINARY_DIR}/Axyne-License.txt")
+    set(AXYNE_CPACK_README_FILE
+        "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Release-Notes.txt")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${AXYNE_CPACK_LICENSE_FILE}"
+        COPYONLY
+    )
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASE_NOTES.md"
+        "${AXYNE_CPACK_README_FILE}"
+        COPYONLY
+    )
+    set(CPACK_RESOURCE_FILE_LICENSE "${AXYNE_CPACK_LICENSE_FILE}")
+    set(CPACK_RESOURCE_FILE_README "${AXYNE_CPACK_README_FILE}")
     set(AXYNE_PACKAGING_CONFIGURED_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
     if(CMAKE_CONFIGURATION_TYPES)
         set(AXYNE_PACKAGING_MULTI_CONFIG TRUE)
