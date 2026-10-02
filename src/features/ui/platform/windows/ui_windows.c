@@ -455,6 +455,32 @@ static const char *axyne_editor_lexer(const char *path)
     return "null";
 }
 
+/* Figma editor palette for the C-family lexer: comments grey, strings green,
+ * keywords orange, type names blue, preprocessor purple, numbers amber and
+ * constants teal. Other palettes keep their configured colours. */
+static void axyne_apply_syntax_styles(AxyneWindowState *state,
+                                      const char *language)
+{
+    static const unsigned int styles[] = { 1, 2, 3, 15, 4, 5, 6, 7, 9, 10, 11,
+                                           16, 19 };
+    static const uint32_t colors[] = { 0x7a828e, 0x7a828e, 0x7a828e, 0x7a828e,
+        0xd9b36c, 0xd98e73, 0xa3c98a, 0xa3c98a, 0xc79ad9, 0xd5d8dd, 0xd5d8dd,
+        0x7db5e3, 0x8cc7c0 };
+    const AxyneThemePreferences *theme = &state->preferences.theme;
+    size_t i;
+    if (strcmp(language, "cpp") != 0) return;
+    for (i = 0; i < sizeof(styles) / sizeof(styles[0]); ++i) {
+        uint32_t color = colors[i];
+        if (!AXYNE_REFERENCE) {
+            if (i < 4) color = theme->muted;
+            else if (styles[i] == 10 || styles[i] == 11) color = theme->editor_text;
+            else color = theme->accent;
+        }
+        SendMessageA(state->editor, SCI_STYLESETFORE, styles[i],
+                     (LPARAM)axyne_theme_color(color));
+    }
+}
+
 static void axyne_apply_editor_lexer(AxyneWindowState *state,
                                      const AxyneDocument *document)
 {
@@ -468,6 +494,24 @@ static void axyne_apply_editor_lexer(AxyneWindowState *state,
         lexer = state->create_lexer("null");
     if (lexer != NULL) {
         SendMessageA(state->editor, SCI_SETILEXER, 0, (LPARAM)lexer);
+        if (strcmp(language, "cpp") == 0) {
+            /* Set 0: control and storage keywords; set 1: builtin types;
+             * set 3: well-known constants (NULL, true, false). */
+            SendMessageA(state->editor, SCI_SETKEYWORDS, 0,
+                (LPARAM)"auto break case const continue default do else enum "
+                    "extern for goto if inline register restrict return sizeof "
+                    "static struct switch typedef union volatile while");
+            SendMessageA(state->editor, SCI_SETKEYWORDS, 1,
+                (LPARAM)"void char short int long float double signed unsigned "
+                    "bool size_t ssize_t ptrdiff_t intptr_t uintptr_t int8_t "
+                    "int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t "
+                    "FILE HWND HDC HMENU HFONT HBRUSH HICON HANDLE HINSTANCE "
+                    "LRESULT WPARAM LPARAM UINT DWORD WORD BYTE BOOL WCHAR "
+                    "LPCSTR LPCWSTR LPSTR LPWSTR COLORREF RECT POINT SIZE");
+            SendMessageA(state->editor, SCI_SETKEYWORDS, 3,
+                (LPARAM)"NULL true false TRUE FALSE");
+        }
+        axyne_apply_syntax_styles(state, language);
         SendMessageA(state->editor, SCI_COLOURISE, 0, (LPARAM)-1);
     }
 }
@@ -483,6 +527,8 @@ static void axyne_update_line_number_margin(AxyneWindowState *state)
     (void)snprintf(digits, sizeof(digits), "%lld", (long long)line_count);
     width = SendMessageA(state->editor, SCI_TEXTWIDTH, 33, (LPARAM)digits);
     if (width < 1) width = 32;
+    /* Figma gutter: a 52px column with right-aligned numbers. */
+    if (width + 10 < 52) width = 42;
     SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, width + 10);
 }
 
@@ -590,23 +636,49 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     if (state->editor == NULL) { free(font_name); return; }
     SendMessageA(state->editor, SCI_STYLESETFORE, 32, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
     SendMessageA(state->editor, SCI_STYLESETBACK, 32, (LPARAM)axyne_theme_color(state->preferences.theme.editor_background));
+    /* STYLECLEARALL copies style 32 into every style, so the font must be
+     * set first or lexer styles never inherit it. */
     SendMessageA(state->editor, SCI_STYLESETSIZE, 32, (LPARAM)font_size);
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)editor_font);
-    SendMessageA(state->editor, SCI_STYLESETFORE, 33, (LPARAM)axyne_theme_color(state->preferences.theme.muted));
-    SendMessageA(state->editor, SCI_STYLESETBACK, 33, (LPARAM)axyne_theme_color(state->preferences.theme.panel));
+    SendMessageA(state->editor, SCI_STYLECLEARALL, 0, 0);
+    SendMessageA(state->editor, SCI_STYLESETFORE, 33, (LPARAM)axyne_theme_color(
+        AXYNE_REFERENCE ? 0x5a606a : state->preferences.theme.muted));
+    SendMessageA(state->editor, SCI_STYLESETBACK, 33, (LPARAM)axyne_theme_color(
+        AXYNE_REFERENCE ? state->preferences.theme.editor_background
+                        : state->preferences.theme.panel));
     SendMessageA(state->editor, SCI_STYLESETFORE, 34, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
     SendMessageA(state->editor, SCI_STYLESETBACK, 34, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
     SendMessageA(state->editor, SCI_STYLESETFORE, 35, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
     SendMessageA(state->editor, SCI_STYLESETBACK, 35, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
     SendMessageA(state->editor, SCI_SETSELFORE, 0, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
     SendMessageA(state->editor, SCI_SETSELBACK, 1, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
-    SendMessageA(state->editor, SCI_SETCARETFORE, 0, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
+    /* SCI_SETCARETFORE and SCI_SETCARETLINEBACK take the colour in wParam. */
+    SendMessageA(state->editor, SCI_SETCARETFORE,
+                 (WPARAM)axyne_theme_color(state->preferences.theme.accent), 0);
+    SendMessageA(state->editor, SCI_SETCARETLINEVISIBLE, 1, 0);
+    SendMessageA(state->editor, SCI_SETCARETLINEBACK,
+                 (WPARAM)axyne_theme_color(AXYNE_REFERENCE
+                     ? 0x202328 : state->preferences.theme.toolbar), 0);
+    /* Figma code rows are 19px at a 13px font; scale that ratio to the chosen
+     * size by padding the font's natural line height. Font sizes are points. */
+    SendMessageA(state->editor, SCI_SETEXTRAASCENT, 0, 0);
+    SendMessageA(state->editor, SCI_SETEXTRADESCENT, 0, 0);
+    {
+        LRESULT natural = SendMessageA(state->editor, SCI_TEXTHEIGHT, 0, 0);
+        LRESULT pixels = ((LRESULT)font_size * 4 + 1) / 3;
+        LRESULT extra = (pixels * 19 + 6) / 13 - natural;
+        if (extra > 0) {
+            SendMessageA(state->editor, SCI_SETEXTRAASCENT, (WPARAM)((extra + 1) / 2), 0);
+            SendMessageA(state->editor, SCI_SETEXTRADESCENT, (WPARAM)(extra / 2), 0);
+        }
+    }
     SendMessageA(state->editor, SCI_SETINDENT, state->preferences.editor.tab_width, 0);
     SendMessageA(state->editor, SCI_SETTABWIDTH, state->preferences.editor.tab_width, 0);
     SendMessageA(state->editor, SCI_SETUSETABS, state->preferences.editor.insert_spaces ? 0 : 1, 0);
     SendMessageA(state->editor, SCI_SETWRAPMODE, state->preferences.editor.word_wrap ? 1 : 0, 0);
     SendMessageA(state->editor, SCI_SETVIEWWS, state->preferences.editor.show_whitespace ? 1 : 0, 0);
+    axyne_apply_editor_lexer(state, axyne_active(state));
     axyne_update_line_number_margin(state);
     axyne_update_brace_highlight(state);
     free(font_name);
@@ -2934,10 +3006,10 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     SendMessageA(state->editor, SCI_SETMARGINTYPEN, 0, 1);
     SendMessageA(state->editor, SCI_SETMARGINMASKN, 0, 0);
     SendMessageA(state->editor, SCI_SETMARGINSENSITIVEN, 0, 0);
-    SendMessageA(state->editor, SCI_STYLECLEARALL, 0, 0);
     SendMessageA(state->editor, SCI_STYLESETSIZE, 32, 11);
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)"Cascadia Mono");
+    SendMessageA(state->editor, SCI_STYLECLEARALL, 0, 0);
     SendMessageA(state->editor, SCI_SETINDENTATIONGUIDES, 3, 0);
     SendMessageA(state->editor, SCI_SETBACKSPACEUNINDENTS, 1, 0);
     SendMessageA(state->editor, SCI_SETTABINDENTS, 1, 0);
