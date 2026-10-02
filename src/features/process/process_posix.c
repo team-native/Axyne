@@ -164,6 +164,13 @@ static void free_environment(char **environment)
     free(environment);
 }
 
+static void consume_sigpipe_if_pending(const sigset_t *blocked)
+{
+    sigset_t pending;
+    (void)sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE) == 1) (void)sigwait(blocked, NULL);
+}
+
 static void *process_worker(void *opaque)
 {
     AxyneProcess *process = (AxyneProcess *)opaque;
@@ -394,8 +401,7 @@ AxyneStatus axyne_process_write(AxyneProcess *process, const char *bytes,
         else if (written < 0 && errno == EINTR) continue;
         else {
             if (errno == EPIPE && !had_pending) {
-                struct timespec timeout = { 0, 0 };
-                (void)sigtimedwait(&blocked, NULL, &timeout);
+                consume_sigpipe_if_pending(&blocked);
             }
             (void)pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
             (void)pthread_mutex_unlock(&state->write_lock);
