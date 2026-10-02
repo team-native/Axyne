@@ -175,6 +175,30 @@ int axyne_test_settings_preferences(const char *root)
         settings = NULL;
     }
 
+    AXYNE_TEST_CHECK(axyne_preferences_check_font_size(5) != AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_font_size(6) == AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_font_size(72) == AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_font_size(73) != AXYNE_PREFERENCE_CHECK_OK);
+    AXYNE_TEST_CHECK(axyne_preferences_check_tab_width(0) != AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_tab_width(16) == AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_tab_width(17) != AXYNE_PREFERENCE_CHECK_OK);
+    AXYNE_TEST_CHECK(axyne_preferences_check_key("") != AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_key("F5") == AXYNE_PREFERENCE_CHECK_OK &&
+                     axyne_preferences_check_key("0123456789abcdef") != AXYNE_PREFERENCE_CHECK_OK);
+    AXYNE_TEST_CHECK(axyne_preferences_check_font_family("") == AXYNE_PREFERENCE_CHECK_OK);
+    {
+        AxynePreferences edited = defaults;
+        AxyneKeyBinding *save = (AxyneKeyBinding *)axyne_preferences_find_binding(&edited, AXYNE_ACTION_SAVE);
+        strcpy(save->key, "Q"); save->enabled = 0; save->modifiers = 0;
+        axyne_preferences_restore_binding(&edited, AXYNE_ACTION_SAVE);
+        save = (AxyneKeyBinding *)axyne_preferences_find_binding(&edited, AXYNE_ACTION_SAVE);
+        AXYNE_TEST_CHECK(strcmp(save->key, "S") == 0 && save->enabled == 1 &&
+                         save->modifiers == AXYNE_KEY_MODIFIER_COMMAND);
+        axyne_preferences_select_theme(&edited.theme, AXYNE_THEME_LIGHT);
+        AXYNE_TEST_CHECK(edited.theme.preset == AXYNE_THEME_LIGHT &&
+                         edited.theme.editor_background == 0xffffff);
+    }
+
     axyne_test_remove_tree(root);
     return 1;
 }

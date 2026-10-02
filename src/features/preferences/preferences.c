@@ -448,3 +448,41 @@ const char *axyne_preferences_action_name(AxynePreferenceAction action)
     static const char *names[] = {"New", "Open", "Save", "Close", "Find", "Replace", "Search Workspace", "Quick File", "Build", "Run", "Preferences"};
     return action >= 0 && action < AXYNE_ACTION_COUNT ? names[action] : "Unknown";
 }
+
+AxynePreferenceCheck axyne_preferences_check_font_size(unsigned long value)
+{
+    return value >= 6 && value <= 72 ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_FONT_SIZE;
+}
+
+AxynePreferenceCheck axyne_preferences_check_tab_width(unsigned long value)
+{
+    return value >= 1 && value <= 16 ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_TAB_WIDTH;
+}
+
+AxynePreferenceCheck axyne_preferences_check_font_family(const char *utf8)
+{
+    return utf8 != NULL && strlen(utf8) < AXYNE_PREFERENCE_TEXT_MAX ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_FONT_FAMILY;
+}
+
+AxynePreferenceCheck axyne_preferences_check_key(const char *utf8)
+{
+    return utf8 != NULL && utf8[0] != '\0' && strlen(utf8) < AXYNE_PREFERENCE_KEY_MAX ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_KEY;
+}
+
+void axyne_preferences_select_theme(AxyneThemePreferences *theme, AxyneThemePreset preset)
+{
+    if (theme == NULL) return;
+    axyne_theme_defaults(theme, preset);
+}
+
+void axyne_preferences_restore_binding(AxynePreferences *preferences, AxynePreferenceAction action)
+{
+    AxynePreferences defaults;
+    const AxyneKeyBinding *restored;
+    int index;
+    if (preferences == NULL) return;
+    axyne_preferences_defaults(&defaults);
+    restored = axyne_preferences_find_binding(&defaults, action);
+    index = axyne_binding_index(preferences, action);
+    if (restored != NULL && index >= 0) preferences->bindings[index] = *restored;
+}

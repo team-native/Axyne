@@ -150,6 +150,30 @@ void axyne_preferences_mark_all(AxynePreferences *preferences);
 void axyne_preferences_mark_binding(AxynePreferences *preferences,
                                      AxynePreferenceAction action);
 
+/* Validation shared by every settings editor. Limits: font size 6-72, tab
+ * width 1-16, font family shorter than AXYNE_PREFERENCE_TEXT_MAX bytes, key
+ * text non-empty and shorter than AXYNE_PREFERENCE_KEY_MAX bytes. */
+typedef enum AxynePreferenceCheck {
+    AXYNE_PREFERENCE_CHECK_OK = 0,
+    AXYNE_PREFERENCE_CHECK_FONT_SIZE,
+    AXYNE_PREFERENCE_CHECK_TAB_WIDTH,
+    AXYNE_PREFERENCE_CHECK_FONT_FAMILY,
+    AXYNE_PREFERENCE_CHECK_KEY
+} AxynePreferenceCheck;
+
+AxynePreferenceCheck axyne_preferences_check_font_size(unsigned long value);
+AxynePreferenceCheck axyne_preferences_check_tab_width(unsigned long value);
+AxynePreferenceCheck axyne_preferences_check_font_family(const char *utf8);
+AxynePreferenceCheck axyne_preferences_check_key(const char *utf8);
+
+/* Replaces the theme with the palette of a preset (system uses dark colors
+ * until the platform resolves the appearance). */
+void axyne_preferences_select_theme(AxyneThemePreferences *theme,
+                                    AxyneThemePreset preset);
+/* Restores one binding (key, modifiers, enabled) to its default. */
+void axyne_preferences_restore_binding(AxynePreferences *preferences,
+                                       AxynePreferenceAction action);
+
 const AxyneKeyBinding *axyne_preferences_find_binding(
     const AxynePreferences *preferences, AxynePreferenceAction action);
 const char *axyne_preferences_action_name(AxynePreferenceAction action);
