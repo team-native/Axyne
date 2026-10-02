@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <ctype.h>
 #include <string.h>
 #include <commdlg.h>
 #include <shlobj.h>
@@ -15,6 +16,7 @@
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
+#include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
 
@@ -44,17 +46,21 @@ enum {
     SCI_STYLESETFONT = 2056,
     SCI_SETMARGINWIDTHN = 2242,
     SCI_SETCODEPAGE = 2037,
-    SCI_SETWRAPMODE = 2268
+    SCI_SETWRAPMODE = 2268,
+    SCI_SETINDENT = 2122,
+    SCI_SETUSETABS = 2124,
+    SCI_SETVIEWWS = 2021
 };
 
 static const wchar_t AXYNE_WINDOW_CLASS[] = L"AxyneWindow";
-static const COLORREF AXYNE_BG = RGB(22, 23, 26);
-static const COLORREF AXYNE_PANEL = RGB(31, 33, 38);
-static const COLORREF AXYNE_TOOLBAR_BG = RGB(28, 30, 34);
-static const COLORREF AXYNE_BORDER = RGB(41, 44, 50);
-static const COLORREF AXYNE_TEXT = RGB(199, 201, 206);
-static const COLORREF AXYNE_MUTED = RGB(115, 119, 128);
-static const COLORREF AXYNE_ACCENT = RGB(182, 122, 246);
+static COLORREF AXYNE_BG;
+static COLORREF AXYNE_PANEL;
+static COLORREF AXYNE_TOOLBAR_BG;
+static COLORREF AXYNE_BORDER;
+static COLORREF AXYNE_TEXT;
+static COLORREF AXYNE_MUTED;
+static COLORREF AXYNE_ACCENT;
+static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
 
@@ -85,6 +91,11 @@ typedef struct AxyneWindowState {
     int last_exit_code;
     int last_exit_failed;
     int has_exit_status;
+    AxynePreferences global_preferences;
+    AxynePreferences preferences;
+    char *global_preferences_path;
+    char *workspace_preferences_path;
+    unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
     char lsp_status[192];
 } AxyneWindowState;
@@ -107,6 +118,7 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
        AXYNE_CMD_EXPLORER_RENAME, AXYNE_CMD_EXPLORER_REMOVE,
        AXYNE_CMD_BUILD, AXYNE_CMD_RUN, AXYNE_CMD_CONFIGURE_RUNNER,
+       AXYNE_CMD_PREFERENCES, AXYNE_CMD_WORKSPACE_PREFERENCES,
        AXYNE_CMD_GIT_STATUS, AXYNE_CMD_GIT_DIFF, AXYNE_CMD_GIT_STAGE_ALL,
        AXYNE_CMD_GIT_UNSTAGE_ALL, AXYNE_CMD_LSP_DEFINITION,
        AXYNE_CMD_LSP_REFERENCES };
@@ -210,6 +222,16 @@ static AxyneDocument *axyne_active(AxyneWindowState *state);
 static int axyne_capture_editor(AxyneWindowState *state);
 static int axyne_save_active(HWND window, AxyneWindowState *state);
 static char *axyne_workspace_parent(const char *path);
+static void axyne_start_action(HWND window, AxyneWindowState *state, int run);
+static void axyne_new_document(HWND window, AxyneWindowState *state);
+static void axyne_open_document(HWND window, AxyneWindowState *state,
+                                const char *path);
+static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index);
+static void axyne_find(HWND window, AxyneWindowState *state, int replace,
+                       int replace_all);
+static void axyne_search_folder(HWND window, AxyneWindowState *state, int files);
+static void axyne_workspace_show_error(HWND window, const char *prefix,
+                                       const AxyneError *error);
 
 typedef BOOL (WINAPI *AxyneRegisterScintilla)(HINSTANCE instance);
 
@@ -239,6 +261,180 @@ static char *axyne_utf8(const wchar_t *wide)
         return NULL;
     }
     return utf8;
+}
+
+static COLORREF axyne_theme_color(uint32_t value)
+{
+    return RGB((BYTE)((value >> 16) & 0xff), (BYTE)((value >> 8) & 0xff),
+               (BYTE)(value & 0xff));
+}
+
+static void axyne_apply_theme(const AxyneThemePreferences *theme)
+{
+    if (theme == NULL) return;
+    AXYNE_BG = axyne_theme_color(theme->background);
+    AXYNE_PANEL = axyne_theme_color(theme->panel);
+    AXYNE_TOOLBAR_BG = axyne_theme_color(theme->toolbar);
+    AXYNE_BORDER = axyne_theme_color(theme->border);
+    AXYNE_TEXT = axyne_theme_color(theme->text);
+    AXYNE_MUTED = axyne_theme_color(theme->muted);
+    AXYNE_ACCENT = axyne_theme_color(theme->accent);
+    if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
+        DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
+    AXYNE_EDIT_BACKGROUND_BRUSH = CreateSolidBrush(AXYNE_BG);
+}
+
+static void axyne_select_theme_preset(AxyneThemePreferences *theme,
+                                      AxyneThemePreset preset)
+{
+    theme->preset = preset;
+    if (preset == AXYNE_THEME_LIGHT) {
+        theme->background = 0xf5f6f8; theme->panel = 0xffffff;
+        theme->toolbar = 0xe9ebef; theme->border = 0xd3d7de;
+        theme->text = 0x24272d; theme->muted = 0x68707d;
+        theme->accent = 0x7650b5; theme->editor_background = 0xffffff;
+        theme->editor_text = 0x24272d;
+    } else {
+        theme->background = 0x16171a; theme->panel = 0x1f2126;
+        theme->toolbar = 0x1c1e22; theme->border = 0x292c32;
+        theme->text = 0xc7c9ce; theme->muted = 0x737780;
+        theme->accent = 0xb67af6; theme->editor_background = 0x1a1c20;
+        theme->editor_text = 0xcbced6;
+    }
+}
+
+static int axyne_windows_prefers_dark(void)
+{
+    HKEY key; DWORD value = 1; DWORD size = sizeof(value);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_READ, &key) != ERROR_SUCCESS) return 1;
+    (void)RegQueryValueExW(key, L"AppsUseLightTheme", NULL, NULL,
+                           (LPBYTE)&value, &size);
+    RegCloseKey(key);
+    return value == 0;
+}
+
+static char *axyne_global_preferences_path(void)
+{
+    wchar_t app_data[MAX_PATH];
+    wchar_t directory[MAX_PATH];
+    wchar_t path[MAX_PATH];
+    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT,
+                         app_data) != S_OK) return NULL;
+    if (swprintf_s(directory, MAX_PATH, L"%ls\\Axyne", app_data) < 0 ||
+        swprintf_s(path, MAX_PATH, L"%ls\\preferences.json", directory) < 0)
+        return NULL;
+    return axyne_utf8(path);
+}
+
+static char *axyne_workspace_preferences_path(const char *root)
+{
+    wchar_t *wide_root; wchar_t directory[32768]; wchar_t path[32768];
+    if (root == NULL) return NULL;
+    wide_root = axyne_wide(root);
+    if (wide_root == NULL || swprintf_s(directory, 32768, L"%ls\\.axyne",
+                                         wide_root) < 0 ||
+        swprintf_s(path, 32768, L"%ls\\preferences.json", directory) < 0) {
+        free(wide_root); return NULL;
+    }
+    free(wide_root);
+    return axyne_utf8(path);
+}
+
+static void axyne_apply_editor_preferences(AxyneWindowState *state)
+{
+    wchar_t *font_name = NULL;
+    const wchar_t *fallback = L"Cascadia Mono";
+    const char *editor_font = "Cascadia Mono";
+    unsigned int font_size = state->preferences.editor.font_size;
+    if (font_size < 6 || font_size > 72) font_size = 11;
+    if (state->preferences.editor.font_family[0] != '\0')
+        font_name = axyne_wide(state->preferences.editor.font_family);
+    if (state->code_font != NULL) DeleteObject(state->code_font);
+    state->code_font = CreateFontW(-(int)font_size, 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN,
+        font_name != NULL ? font_name : fallback);
+    if (state->preferences.editor.font_family[0] != '\0')
+        editor_font = state->preferences.editor.font_family;
+    if (state->editor == NULL) { free(font_name); return; }
+    SendMessageA(state->editor, SCI_STYLESETFORE, 32, (LPARAM)axyne_theme_color(state->preferences.theme.editor_text));
+    SendMessageA(state->editor, SCI_STYLESETBACK, 32, (LPARAM)axyne_theme_color(state->preferences.theme.editor_background));
+    SendMessageA(state->editor, SCI_STYLESETSIZE, 32, (LPARAM)font_size);
+    SendMessageA(state->editor, SCI_STYLESETFONT, 32,
+                 (LPARAM)editor_font);
+    SendMessageA(state->editor, SCI_STYLESETFORE, 33, (LPARAM)axyne_theme_color(state->preferences.theme.muted));
+    SendMessageA(state->editor, SCI_STYLESETBACK, 33, (LPARAM)axyne_theme_color(state->preferences.theme.editor_background));
+    SendMessageA(state->editor, SCI_SETINDENT, state->preferences.editor.tab_width, 0);
+    SendMessageA(state->editor, SCI_SETUSETABS, state->preferences.editor.insert_spaces ? 0 : 1, 0);
+    SendMessageA(state->editor, SCI_SETWRAPMODE, state->preferences.editor.word_wrap ? 1 : 0, 0);
+    SendMessageA(state->editor, SCI_SETVIEWWS, state->preferences.editor.show_whitespace ? 1 : 0, 0);
+    free(font_name);
+}
+
+static void axyne_refresh_terminal_theme(AxyneWindowState *state)
+{
+    if (state == NULL || state->terminal_output == NULL) return;
+    InvalidateRect(state->terminal_output, NULL, TRUE);
+    UpdateWindow(state->terminal_output);
+}
+
+static void axyne_apply_preferences(AxyneWindowState *state)
+{
+    if (state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
+        axyne_select_theme_preset(&state->preferences.theme,
+            axyne_windows_prefers_dark() ? AXYNE_THEME_DARK : AXYNE_THEME_LIGHT);
+        state->preferences.theme.preset = AXYNE_THEME_SYSTEM;
+    }
+    axyne_apply_theme(&state->preferences.theme);
+    axyne_apply_editor_preferences(state);
+    axyne_refresh_terminal_theme(state);
+}
+
+static void axyne_load_global_preferences(AxyneWindowState *state)
+{
+    AxyneError error;
+    AxyneStatus status;
+    axyne_preferences_defaults(&state->global_preferences);
+    state->global_preferences_path = axyne_global_preferences_path();
+    status = state->global_preferences_path == NULL ? AXYNE_STATUS_NOT_FOUND :
+        axyne_preferences_load_global(state->global_preferences_path,
+                                      &state->global_preferences, &error);
+    state->preferences = state->global_preferences;
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
+        MessageBoxA(NULL, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR);
+}
+
+static void axyne_load_workspace_preferences(AxyneWindowState *state,
+                                             const char *root)
+{
+    AxynePreferences workspace;
+    AxyneError error;
+    AxyneStatus status;
+    state->preferences = state->global_preferences;
+    memset(state->workspace_binding_present, 0,
+           sizeof(state->workspace_binding_present));
+    free(state->workspace_preferences_path);
+    state->workspace_preferences_path = axyne_workspace_preferences_path(root);
+    if (state->workspace_preferences_path == NULL) {
+        axyne_apply_preferences(state);
+        return;
+    }
+    status = axyne_preferences_load(state->workspace_preferences_path,
+                                     &workspace, &error);
+    if (status == AXYNE_STATUS_OK) {
+        /* Keep the file's binding mask separate from the normalized snapshot
+         * used to calculate effective workspace preferences. */
+        memcpy(state->workspace_binding_present, workspace.binding_present,
+               sizeof(state->workspace_binding_present));
+        axyne_preferences_mark_all(&workspace);
+        axyne_preferences_apply_workspace(&state->preferences, &workspace);
+        axyne_apply_preferences(state);
+    } else if (status != AXYNE_STATUS_NOT_FOUND) {
+        axyne_workspace_show_error(NULL, "Unable to load workspace preferences", &error);
+        axyne_apply_preferences(state);
+    } else axyne_apply_preferences(state);
 }
 
 static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
@@ -1003,6 +1199,166 @@ static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
     return accepted;
 }
 
+static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
+                                    int workspace)
+{
+    AxynePreferences next = workspace ? state->preferences : state->global_preferences;
+    wchar_t value[128];
+    char *utf8 = NULL;
+    unsigned long parsed;
+    wchar_t *end;
+    AxyneError error;
+    AxyneStatus status;
+    const char *path;
+    if (workspace)
+        memcpy(next.binding_present, state->workspace_binding_present,
+               sizeof(next.binding_present));
+    (void)swprintf_s(value, 128, L"%ls", next.theme.preset == AXYNE_THEME_LIGHT ? L"light" : next.theme.preset == AXYNE_THEME_SYSTEM ? L"system" : L"dark");
+    if (!axyne_prompt(owner, workspace ? L"Workspace Settings" : L"Preferences",
+                      L"Theme (dark, light, or system)", value, 128)) return 0;
+    utf8 = axyne_utf8(value);
+    if (utf8 == NULL || (strcmp(utf8, "dark") != 0 && strcmp(utf8, "light") != 0 && strcmp(utf8, "system") != 0)) {
+        free(utf8); MessageBoxA(owner, "Theme must be dark, light, or system.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0;
+    }
+    axyne_select_theme_preset(&next.theme, strcmp(utf8, "light") == 0 ? AXYNE_THEME_LIGHT : strcmp(utf8, "system") == 0 ? AXYNE_THEME_SYSTEM : AXYNE_THEME_DARK);
+    if (workspace) {
+        next.present_fields = 0;
+    }
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_THEME_PRESET;
+    free(utf8);
+    (void)swprintf_s(value, 128, L"%u", next.editor.font_size);
+    if (!axyne_prompt(owner, L"Editor Preferences", L"Font size (6-72)", value, 128)) return 0;
+    parsed = wcstoul(value, &end, 10);
+    if (*value == L'\0' || *end != L'\0' || parsed < 6 || parsed > 72) { MessageBoxA(owner, "Font size must be between 6 and 72.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    next.editor.font_size = (unsigned int)parsed;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_SIZE;
+    (void)swprintf_s(value, 128, L"%u", next.editor.tab_width);
+    if (!axyne_prompt(owner, L"Editor Preferences", L"Tab width (1-16)", value, 128)) return 0;
+    parsed = wcstoul(value, &end, 10);
+    if (*value == L'\0' || *end != L'\0' || parsed < 1 || parsed > 16) { MessageBoxA(owner, "Tab width must be between 1 and 16.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    next.editor.tab_width = (unsigned int)parsed;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_TAB_WIDTH;
+    (void)swprintf_s(value, 128, L"%ls", next.editor.insert_spaces ? L"yes" : L"no");
+    if (!axyne_prompt(owner, L"Editor Preferences", L"Insert spaces instead of tabs (yes or no)", value, 128)) return 0;
+    if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    next.editor.insert_spaces = _wcsicmp(value, L"yes") == 0;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_INSERT_SPACES;
+    (void)swprintf_s(value, 128, L"%ls", next.editor.word_wrap ? L"yes" : L"no");
+    if (!axyne_prompt(owner, L"Editor Preferences", L"Word wrap (yes or no)", value, 128)) return 0;
+    if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    next.editor.word_wrap = _wcsicmp(value, L"yes") == 0;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_WORD_WRAP;
+    (void)swprintf_s(value, 128, L"%hs", next.editor.font_family);
+    if (!axyne_prompt(owner, L"Editor Preferences",
+                      L"Font family (blank for native default)", value, 128)) return 0;
+    utf8 = axyne_utf8(value);
+    if (utf8 == NULL || strlen(utf8) >= AXYNE_PREFERENCE_TEXT_MAX) {
+        free(utf8); MessageBoxA(owner, "The font family is invalid.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0;
+    }
+    (void)snprintf(next.editor.font_family, sizeof(next.editor.font_family), "%s", utf8);
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
+    free(utf8);
+    (void)swprintf_s(value, 128, L"%ls", next.editor.show_whitespace ? L"yes" : L"no");
+    if (!axyne_prompt(owner, L"Editor Preferences", L"Show whitespace (yes or no)", value, 128)) return 0;
+    if (_wcsicmp(value, L"yes") != 0 && _wcsicmp(value, L"no") != 0) { MessageBoxA(owner, "Enter yes or no.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    next.editor.show_whitespace = _wcsicmp(value, L"yes") == 0;
+    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE;
+    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
+        const AxyneKeyBinding *current = axyne_preferences_find_binding(&next, (AxynePreferenceAction)action);
+        wchar_t binding_value[128]; char *binding_utf8;
+        if (current == NULL) continue;
+        (void)swprintf_s(binding_value, 128, L"%hs", current->key);
+        if (!axyne_prompt(owner, L"Key Bindings",
+                          L"Enter key, disable, restore, or skip",
+                          binding_value, 128)) return 0;
+        if (binding_value[0] == L'\0' || _wcsicmp(binding_value, L"skip") == 0) continue;
+        {
+            AxyneKeyBinding *edited = (AxyneKeyBinding *)current;
+            if (_wcsicmp(binding_value, L"disable") == 0) edited->enabled = 0;
+            else if (_wcsicmp(binding_value, L"restore") == 0) {
+                AxynePreferences defaults;
+                axyne_preferences_defaults(&defaults);
+                edited = (AxyneKeyBinding *)axyne_preferences_find_binding(&defaults, (AxynePreferenceAction)action);
+                next.bindings[current - next.bindings] = *edited;
+            } else {
+                binding_utf8 = axyne_utf8(binding_value);
+                if (binding_utf8 == NULL || binding_utf8[0] == '\0' || strlen(binding_utf8) >= AXYNE_PREFERENCE_KEY_MAX) {
+                    free(binding_utf8); MessageBoxA(owner, "The key binding is invalid.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0;
+                }
+                (void)snprintf(((AxyneKeyBinding *)current)->key, AXYNE_PREFERENCE_KEY_MAX, "%s", binding_utf8);
+                ((AxyneKeyBinding *)current)->enabled = 1;
+                free(binding_utf8);
+            }
+        }
+        if (workspace) axyne_preferences_mark_binding(&next, (AxynePreferenceAction)action);
+    }
+    path = workspace ? state->workspace_preferences_path : state->global_preferences_path;
+    if (path == NULL) { MessageBoxA(owner, "The preference path is unavailable.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
+    if (status != AXYNE_STATUS_OK) { MessageBoxA(owner, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    state->preferences = next;
+    if (workspace)
+        memcpy(state->workspace_binding_present, next.binding_present,
+               sizeof(state->workspace_binding_present));
+    if (!workspace) {
+        state->global_preferences = next;
+        if (state->workspace_preferences_path != NULL) {
+            AxynePreferences workspace_preferences;
+            AxyneStatus workspace_status = axyne_preferences_load_workspace(
+                state->workspace_preferences_path, &workspace_preferences, &error);
+            if (workspace_status == AXYNE_STATUS_OK)
+                axyne_preferences_apply_workspace(&state->preferences, &workspace_preferences);
+            else if (workspace_status != AXYNE_STATUS_NOT_FOUND)
+                axyne_workspace_show_error(owner, "Unable to reload workspace preferences", &error);
+        }
+    }
+    axyne_apply_preferences(state);
+    InvalidateRect(owner, NULL, FALSE);
+    return 1;
+}
+
+static int axyne_windows_binding_matches(const AxyneWindowState *state,
+                                         AxynePreferenceAction action,
+                                         WPARAM key)
+{
+    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
+        &state->preferences, action);
+    unsigned int modifiers = 0;
+    if (binding == NULL || !binding->enabled) return 0;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+    if ((GetKeyState(VK_MENU) & 0x8000) != 0)
+        modifiers |= AXYNE_KEY_MODIFIER_ALT;
+    {
+        unsigned int required = binding->modifiers;
+        if ((required & AXYNE_KEY_MODIFIER_COMMAND) != 0)
+            required = (required & ~AXYNE_KEY_MODIFIER_COMMAND) |
+                       AXYNE_KEY_MODIFIER_CONTROL;
+        if (required != modifiers) return 0;
+    }
+    if (strlen(binding->key) == 1)
+        return toupper((unsigned char)binding->key[0]) == toupper((int)key);
+    return (key == VK_F5 && _stricmp(binding->key, "F5") == 0);
+}
+
+static int axyne_handle_key(HWND window, AxyneWindowState *state, WPARAM key)
+{
+    if (axyne_windows_binding_matches(state, AXYNE_ACTION_NEW, key)) axyne_new_document(window, state);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_OPEN, key)) axyne_open_document(window, state, NULL);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_SAVE, key)) (void)axyne_save_active(window, state);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_CLOSE, key)) axyne_close_tab(window, state, state->documents.active_index);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_FIND, key)) axyne_find(window, state, 0, 0);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_REPLACE, key)) axyne_find(window, state, 1, 0);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_SEARCH_WORKSPACE, key)) axyne_search_folder(window, state, 0);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_QUICK_FILE, key)) axyne_search_folder(window, state, 1);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_BUILD, key)) axyne_start_action(window, state, 0);
+    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_RUN, key)) axyne_start_action(window, state, 1);
+    else return 0;
+    return 1;
+}
+
 static int axyne_choose_folder(HWND owner, char **root)
 {
     BROWSEINFOW info = {0}; info.hwndOwner = owner;
@@ -1436,6 +1792,7 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
     }
     state->watcher = watcher;
     state->explorer_has_selection = 0;
+    axyne_load_workspace_preferences(state, root);
     free(root);
     InvalidateRect(window, NULL, FALSE);
     return 1;
@@ -1751,6 +2108,9 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_SEARCH_FOLDER, L"Search Folder\tCtrl+Shift+F");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_QUICK_FILE, L"Quick File\tCtrl+P");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_PREFERENCES, L"Preferences...");
+    AppendMenuW(menu, MF_STRING, AXYNE_CMD_WORKSPACE_PREFERENCES,
+                L"Workspace Settings...");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STATUS, L"Git Status");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_DIFF, L"Git Diff");
     AppendMenuW(menu, MF_STRING, AXYNE_CMD_GIT_STAGE_ALL, L"Git Stage All");
@@ -1831,13 +2191,9 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     SendMessageA(state->editor, SCI_SETWRAPMODE, 0, 0);
     SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, 44);
     SendMessageA(state->editor, SCI_STYLECLEARALL, 0, 0);
-    SendMessageA(state->editor, SCI_STYLESETFORE, 32, RGB(203, 206, 214));
-    SendMessageA(state->editor, SCI_STYLESETBACK, 32, RGB(26, 28, 32));
     SendMessageA(state->editor, SCI_STYLESETSIZE, 32, 11);
     SendMessageA(state->editor, SCI_STYLESETFONT, 32,
                  (LPARAM)"Cascadia Mono");
-    SendMessageA(state->editor, SCI_STYLESETFORE, 33, RGB(115, 119, 128));
-    SendMessageA(state->editor, SCI_STYLESETBACK, 33, RGB(26, 28, 32));
 }
 
 static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
@@ -1856,7 +2212,7 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
         wchar_t label[512];
         int x = 16 + (int)node->depth * 16;
         if (state->explorer_has_selection && state->explorer_selection == i)
-            axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, RGB(47, 52, 60));
+            axyne_fill(dc, 0, y - 2, AXYNE_SIDEBAR, y + 20, AXYNE_BORDER);
         (void)swprintf_s(label, 512, L"%lc %ls", node->kind == AXYNE_FILE_KIND_DIRECTORY
             ? (axyne_explorer_is_expanded(&state->explorer, node->path) ? L'⌄' : L'›') : L'·',
             name != NULL ? name : L"(invalid name)");
@@ -1916,14 +2272,14 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
 
     axyne_fill(dc, 0, 0, width, height, AXYNE_BG);
-    axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, RGB(19, 20, 23));
+    axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, AXYNE_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU, width, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
                AXYNE_TOOLBAR_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU + AXYNE_TOOLBAR, width, editor_top,
-               RGB(23, 25, 28));
+               AXYNE_TOOLBAR_BG);
     axyne_fill(dc, 0, editor_top, AXYNE_SIDEBAR, bottom_top, AXYNE_PANEL);
-    axyne_fill(dc, 0, bottom_top, width, status_top, RGB(28, 30, 34));
-    axyne_fill(dc, 0, status_top, width, height, RGB(25, 27, 30));
+    axyne_fill(dc, 0, bottom_top, width, status_top, AXYNE_TOOLBAR_BG);
+    axyne_fill(dc, 0, status_top, width, height, AXYNE_BG);
     axyne_fill(dc, AXYNE_SIDEBAR - 1, editor_top, AXYNE_SIDEBAR, status_top,
                AXYNE_BORDER);
     axyne_fill(dc, 0, bottom_top, width, bottom_top + 1, AXYNE_BORDER);
@@ -1933,7 +2289,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     axyne_text(dc, state->ui_font, AXYNE_MUTED, 12, 39,
                L"▱   ▣    ↶   ↷       ▷  Debug · x64 (MSVC)       빌드  Ctrl+B");
     axyne_fill(dc, width - 360, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 6,
-               width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30, RGB(22, 23, 26));
+               width - 12, AXYNE_TOP_MENU + AXYNE_TOOLBAR + 30, AXYNE_BG);
     axyne_text(dc, state->ui_font, AXYNE_MUTED, width - 346,
                AXYNE_TOP_MENU + AXYNE_TOOLBAR + 11, L"⌕  파일 이동, > 명령 실행");
     axyne_fill(dc, AXYNE_SIDEBAR + 20,
@@ -1945,7 +2301,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         int tab_right = tab_left + 184;
         if (i == state->documents.active_index) {
             axyne_fill(dc, tab_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
-                       tab_right, editor_top, RGB(31, 33, 38));
+                       tab_right, editor_top, AXYNE_PANEL);
             axyne_fill(dc, tab_left, AXYNE_TOP_MENU + AXYNE_TOOLBAR,
                        tab_left + 1, editor_top, AXYNE_ACCENT);
         }
@@ -1981,7 +2337,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             (void)swprintf_s(status, 96, L"✓ 빌드 준비됨");
         }
         axyne_text(dc, state->ui_font,
-                   state->last_exit_failed ? RGB(220, 100, 100) : AXYNE_MUTED,
+                   state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED,
                    12, status_top + 6, status);
     }
     if (state->lsp_status[0] != '\0') {
@@ -2025,6 +2381,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         axyne_open_scintilla(state, window, instance);
+        axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
         axyne_show_document(state, state->documents.active_index);
         axyne_update_title(window, state);
@@ -2034,30 +2391,19 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_SIZE:
         axyne_layout(window, state);
         return 0;
-    case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
-            if (w_param == 'N') { axyne_new_document(window, state); return 0; }
-            if (w_param == 'O') { axyne_open_document(window, state, NULL); return 0; }
-            if (w_param == 'S') { (void)axyne_save_active(window, state); return 0; }
-            if (w_param == 'W') {
-                axyne_close_tab(window, state, state->documents.active_index);
-                return 0;
-            }
-            if (w_param == 'F' && (GetKeyState(VK_SHIFT) & 0x8000) != 0) {
-                axyne_search_folder(window, state, 0); return 0;
-            }
-            if (w_param == 'F') { axyne_find(window, state, 0, 0); return 0; }
-            if (w_param == 'H') { axyne_find(window, state, 1, 0); return 0; }
-            if (w_param == 'P') { axyne_search_folder(window, state, 1); return 0; }
-            if (w_param == 'B') { axyne_start_action(window, state, 0); return 0; }
-            if ((GetKeyState(VK_MENU) & 0x8000) != 0 && w_param == 'D') {
-                axyne_lsp_navigate(window, state, 0); return 0;
-            }
-            if ((GetKeyState(VK_MENU) & 0x8000) != 0 && w_param == 'R') {
-                axyne_lsp_navigate(window, state, 1); return 0;
-            }
+    case WM_SETTINGCHANGE:
+        if (state != NULL && state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
+            axyne_apply_preferences(state);
+            InvalidateRect(window, NULL, FALSE);
         }
-        if (w_param == VK_F5) { axyne_start_action(window, state, 1); return 0; }
+        return 0;
+    case WM_KEYDOWN:
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+            (GetKeyState(VK_MENU) & 0x8000) != 0) {
+            if (w_param == 'D') { axyne_lsp_navigate(window, state, 0); return 0; }
+            if (w_param == 'R') { axyne_lsp_navigate(window, state, 1); return 0; }
+        }
+        if (axyne_handle_key(window, state, w_param)) return 0;
         break;
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(l_param);
@@ -2134,6 +2480,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
         else if (command == AXYNE_CMD_CONFIGURE_RUNNER)
             (void)axyne_configure_runner(window, &state->action_runner);
+        else if (command == AXYNE_CMD_PREFERENCES)
+            (void)axyne_preferences_dialog(window, state, 0);
+        else if (command == AXYNE_CMD_WORKSPACE_PREFERENCES) {
+            if (state->workspace_preferences_path == NULL)
+                MessageBoxA(window, "Open a workspace folder before editing workspace settings.", "Axyne - Preferences", MB_OK | MB_ICONINFORMATION);
+            else (void)axyne_preferences_dialog(window, state, 1);
+        }
         else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
         else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
@@ -2181,6 +2534,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->documents.recent_paths[command - AXYNE_CMD_RECENT_BASE]);
         return 0;
     }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)l_param == state->terminal_output) {
+            HDC dc = (HDC)w_param;
+            SetTextColor(dc, AXYNE_TEXT);
+            SetBkColor(dc, AXYNE_BG);
+            return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
+        }
+        break;
     case AXYNE_WM_EXPLORER_EVENT: {
         AxyneExplorerMessage *event_message = (AxyneExplorerMessage *)l_param;
         if (event_message != NULL) {
@@ -2318,6 +2680,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
+            if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL) {
+                DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
+                AXYNE_EDIT_BACKGROUND_BRUSH = NULL;
+            }
             if (state->watcher != NULL) {
                 axyne_watcher_stop(state->watcher);
                 axyne_watcher_release(state->watcher);
@@ -2340,6 +2706,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             if (state->ui_font != NULL) DeleteObject(state->ui_font);
             if (state->code_font != NULL) DeleteObject(state->code_font);
+            free(state->global_preferences_path);
+            free(state->workspace_preferences_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
             HeapFree(GetProcessHeap(), 0, state);
         }
@@ -2385,6 +2753,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
+    axyne_load_global_preferences(state);
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1440, 900,
         NULL, NULL, instance, state);
@@ -2401,23 +2770,11 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     MSG message;
     int result = 0;
     while (GetMessageW(&message, NULL, 0, 0) > 0) {
-        if (message.message == WM_KEYDOWN &&
-            (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        if (message.message == WM_KEYDOWN) {
             AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
                 window, GWLP_USERDATA);
-            if (message.wParam == 'N') { axyne_new_document(window, current); continue; }
-            if (message.wParam == 'O') { axyne_open_document(window, current, NULL); continue; }
-            if (message.wParam == 'S') { (void)axyne_save_active(window, current); continue; }
-            if (message.wParam == 'W') {
-                axyne_close_tab(window, current, current->documents.active_index);
-                continue;
-            }
-            if (message.wParam == 'F' && (GetKeyState(VK_SHIFT) & 0x8000) != 0) {
-                axyne_search_folder(window, current, 0); continue;
-            }
-            if (message.wParam == 'F') { axyne_find(window, current, 0, 0); continue; }
-            if (message.wParam == 'H') { axyne_find(window, current, 1, 0); continue; }
-            if (message.wParam == 'P') { axyne_search_folder(window, current, 1); continue; }
+            if (current != NULL && axyne_handle_key(window, current,
+                                                    message.wParam)) continue;
         }
         TranslateMessage(&message);
         DispatchMessageW(&message);
