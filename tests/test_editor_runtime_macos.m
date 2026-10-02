@@ -7,12 +7,15 @@
 #include <string.h>
 #include "axyne/document.h"
 #include "axyne/filesystem.h"
+#include "axyne/preferences.h"
 #include "Scintilla.h"
 
 /* Reach the production adapter through Objective-C's runtime. No test API is
  * exported by the application and this executable never enters its UI loop. */
 @interface NSView (AxyneEditorRuntimeTest)
 - (void)loadScintillaView;
+- (void)applyPreferences;
+- (void)notification:(SCNotification *)notification;
 - (BOOL)loadActiveDocument;
 - (BOOL)selectDocumentAtIndex:(size_t)index;
 - (BOOL)captureEditor;
@@ -76,6 +79,12 @@ static AxyneDocumentSet *document_set(NSView *workspace)
 {
     Ivar ivar = class_getInstanceVariable([workspace class], "_documents");
     return (AxyneDocumentSet *)((char *)workspace + ivar_getOffset(ivar));
+}
+
+static AxynePreferences *preferences_for(NSView *workspace)
+{
+    Ivar ivar = class_getInstanceVariable([workspace class], "_preferences");
+    return (AxynePreferences *)((char *)workspace + ivar_getOffset(ivar));
 }
 
 static NSInteger editor_message(NSView *workspace, unsigned int message,
@@ -144,6 +153,10 @@ static int run_tests(NSString *pngPath)
         CHECK(dlsym(lexilla, "CreateLexer") != NULL);
         printf("Loaded native Scintilla: %s\n", [[bundle executablePath] fileSystemRepresentation]);
         printf("Loaded bundled Lexilla and CreateLexer\n");
+        AxynePreferences *preferences = preferences_for(workspace);
+        preferences->editor.tab_width = 6;
+        preferences->editor.insert_spaces = 1;
+        [workspace applyPreferences];
 
         // Load bytes on the very first bind, before the view moves to a window.
         // Includes UTF-8, CRLF and embedded NUL so NSString/strlen conversion
@@ -154,6 +167,9 @@ static int run_tests(NSString *pngPath)
             == AXYNE_STATUS_OK);
         CHECK(axyne_documents_mark_clean(documents, 0, NULL) == AXYNE_STATUS_OK);
         CHECK([workspace loadActiveDocument]);
+        CHECK(editor_message(workspace, SCI_GETINDENT, 0, 0) == 6);
+        CHECK(editor_message(workspace, SCI_GETTABWIDTH, 0, 0) == 6);
+        CHECK(editor_message(workspace, SCI_GETUSETABS, 0, 0) == 0);
         CHECK(editor_equals(workspace, first, sizeof(first) - 1));
         CHECK(documents->documents[0].owns_native_editor_document);
         CHECK(editor_message(workspace, SCI_GETCODEPAGE, 0, 0) == SC_CP_UTF8);
@@ -194,12 +210,16 @@ static int run_tests(NSString *pngPath)
         CHECK(documents->count == 1 && documents->documents[0].is_untitled);
         CHECK(documents->documents[0].owns_native_editor_document);
         CHECK(editor_equals(workspace, "", 0));
+        CHECK(editor_message(workspace, SCI_GETINDENT, 0, 0) == 6);
+        CHECK(editor_message(workspace, SCI_GETUSETABS, 0, 0) == 0);
         [workspace openPath:firstPath];
         CHECK(documents->count == 2 && documents->active_index == 1);
         CHECK(editor_equals(workspace, first, sizeof(first) - 1));
         CHECK(documents->documents[1].length == sizeof(first) - 1);
         CHECK(!documents->documents[1].is_dirty);
         CHECK(editor_message(workspace, SCI_CANUNDO, 0, 0) == 0);
+        CHECK(editor_message(workspace, SCI_GETINDENT, 0, 0) == 6);
+        CHECK(editor_message(workspace, SCI_GETTABWIDTH, 0, 0) == 6);
         [workspace openPath:secondPath];
         CHECK(documents->count == 3 && documents->active_index == 2);
         CHECK(editor_equals(workspace, second, sizeof(second) - 1));
@@ -326,6 +346,42 @@ static int run_tests(NSString *pngPath)
         [earlyWorkspace openPath:firstPath];
         CHECK(editor_equals(earlyWorkspace, edited, sizeof(edited) - 1));
         [earlyWorkspace release];
+
+        // Actual indentation must use the effective profile on fresh buffers.
+        NSView *indentWorkspace = [[testClass alloc] initWithFrame:NSZeroRect];
+        CHECK(indentWorkspace != nil);
+        AxynePreferences *indentPreferences = preferences_for(indentWorkspace);
+        indentPreferences->editor.tab_width = 6;
+        indentPreferences->editor.insert_spaces = 1;
+        [indentWorkspace loadScintillaView];
+        [indentWorkspace applyPreferences];
+        CHECK([indentWorkspace loadActiveDocument]);
+        [indentWorkspace newDocument:nil];
+        CHECK(document_set(indentWorkspace)->count == 2);
+        CHECK(editor_message(indentWorkspace, SCI_GETINDENT, 0, 0) == 6);
+        CHECK(editor_message(indentWorkspace, SCI_GETTABWIDTH, 0, 0) == 6);
+        CHECK(editor_message(indentWorkspace, SCI_GETUSETABS, 0, 0) == 0);
+        const char line[] = "if (1) {\n";
+        editor_message(indentWorkspace, SCI_ADDTEXT, sizeof(line) - 1, (intptr_t)line);
+        SCNotification newline = {0};
+        newline.nmhdr.code = SCN_CHARADDED;
+        newline.ch = '\n';
+        newline.position = sizeof(line) - 2;
+        [indentWorkspace notification:&newline];
+        const char indented[] = "if (1) {\n      ";
+        CHECK(editor_equals(indentWorkspace, indented, sizeof(indented) - 1));
+        CHECK([indentWorkspace captureEditor]);
+        CHECK([indentWorkspace selectDocumentAtIndex:0]);
+        CHECK([indentWorkspace selectDocumentAtIndex:1]);
+        CHECK(editor_equals(indentWorkspace, indented, sizeof(indented) - 1));
+        indentPreferences->editor.tab_width = 3;
+        indentPreferences->editor.insert_spaces = 0;
+        [indentWorkspace applyPreferences];
+        CHECK([indentWorkspace selectDocumentAtIndex:0]);
+        CHECK(editor_message(indentWorkspace, SCI_GETINDENT, 0, 0) == 3);
+        CHECK(editor_message(indentWorkspace, SCI_GETTABWIDTH, 0, 0) == 3);
+        CHECK(editor_message(indentWorkspace, SCI_GETUSETABS, 0, 0) == 1);
+        [indentWorkspace release];
 
         if (pngPath != nil) {
             CHECK([workspace selectDocumentAtIndex:1]);

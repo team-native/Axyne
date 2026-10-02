@@ -527,6 +527,7 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     SendMessageA(state->editor, SCI_SETSELBACK, 1, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
     SendMessageA(state->editor, SCI_SETCARETFORE, 0, (LPARAM)axyne_theme_color(state->preferences.theme.accent));
     SendMessageA(state->editor, SCI_SETINDENT, state->preferences.editor.tab_width, 0);
+    SendMessageA(state->editor, SCI_SETTABWIDTH, state->preferences.editor.tab_width, 0);
     SendMessageA(state->editor, SCI_SETUSETABS, state->preferences.editor.insert_spaces ? 0 : 1, 0);
     SendMessageA(state->editor, SCI_SETWRAPMODE, state->preferences.editor.word_wrap ? 1 : 0, 0);
     SendMessageA(state->editor, SCI_SETVIEWWS, state->preferences.editor.show_whitespace ? 1 : 0, 0);
@@ -1890,6 +1891,7 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
             (void)axyne_documents_set_active(&state->documents, previous_index, NULL);
             return 0;
         }
+        axyne_apply_editor_preferences(state);
         axyne_apply_editor_lexer(state, doc);
         axyne_update_line_number_margin(state);
         axyne_update_brace_highlight(state);

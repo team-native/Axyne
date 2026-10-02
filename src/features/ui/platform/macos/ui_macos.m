@@ -876,6 +876,7 @@ static NSString *axyne_macos_file_badge(const char *name)
         [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
         [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
+        [self sendEditorMessage:SCI_SETTABWIDTH wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
         [self sendEditorMessage:SCI_SETWRAPMODE wParam:_preferences.editor.word_wrap ? 1 : 0 lParam:0];
         [self sendEditorMessage:SCI_SETVIEWWS wParam:_preferences.editor.show_whitespace ? 1 : 0 lParam:0];
@@ -1027,6 +1028,7 @@ static NSString *axyne_macos_file_badge(const char *name)
     BOOL loaded = axyne_editor_load_document(doc, axyne_macos_editor_message, self);
     _loadingEditor = NO;
     if (!loaded) return NO;
+    [self applyPreferences];
     [self applyEditorLexer];
     [self updateLineNumberMargin];
     [self updateBraceHighlight];
