@@ -69,6 +69,14 @@ int main(void)
     /* Hidden window; no message loop or desktop interaction is needed. */
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne editor test",
         WS_OVERLAPPEDWINDOW, 0, 0, 1440, 900, NULL, NULL, instance, state);
+    if (window == NULL) {
+        fprintf(stderr, "CreateWindowExW failed: %lu\n", (unsigned long)GetLastError());
+    } else if (state->editor == NULL) {
+        fprintf(stderr, "Scintilla editor creation failed: scintilla=%p lexilla=%p "
+                        "lexer=%p error=%lu\n",
+                (void *)state->scintilla_module, (void *)state->lexilla_module,
+                (void *)state->create_lexer, (unsigned long)GetLastError());
+    }
     CHECK(window != NULL && state->editor != NULL);
     CHECK(state->scintilla_module != NULL && state->lexilla_module != NULL);
     CHECK(state->create_lexer != NULL);
