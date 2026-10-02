@@ -67,6 +67,7 @@ if(APPLE)
     )
     target_include_directories(axyne_editor_runtime_tests PRIVATE
         "${axyne_scintilla_SOURCE_DIR}/include"
+        "${axyne_lexilla_SOURCE_DIR}/include"
     )
     target_link_libraries(axyne_editor_runtime_tests PRIVATE
         axyne_ui axyne_debugger axyne_git axyne_lsp axyne_runner axyne_core

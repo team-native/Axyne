@@ -9,6 +9,7 @@
 #include "axyne/filesystem.h"
 #include "axyne/preferences.h"
 #include "Scintilla.h"
+#include "SciLexer.h"
 
 /* Reach the production adapter through Objective-C's runtime. No test API is
  * exported by the application and this executable never enters its UI loop. */
@@ -224,6 +225,14 @@ static int run_tests(NSString *pngPath)
         CHECK(documents->count == 3 && documents->active_index == 2);
         CHECK(editor_equals(workspace, second, sizeof(second) - 1));
         CHECK(editor_message(workspace, SCI_GETLEXER, 0, 0) != 0);
+        /* Keyword sets must be populated: style-only configuration leaves
+         * these tokens as the default style even though the palette exists. */
+        CHECK(editor_message(workspace, SCI_GETSTYLEAT, 0, 0) == SCE_C_WORD2);
+        CHECK(editor_message(workspace, SCI_GETSTYLEAT, 18, 0) == SCE_C_WORD);
+        CHECK(editor_message(workspace, SCI_STYLEGETFORE, SCE_C_WORD2, 0) ==
+            (NSInteger)0xe3b57d);
+        CHECK(editor_message(workspace, SCI_STYLEGETFORE, SCE_C_WORD, 0) ==
+            (NSInteger)0x738ed9);
         CHECK([window firstResponder] == [editor content]);
 
         // Keep edits and undo history in the first tab across repeated switches.

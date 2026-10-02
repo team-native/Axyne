@@ -154,6 +154,9 @@ static NSColor *axyne_preference_color(uint32_t value)
                        (CGFloat)(value & 0xff));
 }
 
+static BOOL axyne_macos_reference_surfaces(const AxyneThemePreferences *theme);
+static uint32_t axyne_macos_output_background(const AxyneThemePreferences *theme);
+
 static intptr_t axyne_editor_color(uint32_t rgb)
 {
     return (intptr_t)(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff));
@@ -590,6 +593,11 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return [button retain];
 }
 
+static NSString *axyne_macos_file_badge(const char *name)
+{
+    return [NSString stringWithUTF8String:axyne_ui_file_badge(name).label];
+}
+
 @implementation AxyneWorkspaceView
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -837,8 +845,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             [self sendEditorMessage:SCI_SETKEYWORDS wParam:3
                 lParam:(intptr_t)"NULL true false TRUE FALSE"];
             const unsigned int styles[] = { 1, 2, 3, 15, 4, 5, 6, 7, 9, 10, 11, 16, 19 };
-            const uint32_t colors[] = { 0x7a828e, 0x7a828e, 0x7a828e, 0x7a828e,
-                0xd9b36c, 0xd98e73, 0xa3c98a, 0xa3c98a, 0xc79ad9, 0xd5d8dd,
+            const uint32_t colors[] = { 0x7a828e, 0x7a828e, 0x7a828e, 0xe3b57d,
+                0x738ed9, 0xd98e73, 0xa3c98a, 0xa3c98a, 0xc79ad9, 0xd5d8dd,
                 0xd5d8dd, 0x7db5e3, 0x8cc7c0 };
             BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
             for (size_t i = 0; i < sizeof(styles) / sizeof(styles[0]); ++i) {
@@ -2722,7 +2730,9 @@ else [_terminalInput setStringValue:@""];
         AxyneDocument *doc = &_documents.documents[i];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         CGFloat nameWidth = [title sizeWithAttributes:@{NSFontAttributeName:font}].width;
-        CGFloat width = MIN(240, MAX(100, nameWidth + 24 + 54));
+        CGFloat badgeWidth = [axyne_macos_file_badge(doc->title)
+            length] != 0 ? 24 : 0;
+        CGFloat width = MIN(240, MAX(100, nameWidth + badgeWidth + 54));
         if (i == index) return NSMakeRect(x, AXYNE_TOOLBAR, width, AXYNE_TABS);
         x += width;
     }
@@ -2735,7 +2745,6 @@ else [_terminalInput setStringValue:@""];
     NSRect last = [self tabFrameAtIndex:_documents.count - 1];
     CGFloat maximum = MAX(0, NSMaxX(last) + _tabScroll - NSWidth([self bounds]));
     _tabScroll = MIN(maximum, MAX(0, _tabScroll + delta));
-    /* Redraw only: layout reveals the active tab and would undo manual scroll. */
     [self setNeedsDisplay:YES];
 }
 
@@ -2840,8 +2849,6 @@ else [_terminalInput setStringValue:@""];
     CGFloat bottomTop = height - AXYNE_STATUS - AXYNE_BOTTOM;
     CGFloat statusTop = height - AXYNE_STATUS;
     CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
-    BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
-        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
     NSColor *background = axyne_preference_color(_preferences.theme.background);
     NSColor *panel = axyne_preference_color(_preferences.theme.panel);
     NSColor *muted = axyne_preference_color(_preferences.theme.muted);
@@ -2866,7 +2873,7 @@ else [_terminalInput setStringValue:@""];
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR - 1, editorTop, 1, statusTop - editorTop));
     NSRectFill(NSMakeRect(0, bottomTop, width, 1));
     if (![_searchButton isHidden]) {
-    [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
+        [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
         [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
     }
     NSButton *selected = _panelMode == 0 ? _outputTab : (_panelMode == 1 ? _problemsTab : _terminalTab);
@@ -2896,7 +2903,7 @@ else [_terminalInput setStringValue:@""];
         NSRectClip(NSMakeRect(badgeX + 26, AXYNE_TOOLBAR + 4, NSWidth(frame) - 64, 28));
         [self drawLabel:title != nil ? title : @"Untitled"
             at:NSMakePoint(badgeX + 26, AXYNE_TOOLBAR + 10)
-            size:12 color:active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted family:@"SF Pro Text"];
+            size:12 color:active ? axyne_preference_color(reference ? 0xe6e7ea : _preferences.theme.text) : muted family:@"SF Pro Text"];
         [NSGraphicsContext restoreGraphicsState];
         [self drawLabel:doc->is_dirty ? @"●" : @"×"
             at:NSMakePoint(NSMaxX(frame) - 20, AXYNE_TOOLBAR + 10)
@@ -2904,7 +2911,7 @@ else [_terminalInput setStringValue:@""];
     }
     [NSGraphicsContext restoreGraphicsState];
     [self drawLabel:@"탐색기" at:NSMakePoint(12, editorTop + 8)
-        size:11 color:axyne_preference_color(light ? 0x68707d : 0x8b919b) family:@"SF Pro Text"];
+        size:11 color:axyne_preference_color(reference ? 0x8b919b : _preferences.theme.muted) family:@"SF Pro Text"];
     CGFloat explorerY = editorTop + AXYNE_UI_EXPLORER_HEADER;
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(NSMakeRect(0, explorerY, AXYNE_SIDEBAR - 1, MAX(0, bottomTop - explorerY)));
@@ -2917,7 +2924,7 @@ else [_terminalInput setStringValue:@""];
             AxyneExplorerNode *node = &_explorer.nodes[i];
             BOOL selectedRow = _hasExplorerSelection && _explorerSelection == (NSInteger)i;
             if (selectedRow) {
-                [axyne_preference_color(reference ? 0x2f343c : _preferences.theme.border) setFill];
+                [axyne_preference_color(reference ? 0x2f343c : _preferences.theme.editor_background) setFill];
                 NSRectFill(NSMakeRect(0, explorerY, AXYNE_SIDEBAR, AXYNE_UI_ROW));
             }
             CGFloat x = 8 + node->depth * AXYNE_UI_INDENT;
@@ -2933,7 +2940,7 @@ else [_terminalInput setStringValue:@""];
             NSString *name = [NSString stringWithUTF8String:node->name];
             [self drawLabel:name != nil ? name : @"(invalid name)"
                 at:NSMakePoint(nameX, explorerY + 3) size:12
-                color:selectedRow ? text : axyne_preference_color(light ? 0x24272d : 0xc4c8ce)
+                color:selectedRow ? text : axyne_preference_color(reference ? 0xc4c8ce : _preferences.theme.text)
                 family:@"SF Pro Text"];
         }
     }
