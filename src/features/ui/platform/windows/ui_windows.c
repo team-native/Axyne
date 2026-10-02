@@ -24,6 +24,7 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/palette_controller.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
@@ -161,6 +162,15 @@ typedef struct AxyneWindowState {
     int fullscreen;
     LONG_PTR saved_style;
     WINDOWPLACEMENT saved_placement;
+    AxynePaletteController palette;
+    HWND palette_edit;
+    HWND palette_popup;
+    HWND palette_dim;
+    WNDPROC palette_edit_proc;
+    HBRUSH palette_edit_brush;
+    HFONT palette_fonts[7];
+    int palette_updating;
+    int palette_wheel_remainder;
 } AxyneWindowState;
 
 /* The explorer column and bottom panel collapse to zero when hidden, so every
@@ -328,6 +338,12 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
 static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
 static void axyne_layout(HWND window, AxyneWindowState *state);
+static void axyne_palette_open(HWND window, AxyneWindowState *state,
+                               const char *initial);
+static int axyne_palette_document(void *user, char **path, char **text,
+                                  size_t *length, size_t *line_count);
+static void axyne_palette_menu_label(wchar_t *buffer, size_t capacity,
+                                     const wchar_t *title);
 
 static wchar_t *axyne_wide(const char *utf8)
 {
@@ -1889,10 +1905,42 @@ static int axyne_windows_binding_matches(const AxyneWindowState *state,
     return (key == VK_F5 && _stricmp(binding->key, "F5") == 0);
 }
 
-static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key);
+/* Ctrl+Shift+P: the quick-file binding plus Shift opens the palette with ">". */
+static int axyne_windows_palette_shift_matches(const AxyneWindowState *state,
+                                               WPARAM key)
+{
+    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
+        &state->preferences, AXYNE_ACTION_QUICK_FILE);
+    unsigned int modifiers = 0, required;
+    if (binding == NULL || !binding->enabled || strlen(binding->key) != 1) return 0;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+    if ((GetKeyState(VK_MENU) & 0x8000) != 0) modifiers |= AXYNE_KEY_MODIFIER_ALT;
+    required = binding->modifiers;
+    if ((required & AXYNE_KEY_MODIFIER_COMMAND) != 0)
+        required = (required & ~AXYNE_KEY_MODIFIER_COMMAND) | AXYNE_KEY_MODIFIER_CONTROL;
+    if ((required & AXYNE_KEY_MODIFIER_SHIFT) != 0) return 0;
+    if (modifiers != (required | AXYNE_KEY_MODIFIER_SHIFT)) return 0;
+    return toupper((unsigned char)binding->key[0]) == toupper((int)key);
+}
+
+static int axyne_palette_handle_open_key(HWND window, AxyneWindowState *state,
+                                         WPARAM key)
+{
+    if (axyne_windows_palette_shift_matches(state, key)) {
+        axyne_palette_open(window, state, ">");
+        return 1;
+    }
+    if (axyne_windows_binding_matches(state, AXYNE_ACTION_QUICK_FILE, key)) {
+        axyne_palette_open(window, state, "");
+        return 1;
+    }
+    return 0;
+}
 
 static int axyne_handle_key(HWND window, AxyneWindowState *state, WPARAM key)
 {
+    if (axyne_palette_handle_open_key(window, state, key)) return 1;
     if (axyne_windows_binding_matches(state, AXYNE_ACTION_NEW, key)) axyne_new_document(window, state);
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_OPEN, key)) axyne_open_document(window, state, NULL);
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_SAVE, key)) (void)axyne_save_active(window, state);
@@ -1900,7 +1948,6 @@ static int axyne_handle_key(HWND window, AxyneWindowState *state, WPARAM key)
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_FIND, key)) axyne_find(window, state, 0, 0);
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_REPLACE, key)) axyne_find(window, state, 1, 0);
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_SEARCH_WORKSPACE, key)) axyne_search_folder(window, state, 0);
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_QUICK_FILE, key)) axyne_search_folder(window, state, 1);
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_BUILD, key)) axyne_start_action(window, state, 0);
     else if (axyne_windows_binding_matches(state, AXYNE_ACTION_RUN, key)) axyne_start_action(window, state, 1);
     else return axyne_action_key(window, state, key);
@@ -2939,53 +2986,14 @@ static void axyne_find(HWND window, AxyneWindowState *state, int replace,
 
 static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
 {
+    /* Quick file lookup lives in the command palette; this function keeps the
+     * text search over a chosen folder. */
+    if (files) { axyne_palette_open(window, state, ""); return; }
     char *root = NULL;
     if (!axyne_choose_folder(window, &root)) return;
-    char *query = axyne_prompt_utf8(window, files ? L"Quick File" : L"Search Folder",
-                                   files ? L"Filename contains:" : L"Search text:");
+    char *query = axyne_prompt_utf8(window, L"Search Folder", L"Search text:");
     if (query == NULL) { free(root); return; }
-    wchar_t summary[32768] = L"";
-    if (files) {
-        char **paths = NULL; size_t count = 0;
-        if (axyne_search_files(root, query, &paths, &count, NULL) == AXYNE_STATUS_OK) {
-            if (count == 0) MessageBoxW(window, L"No files found.", L"Axyne", MB_OK);
-            else {
-                size_t chosen = 0;
-                size_t listed = count < 40 ? count : 40;
-                wchar_t *listing = (wchar_t *)calloc(32768, sizeof(wchar_t));
-                if (listing == NULL) {
-                    MessageBoxW(window, L"Unable to allocate the file result list.",
-                                L"Quick File", MB_OK | MB_ICONERROR);
-                    axyne_search_paths_destroy(paths, count);
-                    free(query); free(root); return;
-                }
-                size_t used = 0;
-                size_t path_indices[40], displayed = 0;
-                for (size_t i = 0; i < listed && used < 30000; ++i) {
-                    wchar_t *path = axyne_wide(paths[i]);
-                    int n = path != NULL ? swprintf_s(listing + used, 32768 - used,
-                        L"%zu. %ls\n", displayed + 1, path) : -1;
-                    free(path);
-                    if (n > 0) {
-                        used += (size_t)n;
-                        path_indices[displayed++] = i;
-                    }
-                }
-                if (displayed == 0) {
-                    MessageBoxW(window, L"File matches could not be displayed.",
-                                L"Quick File", MB_OK | MB_ICONERROR);
-                } else {
-                    MessageBoxW(window, listing, L"Quick File Matches", MB_OK | MB_ICONINFORMATION);
-                    wchar_t prompt[256]; swprintf_s(prompt, 256, L"Enter a displayed result number (1-%zu):", displayed);
-                    if (axyne_prompt(window, L"Quick File", prompt, summary, 32768) &&
-                        swscanf_s(summary, L"%zu", &chosen) == 1 && chosen > 0 && chosen <= displayed)
-                        axyne_open_document(window, state, paths[path_indices[chosen - 1]]);
-                }
-                free(listing);
-            }
-        }
-        axyne_search_paths_destroy(paths, count);
-    } else {
+    {
         AxyneSearchResults results = {0};
         if (axyne_search_workspace(root, query, 0, &results, NULL) == AXYNE_STATUS_OK) {
             size_t shown = results.count < 20 ? results.count : 20;
@@ -3800,6 +3808,881 @@ static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
     return slots == 0 ? 1 : slots;
 }
 
+/* ---- command palette (Figma 80:70) ---------------------------------------
+ * The shared AxynePaletteController owns mode, rows, selection and actions.
+ * This section owns the Win32 pieces: an EDIT control laid over the toolbar
+ * search field, an owner-drawn popup window and a translucent dim window.
+ * Popup, dim and field geometry come from the helpers below so that painting
+ * and hit testing use the same numbers. */
+enum {
+    AXYNE_PALETTE_EDIT_ID = 5101,
+    AXYNE_PALETTE_TIMER_ID = 5102,
+    AXYNE_PAL_WIDTH = 561,
+    AXYNE_PAL_HEADER = 31,
+    AXYNE_PAL_ROW = 32,
+    AXYNE_PAL_LIST_PAD = 4,
+    AXYNE_PAL_FOOTER = 33,
+    AXYNE_PAL_MARGIN = 7,
+    AXYNE_PAL_GAP = 3,
+    AXYNE_PAL_DIM_ALPHA = 140
+};
+
+enum { AXYNE_WM_PALETTE_CLOSE = WM_APP + 26, AXYNE_WM_PALETTE_ENTER = WM_APP + 27 };
+
+enum { AXYNE_PFONT_REGULAR11, AXYNE_PFONT_SEMIBOLD11, AXYNE_PFONT_REGULAR13,
+       AXYNE_PFONT_SEMIBOLD13, AXYNE_PFONT_MONO10_BOLD, AXYNE_PFONT_MONO10,
+       AXYNE_PFONT_MONO11 };
+
+static const wchar_t AXYNE_PALETTE_POPUP_CLASS[] = L"AxynePalettePopup";
+static const wchar_t AXYNE_PALETTE_DIM_CLASS[] = L"AxynePaletteDim";
+
+static COLORREF axyne_pal_color(unsigned int rgb) { return axyne_theme_color(rgb); }
+
+static wchar_t *axyne_wide_n(const char *utf8, size_t length)
+{
+    int count;
+    wchar_t *wide;
+    if (length == 0) return (wchar_t *)calloc(1, sizeof(wchar_t));
+    if (length > (size_t)INT_MAX - 1) return NULL;
+    count = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)length, NULL, 0);
+    if (count <= 0) return NULL;
+    wide = (wchar_t *)calloc((size_t)count + 1, sizeof(wchar_t));
+    if (wide != NULL && MultiByteToWideChar(CP_UTF8, 0, utf8, (int)length,
+                                            wide, count) == 0) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static HFONT axyne_pal_make_font(int pixels, int weight, int mono)
+{
+    return CreateFontW(-pixels, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, mono ? FIXED_PITCH | FF_MODERN : DEFAULT_PITCH | FF_DONTCARE,
+        mono ? L"Cascadia Mono" : L"Segoe UI");
+}
+
+static void axyne_pal_round_fill(HDC dc, RECT rect, int radius, COLORREF color)
+{
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ old_brush, old_pen;
+    if (brush == NULL) return;
+    old_brush = SelectObject(dc, brush);
+    old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    RoundRect(dc, rect.left, rect.top, rect.right + 1, rect.bottom + 1,
+              radius * 2, radius * 2);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    DeleteObject(brush);
+}
+
+static int axyne_pal_text_width(HDC dc, HFONT font, const wchar_t *text)
+{
+    SIZE size = {0, 0};
+    HFONT old = (HFONT)SelectObject(dc, font);
+    GetTextExtentPoint32W(dc, text, (int)wcslen(text), &size);
+    SelectObject(dc, old);
+    return size.cx;
+}
+
+/* Toolbar search field: the same rectangle the shell paints and hit-tests. */
+static RECT axyne_palette_field_rect(HWND window)
+{
+    RECT client;
+    GetClientRect(window, &client);
+    return axyne_toolbar_rect(8, client.right);
+}
+
+static RECT axyne_palette_edit_rect(HWND window)
+{
+    RECT field = axyne_palette_field_rect(window);
+    RECT edit = {field.left + 32, field.top + 5, field.right - 40, field.top + 21};
+    if (edit.right < edit.left) edit.right = edit.left;
+    return edit;
+}
+
+/* Popup rectangle in client coordinates. */
+static RECT axyne_palette_popup_rect(HWND window, const AxyneWindowState *state)
+{
+    RECT client, rect;
+    int rows = (int)axyne_palette_ctl_visible_rows(&state->palette);
+    int width = AXYNE_PAL_WIDTH;
+    GetClientRect(window, &client);
+    rect.right = client.right - AXYNE_PAL_MARGIN;
+    if (width > rect.right - 8) width = rect.right - 8;
+    rect.left = rect.right - width;
+    rect.top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_PAL_GAP;
+    rect.bottom = rect.top + 2 + AXYNE_PAL_HEADER + 2 * AXYNE_PAL_LIST_PAD +
+                  rows * AXYNE_PAL_ROW + AXYNE_PAL_FOOTER;
+    return rect;
+}
+
+/* Footer chips in popup-local coordinates: file, >, @, : (mode order). */
+static RECT axyne_palette_chip_rect(int index, int popup_height)
+{
+    static const int widths[] = {36, 45, 45, 58};
+    RECT rect;
+    int i, left = 8;
+    for (i = 0; i < index; ++i) left += widths[i] + 4;
+    rect.left = left;
+    rect.right = left + widths[index];
+    rect.top = popup_height - 28;
+    rect.bottom = rect.top + 22;
+    return rect;
+}
+
+typedef enum AxynePaletteHit {
+    AXYNE_PAL_HIT_NONE = 0, AXYNE_PAL_HIT_ROW, AXYNE_PAL_HIT_CHIP
+} AxynePaletteHit;
+
+static AxynePaletteHit axyne_palette_hit(const AxyneWindowState *state, int height,
+                                         int x, int y, size_t *index)
+{
+    const AxynePaletteController *c = &state->palette;
+    int rows_top = 1 + AXYNE_PAL_HEADER + AXYNE_PAL_LIST_PAD;
+    int rows = (int)axyne_palette_ctl_visible_rows(c);
+    int i;
+    for (i = 0; i < 4; ++i) {
+        RECT chip = axyne_palette_chip_rect(i, height);
+        POINT point = {x, y};
+        if (PtInRect(&chip, point)) { *index = (size_t)i; return AXYNE_PAL_HIT_CHIP; }
+    }
+    if (y >= rows_top && y < rows_top + rows * AXYNE_PAL_ROW && x >= 1) {
+        size_t row = c->scroll + (size_t)((y - rows_top) / AXYNE_PAL_ROW);
+        if (row < axyne_palette_ctl_row_count(c)) {
+            *index = row;
+            return AXYNE_PAL_HIT_ROW;
+        }
+    }
+    return AXYNE_PAL_HIT_NONE;
+}
+
+static HFONT axyne_pal_font(AxyneWindowState *state, int index)
+{
+    return state->palette_fonts[index] != NULL ? state->palette_fonts[index]
+                                               : state->ui_font;
+}
+
+static void axyne_palette_paint_label(HDC dc, AxyneWindowState *state,
+                                      const AxynePaletteItem *item, int x,
+                                      RECT row, int right, int *end_x)
+{
+    size_t length = strlen(item->label);
+    size_t start = item->match_start, count = item->match_len;
+    size_t pieces[3][2];
+    int p;
+    if (count == 0 || start > length || count > length - start) {
+        start = 0; count = 0;
+    }
+    pieces[0][0] = 0;            pieces[0][1] = start;
+    pieces[1][0] = start;        pieces[1][1] = count;
+    pieces[2][0] = start + count; pieces[2][1] = length - start - count;
+    for (p = 0; p < 3; ++p) {
+        wchar_t *text;
+        RECT area = {x, row.top, right, row.bottom};
+        HFONT font = p == 1 ? axyne_pal_font(state, AXYNE_PFONT_SEMIBOLD13)
+                            : axyne_pal_font(state, AXYNE_PFONT_REGULAR13);
+        COLORREF color = p == 1 ? axyne_pal_color(0xc9a2f7) : axyne_pal_color(0xd5d8dd);
+        if (pieces[p][1] == 0 || x >= right) continue;
+        text = axyne_wide_n(item->label + pieces[p][0], pieces[p][1]);
+        if (text == NULL) continue;
+        axyne_text_rect(dc, font, color, area, text, DT_LEFT);
+        x += axyne_pal_text_width(dc, font, text);
+        free(text);
+    }
+    *end_x = x;
+}
+
+static void axyne_palette_paint_row(HDC dc, AxyneWindowState *state,
+                                    const AxynePaletteItem *item, RECT row,
+                                    int selected)
+{
+    wchar_t *text;
+    int x, end_x, right = row.right - 10;
+    if (selected) axyne_pal_round_fill(dc, row, 4, axyne_pal_color(0x3b2d55));
+    {
+        RECT badge = {row.left + 10, row.top, row.left + 34, row.bottom};
+        if (item->badge != NULL && item->badge[0] != '\0') {
+            text = axyne_wide(item->badge);
+            if (text != NULL) {
+                axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_MONO10_BOLD),
+                    axyne_pal_color(item->badge_color), badge, text, DT_CENTER);
+                free(text);
+            }
+        } else if (item->kind == AXYNE_PALETTE_ITEM_FILE) {
+            HPEN pen = CreatePen(PS_SOLID, 1, axyne_pal_color(item->badge_color));
+            HGDIOBJ old_pen = SelectObject(dc, pen);
+            HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            int bx = (badge.left + badge.right - 8) / 2;
+            int by = (badge.top + badge.bottom - 10) / 2;
+            Rectangle(dc, bx, by, bx + 8, by + 10);
+            SelectObject(dc, old_brush);
+            SelectObject(dc, old_pen);
+            DeleteObject(pen);
+        }
+    }
+    x = row.left + 10 + 24 + 10;
+    if (item->kind == AXYNE_PALETTE_ITEM_COMMAND && item->detail != NULL &&
+        item->detail[0] != '\0') {
+        /* shortcut hint sits at the right edge so labels stay aligned */
+        text = axyne_wide(item->detail);
+        if (text != NULL) {
+            int width = axyne_pal_text_width(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11), text);
+            RECT area = {right - width, row.top, right, row.bottom};
+            axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11),
+                axyne_pal_color(0x8b919b), area, text, DT_RIGHT);
+            free(text);
+            right -= width + 12;
+        }
+        axyne_palette_paint_label(dc, state, item, x, row, right, &end_x);
+        return;
+    }
+    axyne_palette_paint_label(dc, state, item, x, row, right, &end_x);
+    if (item->detail != NULL && item->detail[0] != '\0' && end_x + 10 < right) {
+        text = axyne_wide(item->detail);
+        if (text != NULL) {
+            RECT area = {end_x + 10, row.top, right, row.bottom};
+            axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11),
+                axyne_pal_color(0x8b919b), area, text, DT_LEFT);
+            free(text);
+        }
+    }
+}
+
+static void axyne_palette_paint_popup(HWND popup, AxyneWindowState *state)
+{
+    PAINTSTRUCT paint;
+    HDC target = BeginPaint(popup, &paint);
+    const AxynePaletteController *c = &state->palette;
+    RECT client;
+    HDC dc;
+    HBITMAP bitmap, old_bitmap;
+    int width, height, rows, rows_top, i;
+    wchar_t buffer[96];
+    GetClientRect(popup, &client);
+    width = client.right;
+    height = client.bottom;
+    dc = CreateCompatibleDC(target);
+    bitmap = CreateCompatibleBitmap(target, width > 0 ? width : 1, height > 0 ? height : 1);
+    if (dc == NULL || bitmap == NULL) {
+        if (bitmap != NULL) DeleteObject(bitmap);
+        if (dc != NULL) DeleteDC(dc);
+        EndPaint(popup, &paint);
+        return;
+    }
+    old_bitmap = (HBITMAP)SelectObject(dc, bitmap);
+    axyne_fill(dc, 0, 0, width, height, axyne_pal_color(0x202328));
+    rows = (int)axyne_palette_ctl_visible_rows(c);
+    rows_top = 1 + AXYNE_PAL_HEADER + AXYNE_PAL_LIST_PAD;
+
+    /* header: mode title and match count */
+    {
+        wchar_t *title = axyne_wide(axyne_palette_ctl_title(c->mode));
+        RECT area = {14, 1, width - 14, AXYNE_PAL_HEADER};
+        if (title != NULL) {
+            axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_SEMIBOLD11),
+                axyne_pal_color(0xc9a2f7), area, title, DT_LEFT);
+            free(title);
+        }
+        if (c->list.count > 0) {
+            (void)swprintf_s(buffer, 96, L"%zu개 일치", c->list.count);
+            axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11),
+                axyne_pal_color(0x8b919b), area, buffer, DT_RIGHT);
+        }
+        axyne_fill(dc, 1, AXYNE_PAL_HEADER, width - 1, AXYNE_PAL_HEADER + 1,
+                   axyne_pal_color(0x2a2d33));
+    }
+
+    /* rows */
+    if (c->list.count > 0) {
+        for (i = 0; i < rows; ++i) {
+            size_t index = c->scroll + (size_t)i;
+            RECT row;
+            if (index >= c->list.count) break;
+            row.left = 1 + AXYNE_PAL_LIST_PAD;
+            row.right = width - 1 - AXYNE_PAL_LIST_PAD;
+            row.top = rows_top + i * AXYNE_PAL_ROW;
+            row.bottom = row.top + AXYNE_PAL_ROW - 1;
+            axyne_palette_paint_row(dc, state, &c->list.items[index], row,
+                                    index == c->selection);
+        }
+        if (c->list.count > (size_t)rows) {
+            int track = rows * AXYNE_PAL_ROW;
+            int thumb = track * rows / (int)c->list.count;
+            int top = rows_top + (int)((long long)(track - thumb) * (long long)c->scroll /
+                      (long long)(c->list.count - (size_t)rows));
+            if (thumb < 16) thumb = 16;
+            axyne_pal_round_fill(dc, (RECT){width - 6, top, width - 3, top + thumb - 1}, 1,
+                                 axyne_pal_color(0x3a3e46));
+        }
+    } else if (c->message[0] != '\0') {
+        wchar_t *message = axyne_wide(c->message);
+        RECT row = {1 + AXYNE_PAL_LIST_PAD, rows_top, width - 1 - AXYNE_PAL_LIST_PAD,
+                    rows_top + AXYNE_PAL_ROW - 1};
+        RECT area = {row.left + 10, row.top, row.right - 10, row.bottom};
+        if (c->message_actionable)
+            axyne_pal_round_fill(dc, row, 4, axyne_pal_color(0x3b2d55));
+        if (message != NULL) {
+            axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR13),
+                c->message_actionable ? axyne_pal_color(0xd5d8dd) : axyne_pal_color(0x8b919b),
+                area, message, DT_LEFT);
+            free(message);
+        }
+    }
+
+    /* footer: filter chips and key hints */
+    axyne_fill(dc, 1, height - 1 - 32 - 1, width - 1, height - 1 - 32,
+               axyne_pal_color(0x2a2d33));
+    {
+        static const wchar_t *glyphs[] = {L"", L">", L"@", L":"};
+        static const wchar_t *labels[] = {L"파일", L"명령", L"기호", L"줄 이동"};
+        int chips_right = 0;
+        for (i = 0; i < 4; ++i) {
+            RECT chip = axyne_palette_chip_rect(i, height);
+            HFONT mono = axyne_pal_font(state, AXYNE_PFONT_MONO11);
+            HFONT sans = axyne_pal_font(state, AXYNE_PFONT_REGULAR11);
+            int glyph_w = glyphs[i][0] != L'\0' ? axyne_pal_text_width(dc, mono, glyphs[i]) : 0;
+            int label_w = axyne_pal_text_width(dc, sans, labels[i]);
+            int gap = glyph_w > 0 ? 3 : 0;
+            int x = chip.left + ((chip.right - chip.left) - (glyph_w + gap + label_w)) / 2;
+            RECT glyph_area = {x, chip.top, x + glyph_w + 2, chip.bottom};
+            RECT label_area = {x + glyph_w + gap, chip.top, chip.right - 2, chip.bottom};
+            axyne_pal_round_fill(dc, chip, 3, i == (int)c->mode
+                ? axyne_pal_color(0x3b2d55) : axyne_pal_color(0x2a2e35));
+            if (glyph_w > 0)
+                axyne_text_rect(dc, mono, axyne_pal_color(0xc9a2f7), glyph_area, glyphs[i], DT_LEFT);
+            axyne_text_rect(dc, sans, axyne_pal_color(0xc4c8ce), label_area, labels[i], DT_LEFT);
+            chips_right = chip.right;
+        }
+        {
+            const wchar_t *hint = c->mode == AXYNE_PALETTE_MODE_COMMAND
+                ? L"↑↓ 이동 · Enter 실행 · Esc 닫기"
+                : (c->mode == AXYNE_PALETTE_MODE_FILE
+                    ? L"↑↓ 이동 · Enter 열기 · Esc 닫기"
+                    : L"↑↓ 이동 · Enter 이동 · Esc 닫기");
+            RECT area = {chips_right + 12, height - 28, width - 8, height - 6};
+            axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11),
+                axyne_pal_color(0x8b919b), area, hint, DT_RIGHT);
+        }
+    }
+
+    /* 1px border with the 6px radius of the design */
+    {
+        HPEN pen = CreatePen(PS_SOLID, 1, axyne_pal_color(0x3a3e46));
+        HGDIOBJ old_pen = SelectObject(dc, pen);
+        HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, 0, 0, width, height, 12, 12);
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        DeleteObject(pen);
+    }
+    BitBlt(target, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    EndPaint(popup, &paint);
+}
+
+/* Toolbar field while the palette is open: accent border, dark fill, search
+ * glyph and the "Esc" hint; the EDIT control supplies the text. */
+static void axyne_palette_paint_field(HDC dc, AxyneWindowState *state, RECT rect)
+{
+    HPEN pen;
+    HGDIOBJ old_pen, old_brush;
+    int x = rect.left + 11, y = rect.top + 7;
+    RECT hint = {rect.right - 34, rect.top, rect.right - 11, rect.bottom};
+    axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom, axyne_pal_color(0xa66bf0));
+    axyne_pal_round_fill(dc, (RECT){rect.left + 1, rect.top + 1, rect.right - 2, rect.bottom - 2},
+                         3, axyne_pal_color(0x131417));
+    pen = CreatePen(PS_SOLID, 1, axyne_pal_color(0x8b919b));
+    old_pen = SelectObject(dc, pen);
+    old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Ellipse(dc, x, y, x + 9, y + 9);
+    MoveToEx(dc, x + 8, y + 8, NULL);
+    LineTo(dc, x + 12, y + 12);
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+    axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_MONO10), axyne_pal_color(0x8b919b),
+                    hint, L"Esc", DT_RIGHT);
+}
+
+/* Moves, sizes and repaints the popup and the dim layer after any change. */
+static void axyne_palette_refresh(HWND window, AxyneWindowState *state)
+{
+    RECT rect, field;
+    POINT origin;
+    int width, height;
+    HRGN region;
+    if (!state->palette.active || state->palette_popup == NULL) return;
+    rect = axyne_palette_popup_rect(window, state);
+    width = rect.right - rect.left;
+    height = rect.bottom - rect.top;
+    origin.x = rect.left;
+    origin.y = rect.top;
+    ClientToScreen(window, &origin);
+    SetWindowPos(state->palette_popup, HWND_TOP, origin.x, origin.y, width, height,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 12, 12);
+    if (region != NULL) SetWindowRgn(state->palette_popup, region, TRUE);
+    InvalidateRect(state->palette_popup, NULL, FALSE);
+    if (state->palette_dim != NULL) {
+        RECT client, body;
+        POINT top_left;
+        GetClientRect(window, &client);
+        body.left = 0;
+        body.top = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
+        body.right = client.right;
+        body.bottom = client.bottom - AXYNE_STATUS;
+        top_left.x = body.left;
+        top_left.y = body.top;
+        ClientToScreen(window, &top_left);
+        SetWindowPos(state->palette_dim, HWND_TOP,
+                     top_left.x, top_left.y, body.right - body.left,
+                     body.bottom - body.top > 0 ? body.bottom - body.top : 0,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        /* keep the list above the dim layer */
+        SetWindowPos(state->palette_popup, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    if (state->palette_edit != NULL) {
+        RECT edit = axyne_palette_edit_rect(window);
+        SetWindowPos(state->palette_edit, HWND_TOP, edit.left, edit.top,
+                     edit.right - edit.left, edit.bottom - edit.top,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    field = axyne_palette_field_rect(window);
+    InvalidateRect(window, &field, FALSE);
+}
+
+static void axyne_palette_close(HWND window, AxyneWindowState *state, int restore_focus)
+{
+    RECT field;
+    if (state == NULL || !state->palette.active) return;
+    KillTimer(window, AXYNE_PALETTE_TIMER_ID);
+    axyne_palette_ctl_close(&state->palette);
+    if (state->palette_popup != NULL) ShowWindow(state->palette_popup, SW_HIDE);
+    if (state->palette_dim != NULL) ShowWindow(state->palette_dim, SW_HIDE);
+    if (state->palette_edit != NULL) ShowWindow(state->palette_edit, SW_HIDE);
+    field = axyne_palette_field_rect(window);
+    InvalidateRect(window, &field, FALSE);
+    if (restore_focus && state->editor != NULL) SetFocus(state->editor);
+}
+
+static void axyne_palette_set_text(AxyneWindowState *state, const char *text)
+{
+    wchar_t *wide = axyne_wide(text == NULL ? "" : text);
+    if (wide == NULL || state->palette_edit == NULL) { free(wide); return; }
+    state->palette_updating = 1;
+    SetWindowTextW(state->palette_edit, wide);
+    SendMessageW(state->palette_edit, EM_SETSEL, (WPARAM)wcslen(wide), (LPARAM)wcslen(wide));
+    state->palette_updating = 0;
+    free(wide);
+}
+
+static void axyne_palette_text_changed(HWND window, AxyneWindowState *state)
+{
+    char *text;
+    if (!state->palette.active || state->palette_updating) return;
+    text = axyne_edit_utf8(state->palette_edit);
+    if (text == NULL) return;
+    (void)axyne_palette_ctl_set_input(&state->palette, text);
+    free(text);
+    axyne_palette_refresh(window, state);
+}
+
+static void axyne_palette_goto(AxyneWindowState *state, size_t line, size_t column)
+{
+    LRESULT count, start, end;
+    size_t target;
+    if (state->editor == NULL) return;
+    count = SendMessageA(state->editor, SCI_GETLINECOUNT, 0, 0);
+    line = axyne_palette_clamp_line(line, count > 0 ? (size_t)count : 1);
+    start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, (WPARAM)(line - 1), 0);
+    end = SendMessageA(state->editor, SCI_GETLINEENDPOSITION, (WPARAM)(line - 1), 0);
+    column = axyne_palette_clamp_column(column, end > start ? (size_t)(end - start) : 0);
+    target = (size_t)start + column - 1;
+    SendMessageA(state->editor, SCI_GOTOPOS, (WPARAM)target, 0);
+    SendMessageA(state->editor, SCI_SCROLLCARET, 0, 0);
+    SetFocus(state->editor);
+}
+
+static UINT axyne_palette_command_message(AxynePaletteCommandId id)
+{
+    switch (id) {
+    case AXYNE_PALETTE_COMMAND_NEW_FILE: return AXYNE_CMD_NEW;
+    case AXYNE_PALETTE_COMMAND_OPEN_FILE: return AXYNE_CMD_OPEN;
+    case AXYNE_PALETTE_COMMAND_OPEN_FOLDER: return AXYNE_CMD_WORKSPACE;
+    case AXYNE_PALETTE_COMMAND_SAVE: return AXYNE_CMD_SAVE;
+    case AXYNE_PALETTE_COMMAND_SAVE_AS: return AXYNE_CMD_SAVE_AS;
+    case AXYNE_PALETTE_COMMAND_CLOSE_TAB: return AXYNE_CMD_CLOSE;
+    case AXYNE_PALETTE_COMMAND_FIND: return AXYNE_CMD_FIND;
+    case AXYNE_PALETTE_COMMAND_REPLACE: return AXYNE_CMD_REPLACE;
+    case AXYNE_PALETTE_COMMAND_BUILD: return AXYNE_CMD_BUILD;
+    case AXYNE_PALETTE_COMMAND_RUN: return AXYNE_CMD_RUN;
+    case AXYNE_PALETTE_COMMAND_START_DEBUGGING: return AXYNE_DEBUG_START;
+    case AXYNE_PALETTE_COMMAND_GIT_STATUS: return AXYNE_CMD_GIT_STATUS;
+    case AXYNE_PALETTE_COMMAND_GIT_DIFF: return AXYNE_CMD_GIT_DIFF;
+    case AXYNE_PALETTE_COMMAND_GIT_STAGE_ALL: return AXYNE_CMD_GIT_STAGE_ALL;
+    case AXYNE_PALETTE_COMMAND_GIT_UNSTAGE_ALL: return AXYNE_CMD_GIT_UNSTAGE_ALL;
+    case AXYNE_PALETTE_COMMAND_PREFERENCES: return AXYNE_CMD_PREFERENCES;
+    case AXYNE_PALETTE_COMMAND_WORKSPACE_SETTINGS: return AXYNE_CMD_WORKSPACE_PREFERENCES;
+    case AXYNE_PALETTE_COMMAND_PANEL_OUTPUT: return AXYNE_CMD_PANEL_OUTPUT;
+    case AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS: return AXYNE_CMD_PANEL_PROBLEMS;
+    case AXYNE_PALETTE_COMMAND_PANEL_TERMINAL: return AXYNE_CMD_PANEL_TERMINAL;
+    default: return 0;
+    }
+}
+
+static void axyne_palette_run_command(HWND window, AxyneWindowState *state,
+                                      AxynePaletteCommandId id)
+{
+    UINT message = axyne_palette_command_message(id);
+    if (id == AXYNE_PALETTE_COMMAND_CLEAR_OUTPUT) {
+        if (state->terminal_output != NULL) SetWindowTextW(state->terminal_output, L"");
+        return;
+    }
+    if (message == 0) return;
+    if ((id == AXYNE_PALETTE_COMMAND_SAVE || id == AXYNE_PALETTE_COMMAND_SAVE_AS ||
+         id == AXYNE_PALETTE_COMMAND_CLOSE_TAB) && axyne_active(state) == NULL) return;
+    if ((id == AXYNE_PALETTE_COMMAND_BUILD || id == AXYNE_PALETTE_COMMAND_RUN) &&
+        !axyne_toolbar_enabled(state, message)) return;
+    if (id >= AXYNE_PALETTE_COMMAND_GIT_STATUS && id <= AXYNE_PALETTE_COMMAND_GIT_UNSTAGE_ALL &&
+        (state->explorer.root == NULL || state->git_process != NULL)) {
+        MessageBoxW(window, state->explorer.root == NULL
+            ? L"Open a workspace folder before using Git commands."
+            : L"A Git command is already running.", L"Axyne - Git",
+            MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    SendMessageW(window, WM_COMMAND, message, 0);
+}
+
+/* Enter or a click: closes the palette and runs what the controller returns. */
+static void axyne_palette_execute(HWND window, AxyneWindowState *state, size_t row)
+{
+    AxynePaletteAction action;
+    if (!state->palette.active) return;
+    if (!axyne_palette_ctl_activate(&state->palette, row, &action)) return;
+    if (action.kind == AXYNE_PALETTE_ACTION_SET_INPUT) {
+        axyne_palette_set_text(state, action.text);
+        axyne_palette_text_changed(window, state);
+        SetFocus(state->palette_edit);
+        axyne_palette_action_destroy(&action);
+        return;
+    }
+    axyne_palette_close(window, state, 1);
+    if (action.kind == AXYNE_PALETTE_ACTION_OPEN_FILE && action.path != NULL)
+        axyne_open_document(window, state, action.path);
+    else if (action.kind == AXYNE_PALETTE_ACTION_GOTO)
+        axyne_palette_goto(state, action.line, action.column);
+    else if (action.kind == AXYNE_PALETTE_ACTION_COMMAND)
+        axyne_palette_run_command(window, state, action.command);
+    axyne_palette_action_destroy(&action);
+}
+
+static int axyne_palette_document(void *user, char **path, char **text,
+                                  size_t *length, size_t *line_count)
+{
+    AxyneWindowState *state = (AxyneWindowState *)user;
+    AxyneDocument *document = axyne_active(state);
+    LRESULT size, lines;
+    char *buffer;
+    if (state == NULL || state->editor == NULL || document == NULL) return 0;
+    size = SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
+    lines = SendMessageA(state->editor, SCI_GETLINECOUNT, 0, 0);
+    if (size < 0) return 0;
+    buffer = (char *)malloc((size_t)size + 1);
+    if (buffer == NULL) return 0;
+    SendMessageA(state->editor, SCI_GETTEXT, (WPARAM)size + 1, (LPARAM)buffer);
+    *path = document->is_untitled || document->path == NULL ? NULL : _strdup(document->path);
+    *text = buffer;
+    *length = (size_t)size;
+    *line_count = lines > 0 ? (size_t)lines : 1;
+    return 1;
+}
+
+static LRESULT CALLBACK axyne_palette_popup_proc(HWND popup, UINT message,
+                                                 WPARAM w_param, LPARAM l_param)
+{
+    HWND owner = GetWindow(popup, GW_OWNER);
+    AxyneWindowState *state = owner == NULL ? NULL
+        : (AxyneWindowState *)GetWindowLongPtrW(owner, GWLP_USERDATA);
+    if (state == NULL) return DefWindowProcW(popup, message, w_param, l_param);
+    switch (message) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        axyne_palette_paint_popup(popup, state);
+        return 0;
+    case WM_MOUSEMOVE: {
+        RECT client;
+        size_t index = 0;
+        GetClientRect(popup, &client);
+        if (state->palette.active && axyne_palette_hit(state, client.bottom,
+                GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param), &index) == AXYNE_PAL_HIT_ROW &&
+            index != state->palette.selection && state->palette.list.count > 0) {
+            axyne_palette_ctl_select(&state->palette, index);
+            InvalidateRect(popup, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        int steps;
+        state->palette_wheel_remainder += GET_WHEEL_DELTA_WPARAM(w_param);
+        steps = state->palette_wheel_remainder / WHEEL_DELTA;
+        state->palette_wheel_remainder %= WHEEL_DELTA;
+        if (steps != 0 && state->palette.active) {
+            axyne_palette_ctl_scroll(&state->palette, -steps * 3);
+            InvalidateRect(popup, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        RECT client;
+        size_t index = 0;
+        AxynePaletteHit hit;
+        GetClientRect(popup, &client);
+        hit = axyne_palette_hit(state, client.bottom, GET_X_LPARAM(l_param),
+                                GET_Y_LPARAM(l_param), &index);
+        if (hit == AXYNE_PAL_HIT_ROW) {
+            PostMessageW(owner, AXYNE_WM_PALETTE_ENTER, (WPARAM)index, 1);
+        } else if (hit == AXYNE_PAL_HIT_CHIP) {
+            axyne_palette_set_text(state, axyne_palette_mode_prefix((AxynePaletteMode)index));
+            axyne_palette_text_changed(owner, state);
+            SetFocus(state->palette_edit);
+        }
+        return 0;
+    }
+    default:
+        break;
+    }
+    return DefWindowProcW(popup, message, w_param, l_param);
+}
+
+static LRESULT CALLBACK axyne_palette_dim_proc(HWND dim, UINT message,
+                                               WPARAM w_param, LPARAM l_param)
+{
+    HWND owner = GetWindow(dim, GW_OWNER);
+    switch (message) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        RECT client;
+        HDC dc = BeginPaint(dim, &paint);
+        GetClientRect(dim, &client);
+        axyne_fill(dc, 0, 0, client.right, client.bottom, axyne_pal_color(0x16171a));
+        EndPaint(dim, &paint);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+        if (owner != NULL) PostMessageW(owner, AXYNE_WM_PALETTE_CLOSE, 1, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(dim, message, w_param, l_param);
+}
+
+static LRESULT CALLBACK axyne_palette_edit_proc(HWND edit, UINT message,
+                                                WPARAM w_param, LPARAM l_param)
+{
+    HWND owner = GetParent(edit);
+    AxyneWindowState *state = owner == NULL ? NULL
+        : (AxyneWindowState *)GetWindowLongPtrW(owner, GWLP_USERDATA);
+    if (state == NULL || state->palette_edit_proc == NULL)
+        return DefWindowProcW(edit, message, w_param, l_param);
+    switch (message) {
+    case WM_KEYDOWN:
+        if (state->palette.active) {
+            switch (w_param) {
+            case VK_ESCAPE:
+                PostMessageW(owner, AXYNE_WM_PALETTE_CLOSE, 1, 0);
+                return 0;
+            case VK_RETURN:
+                PostMessageW(owner, AXYNE_WM_PALETTE_ENTER, (WPARAM)-1, 0);
+                return 0;
+            case VK_UP:
+            case VK_DOWN:
+                axyne_palette_ctl_move(&state->palette, w_param == VK_UP ? -1 : 1);
+                InvalidateRect(state->palette_popup, NULL, FALSE);
+                return 0;
+            case VK_PRIOR:
+            case VK_NEXT: {
+                size_t step = AXYNE_PALETTE_VISIBLE_ROWS;
+                size_t selection = state->palette.selection;
+                axyne_palette_ctl_select(&state->palette, w_param == VK_PRIOR
+                    ? (selection > step ? selection - step : 0) : selection + step);
+                InvalidateRect(state->palette_popup, NULL, FALSE);
+                return 0;
+            }
+            case VK_TAB:
+                return 0;
+            default:
+                break;
+            }
+        }
+        break;
+    case WM_CHAR:
+        if (w_param == VK_RETURN || w_param == VK_ESCAPE || w_param == VK_TAB) return 0;
+        break;
+    case WM_MOUSEWHEEL:
+        if (state->palette.active && state->palette_popup != NULL)
+            return SendMessageW(state->palette_popup, message, w_param, l_param);
+        break;
+    case WM_KILLFOCUS:
+        PostMessageW(owner, AXYNE_WM_PALETTE_CLOSE, 0, 0);
+        break;
+    default:
+        break;
+    }
+    return CallWindowProcW(state->palette_edit_proc, edit, message, w_param, l_param);
+}
+
+static int axyne_palette_ensure_ui(HWND window, AxyneWindowState *state)
+{
+    HINSTANCE instance = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
+    static int classes_registered = 0;
+    if (!classes_registered) {
+        WNDCLASSEXW popup_class = {0}, dim_class = {0};
+        popup_class.cbSize = sizeof(popup_class);
+        popup_class.hInstance = instance;
+        popup_class.lpfnWndProc = axyne_palette_popup_proc;
+        popup_class.lpszClassName = AXYNE_PALETTE_POPUP_CLASS;
+        popup_class.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        dim_class.cbSize = sizeof(dim_class);
+        dim_class.hInstance = instance;
+        dim_class.lpfnWndProc = axyne_palette_dim_proc;
+        dim_class.lpszClassName = AXYNE_PALETTE_DIM_CLASS;
+        dim_class.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        if (RegisterClassExW(&popup_class) == 0 || RegisterClassExW(&dim_class) == 0)
+            return 0;
+        classes_registered = 1;
+    }
+    if (state->palette_fonts[0] == NULL) {
+        state->palette_fonts[AXYNE_PFONT_REGULAR11] = axyne_pal_make_font(11, FW_NORMAL, 0);
+        state->palette_fonts[AXYNE_PFONT_SEMIBOLD11] = axyne_pal_make_font(11, FW_SEMIBOLD, 0);
+        state->palette_fonts[AXYNE_PFONT_REGULAR13] = axyne_pal_make_font(13, FW_NORMAL, 0);
+        state->palette_fonts[AXYNE_PFONT_SEMIBOLD13] = axyne_pal_make_font(13, FW_SEMIBOLD, 0);
+        state->palette_fonts[AXYNE_PFONT_MONO10_BOLD] = axyne_pal_make_font(10, FW_BOLD, 1);
+        state->palette_fonts[AXYNE_PFONT_MONO10] = axyne_pal_make_font(10, FW_NORMAL, 1);
+        state->palette_fonts[AXYNE_PFONT_MONO11] = axyne_pal_make_font(11, FW_NORMAL, 1);
+    }
+    if (state->palette_edit_brush == NULL)
+        state->palette_edit_brush = CreateSolidBrush(axyne_pal_color(0x131417));
+    if (state->palette_edit == NULL) {
+        state->palette_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
+            0, 0, 10, 16, window, (HMENU)(UINT_PTR)AXYNE_PALETTE_EDIT_ID, instance, NULL);
+        if (state->palette_edit == NULL) return 0;
+        SendMessageW(state->palette_edit, WM_SETFONT, (WPARAM)state->ui_font, TRUE);
+        SendMessageW(state->palette_edit, EM_SETLIMITTEXT, 512, 0);
+        state->palette_edit_proc = (WNDPROC)SetWindowLongPtrW(state->palette_edit,
+            GWLP_WNDPROC, (LONG_PTR)axyne_palette_edit_proc);
+    }
+    if (state->palette_dim == NULL) {
+        state->palette_dim = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            AXYNE_PALETTE_DIM_CLASS, L"", WS_POPUP, 0, 0, 10, 10, window, NULL, instance, NULL);
+        if (state->palette_dim != NULL)
+            SetLayeredWindowAttributes(state->palette_dim, 0, AXYNE_PAL_DIM_ALPHA, LWA_ALPHA);
+    }
+    if (state->palette_popup == NULL) {
+        state->palette_popup = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            AXYNE_PALETTE_POPUP_CLASS, L"명령 팔레트", WS_POPUP, 0, 0, 10, 10, window,
+            NULL, instance, NULL);
+        if (state->palette_popup == NULL) return 0;
+    }
+    return 1;
+}
+
+static void axyne_palette_open(HWND window, AxyneWindowState *state, const char *initial)
+{
+    const char **paths;
+    size_t i, count = 0;
+    AxynePaletteMode wanted;
+    if (state == NULL || state->editor == NULL) return;
+    if (initial == NULL) initial = "";
+    if (!axyne_palette_ensure_ui(window, state)) return;
+    wanted = axyne_palette_parse_mode(initial, NULL);
+    if (state->palette.active) {
+        if (state->palette.mode != wanted) {
+            axyne_palette_set_text(state, initial);
+            axyne_palette_text_changed(window, state);
+        }
+        axyne_palette_refresh(window, state);
+        SetFocus(state->palette_edit);
+        return;
+    }
+    paths = (const char **)calloc(state->documents.count + 1, sizeof(*paths));
+    if (paths == NULL) return;
+    for (i = 0; i < state->documents.count; ++i) {
+        const AxyneDocument *document = &state->documents.documents[i];
+        if (!document->is_untitled && document->path != NULL) paths[count++] = document->path;
+    }
+    if (axyne_palette_ctl_open(&state->palette, state->explorer.root, paths, count,
+                               initial) != AXYNE_STATUS_OK) {
+        free(paths);
+        return;
+    }
+    free(paths);
+    state->palette_wheel_remainder = 0;
+    axyne_palette_set_text(state, initial);
+    axyne_palette_refresh(window, state);
+    if (axyne_palette_ctl_walk_running(&state->palette))
+        SetTimer(window, AXYNE_PALETTE_TIMER_ID, 15, NULL);
+    SetFocus(state->palette_edit);
+}
+
+/* WM_TIMER: advances the workspace walk a little each tick. */
+static void axyne_palette_tick(HWND window, AxyneWindowState *state)
+{
+    int changed = 0;
+    if (!state->palette.active) { KillTimer(window, AXYNE_PALETTE_TIMER_ID); return; }
+    if (!axyne_palette_ctl_walk_step(&state->palette, 1500, &changed))
+        KillTimer(window, AXYNE_PALETTE_TIMER_ID);
+    if (changed) axyne_palette_refresh(window, state);
+}
+
+static void axyne_palette_destroy_ui(AxyneWindowState *state)
+{
+    size_t i;
+    axyne_palette_ctl_destroy(&state->palette);
+    /* owned windows may already be gone with their owner */
+    if (state->palette_popup != NULL && IsWindow(state->palette_popup))
+        DestroyWindow(state->palette_popup);
+    if (state->palette_dim != NULL && IsWindow(state->palette_dim))
+        DestroyWindow(state->palette_dim);
+    state->palette_popup = state->palette_dim = NULL;
+    for (i = 0; i < sizeof(state->palette_fonts) / sizeof(*state->palette_fonts); ++i) {
+        if (state->palette_fonts[i] != NULL) DeleteObject(state->palette_fonts[i]);
+        state->palette_fonts[i] = NULL;
+    }
+    if (state->palette_edit_brush != NULL) DeleteObject(state->palette_edit_brush);
+    state->palette_edit_brush = NULL;
+}
+
+/* Menu label for the quick-file entry, with the shortcut from the palette
+ * command table (Ctrl+P on Windows). */
+static void axyne_palette_menu_label(wchar_t *buffer, size_t capacity,
+                                     const wchar_t *title)
+{
+    const AxynePaletteCommand *command =
+        axyne_palette_command(AXYNE_PALETTE_COMMAND_QUICK_FILE);
+    char shortcut[64] = "";
+    wchar_t *wide;
+    if (command != NULL)
+        (void)axyne_palette_format_shortcut(&command->shortcut, 0, shortcut, sizeof(shortcut));
+    wide = axyne_wide(shortcut);
+    (void)swprintf_s(buffer, capacity, L"%ls\t%ls", title, wide != NULL ? wide : L"");
+    free(wide);
+}
+
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
                                  HINSTANCE instance)
 {
@@ -3958,6 +4841,7 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     state->tab_reveal_index = SIZE_MAX;
     (void)axyne_visible_tabs(state, width);
     (void)axyne_explorer_visible_rows(state, status_top);
+    axyne_palette_refresh(window, state);
     InvalidateRect(window, NULL, FALSE);
 }
 
@@ -3973,6 +4857,12 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     int bottom_top = status_top - axyne_panel_height(state);
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
 
+    if (state->palette.active && state->palette_edit != NULL) {
+        /* the palette's EDIT control paints its own pixels */
+        RECT edit_rect = axyne_palette_edit_rect(window);
+        ExcludeClipRect(dc, edit_rect.left, edit_rect.top, edit_rect.right,
+                        edit_rect.bottom);
+    }
     axyne_fill(dc, 0, 0, width, height, AXYNE_BG);
     axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, AXYNE_MENU_BG);
     axyne_fill(dc, 0, AXYNE_TOP_MENU - 1, width, AXYNE_TOP_MENU, AXYNE_BORDER);
@@ -4069,6 +4959,9 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             part.left = rect.right - 10 - shortcut;
             part.right = rect.right - 10;
             axyne_text_rect(dc, state->font_tiny, AXYNE_SHORTCUT, part, L"Ctrl+P", DT_RIGHT);
+            if (state->palette.active) {
+                axyne_palette_paint_field(dc, state, rect);
+            }
         }
     }
     int tab_left = axyne_sidebar_width(state);
@@ -4195,6 +5088,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_CREATE: {
         state = (AxyneWindowState *)GetWindowLongPtrW(window, GWLP_USERDATA);
         HINSTANCE instance = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
+        axyne_palette_ctl_init(&state->palette, 0, axyne_palette_document, state);
         state->ui_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -4239,6 +5133,23 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
         return 0;
     }
+    case WM_MOVE:
+        if (state != NULL && state->palette.active) axyne_palette_refresh(window, state);
+        break;
+    case WM_TIMER:
+        if (state != NULL && w_param == AXYNE_PALETTE_TIMER_ID) {
+            axyne_palette_tick(window, state);
+            return 0;
+        }
+        break;
+    case AXYNE_WM_PALETTE_CLOSE:
+        if (state != NULL && state->palette.active &&
+            (w_param != 0 || GetFocus() != state->palette_edit))
+            axyne_palette_close(window, state, (int)w_param);
+        return 0;
+    case AXYNE_WM_PALETTE_ENTER:
+        if (state != NULL) axyne_palette_execute(window, state, (size_t)w_param);
+        return 0;
     case WM_SETTINGCHANGE:
         if (state != NULL && state->preferences.theme.preset == AXYNE_THEME_SYSTEM) {
             axyne_apply_preferences(state);
@@ -4273,6 +5184,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         RECT client;
         POINT point = {x, y};
         GetClientRect(window, &client);
+        if (state->palette.active) {
+            RECT field = axyne_palette_field_rect(window);
+            if (PtInRect(&field, point)) {
+                SetFocus(state->palette_edit);
+                return 0;
+            }
+            axyne_palette_close(window, state, 1);
+        }
         {
             int index = axyne_menu_bar_hit(state, x, y);
             if (index >= 0) {
@@ -4444,6 +5363,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_COMMAND: {
         UINT command = LOWORD(w_param);
+        if (command == AXYNE_PALETTE_EDIT_ID && HIWORD(w_param) == EN_CHANGE &&
+            (HWND)l_param == state->palette_edit) {
+            axyne_palette_text_changed(window, state);
+            return 0;
+        }
         if (command == AXYNE_CMD_PANEL_OUTPUT || command == AXYNE_CMD_PANEL_TERMINAL ||
             command == AXYNE_CMD_PANEL_PROBLEMS) {
             state->terminal_panel_selected = command == AXYNE_CMD_PANEL_TERMINAL;
@@ -4548,6 +5472,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORSTATIC:
+        if (state->palette_edit != NULL && (HWND)l_param == state->palette_edit) {
+            HDC dc = (HDC)w_param;
+            SetTextColor(dc, RGB(255, 255, 255));
+            SetBkColor(dc, axyne_pal_color(0x131417));
+            return (LRESULT)state->palette_edit_brush;
+        }
         if ((HWND)l_param == state->terminal_output ||
             (HWND)l_param == state->terminal_input) {
             HDC dc = (HDC)w_param;
@@ -4791,6 +5721,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                         (AxyneLspStatusMessage *)pending_message.lParam);
                 }
             }
+            axyne_palette_destroy_ui(state);
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
             if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL) {
@@ -4893,6 +5824,15 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN) {
             AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
                 window, GWLP_USERDATA);
+            if (current != NULL && current->palette.active &&
+                message.hwnd == current->palette_edit) {
+                /* only the palette shortcuts apply while typing in the field */
+                if (!axyne_palette_handle_open_key(window, current, message.wParam)) {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                continue;
+            }
             if (current != NULL && message.hwnd == current->terminal_input) {
                 if (message.message == WM_KEYDOWN && message.wParam == VK_RETURN) {
                     axyne_terminal_send(current);
