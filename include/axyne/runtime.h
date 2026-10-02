@@ -31,8 +31,11 @@ typedef struct AxyneRuntimeList {
 } AxyneRuntimeList;
 
 /* Performs PATH discovery and version probes only when explicitly called.
- * Each version probe is limited to two seconds; a timed-out process tree is
- * terminated and reaped, and discovery continues with the next runtime.
+ * Each version probe has a two-second deadline for the top-level version
+ * process. On timeout, its managed process group is terminated and the root
+ * is reaped; on POSIX, descendants that escape the process group (for example
+ * with setsid) may keep inherited output pipes open, so cleanup can take longer
+ * than two seconds. Discovery continues after cleanup completes.
  * No runtime is installed or bundled. At most one available executable is
  * returned per kind; TypeScript uses the external tsc command, and Java and
  * javac are reported separately. Initialize the output list by passing an
