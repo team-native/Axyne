@@ -20,6 +20,7 @@
 #include "axyne/git.h"
 #include "axyne/lsp.h"
 #include "axyne/ui_design.h"
+#include "axyne/outline.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
 
@@ -107,6 +108,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     NSTextField *_problemSummary;
     NSInteger _panelMode;
     NSInteger _explorerFirstRow;
+    AxyneOutline _outline;
+    NSTimer *_outlineTimer;
     CGFloat _tabScroll;
     void *_lexillaModule;
     void *(*_createLexer)(const char *name);
@@ -310,6 +313,16 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)showWorkspaceMessage:(NSString *)message;
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
+- (CGFloat)outlineHeight;
+- (CGFloat)explorerTreeBottom;
+- (void)refreshOutline;
+- (void)scheduleOutlineRefresh;
+- (void)cancelOutlineTimer;
+- (void)outlineTimerFired:(NSTimer *)timer;
+- (NSInteger)outlineSymbolAtPoint:(NSPoint)point;
+- (BOOL)pointIsInOutline:(NSPoint)point;
+- (void)jumpToOutlineSymbol:(NSInteger)index;
+- (void)drawOutlineAtTop:(CGFloat)top light:(BOOL)light reference:(BOOL)reference;
 - (NSRect)tabFrameAtIndex:(size_t)index;
 - (void)selectPanel:(id)sender;
 - (void)clearOutput:(id)sender;
@@ -1178,6 +1191,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
+    [self refreshOutline];
     if ([self window] != nil)
         [[self window] makeFirstResponder:[(id)_editorView content]];
     return YES;
@@ -1215,6 +1229,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self setNeedsDisplay:YES];
     }
     if (notification->nmhdr.code == SCN_MODIFIED &&
+        (notification->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) != 0)
+        [self scheduleOutlineRefresh];
+    if (notification->nmhdr.code == SCN_MODIFIED &&
         [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0) {
         if (!doc->is_dirty) {
             (void)axyne_documents_mark_dirty(&_documents, _documents.active_index, NULL);
@@ -1251,6 +1268,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         return NO;
     }
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self refreshOutline];
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshRecentMenu];
@@ -1280,6 +1298,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         return NO;
     }
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self refreshOutline];
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshRecentMenu];
@@ -1460,10 +1479,127 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return YES;
 }
 
+/* ---- explorer outline (개요) -------------------------------------------- */
+
+/* Height of the outline section at the bottom of the explorer column, or 0
+ * when it is hidden. The cap is a share of the whole explorer column. */
+- (CGFloat)outlineHeight
+{
+    CGFloat explorer = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM -
+        (AXYNE_TOOLBAR + AXYNE_TABS);
+    if (explorer <= 0) return 0;
+    return (CGFloat)axyne_outline_height(&_outline, (int)explorer);
+}
+
+/* The file tree ends where the outline begins. */
+- (CGFloat)explorerTreeBottom
+{
+    return NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM - [self outlineHeight];
+}
+
+- (BOOL)pointIsInOutline:(NSPoint)point
+{
+    CGFloat height = [self outlineHeight];
+    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
+    return height > 0 && point.x >= 0 && point.x < AXYNE_SIDEBAR &&
+        point.y >= bottom - height && point.y < bottom;
+}
+
+/* Symbol index under the point, or -1 (separator, header, message row, gap). */
+- (NSInteger)outlineSymbolAtPoint:(NSPoint)point
+{
+    CGFloat height = [self outlineHeight];
+    CGFloat top = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM - height;
+    if (![self pointIsInOutline:point]) return -1;
+    return (NSInteger)axyne_outline_symbol_at(&_outline, (int)height, (int)(point.y - top));
+}
+
+- (void)cancelOutlineTimer
+{
+    if (_outlineTimer != nil) {
+        [_outlineTimer invalidate];
+        _outlineTimer = nil; /* the run loop owned the only reference */
+    }
+}
+
+- (void)scheduleOutlineRefresh
+{
+    [self cancelOutlineTimer];
+    _outlineTimer = [NSTimer scheduledTimerWithTimeInterval:
+        (NSTimeInterval)AXYNE_OUTLINE_DEBOUNCE_MS / 1000.0
+        target:self selector:@selector(outlineTimerFired:) userInfo:nil repeats:NO];
+}
+
+- (void)outlineTimerFired:(NSTimer *)timer
+{
+    (void)timer;
+    _outlineTimer = nil; /* a fired one-shot timer is already invalid */
+    [self refreshOutline];
+}
+
+/* Rescans the active document. Files over the size limit and unsupported
+ * extensions are classified without reading any text. */
+- (void)refreshOutline
+{
+    AxyneDocument *doc = [self activeDocument];
+    [self cancelOutlineTimer];
+    if (doc == NULL || _editorView == nil) {
+        axyne_outline_clear(&_outline);
+    } else {
+        const char *name = doc->is_untitled ? NULL :
+            (doc->title != NULL ? doc->title : doc->path);
+        NSInteger length = [self sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
+        if (length < 0) length = 0;
+        if (axyne_outline_prepare(&_outline, name, (size_t)length)) {
+            char *text = (char *)malloc((size_t)length + 1);
+            if (text == NULL) {
+                axyne_outline_clear(&_outline);
+            } else {
+                (void)[self sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)length + 1
+                                        lParam:(intptr_t)text];
+                (void)axyne_outline_scan(&_outline, text, (size_t)length, NULL);
+                free(text);
+            }
+        }
+    }
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+/* Puts the caret on the symbol name, scrolls it into view and focuses the
+ * editor. */
+- (void)jumpToOutlineSymbol:(NSInteger)index
+{
+    NSInteger lineCount, line, start, end, position, column;
+    if (index < 0 || (size_t)index >= _outline.symbols.count || _editorView == nil) return;
+    const AxyneSymbol *symbol = &_outline.symbols.items[index];
+    lineCount = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
+    if (lineCount < 1) return;
+    line = symbol->line > 0 ? (NSInteger)symbol->line - 1 : 0;
+    if (line >= lineCount) line = lineCount - 1;
+    start = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)line lParam:0];
+    end = [self sendEditorMessage:SCI_GETLINEENDPOSITION wParam:(uintptr_t)line lParam:0];
+    column = symbol->column > 0 ? (NSInteger)symbol->column - 1 : 0;
+    if (column > end - start) column = end - start;
+    position = start + column;
+    (void)[self sendEditorMessage:SCI_ENSUREVISIBLEENFORCEPOLICY wParam:(uintptr_t)line lParam:0];
+    (void)[self sendEditorMessage:SCI_SETSEL wParam:(uintptr_t)position lParam:(intptr_t)position];
+    (void)[self sendEditorMessage:SCI_SCROLLCARET wParam:0 lParam:0];
+    if ([self window] != nil)
+        [[self window] makeFirstResponder:[(id)_editorView content]];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)viewWillMoveToWindow:(NSWindow *)newWindow
+{
+    if (newWindow == nil) [self cancelOutlineTimer];
+    [super viewWillMoveToWindow:newWindow];
+}
+
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
 {
     const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
-    const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
+    const CGFloat bottom = [self explorerTreeBottom];
     NSInteger row;
     if (_explorer.root == NULL || point.x < 0 || point.x >= AXYNE_SIDEBAR ||
         point.y < explorerTop || point.y >= bottom) return NSNotFound;
@@ -1483,8 +1619,17 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self scrollTabsBy:-delta * ([event hasPreciseScrollingDeltas] ? 1 : 40)];
         return;
     }
+    if ([self pointIsInOutline:point]) {
+        CGFloat section = [self outlineHeight];
+        NSInteger step = (NSInteger)ceil(fabs([event scrollingDeltaY]) /
+            ([event hasPreciseScrollingDeltas] ? AXYNE_UI_ROW : 1));
+        if ([event scrollingDeltaY] > 0) step = -step;
+        (void)axyne_outline_scroll_by(&_outline, (long)step, (int)section);
+        [self setNeedsDisplay:YES];
+        return;
+    }
     CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
-    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
+    CGFloat bottom = [self explorerTreeBottom];
     if (point.x < AXYNE_SIDEBAR && point.y >= top && point.y < bottom) {
         NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
         NSInteger maximum = MAX(0, (NSInteger)_explorer.count - visible);
@@ -1778,6 +1923,13 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     }
     if (point.x < AXYNE_SIDEBAR && point.y >= AXYNE_TOOLBAR + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM) {
+        if ([self pointIsInOutline:point]) {
+            /* Never a tree click: flush a pending rescan so the row maps to
+             * the current text, then jump. */
+            if (_outlineTimer != nil) [self refreshOutline];
+            [self jumpToOutlineSymbol:[self outlineSymbolAtPoint:point]];
+            return;
+        }
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
             _explorerSelection = row;
@@ -1802,7 +1954,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     NSInteger row = [self explorerNodeAtPoint:point];
-    if (point.x >= AXYNE_SIDEBAR || point.y < AXYNE_TOOLBAR + AXYNE_TABS ||
+    if ([self pointIsInOutline:point] || point.x >= AXYNE_SIDEBAR ||
+        point.y < AXYNE_TOOLBAR + AXYNE_TABS ||
         point.y >= NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM) {
         [super rightMouseDown:event];
         return;
@@ -2731,7 +2884,9 @@ else [_terminalInput setStringValue:@""];
     CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
         MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
-    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
+    CGFloat outlineHeight = [self outlineHeight];
+    (void)axyne_outline_set_scroll(&_outline, (long)_outline.first_row, (int)outlineHeight);
+    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - outlineHeight - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
     BOOL terminal = _panelMode == 2;
@@ -2815,6 +2970,65 @@ else [_terminalInput setStringValue:@""];
         NSParagraphStyleAttributeName:style}];
 }
 
+/* Explorer outline: 9px separator band with a 1px line, a 30px header and
+ * 22px symbol rows (Figma 6:399). The symbol holding the caret is white. */
+- (void)drawOutlineAtTop:(CGFloat)top light:(BOOL)light reference:(BOOL)reference
+{
+    CGFloat height = [self outlineHeight];
+    if (height <= 0) return;
+    char header[256];
+    CGFloat rowsTop = top + AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER;
+    NSColor *muted = axyne_preference_color(_preferences.theme.muted);
+    NSColor *normal = axyne_preference_color(light ? 0x24272d : 0xc4c8ce);
+    NSColor *active = axyne_preference_color(light ? 0x111317 : 0xffffff);
+    [axyne_preference_color(reference ? 0x2a2d33 : _preferences.theme.border) setFill];
+    NSRectFill(NSMakeRect(0, top + 4, AXYNE_SIDEBAR - 1, 1));
+    axyne_outline_header(&_outline, header, sizeof(header));
+    NSString *title = [NSString stringWithUTF8String:header];
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(NSMakeRect(0, top + AXYNE_OUTLINE_SEPARATOR, AXYNE_SIDEBAR - 1, AXYNE_OUTLINE_HEADER));
+    [self drawLabel:title != nil ? title : @"개요"
+        at:NSMakePoint(12, top + AXYNE_OUTLINE_SEPARATOR + 8) size:11
+        color:axyne_preference_color(light ? 0x68707d : 0x8b919b) family:@"SF Pro Text"];
+    [NSGraphicsContext restoreGraphicsState];
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(NSMakeRect(0, rowsTop, AXYNE_SIDEBAR - 1, MAX(0, height - (rowsTop - top))));
+    if (_outline.state == AXYNE_OUTLINE_SYMBOLS) {
+        NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+        NSInteger caretLine = [self sendEditorMessage:SCI_LINEFROMPOSITION
+            wParam:(uintptr_t)(caret < 0 ? 0 : caret) lParam:0] + 1;
+        long current = axyne_outline_symbol_for_line(&_outline, (size_t)caretLine);
+        size_t visible = axyne_outline_visible_rows((int)height);
+        NSMutableParagraphStyle *center = [[[NSMutableParagraphStyle alloc] init] autorelease];
+        [center setAlignment:NSTextAlignmentCenter];
+        for (size_t k = 0; k < visible; ++k) {
+            size_t i = _outline.first_row + k;
+            if (i >= _outline.symbols.count) break;
+            const AxyneSymbol *symbol = &_outline.symbols.items[i];
+            CGFloat y = rowsTop + (CGFloat)k * AXYNE_OUTLINE_ROW;
+            char glyph[2] = { axyne_outline_glyph(symbol->kind), '\0' };
+            [[NSString stringWithUTF8String:glyph] drawInRect:NSMakeRect(
+                AXYNE_OUTLINE_PAD_LEFT, y + 4, AXYNE_OUTLINE_GLYPH_WIDTH, 14)
+                withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9],
+                    NSForegroundColorAttributeName:
+                        axyne_preference_color(axyne_outline_glyph_color(symbol->kind)),
+                    NSParagraphStyleAttributeName:center}];
+            NSString *name = [NSString stringWithUTF8String:symbol->name];
+            [self drawLabel:name != nil ? name : @"(invalid name)"
+                at:NSMakePoint(AXYNE_OUTLINE_PAD_LEFT + AXYNE_OUTLINE_GLYPH_WIDTH +
+                    AXYNE_OUTLINE_GLYPH_GAP, y + 3)
+                size:12 color:(long)i == current ? active : normal family:@"SF Pro Text"];
+        }
+    } else {
+        const char *message = axyne_outline_message(_outline.state);
+        NSString *label = message != nil ? [NSString stringWithUTF8String:message] : nil;
+        if (label != nil)
+            [self drawLabel:label at:NSMakePoint(AXYNE_OUTLINE_PAD_LEFT, rowsTop + 3)
+                size:12 color:muted family:@"SF Pro Text"];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
     (void)dirtyRect;
@@ -2890,13 +3104,14 @@ else [_terminalInput setStringValue:@""];
         size:11 color:axyne_preference_color(light ? 0x68707d : 0x8b919b) family:@"SF Pro Text"];
     CGFloat explorerY = editorTop + AXYNE_UI_EXPLORER_HEADER;
     [NSGraphicsContext saveGraphicsState];
-    NSRectClip(NSMakeRect(0, explorerY, AXYNE_SIDEBAR - 1, MAX(0, bottomTop - explorerY)));
+    CGFloat treeBottom = [self explorerTreeBottom];
+    NSRectClip(NSMakeRect(0, explorerY, AXYNE_SIDEBAR - 1, MAX(0, treeBottom - explorerY)));
     if (_explorer.root == NULL) {
         [self drawLabel:@"폴더 열기…" at:NSMakePoint(16, explorerY + 3)
             size:12 color:text family:@"SF Pro Text"];
     } else {
         for (size_t i = (size_t)_explorerFirstRow; i < _explorer.count &&
-            explorerY + AXYNE_UI_ROW <= bottomTop; ++i, explorerY += AXYNE_UI_ROW) {
+            explorerY + AXYNE_UI_ROW <= treeBottom; ++i, explorerY += AXYNE_UI_ROW) {
             AxyneExplorerNode *node = &_explorer.nodes[i];
             BOOL selectedRow = _hasExplorerSelection && _explorerSelection == (NSInteger)i;
             if (selectedRow) {
@@ -2921,6 +3136,7 @@ else [_terminalInput setStringValue:@""];
         }
     }
     [NSGraphicsContext restoreGraphicsState];
+    [self drawOutlineAtTop:treeBottom light:light reference:reference];
     NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"✗ 실행 실패 (%d)", _lastExitCode] :
         (_activeAction != 0 ? @"● 실행 중" : (_hasExitStatus ? @"✓ 실행 완료" : @"준비"));
     [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
@@ -2968,6 +3184,8 @@ else [_terminalInput setStringValue:@""];
         axyne_watcher_release(_watcher);
     }
     axyne_explorer_destroy(&_explorer);
+    [self cancelOutlineTimer];
+    axyne_outline_destroy(&_outline);
     [_recentMenu release];
     if (_editorView != nil) {
         for (size_t i = 0; i < _documents.count; ++i) {

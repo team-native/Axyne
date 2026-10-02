@@ -6,6 +6,7 @@
 #include "axyne/ui_design.h"
 #include "axyne/preferences.h"
 #include "axyne/document.h"
+#include "axyne/outline.h"
 
 @interface NSView (AxyneWorkspaceLayoutTest)
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
@@ -117,6 +118,37 @@ int main(void)
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, top - 1)] == NSNotFound);
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, bottom)] == NSNotFound);
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, 842 - AXYNE_UI_STATUS)] == NSNotFound);
+
+        /* The outline takes the bottom of the explorer column: the tree ends
+         * above it and an outline click is never a tree hit. */
+        AxyneOutline *outline = value_field(view, "_outline");
+        CHECK(outline != NULL);
+        {
+            const char outlineText[] = "int a;\nint b;\nint f(void) { return 0; }\n"
+                "struct S { int x; };\n";
+            CGFloat explorerHeight = bottom - AXYNE_UI_TOOLBAR - AXYNE_UI_TABS;
+            CHECK(axyne_outline_prepare(outline, "main.c", sizeof(outlineText) - 1) != 0);
+            CHECK(axyne_outline_scan(outline, outlineText, sizeof(outlineText) - 1, NULL) ==
+                  AXYNE_STATUS_OK);
+            CHECK(outline->symbols.count >= 3);
+            [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
+            int section = axyne_outline_height(outline, (int)explorerHeight);
+            CHECK(section == AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER +
+                  (int)outline->symbols.count * AXYNE_OUTLINE_ROW);
+            CHECK(section <= explorerHeight * 0.4);
+            CGFloat treeBottom = bottom - section;
+            NSInteger lastRow = (NSInteger)((treeBottom - top) / AXYNE_UI_ROW) - 1;
+            CHECK(lastRow > 0);
+            CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + lastRow * AXYNE_UI_ROW)] == lastRow);
+            CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + (lastRow + 1) * AXYNE_UI_ROW)] == NSNotFound);
+            CHECK([view explorerNodeAtPoint:NSMakePoint(80, treeBottom)] == NSNotFound);
+            CHECK([view explorerNodeAtPoint:NSMakePoint(80, bottom - 1)] == NSNotFound);
+            CHECK([view explorerNodeAtPoint:NSMakePoint(80, top)] == 0);
+            axyne_outline_clear(outline);
+            [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
+            CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + (lastRow + 1) * AXYNE_UI_ROW)] ==
+                  lastRow + 1);
+        }
 
         /* A reload after external deletions clamps the old scroll position. */
         NSInteger *firstRow = value_field(view, "_explorerFirstRow");
