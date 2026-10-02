@@ -568,6 +568,10 @@ static void axyne_update_line_number_margin(AxyneWindowState *state)
     LRESULT line_count;
     LRESULT width;
     if (state == NULL || state->editor == NULL) return;
+    if (!state->preferences.editor.line_numbers) {
+        SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, 0);
+        return;
+    }
     line_count = SendMessageA(state->editor, SCI_GETLINECOUNT, 0, 0);
     if (line_count < 1) line_count = 1;
     (void)snprintf(digits, sizeof(digits), "%lld", (long long)line_count);
@@ -576,6 +580,19 @@ static void axyne_update_line_number_margin(AxyneWindowState *state)
     /* Figma gutter: a 52px column with right-aligned numbers. */
     if (width + 10 < 52) width = 42;
     SendMessageA(state->editor, SCI_SETMARGINWIDTHN, 0, width + 10);
+}
+
+/* Subtle current-line tint: editor background nudged 8% toward the text. */
+static uint32_t axyne_caret_line_color(const AxyneThemePreferences *theme)
+{
+    uint32_t result = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+        uint32_t back = (theme->editor_background >> shift) & 0xffu;
+        uint32_t text = (theme->editor_text >> shift) & 0xffu;
+        uint32_t mixed = (back * 92u + text * 8u) / 100u;
+        result |= (mixed & 0xffu) << shift;
+    }
+    return result;
 }
 
 static int axyne_is_brace(int character)
@@ -625,6 +642,7 @@ static void axyne_auto_indent(AxyneWindowState *state,
     unsigned int tab_width;
     if (state == NULL || state->editor == NULL || notification == NULL)
         return;
+    if (!state->preferences.editor.auto_indent) return;
     tab_width = state->preferences.editor.tab_width;
     if (tab_width == 0) tab_width = 4;
     if (notification->ch == '\n') {
@@ -725,6 +743,16 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     SendMessageA(state->editor, SCI_SETWRAPMODE, state->preferences.editor.word_wrap ? 1 : 0, 0);
     SendMessageA(state->editor, SCI_SETVIEWWS, state->preferences.editor.show_whitespace ? 1 : 0, 0);
     axyne_apply_editor_lexer(state, axyne_active(state));
+    SendMessageA(state->editor, SCI_SETCARETLINEBACK,
+                 (WPARAM)axyne_theme_color(axyne_caret_line_color(&state->preferences.theme)), 0);
+    SendMessageA(state->editor, SCI_SETCARETLINEVISIBLE,
+                 state->preferences.editor.highlight_current_line ? 1 : 0, 0);
+    {
+        int technology = state->preferences.editor.rendering == AXYNE_RENDERING_GDI
+            ? SC_TECHNOLOGY_DEFAULT : SC_TECHNOLOGY_DIRECTWRITE;
+        if (SendMessageA(state->editor, SCI_GETTECHNOLOGY, 0, 0) != technology)
+            SendMessageA(state->editor, SCI_SETTECHNOLOGY, (WPARAM)technology, 0);
+    }
     axyne_update_line_number_margin(state);
     axyne_update_brace_highlight(state);
     free(font_name);
