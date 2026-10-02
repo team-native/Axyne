@@ -52,6 +52,16 @@ jobs:
         if: runner.os == 'macOS'
         run: ctest --test-dir build --output-on-failure
 
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $env:Path = "C:\Program Files (x86)\NSIS;$env:Path"
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            throw 'NSIS compiler was not installed.'
+          }
+
       - name: Package Windows app output
         if: runner.os == 'Windows'
         id: package-windows
@@ -61,9 +71,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stagingDirectory, $packageDirectory | Out-Null
           cmake --install build --config Release --prefix $stagingDirectory
           cmake `
-            -DAXYNE_INSTALL_ROOT=$stagingDirectory `
-            -DAXYNE_PLATFORM=Windows `
-            -DAXYNE_CONFIGURATION=Release `
+            "-DAXYNE_INSTALL_ROOT=$stagingDirectory" `
+            '-DAXYNE_PLATFORM=Windows' `
+            '-DAXYNE_CONFIGURATION=Release' `
             -P packaging/validation/validate-install.cmake
           cpack --config build/CPackConfig.cmake -C Release -B $packageDirectory
 
