@@ -85,10 +85,11 @@ int main(void)
             lexilla_attributes = GetFileAttributesW(module_path);
         }
         fprintf(stderr, "Scintilla editor creation failed: scintilla=%p lexilla=%p "
-                        "lexer=%p error=%lu load_error=%lu files=%lu/%lu\n",
+                        "lexer=%p error=%lu load_error=%lu stage=%d files=%lu/%lu\n",
                 (void *)state->scintilla_module, (void *)state->lexilla_module,
                 (void *)state->create_lexer, (unsigned long)GetLastError(),
                 (unsigned long)AXYNE_RUNTIME_LOAD_ERROR,
+                AXYNE_RUNTIME_FAILURE_STAGE,
                 (unsigned long)scintilla_attributes,
                 (unsigned long)lexilla_attributes);
     }

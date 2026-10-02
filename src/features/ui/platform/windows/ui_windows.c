@@ -90,6 +90,7 @@ static COLORREF AXYNE_POPUP_SEPARATOR;
 static COLORREF AXYNE_POPUP_CHECK;
 static HBRUSH AXYNE_POPUP_BRUSH;
 static DWORD AXYNE_RUNTIME_LOAD_ERROR;
+static int AXYNE_RUNTIME_FAILURE_STAGE;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
@@ -3321,6 +3322,7 @@ static HMODULE axyne_load_runtime_library(const wchar_t *name)
     size_t directory_length;
     if (module != NULL) return module;
     AXYNE_RUNTIME_LOAD_ERROR = GetLastError();
+    AXYNE_RUNTIME_FAILURE_STAGE = 1;
     path = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
         AXYNE_MODULE_PATH_CAPACITY * sizeof(*path));
     if (path == NULL) return NULL;
@@ -3360,6 +3362,7 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
         (AxyneRegisterScintilla)(uintptr_t)GetProcAddress(
             state->scintilla_module, "Scintilla_RegisterClasses");
     if (register_classes == NULL || !register_classes(instance)) {
+        AXYNE_RUNTIME_FAILURE_STAGE = register_classes == NULL ? 2 : 3;
         FreeLibrary(state->scintilla_module);
         state->scintilla_module = NULL;
         return;
@@ -3369,6 +3372,7 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
         0, L"Scintilla", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, NULL, instance, NULL);
     if (state->editor == NULL) {
+        AXYNE_RUNTIME_FAILURE_STAGE = 4;
         FreeLibrary(state->scintilla_module);
         state->scintilla_module = NULL;
         return;
