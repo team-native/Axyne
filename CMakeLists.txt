@@ -249,6 +249,11 @@ foreach(AXYNE_FEATURE_MODULE IN LISTS AXYNE_FEATURE_MODULES)
     include("${AXYNE_FEATURE_MODULE}")
 endforeach()
 
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
+
 if(WIN32 OR APPLE)
     set(CPACK_PACKAGE_NAME "${AXYNE_DISPLAY_NAME}")
     set(CPACK_PACKAGE_VENDOR "${AXYNE_AUTHOR}")
