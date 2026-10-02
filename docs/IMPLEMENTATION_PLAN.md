@@ -54,6 +54,12 @@
 | Workspace search and quick file | Select a root with the native folder picker; recursively match text or file names; skip binary and unreadable files; read one file at a time. Quick File matches names by case-insensitive substring and opens the selected file through the document manager. | AGENT_PARAMETER | ASSUMED |
 | Explorer tree ordering | Immediate children are displayed with directories first, then files, and names sorted lexicographically; the order is rebuilt after filesystem events. | AGENT_PARAMETER | ASSUMED |
 | Workspace selection lifetime | The selected workspace root and expanded tree state remain session-only; no project/workspace file is persisted. | USER + AGENT_PARAMETER | ASSUMED |
+| LSP server startup | Creating an LSP client is inert; `start`, `didOpen`, and request hooks start the configured local language-server process lazily, perform `initialize`/`initialized`, queue hooks issued during initialization, and terminate the process on release. There is no automatic restart. | AGENT_PARAMETER (GRANT/GUESS) | ASSUMED |
+| LSP document synchronization | LSP-1 sends full-text `didOpen`, `didChange`, and `didClose` notifications from the current `AxyneDocument` snapshot. Changes are explicitly driven by the editor/document integration hook, versions start at 1, and untitled documents are rejected. | AGENT_PARAMETER (GRANT/GUESS) | ASSUMED |
+| LSP diagnostics and navigation hooks | Diagnostics, completion, definition, and references results are delivered through borrowed callback arrays on the process callback thread; Windows and macOS adapters are responsible for marshalling callbacks to their UI thread and applying UTF-16 editor positions. | AGENT_PARAMETER (GRANT/GUESS) | ASSUMED |
+| LSP protocol scope | LSP-1 implements LSP 3.17-style JSON-RPC 2.0 initialization, `Content-Length` framing, document sync, publish-diagnostics notifications, completion, definition, and references requests. It does not add plugin, server-management, account, marketplace, or remote-service behavior. | AGENT_PARAMETER (GRANT/GUESS) | ASSUMED |
+| LSP language and URI inputs | The caller supplies the local executable, arguments, working directory, language identifier, optional filesystem workspace root, and optional JSON initialization options; filesystem document paths are converted to `file:` URIs. A missing language identifier uses `plaintext`. | AGENT_PARAMETER (GRANT/GUESS) | ASSUMED |
+| LSP framing and failure limits | Server stderr is ignored as non-protocol output, one framed message is capped at 16 MiB, malformed protocol/process failures use the error callback, and the client does not restart a failed server. | AGENT_PARAMETER (GRANT/GUESS) | ASSUMED |
 | Windows reparse-point directories | Explorer and its watcher enumerate/open Windows directories through the shared root-to-component handle traversal with `FILE_FLAG_OPEN_REPARSE_POINT`; it rejects a reparse-point workspace root, omits child reparse-point directories, and fails closed when handle opening, UTF-8 conversion, allocation, or handle enumeration is uncertain. A directory handle is revalidated before its entries are traversed, so a path swap cannot redirect an already-open traversal. | USER + AGENT_PARAMETER | ASSUMED |
 | macOS workspace roots | Explorer and its FSEvents watcher reject symbolic-link roots. POSIX directory listing and watcher startup use the shared root-to-component FD traversal with `openat(..., O_NOFOLLOW | O_DIRECTORY)` so intermediate symlinks are not followed during verification; directory entry metadata is read relative to the verified listing FD, and FSEvents paths are revalidated against that anchored root before callbacks are forwarded. The watcher retains the verified directory FD. | AGENT_PARAMETER | ASSUMED |
 | Symbol navigation | Deferred to LSP-1; SEARCH-1 does not provide symbol search without an integrated symbol server. | USER | CONFIRMED |
@@ -79,6 +85,15 @@
 - Terminal output callbacks are marshalled onto the native UI thread; stdout and stderr remain visible in one bounded output view with stderr marked. Stop requests termination, Send writes one line, and window teardown releases the process handle after callbacks have drained.
 - The VCS-1 Git service resolves `git` through the inherited process PATH and captures both output streams without invoking a shell. It runs only after an explicit Git menu action, uses the selected workspace root as its working directory, and returns the process exit code plus captured output. The Windows native UI starts Git asynchronously, marshals one bounded completion result to the UI thread, uses UTF-8 Git locale settings and wide Win32 text APIs for display, and cancels an active operation during window teardown. The initial local command set is `status --short --branch`, `--no-pager diff --no-color`, `add --all`, and `reset --mixed`; no remote, account, credential, hosting, commit, branch, or history flow is included.
 
+## LSP-1 implementation boundary and status
+
+- `axyne_lsp_create` copies the local process specification and callback hooks without starting a child. `did_open` and completion/definition/references hooks are lazy activation points; the client sends `initialize`/`initialized` before queued document notifications and requests.
+- The client uses the existing `AxyneProcess` contract for stdin/stdout/stderr and the existing `AxyneDocument` path/content snapshot for full-text synchronization. JSON-RPC messages use `Content-Length` framing and a bounded input buffer; no JSON or language-server dependency is bundled.
+- `publishDiagnostics` notifications are decoded into callback-scoped diagnostic arrays. `textDocument/completion`, `textDocument/definition`, and `textDocument/references` responses are decoded into callback-scoped completion items and locations, including both `Location` and `LocationLink`-style target fields. Native adapters can map these hooks to Scintilla indicators, completion lists, and navigation commands without moving native editor handles into shared C code.
+- LSP callbacks run on the process-owned worker thread. The client does not perform UI calls, automatically restart a failed server, discover/install a server, or initialize during application startup. Releasing the client terminates the managed process through the existing process tree contract.
+- Native Windows and macOS UI adapters expose LSP diagnostics and definition/references commands through the status bar. The current Scintilla/document adapters do not provide a shared URI-to-document/position navigation command, so definition and references report the returned location count and request id rather than opening a target; the limitation is intentional and confined to the UI adapter. The local server executable is supplied through `AXYNE_LSP_COMMAND` until a preferences surface exists.
+- Validation for this unit includes source-level C17 checks, `git diff --check`, and the available Windows build/check path. macOS compilation and runtime verification require a macOS host.
+
 ## Implementation units and dependencies
 
 | ID | Unit | Dependencies | Status |
@@ -97,17 +112,28 @@
 | RUN-1A | Session-local runner configuration model and process-spec projection | PROC-1 | COMPLETE (Windows Release build and diff checks passed) |
 | RUN-1B | Lazy native terminal session, input, stop, and output display | PROC-1, RUN-1A, UI-1 | COMPLETE (Windows Release build passed; macOS build/runtime pending macOS host) |
 | RUN-1C | Active-document/project build and run output integration | PROC-1, RUN-1A, RUN-1B, EDIT-1 | COMPLETE (RUN-1 fix pass source validation passed; Windows Release build unverified because this host has no native compiler; macOS build/runtime pending macOS host) |
-| LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | PENDING |
+| LSP-1 | Lazy JSON-RPC language-server client and diagnostics/navigation | PROC-1, EDIT-1 | COMPLETE (public C client, full-text document sync, diagnostics and definition hooks; `git diff --check` and available Windows checks passed; macOS build/runtime verification pending macOS host) |
 | VCS-1 | Lazy local Git integration | PROC-1, FS-1 | COMPLETE (shared external-Git service, Windows/AppKit menu actions, `git diff --check`, and Windows Release build passed) |
 | DBG-1 | External debugger launch, controls, breakpoints | PROC-1, EDIT-1 | PENDING |
 | PREF-1 | Global/workspace settings, themes, editor preferences, key bindings | BASE-1, UI-1 | PENDING |
-| PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | PENDING |
+| PACK-1 | Installer, uninstaller, offline version information and bundled release notes | BASE-1 | COMPLETE (CMake install manifest and CPack configuration implemented; native package generation remains host-tool dependent) |
 | AUDIT-1 | Full goal and cross-platform integration audit | All in-scope units | PENDING |
 
 ## Excluded from this goal
 
 Plugin sessions/manager and plugin marketplace, account/login, API/server implementations, and marketplace/developer web UI.
 Remote update checks and remote release-note retrieval are also excluded because they require server communication.
+
+## PACK-1 implementation assumptions
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Windows installer generator | CPack NSIS; the generated NSIS installer includes CPack's standard uninstaller and a Start Menu link to Axyne | AGENT_PARAMETER | ASSUMED |
+| macOS installer generators | CPack ProductBuild `.pkg` and DragNDrop `.dmg`; both place Axyne in `/Applications` when installed through their normal flow | AGENT_PARAMETER | ASSUMED |
+| macOS uninstaller delivery | Ship `Uninstall <bundle-name>.command` beside the app in the macOS package. It derives the bundle name from the CMake target output name, locates the adjacent app first, falls back to `/Applications`, asks for confirmation, and requests administrator authorization before removal. | AGENT_PARAMETER | ASSUMED |
+| Offline version metadata | Install a generated `version.json` containing product name, semantic version, author, release-note filename, and an `offline` marker. Windows stores it under `share/axyne`; macOS stores it in the app's Resources directory. | AGENT_PARAMETER | ASSUMED |
+| Bundled release notes | Install `docs/RELEASE_NOTES.md` beside Windows package metadata and inside the macOS app Resources directory; the same file is also used as CPack's package readme. | AGENT_PARAMETER | ASSUMED |
+| Packaging scope | Package the existing CMake target and its already-staged Scintilla runtime dependencies. Package only Release; reject Debug package requests. Do not add server, account, plugin, marketplace, remote-update, or runtime-bundling behavior. | USER + AGENT_PARAMETER | ASSUMED |
 
 ## UI-1 implementation boundary and status
 
