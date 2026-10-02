@@ -19,26 +19,29 @@ else()
 endif()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+# The no-follow filesystem contract requires canonical parent components.
+# macOS aliases such as /tmp must not make otherwise valid fixtures fail.
+file(REAL_PATH "${CMAKE_CURRENT_BINARY_DIR}/fixtures" AXYNE_TEST_FIXTURE_DIR)
 add_test(
     NAME axyne-documents-search
     COMMAND $<TARGET_FILE:axyne_tests> documents-search
-            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/documents-search"
+            "${AXYNE_TEST_FIXTURE_DIR}/documents-search"
 )
 add_test(
     NAME axyne-settings-preferences
     COMMAND $<TARGET_FILE:axyne_tests> settings-preferences
-            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/settings-preferences"
+            "${AXYNE_TEST_FIXTURE_DIR}/settings-preferences"
 )
 add_test(
     NAME axyne-runner-git-lsp
     COMMAND $<TARGET_FILE:axyne_tests> runner-git-lsp
-            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/runner-git-lsp"
+            "${AXYNE_TEST_FIXTURE_DIR}/runner-git-lsp"
             "${CMAKE_SOURCE_DIR}"
 )
 add_test(
     NAME axyne-process-stability
     COMMAND $<TARGET_FILE:axyne_tests> process-stability
-            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/process-stability"
+            "${AXYNE_TEST_FIXTURE_DIR}/process-stability"
 )
 set_tests_properties(
     axyne-documents-search
@@ -47,6 +50,14 @@ set_tests_properties(
     axyne-process-stability
     PROPERTIES TIMEOUT 60
 )
+
+if(NOT WIN32)
+    add_executable(axyne_workspace_safety_tests test_workspace_safety_posix.c)
+    target_link_libraries(axyne_workspace_safety_tests PRIVATE axyne_core)
+    target_compile_options(axyne_workspace_safety_tests PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME axyne-workspace-safety COMMAND $<TARGET_FILE:axyne_workspace_safety_tests>)
+    set_tests_properties(axyne-workspace-safety PROPERTIES TIMEOUT 60)
+endif()
 
 if(APPLE)
     # Exercise the production AppKit adapter in a bundle with the same native
