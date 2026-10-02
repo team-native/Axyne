@@ -3,9 +3,11 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
 
 #include "axyne/document.h"
 #include "axyne/search.h"
@@ -44,6 +46,8 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     NSBundle *_scintillaBundle;
+    void *_lexillaModule;
+    void *(*_createLexer)(const char *name);
     AxyneDocumentSet _documents;
     AxyneExplorer _explorer;
     AxyneWatcher *_watcher;
@@ -140,6 +144,34 @@ static char *axyne_macos_workspace_preferences_path(const char *root)
     return strdup([path UTF8String]);
 }
 
+static const char *axyne_macos_editor_lexer(const char *path)
+{
+    const char *extension;
+    const char *slash;
+    if (path == NULL || path[0] == '\0') return "cpp";
+    extension = strrchr(path, '.');
+    slash = strrchr(path, '/');
+    if (extension == NULL || (slash != NULL && extension < slash)) return "cpp";
+    if (strcasecmp(extension, ".c") == 0 || strcasecmp(extension, ".h") == 0 ||
+        strcasecmp(extension, ".cc") == 0 || strcasecmp(extension, ".cpp") == 0 ||
+        strcasecmp(extension, ".cxx") == 0 || strcasecmp(extension, ".hpp") == 0 ||
+        strcasecmp(extension, ".m") == 0 || strcasecmp(extension, ".mm") == 0)
+        return "cpp";
+    if (strcasecmp(extension, ".py") == 0) return "python";
+    if (strcasecmp(extension, ".js") == 0 || strcasecmp(extension, ".jsx") == 0 ||
+        strcasecmp(extension, ".ts") == 0 || strcasecmp(extension, ".tsx") == 0)
+        return "javascript";
+    if (strcasecmp(extension, ".json") == 0) return "json";
+    if (strcasecmp(extension, ".html") == 0 || strcasecmp(extension, ".htm") == 0 ||
+        strcasecmp(extension, ".xml") == 0) return "hypertext";
+    if (strcasecmp(extension, ".css") == 0) return "css";
+    if (strcasecmp(extension, ".sh") == 0 || strcasecmp(extension, ".bash") == 0)
+        return "bash";
+    if (strcasecmp(extension, ".md") == 0 || strcasecmp(extension, ".markdown") == 0)
+        return "markdown";
+    return "null";
+}
+
 static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
                                         AxynePreferenceAction action,
                                         NSString *key, NSEvent *event)
@@ -211,6 +243,10 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)showWorkspacePreferences:(id)sender;
 - (void)applyPreferences;
 - (void)applySystemAppearance;
+- (void)applyEditorLexer;
+- (void)updateLineNumberMargin;
+- (void)updateBraceHighlight;
+- (void)autoIndentFromNotification:(SCNotification *)notification;
 - (BOOL)showPreferences:(BOOL)workspace;
 - (void)showGitStatus:(id)sender;
 - (void)showGitDiff:(id)sender;
@@ -602,6 +638,124 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     return [_editorView message:message wParam:wParam lParam:lParam];
 }
 
+- (void)applyEditorLexer
+{
+    AxyneDocument *document = [self activeDocument];
+    const char *language = axyne_macos_editor_lexer(
+        document == NULL ? NULL : document->path);
+    void *lexer;
+    if (_editorView == nil || _createLexer == NULL) return;
+    lexer = _createLexer(language);
+    if (lexer == NULL && strcmp(language, "null") != 0)
+        lexer = _createLexer("null");
+    if (lexer != NULL) {
+        (void)[self sendEditorMessage:SCI_SETILEXER wParam:0
+                                 lParam:(intptr_t)lexer];
+        (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
+    }
+}
+
+- (void)updateLineNumberMargin
+{
+    NSInteger lineCount;
+    NSInteger width;
+    char digits[32];
+    if (_editorView == nil) return;
+    lineCount = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
+    if (lineCount < 1) lineCount = 1;
+    (void)snprintf(digits, sizeof(digits), "%lld", (long long)lineCount);
+    width = [self sendEditorMessage:SCI_TEXTWIDTH wParam:33
+                              lParam:(intptr_t)digits];
+    if (width < 1) width = 32;
+    (void)[self sendEditorMessage:SCI_SETMARGINWIDTHN wParam:0
+                             lParam:width + 10];
+}
+
+- (void)updateBraceHighlight
+{
+    NSInteger caret;
+    NSInteger brace = -1;
+    NSInteger match;
+    if (_editorView == nil) return;
+    caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    if (caret >= 0) {
+        int character = (int)[self sendEditorMessage:SCI_GETCHARAT
+            wParam:(uintptr_t)caret lParam:0];
+        if (character == '{' || character == '}' || character == '(' ||
+            character == ')' || character == '[' || character == ']')
+            brace = caret;
+    }
+    if (brace < 0 && caret > 0) {
+        int character = (int)[self sendEditorMessage:SCI_GETCHARAT
+            wParam:(uintptr_t)(caret - 1) lParam:0];
+        if (character == '{' || character == '}' || character == '(' ||
+            character == ')' || character == '[' || character == ']')
+            brace = caret - 1;
+    }
+    if (brace < 0) {
+        (void)[self sendEditorMessage:SCI_BRACEHIGHLIGHT wParam:(uintptr_t)-1
+                                 lParam:-1];
+        return;
+    }
+    match = [self sendEditorMessage:SCI_BRACEMATCH wParam:(uintptr_t)brace
+                              lParam:0];
+    if (match >= 0)
+        (void)[self sendEditorMessage:SCI_BRACEHIGHLIGHT
+                                 wParam:(uintptr_t)brace lParam:match];
+    else
+        (void)[self sendEditorMessage:SCI_BRACEBADLIGHT
+                                 wParam:(uintptr_t)brace lParam:0];
+}
+
+- (void)autoIndentFromNotification:(SCNotification *)notification
+{
+    NSInteger line;
+    NSInteger previousLine;
+    NSInteger indentation;
+    NSInteger lineStart;
+    NSInteger previousStart;
+    NSInteger position;
+    unsigned int tabWidth = _preferences.editor.tab_width;
+    int lastCharacter = 0;
+    if (_editorView == nil || notification == NULL) return;
+    if (tabWidth == 0) tabWidth = 4;
+    if (notification->ch == '\n') {
+        line = [self sendEditorMessage:SCI_LINEFROMPOSITION
+                                 wParam:(uintptr_t)(notification->position + 1)
+                                 lParam:0];
+        if (line <= 0) return;
+        previousLine = line - 1;
+        indentation = [self sendEditorMessage:SCI_GETLINEINDENTATION
+            wParam:(uintptr_t)previousLine lParam:0];
+        lineStart = [self sendEditorMessage:SCI_POSITIONFROMLINE
+            wParam:(uintptr_t)line lParam:0];
+        previousStart = [self sendEditorMessage:SCI_POSITIONFROMLINE
+            wParam:(uintptr_t)previousLine lParam:0];
+        position = lineStart - 1;
+        while (position >= previousStart) {
+            int character = (int)[self sendEditorMessage:SCI_GETCHARAT
+                wParam:(uintptr_t)position lParam:0];
+            if (character != ' ' && character != '\t' && character != '\r' &&
+                character != '\n') {
+                lastCharacter = character;
+                break;
+            }
+            --position;
+        }
+        if (lastCharacter == '{') indentation += (NSInteger)tabWidth;
+        (void)[self sendEditorMessage:SCI_SETLINEINDENTATION
+            wParam:(uintptr_t)line lParam:indentation];
+    } else if (notification->ch == '}') {
+        line = [self sendEditorMessage:SCI_LINEFROMPOSITION
+            wParam:(uintptr_t)notification->position lParam:0];
+        indentation = [self sendEditorMessage:SCI_GETLINEINDENTATION
+            wParam:(uintptr_t)line lParam:0];
+        if (indentation >= (NSInteger)tabWidth)
+            (void)[self sendEditorMessage:SCI_SETLINEINDENTATION
+                wParam:(uintptr_t)line lParam:indentation - tabWidth];
+    }
+}
+
 - (void)applyPreferences
 {
     [self applySystemAppearance];
@@ -622,12 +776,32 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
                               lParam:(intptr_t)_preferences.theme.editor_text];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:32
                               lParam:(intptr_t)_preferences.theme.editor_background];
+        [self sendEditorMessage:SCI_STYLESETFORE wParam:33
+                              lParam:(intptr_t)_preferences.theme.muted];
+        [self sendEditorMessage:SCI_STYLESETBACK wParam:33
+                              lParam:(intptr_t)_preferences.theme.panel];
+        [self sendEditorMessage:SCI_STYLESETFORE wParam:STYLE_BRACELIGHT
+                              lParam:(intptr_t)_preferences.theme.editor_text];
+        [self sendEditorMessage:SCI_STYLESETBACK wParam:STYLE_BRACELIGHT
+                              lParam:(intptr_t)_preferences.theme.accent];
+        [self sendEditorMessage:SCI_STYLESETFORE wParam:STYLE_BRACEBAD
+                              lParam:(intptr_t)_preferences.theme.editor_text];
+        [self sendEditorMessage:SCI_STYLESETBACK wParam:STYLE_BRACEBAD
+                              lParam:(intptr_t)_preferences.theme.accent];
+        [self sendEditorMessage:SCI_SETSELFORE wParam:0
+                              lParam:(intptr_t)_preferences.theme.editor_text];
+        [self sendEditorMessage:SCI_SETSELBACK wParam:1
+                              lParam:(intptr_t)_preferences.theme.accent];
+        [self sendEditorMessage:SCI_SETCARETFORE wParam:0
+                              lParam:(intptr_t)_preferences.theme.accent];
         [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
         [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
         [self sendEditorMessage:SCI_SETWRAPMODE wParam:_preferences.editor.word_wrap ? 1 : 0 lParam:0];
         [self sendEditorMessage:SCI_SETVIEWWS wParam:_preferences.editor.show_whitespace ? 1 : 0 lParam:0];
+        [self updateLineNumberMargin];
+        [self updateBraceHighlight];
     }
     [self setNeedsDisplay:YES];
 }
@@ -792,6 +966,9 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
             lParam:(intptr_t)doc->native_editor_document];
     }
     _loadingEditor = NO;
+    [self applyEditorLexer];
+    [self updateLineNumberMargin];
+    [self updateBraceHighlight];
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
@@ -812,6 +989,12 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
 {
     AxyneDocument *doc = [self activeDocument];
     if (_loadingEditor || notification == NULL || doc == NULL) return;
+    if (notification->nmhdr.code == SCN_CHARADDED)
+        [self autoIndentFromNotification:notification];
+    if (notification->nmhdr.code == SCN_UPDATEUI) {
+        [self updateLineNumberMargin];
+        [self updateBraceHighlight];
+    }
     if (notification->nmhdr.code == SCN_MODIFIED &&
         [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0) {
         if (!doc->is_dirty) {
@@ -1254,8 +1437,36 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
         _editorView = [[scintillaClass alloc] initWithFrame:NSZeroRect];
         [(id)_editorView setDelegate:self];
         [_editorView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+        [_editorView setAccessibilityElement:YES];
+        [_editorView setAccessibilityRole:NSAccessibilityTextAreaRole];
+        [_editorView setAccessibilityLabel:@"Source editor"];
+        [_editorView setAccessibilityRoleDescription:@"source editor"];
+        [_editorView setFocusRingType:NSFocusRingTypeExterior];
+        (void)[self sendEditorMessage:SCI_SETMARGINTYPEN wParam:0
+                                 lParam:SC_MARGIN_NUMBER];
+        (void)[self sendEditorMessage:SCI_SETMARGINMASKN wParam:0 lParam:0];
+        (void)[self sendEditorMessage:SCI_SETMARGINSENSITIVEN wParam:0 lParam:0];
+        (void)[self sendEditorMessage:SCI_STYLECLEARALL wParam:0 lParam:0];
+        (void)[self sendEditorMessage:SCI_SETINDENTATIONGUIDES
+                                 wParam:SC_IV_LOOKBOTH lParam:0];
+        (void)[self sendEditorMessage:SCI_SETBACKSPACEUNINDENTS wParam:1 lParam:0];
+        (void)[self sendEditorMessage:SCI_SETTABINDENTS wParam:1 lParam:0];
         [self addSubview:_editorView];
         [self setNeedsLayout:YES];
+
+        NSString *lexillaPath = [[NSBundle mainBundle]
+            pathForResource:@"Lexilla" ofType:@"dylib" inDirectory:@"Frameworks"];
+        if (lexillaPath != nil) {
+            _lexillaModule = dlopen([lexillaPath fileSystemRepresentation],
+                                    RTLD_NOW | RTLD_LOCAL);
+            if (_lexillaModule != NULL)
+                _createLexer = (void *(*)(const char *))dlsym(
+                    _lexillaModule, "CreateLexer");
+            if (_createLexer == NULL && _lexillaModule != NULL) {
+                dlclose(_lexillaModule);
+                _lexillaModule = NULL;
+            }
+        }
     }
 }
 
@@ -1264,7 +1475,8 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     [super viewDidMoveToWindow];
     [self loadScintillaView];
     [self applyPreferences];
-    [self loadActiveDocument];
+    if ([self loadActiveDocument] && _editorView != nil && [self window] != nil)
+        [[self window] makeFirstResponder:_editorView];
 }
 
 - (void)mouseDown:(NSEvent *)event
@@ -2413,6 +2625,7 @@ else [_terminalInput setStringValue:@""];
     [_debugBreakpoint release];
     axyne_debugger_destroy(&_debugger);
     [_lspStatus release];
+    if (_lexillaModule != NULL) dlclose(_lexillaModule);
     [_scintillaBundle unload];
     [_scintillaBundle release];
     free(_globalPreferencesPath);
@@ -2563,7 +2776,23 @@ static void axyne_install_menu(NSApplication *application,
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
         NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
-        if ([title isEqualToString:@"Build"]) {
+        if ([title isEqualToString:@"Edit"]) {
+            [submenu addItemWithTitle:@"Undo" action:@selector(undo:)
+                         keyEquivalent:@"z"];
+            NSMenuItem *redo = [submenu addItemWithTitle:@"Redo"
+                action:@selector(redo:) keyEquivalent:@"Z"];
+            [redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
+                                          NSEventModifierFlagShift];
+            [submenu addItem:[NSMenuItem separatorItem]];
+            [submenu addItemWithTitle:@"Cut" action:@selector(cut:)
+                         keyEquivalent:@"x"];
+            [submenu addItemWithTitle:@"Copy" action:@selector(copy:)
+                         keyEquivalent:@"c"];
+            [submenu addItemWithTitle:@"Paste" action:@selector(paste:)
+                         keyEquivalent:@"v"];
+            [submenu addItemWithTitle:@"Select All" action:@selector(selectAll:)
+                         keyEquivalent:@"a"];
+        } else if ([title isEqualToString:@"Build"]) {
             NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
                 action:@selector(buildDocument:) keyEquivalent:@"b"];
             NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
