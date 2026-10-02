@@ -3156,7 +3156,7 @@ static void axyne_palette_refresh(HWND window, AxyneWindowState *state)
     POINT origin;
     int width, height;
     HRGN region;
-    if (!state->palette.active || state->palette_popup == NULL) return;
+    if (!state->palette.active || state->palette_popup == NULL || IsIconic(window)) return;
     rect = axyne_palette_popup_rect(window, state);
     width = rect.right - rect.left;
     height = rect.bottom - rect.top;
