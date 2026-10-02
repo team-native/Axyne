@@ -19,6 +19,7 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/ui_design.h"
 #include "Scintilla.h"
 
 @interface NSObject (AxyneScintillaMessages)
@@ -26,17 +27,55 @@
                lParam:(intptr_t)lParam;
 @end
 
-static const CGFloat AXYNE_SIDEBAR = 248.0;
+static const CGFloat AXYNE_SIDEBAR = AXYNE_UI_SIDEBAR;
 /* These bands follow the 1440x900 Figma work area: toolbar 38px, tabs 34px,
  * output panel 230px, and status bar 24px. The macOS titlebar remains owned
  * by AppKit so its traffic-light controls stay native and accessible. */
-static const CGFloat AXYNE_TOOLBAR = 38.0;
-static const CGFloat AXYNE_TABS = 34.0;
-static const CGFloat AXYNE_STATUS = 24.0;
-static const CGFloat AXYNE_BOTTOM = 230.0;
+static const CGFloat AXYNE_TOOLBAR = AXYNE_UI_TOOLBAR;
+static const CGFloat AXYNE_TABS = AXYNE_UI_TABS;
+static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
+static const CGFloat AXYNE_BOTTOM = AXYNE_UI_PANEL;
 
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
+
+/* Native buttons keep AppKit's actions and accessibility while drawing the
+ * flat, precisely centered Figma toolbar rather than an OS bezel. */
+@interface AxyneChromeButton : NSButton
+@property(nonatomic, retain) NSColor *fillColor;
+@property(nonatomic, retain) NSColor *labelColor;
+@end
+
+@implementation AxyneChromeButton
+@synthesize fillColor = _fillColor, labelColor = _labelColor;
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    NSRect bounds = [self bounds];
+    if (_fillColor != nil) {
+        [_fillColor setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:3 yRadius:3] fill];
+    }
+    if ([[self cell] isHighlighted]) {
+        [[NSColor colorWithWhite:1 alpha:0.08] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:3 yRadius:3] fill];
+    }
+    NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [style setAlignment:NSTextAlignmentCenter];
+    [style setLineBreakMode:NSLineBreakByTruncatingTail];
+    NSColor *color = _labelColor != nil ? _labelColor : [NSColor labelColor];
+    if (![self isEnabled]) color = [color colorWithAlphaComponent:0.45];
+    NSDictionary *attributes = @{NSFontAttributeName:[self font],
+        NSForegroundColorAttributeName:color, NSParagraphStyleAttributeName:style};
+    CGFloat height = [[self title] sizeWithAttributes:attributes].height;
+    [[self title] drawInRect:NSMakeRect(4, (NSHeight(bounds) - height) / 2,
+        MAX(0, NSWidth(bounds) - 8), height) withAttributes:attributes];
+}
+- (void)dealloc
+{
+    [_fillColor release]; [_labelColor release]; [super dealloc];
+}
+@end
 
 static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 {
@@ -56,6 +95,17 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     NSButton *_redoButton;
     NSButton *_buildButton;
     NSButton *_runButton;
+    NSButton *_targetButton;
+    NSButton *_searchButton;
+    NSButton *_outputTab;
+    NSButton *_problemsTab;
+    NSButton *_terminalTab;
+    NSButton *_clearOutput;
+    NSScrollView *_terminalScroll;
+    NSTextField *_problemSummary;
+    NSInteger _panelMode;
+    NSInteger _explorerFirstRow;
+    CGFloat _tabScroll;
     void *_lexillaModule;
     void *(*_createLexer)(const char *name);
     AxyneDocumentSet _documents;
@@ -103,6 +153,11 @@ static NSColor *axyne_preference_color(uint32_t value)
                        (CGFloat)(value & 0xff));
 }
 
+static intptr_t axyne_editor_color(uint32_t rgb)
+{
+    return (intptr_t)(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff));
+}
+
 static void axyne_macos_select_theme(AxyneThemePreferences *theme,
                                      AxyneThemePreset preset)
 {
@@ -128,6 +183,17 @@ static BOOL axyne_macos_prefers_dark(NSView *view)
     NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:
         @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
     return [match isEqualToString:NSAppearanceNameDarkAqua];
+}
+
+static BOOL axyne_macos_reference_surfaces(const AxyneThemePreferences *theme)
+{
+    return theme->background == 0x16171a && theme->panel == 0x1f2126 &&
+        theme->toolbar == 0x1c1e22;
+}
+
+static uint32_t axyne_macos_output_background(const AxyneThemePreferences *theme)
+{
+    return axyne_macos_reference_surfaces(theme) ? 0x1d1f23 : theme->background;
 }
 
 static char *axyne_macos_global_preferences_path(void)
@@ -234,10 +300,16 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)removeExplorerItem:(id)sender;
 - (void)workspaceEvent;
 - (BOOL)refreshExplorer;
+- (void)scrollTabsBy:(CGFloat)delta;
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
 - (void)showWorkspaceMessage:(NSString *)message;
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
+- (NSRect)tabFrameAtIndex:(size_t)index;
+- (void)selectPanel:(id)sender;
+- (void)clearOutput:(id)sender;
+- (void)quickFile:(id)sender;
+- (void)configureRunnerAction:(id)sender;
 - (void)performExplorerOperation:(AxyneFileKind)kind;
 - (NSString *)askForText:(NSString *)title label:(NSString *)label;
 - (void)startTerminal:(id)sender;
@@ -494,7 +566,7 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
 static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                                             SEL action)
 {
-    NSButton *button = [[[NSButton alloc] initWithFrame:NSZeroRect] autorelease];
+    NSButton *button = [[[AxyneChromeButton alloc] initWithFrame:NSZeroRect] autorelease];
     [button setTitle:title];
     [button setTarget:target];
     [button setAction:action];
@@ -504,20 +576,6 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [button setContentTintColor:axyne_color(115, 119, 128)];
     [button setToolTip:title];
     return [button retain];
-}
-
-static NSString *axyne_macos_file_badge(const char *name)
-{
-    const char *dot;
-    if (name == NULL) return @"•";
-    dot = strrchr(name, '.');
-    if (dot == NULL || dot[1] == '\0') return @"•";
-    if (strcasecmp(dot, ".c") == 0) return @"C";
-    if (strcasecmp(dot, ".h") == 0) return @"H";
-    if (strcasecmp(dot, ".cpp") == 0 || strcasecmp(dot, ".cc") == 0) return @"C++";
-    if (strcasecmp(dot, ".json") == 0) return @"{}";
-    if (strcasecmp(dot, ".cmake") == 0 || strcasecmp(name, "CMakeLists.txt") == 0) return @"CM";
-    return [[NSString stringWithUTF8String:dot + 1] uppercaseString];
 }
 
 @implementation AxyneWorkspaceView
@@ -572,31 +630,55 @@ static NSString *axyne_macos_file_badge(const char *name)
         [_terminalOutput setFont:[NSFont fontWithName:@"Menlo" size:11]];
         [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
         [_terminalOutput setBackgroundColor:axyne_preference_color(_preferences.theme.background)];
-        [self addSubview:_terminalOutput];
+        _terminalScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+        [_terminalScroll setBorderType:NSNoBorder];
+        [_terminalScroll setHasVerticalScroller:YES];
+        [_terminalScroll setAutohidesScrollers:YES];
+        [_terminalScroll setDocumentView:_terminalOutput];
+        [_terminalOutput setVerticallyResizable:YES];
+        [_terminalOutput setHorizontallyResizable:NO];
+        [_terminalOutput setAutoresizingMask:NSViewWidthSizable];
+        [[_terminalOutput textContainer] setWidthTracksTextView:YES];
+        [_terminalOutput setTextContainerInset:NSMakeSize(0, 6)];
+        [self addSubview:_terminalScroll];
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
-        _buildButton = axyne_macos_toolbar_button(@"빌드", self, @selector(buildDocument:));
-        _runButton = axyne_macos_toolbar_button(@"▷ 실행", self, @selector(runDocument:));
+        _targetButton = axyne_macos_toolbar_button(@"▷  Runner 설정  ⌄", self, @selector(configureRunnerAction:));
+        _searchButton = axyne_macos_toolbar_button(@"⌕  파일 이동                         ⌘P", self, @selector(quickFile:));
+        _buildButton = axyne_macos_toolbar_button(@"빌드  ⌘B", self, @selector(buildDocument:));
+        _runButton = axyne_macos_toolbar_button(@"▷  실행  F5", self, @selector(runDocument:));
         [self addSubview:_newButton]; [self addSubview:_openButton];
         [self addSubview:_saveButton]; [self addSubview:_undoButton];
         [self addSubview:_redoButton]; [self addSubview:_buildButton];
         [self addSubview:_runButton];
+        [self addSubview:_targetButton]; [self addSubview:_searchButton];
+        _outputTab = axyne_macos_toolbar_button(@"출력", self, @selector(selectPanel:));
+        _problemsTab = axyne_macos_toolbar_button(@"문제", self, @selector(selectPanel:));
+        _terminalTab = axyne_macos_toolbar_button(@"터미널", self, @selector(selectPanel:));
+        [_outputTab setTag:0]; [_problemsTab setTag:1]; [_terminalTab setTag:2];
+        [self addSubview:_outputTab]; [self addSubview:_problemsTab]; [self addSubview:_terminalTab];
+        _clearOutput = axyne_macos_toolbar_button(@"⊘", self, @selector(clearOutput:));
+        [_clearOutput setToolTip:@"출력 지우기"];
+        [self addSubview:_clearOutput];
+        _problemSummary = [[NSTextField labelWithString:@"LSP 진단 없음"] retain];
+        [self addSubview:_problemSummary];
         _terminalInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
         [_terminalInput setPlaceholderString:@"Terminal input"];
+        [_terminalInput setTarget:self]; [_terminalInput setAction:@selector(sendTerminal:)];
         [self addSubview:_terminalInput];
-        _terminalStart = [[NSButton alloc] initWithFrame:NSZeroRect];
-        [_terminalStart setTitle:@"Start Terminal"];
+        _terminalStart = axyne_macos_toolbar_button(@"▷", self, @selector(startTerminal:));
+        [_terminalStart setToolTip:@"터미널 시작"];
         [_terminalStart setTarget:self]; [_terminalStart setAction:@selector(startTerminal:)];
         [self addSubview:_terminalStart];
-        _terminalStop = [[NSButton alloc] initWithFrame:NSZeroRect];
-        [_terminalStop setTitle:@"Stop"]; [_terminalStop setTarget:self];
+        _terminalStop = axyne_macos_toolbar_button(@"×", self, @selector(stopTerminal:));
+        [_terminalStop setToolTip:@"프로세스 중지"]; [_terminalStop setTarget:self];
         [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
         [self addSubview:_terminalStop];
-        _terminalSend = [[NSButton alloc] initWithFrame:NSZeroRect];
-        [_terminalSend setTitle:@"Send"]; [_terminalSend setTarget:self];
+        _terminalSend = axyne_macos_toolbar_button(@"전송", self, @selector(sendTerminal:));
+        [_terminalSend setTarget:self];
         [_terminalSend setAction:@selector(sendTerminal:)];
         [self addSubview:_terminalSend];
         _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -619,6 +701,14 @@ static NSString *axyne_macos_file_badge(const char *name)
         [_debugBreakpoint setTitle:@"Breakpoint"]; [_debugBreakpoint setTarget:self];
         [_debugBreakpoint setAction:@selector(toggleBreakpoint:)];
         [_debugBreakpoint setEnabled:NO]; [self addSubview:_debugBreakpoint];
+        for (NSButton *button in @[_debugStart, _debugPause, _debugContinue,
+                                   _debugNext, _debugBreakpoint]) [button setHidden:YES];
+        [_newButton setToolTip:@"새 파일 (⌘N)"];
+        [_openButton setToolTip:@"파일 열기 (⌘O)"];
+        [_saveButton setToolTip:@"저장 (⌘S)"];
+        [_undoButton setToolTip:@"실행 취소 (⌘Z)"];
+        [_redoButton setToolTip:@"다시 실행 (⇧⌘Z)"];
+        [_searchButton setToolTip:@"파일 이동 (⌘P)"];
         [self applyPreferences];
         [self refreshActionControls];
     }
@@ -647,6 +737,24 @@ static NSString *axyne_macos_file_badge(const char *name)
     [_debugContinue setEnabled:debuggerActive && savedDocument];
     [_debugNext setEnabled:debuggerActive && savedDocument];
     [_debugBreakpoint setEnabled:savedDocument];
+    [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
+    [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
+    [_saveButton setEnabled:document != NULL];
+    NSString *target = _actionRunner.executable == NULL ? @"Runner 설정" :
+        [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
+    [_targetButton setTitle:[NSString stringWithFormat:@"▷  %@  ⌄", target]];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)quickFile:(id)sender { (void)sender; [self searchFolder:YES]; }
+- (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
+- (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
+- (void)selectPanel:(id)sender
+{
+    _panelMode = [sender tag];
+    [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
+    [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
@@ -704,6 +812,20 @@ static NSString *axyne_macos_file_badge(const char *name)
     if (lexer != NULL) {
         (void)[self sendEditorMessage:SCI_SETILEXER wParam:0
                                  lParam:(intptr_t)lexer];
+        if (strcmp(language, "cpp") == 0) {
+            const unsigned int styles[] = { 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 15, 16 };
+            const uint32_t colors[] = { 0x5f8c5a, 0x5f8c5a, 0x5f8c5a, 0xd9b36c,
+                0xd98e73, 0xc79ad9, 0xc79ad9, 0xc79ad9, 0xd5d8dd, 0xd5d8dd,
+                0x8cc7c0, 0xe3cf86 };
+            BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
+            for (size_t i = 0; i < sizeof(styles) / sizeof(styles[0]); ++i) {
+                uint32_t color = reference ? colors[i] : (i < 3 ? _preferences.theme.muted :
+                    (styles[i] == 10 || styles[i] == 11 ? _preferences.theme.editor_text :
+                     _preferences.theme.accent));
+                (void)[self sendEditorMessage:SCI_STYLESETFORE wParam:styles[i]
+                    lParam:axyne_editor_color(color)];
+            }
+        }
         (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
     }
 }
@@ -823,7 +945,10 @@ static NSString *axyne_macos_file_badge(const char *name)
         terminalFont = [NSFont userFixedPitchFontOfSize:fontSize];
     [_terminalOutput setFont:terminalFont];
     [_terminalOutput setTextColor:axyne_preference_color(_preferences.theme.text)];
-    [_terminalOutput setBackgroundColor:axyne_preference_color(_preferences.theme.background)];
+    [_terminalOutput setBackgroundColor:axyne_preference_color(
+        axyne_macos_output_background(&_preferences.theme))];
+    [_terminalScroll setBackgroundColor:[_terminalOutput backgroundColor]];
+    [_problemSummary setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setBackgroundColor:axyne_preference_color(_preferences.theme.panel)];
     [_terminalInput setDrawsBackground:YES];
@@ -835,32 +960,48 @@ static NSString *axyne_macos_file_badge(const char *name)
     }
     for (NSButton *button in @[_newButton, _openButton, _saveButton,
                                _undoButton, _redoButton, _buildButton,
-                               _runButton]) {
-        [button setContentTintColor:axyne_preference_color(_preferences.theme.text)];
+                               _runButton, _targetButton, _searchButton,
+                               _outputTab, _problemsTab, _terminalTab,
+                               _terminalStart, _terminalStop, _terminalSend, _clearOutput]) {
+        [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(_preferences.theme.muted)];
+        [(AxyneChromeButton *)button setFillColor:nil];
+        [button setFont:[NSFont systemFontOfSize:11]];
+        [button setNeedsDisplay:YES];
     }
+    for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton])
+        [button setFont:[NSFont systemFontOfSize:14]];
+    NSColor *control = axyne_preference_color(axyne_macos_reference_surfaces(&_preferences.theme)
+        ? 0x24262b : _preferences.theme.toolbar);
+    [(AxyneChromeButton *)_targetButton setFillColor:control];
+    [(AxyneChromeButton *)_buildButton setFillColor:control];
+    [(AxyneChromeButton *)_buildButton setLabelColor:axyne_preference_color(_preferences.theme.text)];
+    [(AxyneChromeButton *)_runButton setFillColor:axyne_preference_color(_preferences.theme.accent)];
+    [(AxyneChromeButton *)_runButton setLabelColor:axyne_preference_color(_preferences.theme.background)];
+    [(AxyneChromeButton *)_searchButton setFillColor:axyne_preference_color(_preferences.theme.background)];
     if (_editorView != nil) {
         [self sendEditorMessage:SCI_STYLESETFORE wParam:32
-                              lParam:(intptr_t)_preferences.theme.editor_text];
+                              lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:32
-                              lParam:(intptr_t)_preferences.theme.editor_background];
+                              lParam:axyne_editor_color(_preferences.theme.editor_background)];
+        [self sendEditorMessage:SCI_STYLECLEARALL wParam:0 lParam:0];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:33
-                              lParam:(intptr_t)_preferences.theme.muted];
+                              lParam:axyne_editor_color(_preferences.theme.muted)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:33
-                              lParam:(intptr_t)_preferences.theme.panel];
+                              lParam:axyne_editor_color(_preferences.theme.panel)];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:STYLE_BRACELIGHT
-                              lParam:(intptr_t)_preferences.theme.editor_text];
+                              lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:STYLE_BRACELIGHT
-                              lParam:(intptr_t)_preferences.theme.accent];
+                              lParam:axyne_editor_color(_preferences.theme.accent)];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:STYLE_BRACEBAD
-                              lParam:(intptr_t)_preferences.theme.editor_text];
+                              lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:STYLE_BRACEBAD
-                              lParam:(intptr_t)_preferences.theme.accent];
+                              lParam:axyne_editor_color(_preferences.theme.accent)];
         [self sendEditorMessage:SCI_SETSELFORE wParam:0
-                              lParam:(intptr_t)_preferences.theme.editor_text];
+                              lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_SETSELBACK wParam:1
-                              lParam:(intptr_t)_preferences.theme.accent];
+                              lParam:axyne_editor_color(_preferences.theme.accent)];
         [self sendEditorMessage:SCI_SETCARETFORE wParam:0
-                              lParam:(intptr_t)_preferences.theme.accent];
+                              lParam:axyne_editor_color(_preferences.theme.accent)];
         [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
         [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
@@ -869,6 +1010,7 @@ static NSString *axyne_macos_file_badge(const char *name)
         [self sendEditorMessage:SCI_SETVIEWWS wParam:_preferences.editor.show_whitespace ? 1 : 0 lParam:0];
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
+        [self applyEditorLexer];
     }
     [self setNeedsDisplay:YES];
 }
@@ -910,6 +1052,7 @@ static NSString *axyne_macos_file_badge(const char *name)
 {
     [_lspStatus release];
     _lspStatus = [status copy];
+    [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
     [self setNeedsDisplay:YES];
 }
 
@@ -1061,6 +1204,7 @@ static NSString *axyne_macos_file_badge(const char *name)
     if (notification->nmhdr.code == SCN_UPDATEUI) {
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
+        [self setNeedsDisplay:YES];
     }
     if (notification->nmhdr.code == SCN_MODIFIED &&
         [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0) {
@@ -1248,6 +1392,7 @@ static NSString *axyne_macos_file_badge(const char *name)
     }
     _watcher = watcher;
     _hasExplorerSelection = NO;
+    _explorerFirstRow = 0;
     _preferences = _globalPreferences;
     memset(_workspaceBindingPresent, 0, sizeof(_workspaceBindingPresent));
     free(_workspacePreferencesPath);
@@ -1302,17 +1447,47 @@ static NSString *axyne_macos_file_badge(const char *name)
                (size_t)_explorerSelection >= _explorer.count) {
         _hasExplorerSelection = NO;
     }
+    [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
     return YES;
 }
 
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
 {
-    const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + 31.0;
+    const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
     NSInteger row;
-    if (_explorer.root == NULL || point.y < explorerTop) return NSNotFound;
-    row = (NSInteger)((point.y - explorerTop) / 22.0);
+    if (_explorer.root == NULL || point.x < 0 || point.x >= AXYNE_SIDEBAR ||
+        point.y < explorerTop || point.y >= bottom) return NSNotFound;
+    row = (NSInteger)((point.y - explorerTop) / AXYNE_UI_ROW) + _explorerFirstRow;
+    if (explorerTop + (row - _explorerFirstRow + 1) * AXYNE_UI_ROW > bottom)
+        return NSNotFound;
     return row >= 0 && (size_t)row < _explorer.count ? row : NSNotFound;
+}
+
+- (void)scrollWheel:(NSEvent *)event
+{
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    if (point.x >= AXYNE_SIDEBAR && point.x < NSWidth([self bounds]) &&
+        point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS) {
+        CGFloat delta = [event scrollingDeltaX] != 0 ? [event scrollingDeltaX] :
+            [event scrollingDeltaY];
+        [self scrollTabsBy:-delta * ([event hasPreciseScrollingDeltas] ? 1 : 40)];
+        return;
+    }
+    CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
+    if (point.x < AXYNE_SIDEBAR && point.y >= top && point.y < bottom) {
+        NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
+        NSInteger maximum = MAX(0, (NSInteger)_explorer.count - visible);
+        NSInteger delta = (NSInteger)ceil(fabs([event scrollingDeltaY]) /
+            ([event hasPreciseScrollingDeltas] ? AXYNE_UI_ROW : 1));
+        if ([event scrollingDeltaY] > 0) delta = -delta;
+        _explorerFirstRow = MIN(maximum, MAX(0, _explorerFirstRow + delta));
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    [super scrollWheel:event];
 }
 
 - (void)newExplorerFile:(id)sender
@@ -1563,12 +1738,12 @@ static NSString *axyne_macos_file_badge(const char *name)
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     if (point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS &&
-        point.x >= AXYNE_SIDEBAR + 12) {
-        CGFloat offset = point.x - AXYNE_SIDEBAR - 12;
-        size_t index = (size_t)(offset / 184);
-        if (index < _documents.count) {
+        point.x >= AXYNE_SIDEBAR) {
+        for (size_t index = 0; index < _documents.count; ++index) {
+            NSRect tab = [self tabFrameAtIndex:index];
+            if (!NSPointInRect(point, tab)) continue;
             if (![self captureEditor]) return;
-            if (fmod(offset, 184) >= 160) {
+            if (point.x >= NSMaxX(tab) - 24) {
                 if ([self confirmCloseDocumentAtIndex:index]) {
                     AxyneDocument *doc = &_documents.documents[index];
                     if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
@@ -1585,7 +1760,8 @@ static NSString *axyne_macos_file_badge(const char *name)
             return;
         }
     }
-    if (point.x < AXYNE_SIDEBAR && point.y >= AXYNE_TOOLBAR + AXYNE_TABS) {
+    if (point.x < AXYNE_SIDEBAR && point.y >= AXYNE_TOOLBAR + AXYNE_TABS &&
+        point.y < NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM) {
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
             _explorerSelection = row;
@@ -1610,7 +1786,8 @@ static NSString *axyne_macos_file_badge(const char *name)
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     NSInteger row = [self explorerNodeAtPoint:point];
-    if (point.x >= AXYNE_SIDEBAR || point.y < AXYNE_TOOLBAR + AXYNE_TABS) {
+    if (point.x >= AXYNE_SIDEBAR || point.y < AXYNE_TOOLBAR + AXYNE_TABS ||
+        point.y >= NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM) {
         [super rightMouseDown:event];
         return;
     }
@@ -2181,8 +2358,9 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     NSTextStorage *storage = [_terminalOutput textStorage];
     [storage appendAttributedString:[[[NSAttributedString alloc]
         initWithString:text attributes:@{ NSFontAttributeName:
-            [NSFont fontWithName:@"Menlo" size:11],
-            NSForegroundColorAttributeName:axyne_preference_color(_preferences.theme.text) }]
+            [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular],
+            NSForegroundColorAttributeName:axyne_preference_color(
+                stream == AXYNE_PROCESS_STDERR ? 0xe5a445 : _preferences.theme.text) }]
         autorelease]];
     if ([storage length] > 1024 * 1024)
         [storage deleteCharactersInRange:NSMakeRange(0, [storage length] - 1024 * 1024)];
@@ -2503,41 +2681,87 @@ else [_terminalInput setStringValue:@""];
     [self startAction:YES];
 }
 
+- (NSRect)tabFrameAtIndex:(size_t)index
+{
+    CGFloat x = AXYNE_SIDEBAR - _tabScroll;
+    NSFont *font = [NSFont systemFontOfSize:12];
+    for (size_t i = 0; i < _documents.count; ++i) {
+        AxyneDocument *doc = &_documents.documents[i];
+        NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
+        CGFloat nameWidth = [title sizeWithAttributes:@{NSFontAttributeName:font}].width;
+        CGFloat width = MIN(240, MAX(100, nameWidth + 24 + 54));
+        if (i == index) return NSMakeRect(x, AXYNE_TOOLBAR, width, AXYNE_TABS);
+        x += width;
+    }
+    return NSZeroRect;
+}
+
+- (void)scrollTabsBy:(CGFloat)delta
+{
+    if (_documents.count == 0) { _tabScroll = 0; return; }
+    NSRect last = [self tabFrameAtIndex:_documents.count - 1];
+    CGFloat maximum = MAX(0, NSMaxX(last) + _tabScroll - NSWidth([self bounds]));
+    _tabScroll = MIN(maximum, MAX(0, _tabScroll + delta));
+    /* Redraw only: layout reveals the active tab and would undo manual scroll. */
+    [self setNeedsDisplay:YES];
+}
+
 - (void)layout
 {
     [super layout];
     NSRect bounds = [self bounds];
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat width = NSWidth(bounds);
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - AXYNE_BOTTOM;
-    NSRect editorFrame = NSMakeRect(AXYNE_SIDEBAR, editorTop,
-        MAX(0.0, NSWidth(bounds) - AXYNE_SIDEBAR),
-        MAX(0.0, bottomTop - editorTop));
-    [_editorView setFrame:editorFrame];
-    CGFloat terminalTop = bottomTop + 30.0;
-    CGFloat inputTop = bottomTop + AXYNE_BOTTOM - 28.0;
-    [_terminalOutput setFrame:NSMakeRect(12.0, terminalTop,
-        MAX(0.0, NSWidth(bounds) - 24.0), AXYNE_BOTTOM - 62.0)];
-    [_terminalInput setFrame:NSMakeRect(12.0, inputTop,
-        MAX(0.0, NSWidth(bounds) - 260.0), 22.0)];
-    [_terminalStart setFrame:NSMakeRect(NSWidth(bounds) - 240.0, inputTop,
-        96.0, 22.0)];
-    [_terminalStop setFrame:NSMakeRect(NSWidth(bounds) - 138.0, inputTop,
-        56.0, 22.0)];
-    [_terminalSend setFrame:NSMakeRect(NSWidth(bounds) - 76.0, inputTop,
-        64.0, 22.0)];
-    [_debugStart setFrame:NSMakeRect(12.0, bottomTop + 4.0, 72.0, 22.0)];
-    [_debugPause setFrame:NSMakeRect(88.0, bottomTop + 4.0, 64.0, 22.0)];
-    [_debugContinue setFrame:NSMakeRect(156.0, bottomTop + 4.0, 76.0, 22.0)];
-    [_debugNext setFrame:NSMakeRect(236.0, bottomTop + 4.0, 56.0, 22.0)];
-    [_debugBreakpoint setFrame:NSMakeRect(296.0, bottomTop + 4.0, 96.0, 22.0)];
-    NSArray *toolbarButtons = @[_newButton, _openButton, _saveButton,
-        _undoButton, _redoButton, _buildButton, _runButton];
-    CGFloat buttonX = 8.0;
-    for (NSButton *button in toolbarButtons) {
-        CGFloat buttonWidth = ([button isEqual:_buildButton] ||
-                               [button isEqual:_runButton]) ? 72.0 : 30.0;
-        [button setFrame:NSMakeRect(buttonX, 7.0, buttonWidth, 26.0)];
-        buttonX += buttonWidth + 2.0;
+    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    [_editorView setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
+        MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
+    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
+        AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
+    _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
+    BOOL terminal = _panelMode == 2;
+    CGFloat inputTop = NSHeight(bounds) - AXYNE_STATUS - 28;
+    [_terminalScroll setFrame:NSMakeRect(AXYNE_SIDEBAR + 16, bottomTop + 32,
+        MAX(0, width - AXYNE_SIDEBAR - 24), terminal ? 164 : 198)];
+    [_terminalScroll setHidden:_panelMode == 1];
+    [_terminalInput setFrame:NSMakeRect(AXYNE_SIDEBAR + 16, inputTop,
+        MAX(0, width - AXYNE_SIDEBAR - 88), 22)];
+    [_terminalSend setFrame:NSMakeRect(width - 64, inputTop, 52, 22)];
+    [_terminalInput setHidden:!terminal]; [_terminalSend setHidden:!terminal];
+    [_terminalInput setBezeled:NO];
+    [_problemSummary setFrame:NSMakeRect(AXYNE_SIDEBAR + 16, bottomTop + 42,
+        MAX(0, width - AXYNE_SIDEBAR - 32), 22)];
+    [_problemSummary setHidden:_panelMode != 1];
+    [_outputTab setFrame:NSMakeRect(AXYNE_SIDEBAR + 8, bottomTop, 38, 32)];
+    [_problemsTab setFrame:NSMakeRect(AXYNE_SIDEBAR + 48, bottomTop, 38, 32)];
+    [_terminalTab setFrame:NSMakeRect(AXYNE_SIDEBAR + 88, bottomTop, 50, 32)];
+    [_terminalStart setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
+    [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
+    [_terminalStop setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
+    CGFloat x = 8;
+    size_t icon = 0;
+    for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
+        [button setFrame:NSMakeRect(x, 5, 28, 28)];
+        x += 30;
+        if (++icon == 3) x += 2;
+    }
+    x += 2;
+    [_targetButton setFrame:NSMakeRect(x, 6, 170, 26)]; x += 178;
+    [_buildButton setFrame:NSMakeRect(x, 6, 88, 26)]; x += 96;
+    [_runButton setFrame:NSMakeRect(x, 6, 86, 26)]; x += 94;
+    CGFloat searchLeft = MAX(x + 8, width - 348);
+    CGFloat searchWidth = width - 8 - searchLeft;
+    [_searchButton setHidden:searchWidth < 120];
+    [_searchButton setFrame:NSMakeRect(searchLeft, 6, MAX(0, searchWidth), 26)];
+    for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab]) {
+        [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(
+            [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
+        [button setNeedsDisplay:YES];
+    }
+    if (_documents.count != 0) {
+        NSRect active = [self tabFrameAtIndex:_documents.active_index];
+        if (NSMaxX(active) > width) _tabScroll += NSMaxX(active) - width;
+        else if (NSMinX(active) < AXYNE_SIDEBAR)
+            _tabScroll = MAX(0, _tabScroll - AXYNE_SIDEBAR + NSMinX(active));
     }
 }
 
@@ -2553,124 +2777,151 @@ else [_terminalInput setStringValue:@""];
     [label drawAtPoint:point withAttributes:attributes];
 }
 
+- (void)drawFileBadge:(const char *)name inRect:(NSRect)rect tab:(BOOL)tab
+{
+    AxyneFileBadge badge = axyne_ui_file_badge(name);
+    NSString *label = [NSString stringWithUTF8String:badge.label];
+    if ([label length] == 0) {
+        /* Unspecified file types get a neutral document outline rather than
+         * an arbitrary extension-sized word shifting the file name. */
+        NSRect icon = NSMakeRect(NSMinX(rect) + 6, NSMinY(rect) + 3, 8, 10);
+        [axyne_preference_color(badge.color) setStroke];
+        [[NSBezierPath bezierPathWithRect:icon] stroke];
+        return;
+    }
+    NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [style setAlignment:NSTextAlignmentCenter];
+    CGFloat size = tab ? 11 : 9;
+    NSFont *font = tab ? [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightBold] :
+        [NSFont systemFontOfSize:size];
+    [label drawInRect:rect withAttributes:@{NSFontAttributeName:font,
+        NSForegroundColorAttributeName:axyne_preference_color(badge.color),
+        NSParagraphStyleAttributeName:style}];
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
     (void)dirtyRect;
     NSRect bounds = [self bounds];
-    CGFloat width = NSWidth(bounds);
-    CGFloat height = NSHeight(bounds);
+    CGFloat width = NSWidth(bounds), height = NSHeight(bounds);
     CGFloat bottomTop = height - AXYNE_STATUS - AXYNE_BOTTOM;
     CGFloat statusTop = height - AXYNE_STATUS;
+    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
+        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
     NSColor *background = axyne_preference_color(_preferences.theme.background);
     NSColor *panel = axyne_preference_color(_preferences.theme.panel);
     NSColor *muted = axyne_preference_color(_preferences.theme.muted);
     NSColor *text = axyne_preference_color(_preferences.theme.text);
     NSColor *border = axyne_preference_color(_preferences.theme.border);
     NSColor *toolbar = axyne_preference_color(_preferences.theme.toolbar);
-
-    [background setFill];
-    NSRectFill(bounds);
-    [toolbar setFill];
-    NSRectFill(NSMakeRect(0, 0, width, AXYNE_TOOLBAR));
-    [toolbar setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, width, AXYNE_TABS));
-    [panel setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR + AXYNE_TABS,
-                          AXYNE_SIDEBAR, bottomTop - AXYNE_TOOLBAR - AXYNE_TABS));
-    [toolbar setFill];
-    NSRectFill(NSMakeRect(0, bottomTop, width, AXYNE_BOTTOM));
-    [background setFill];
-    NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
+    BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
+    NSColor *tabBackground = axyne_preference_color(reference ? 0x17191c : _preferences.theme.toolbar);
+    [background setFill]; NSRectFill(bounds);
+    [toolbar setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_TOOLBAR));
+    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, width, AXYNE_TABS));
+    [panel setFill]; NSRectFill(NSMakeRect(0, editorTop, AXYNE_SIDEBAR, statusTop - editorTop));
+    [axyne_preference_color(reference ? 0x191b1f : _preferences.theme.toolbar) setFill];
+    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, AXYNE_SIDEBAR, AXYNE_TABS));
+    [tabBackground setFill];
+    NSRectFill(NSMakeRect(AXYNE_SIDEBAR, bottomTop, width - AXYNE_SIDEBAR, 32));
+    [axyne_preference_color(axyne_macos_output_background(&_preferences.theme)) setFill];
+    NSRectFill(NSMakeRect(AXYNE_SIDEBAR, bottomTop + 32, width - AXYNE_SIDEBAR, 198));
+    [toolbar setFill]; NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
-    NSRectFill(NSMakeRect(AXYNE_SIDEBAR - 1, AXYNE_TOOLBAR + AXYNE_TABS,
-                          1, bottomTop - AXYNE_TOOLBAR - AXYNE_TABS));
+    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR - 1, width, 1));
+    NSRectFill(NSMakeRect(AXYNE_SIDEBAR - 1, editorTop, 1, statusTop - editorTop));
     NSRectFill(NSMakeRect(0, bottomTop, width, 1));
-
-    CGFloat toolbarRight = 8.0;
-    for (NSButton *button in @[_newButton, _openButton, _saveButton,
-                               _undoButton, _redoButton, _buildButton, _runButton]) {
-        if ([button superview] == self)
-            toolbarRight = NSMaxX([button frame]) + 2.0;
+    if (![_searchButton isHidden]) {
+    [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
+        [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
     }
-    CGFloat searchLeft = MAX(toolbarRight + 8.0, width - 360.0);
-    CGFloat searchWidth = width - searchLeft - 12.0;
-    if (searchWidth >= 120.0) {
-        NSRect search = NSMakeRect(searchLeft, 7, searchWidth, 26);
-        [background setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:search xRadius:4 yRadius:4] fill];
-        [border setStroke];
-        [[NSBezierPath bezierPathWithRoundedRect:search xRadius:4 yRadius:4] stroke];
-        [self drawLabel:@"⌕  파일 이동, > 명령 실행"
-                    at:NSMakePoint(NSMinX(search) + 10, 13) size:11 color:muted family:@"SF Pro Text"];
-    }
+    NSButton *selected = _panelMode == 0 ? _outputTab : (_panelMode == 1 ? _problemsTab : _terminalTab);
+    [axyne_preference_color(reference ? 0xa66bf0 : _preferences.theme.accent) setFill];
+    NSRectFill(NSMakeRect(NSMinX([selected frame]), bottomTop + 29, NSWidth([selected frame]), 3));
+    NSString *shell = _terminalRunner.executable == NULL ? @"" :
+        [[NSString stringWithUTF8String:_terminalRunner.executable] lastPathComponent];
+    [self drawLabel:shell at:NSMakePoint(AXYNE_SIDEBAR + 148, bottomTop + 10)
+        size:11 color:muted family:@"SF Pro Text"];
 
-    [axyne_preference_color(_preferences.theme.accent) setFill];
-    NSRectFill(NSMakeRect(AXYNE_SIDEBAR + 20, AXYNE_TOOLBAR + AXYNE_TABS,
-                          1, AXYNE_TABS));
-    CGFloat tabX = AXYNE_SIDEBAR + 12;
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(NSMakeRect(AXYNE_SIDEBAR, AXYNE_TOOLBAR, MAX(0, width - AXYNE_SIDEBAR), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
-        if (i == _documents.active_index) {
-            [panel setFill];
-            NSRectFill(NSMakeRect(tabX, AXYNE_TOOLBAR, 184, AXYNE_TABS));
-            [axyne_preference_color(_preferences.theme.accent) setFill];
-            NSRectFill(NSMakeRect(tabX, AXYNE_TOOLBAR, 1, AXYNE_TABS));
+        NSRect frame = [self tabFrameAtIndex:i];
+        if (NSMaxX(frame) <= AXYNE_SIDEBAR || NSMinX(frame) >= width) continue;
+        BOOL active = i == _documents.active_index;
+        if (active) {
+            [axyne_preference_color(_preferences.theme.editor_background) setFill]; NSRectFill(frame);
+            [axyne_preference_color(reference ? 0xa66bf0 : _preferences.theme.accent) setFill];
+            NSRectFill(NSMakeRect(NSMinX(frame), NSMinY(frame), NSWidth(frame), 2));
         }
-        NSString *title = [NSString stringWithUTF8String:
-            doc->title != NULL ? doc->title : "Untitled"];
-        if (title == nil) title = @"Untitled";
-        if (doc->is_dirty) title = [@"● " stringByAppendingString:title];
-        [self drawLabel:title at:NSMakePoint(tabX + 12, AXYNE_TOOLBAR + 10)
-                    size:12 color:i == _documents.active_index ? text : muted
-                 family:@"SF Pro Text"];
-        [self drawLabel:@"×" at:NSMakePoint(tabX + 163, AXYNE_TOOLBAR + 10)
-                    size:12 color:muted family:@"SF Pro Text"];
-        tabX += 184;
+        CGFloat badgeX = NSMinX(frame) + 14;
+        [self drawFileBadge:doc->title inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, 20, 16) tab:YES];
+        NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
+        [NSGraphicsContext saveGraphicsState];
+        NSRectClip(NSMakeRect(badgeX + 26, AXYNE_TOOLBAR + 4, NSWidth(frame) - 64, 28));
+        [self drawLabel:title != nil ? title : @"Untitled"
+            at:NSMakePoint(badgeX + 26, AXYNE_TOOLBAR + 10)
+            size:12 color:active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted family:@"SF Pro Text"];
+        [NSGraphicsContext restoreGraphicsState];
+        [self drawLabel:doc->is_dirty ? @"●" : @"×"
+            at:NSMakePoint(NSMaxX(frame) - 20, AXYNE_TOOLBAR + 10)
+            size:doc->is_dirty ? 8 : 13 color:muted family:@"SF Pro Text"];
     }
-    [self drawLabel:@"탐색기" at:NSMakePoint(12, AXYNE_TOOLBAR + AXYNE_TABS + 10)
-                size:11 color:muted family:@"SF Pro Text"];
-    CGFloat explorerY = AXYNE_TOOLBAR + AXYNE_TABS + 31;
+    [NSGraphicsContext restoreGraphicsState];
+    [self drawLabel:@"탐색기" at:NSMakePoint(12, editorTop + 8)
+        size:11 color:axyne_preference_color(light ? 0x68707d : 0x8b919b) family:@"SF Pro Text"];
+    CGFloat explorerY = editorTop + AXYNE_UI_EXPLORER_HEADER;
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(NSMakeRect(0, explorerY, AXYNE_SIDEBAR - 1, MAX(0, bottomTop - explorerY)));
     if (_explorer.root == NULL) {
-        [self drawLabel:@"폴더 열기..." at:NSMakePoint(16, explorerY)
-                    size:12 color:text family:@"SF Pro Text"];
+        [self drawLabel:@"폴더 열기…" at:NSMakePoint(16, explorerY + 3)
+            size:12 color:text family:@"SF Pro Text"];
     } else {
-        for (size_t i = 0; i < _explorer.count && explorerY + 22 < bottomTop; ++i) {
+        for (size_t i = (size_t)_explorerFirstRow; i < _explorer.count &&
+            explorerY + AXYNE_UI_ROW <= bottomTop; ++i, explorerY += AXYNE_UI_ROW) {
             AxyneExplorerNode *node = &_explorer.nodes[i];
-            if (_hasExplorerSelection && _explorerSelection == (NSInteger)i) {
-                [border setFill];
-                NSRectFill(NSMakeRect(0, explorerY - 2, AXYNE_SIDEBAR, 22));
+            BOOL selectedRow = _hasExplorerSelection && _explorerSelection == (NSInteger)i;
+            if (selectedRow) {
+                [axyne_preference_color(reference ? 0x2f343c : _preferences.theme.border) setFill];
+                NSRectFill(NSMakeRect(0, explorerY, AXYNE_SIDEBAR, AXYNE_UI_ROW));
+            }
+            CGFloat x = 8 + node->depth * AXYNE_UI_INDENT;
+            CGFloat nameX;
+            if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+                [self drawLabel:axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›"
+                    at:NSMakePoint(x, explorerY + 4) size:11 color:muted family:@"SF Pro Text"];
+                nameX = x + 16;
+            } else {
+                [self drawFileBadge:node->name inRect:NSMakeRect(x, explorerY + 4, 20, 14) tab:NO];
+                nameX = x + 26;
             }
             NSString *name = [NSString stringWithUTF8String:node->name];
-            if (name == nil) name = @"(invalid name)";
-            NSString *arrow = node->kind == AXYNE_FILE_KIND_DIRECTORY
-                ? (axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›") : @"·";
-            NSString *badge = node->kind == AXYNE_FILE_KIND_DIRECTORY
-                ? arrow : axyne_macos_file_badge(node->name);
-            NSString *label = [NSString stringWithFormat:@"%@ %@", badge, name];
-            [self drawLabel:label at:NSMakePoint(16 + node->depth * 16, explorerY)
-                        size:12 color:text family:@"SF Pro Text"];
-            explorerY += 22;
+            [self drawLabel:name != nil ? name : @"(invalid name)"
+                at:NSMakePoint(nameX, explorerY + 3) size:12
+                color:selectedRow ? text : axyne_preference_color(light ? 0x24272d : 0xc4c8ce)
+                family:@"SF Pro Text"];
         }
     }
-    [self drawLabel:@"출력     문제 1     터미널"
-                at:NSMakePoint(12, bottomTop + 9) size:11 color:muted family:@"SF Pro Text"];
-    NSString *status = _lastExitFailed
-        ? [NSString stringWithFormat:@"✗ 실행 실패 (exit %d)", _lastExitCode]
-        : (_activeAction != 0 ? @"● 실행 중"
-           : (_hasExitStatus ? @"✓ 실행 완료 (exit 0)" : @"✓ 빌드 준비됨"));
-    [self drawLabel:status
-                at:NSMakePoint(12, statusTop + 6) size:10 color:muted family:@"SF Pro Text"];
-    [self drawLabel:_lspStatus != nil ? _lspStatus : @"줄 1, 열 1     UTF-8    C17"
-                at:NSMakePoint(MAX(12, width - 250), statusTop + 6)
-                size:10 color:muted family:@"SF Pro Text"];
-
-    if (_editorView == nil) {
+    [NSGraphicsContext restoreGraphicsState];
+    NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"✗ 실행 실패 (%d)", _lastExitCode] :
+        (_activeAction != 0 ? @"● 실행 중" : (_hasExitStatus ? @"✓ 실행 완료" : @"준비"));
+    [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
+        color:_lastExitFailed ? axyne_preference_color(0xe5a445) :
+              (_hasExitStatus ? axyne_preference_color(0xa3c98a) : muted) family:@"SF Pro Text"];
+    NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    NSInteger line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
+    NSInteger column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
+    NSString *editing = [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    UTF-8",
+        (long)line, (long)column, _preferences.editor.insert_spaces ? @"공백" : @"탭",
+        _preferences.editor.tab_width];
+    [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
+        size:11 color:text family:@"SF Pro Text"];
+    if (_editorView == nil)
         [self drawLabel:@"Required Scintilla framework failed to load"
-                    at:NSMakePoint(AXYNE_SIDEBAR + 24, AXYNE_TOOLBAR + AXYNE_TABS + 24)
-                    size:12 color:muted family:@"Menlo"];
-    }
+            at:NSMakePoint(AXYNE_SIDEBAR + 24, editorTop + 24) size:12 color:muted family:@"Menlo"];
 }
-
 - (void)dealloc
 {
     if (_gitRun != NULL) {
@@ -2715,6 +2966,10 @@ else [_terminalInput setStringValue:@""];
     [_newButton release]; [_openButton release]; [_saveButton release];
     [_undoButton release]; [_redoButton release];
     [_buildButton release]; [_runButton release];
+    [_targetButton release]; [_searchButton release];
+    [_outputTab release]; [_problemsTab release]; [_terminalTab release];
+    [_clearOutput release]; [_problemSummary release];
+    [_terminalScroll release];
     [_terminalOutput release];
     [_terminalInput release];
     [_terminalStart release];
@@ -2902,7 +3157,7 @@ static void axyne_install_menu(NSApplication *application,
             NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
                 action:@selector(runDocument:) keyEquivalent:@"r"];
             NSMenuItem *configure = [submenu addItemWithTitle:@"Configure Build/Run Runner…"
-                action:@selector(configureRunner) keyEquivalent:@"configure"];
+                action:@selector(configureRunnerAction:) keyEquivalent:@""];
             [build setTarget:workspace]; [run setTarget:workspace];
             [configure setTarget:workspace];
         } else if ([title isEqualToString:@"Debug"]) {
@@ -2910,6 +3165,9 @@ static void axyne_install_menu(NSApplication *application,
                 action:@selector(startDebugger:) keyEquivalent:@"F5"];
             NSMenuItem *pause = [submenu addItemWithTitle:@"Pause"
                 action:@selector(debugCommand:) keyEquivalent:@"F6"];
+            NSMenuItem *resume = [submenu addItemWithTitle:@"Continue"
+                action:@selector(debugCommand:) keyEquivalent:@""];
+            [resume setTag:0]; [resume setTarget:workspace];
             NSMenuItem *next = [submenu addItemWithTitle:@"Step Over"
                 action:@selector(debugCommand:) keyEquivalent:@"F10"];
             [start setTarget:workspace]; [pause setTarget:workspace];
@@ -2917,6 +3175,13 @@ static void axyne_install_menu(NSApplication *application,
             NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
                 action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
             [toggle setTarget:workspace];
+        } else if ([title isEqualToString:@"View"]) {
+            NSArray *panels = @[@"출력", @"문제", @"터미널"];
+            for (NSInteger i = 0; i < (NSInteger)[panels count]; ++i) {
+                NSMenuItem *panelItem = [submenu addItemWithTitle:panels[(NSUInteger)i]
+                    action:@selector(selectPanel:) keyEquivalent:@""];
+                [panelItem setTag:i]; [panelItem setTarget:workspace];
+            }
         } else if ([title isEqualToString:@"Tools"]) {
             NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: Go to Definition"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
