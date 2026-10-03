@@ -8,6 +8,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <unistd.h>
 #endif
 
 #include "axyne/document.h"
@@ -44,9 +45,9 @@ static void axyne_test_process_exit(AxyneProcess *process, int exit_code,
 #endif
 }
 
-#ifdef _WIN32
 static char *axyne_test_find_git(void)
 {
+#ifdef _WIN32
     wchar_t *wide_path = NULL;
     DWORD capacity = MAX_PATH;
     DWORD length;
@@ -82,8 +83,30 @@ static char *axyne_test_find_git(void)
     }
     free(wide_path);
     return utf8_path;
-}
+#else
+    const char *path = getenv("PATH");
+    const char *cursor;
+    if (path == NULL) path = "/usr/bin:/bin";
+    cursor = path;
+    while (1) {
+        const char *end = strchr(cursor, ':');
+        size_t directory_length = end == NULL ? strlen(cursor) :
+            (size_t)(end - cursor);
+        size_t prefix_length = directory_length == 0 ? 1 : directory_length;
+        char *candidate = (char *)malloc(prefix_length + 1 + 4 + 1);
+        if (candidate == NULL) return NULL;
+        if (directory_length == 0) candidate[0] = '.';
+        else memcpy(candidate, cursor, directory_length);
+        candidate[prefix_length] = '/';
+        memcpy(candidate + prefix_length + 1, "git", 4);
+        if (access(candidate, X_OK) == 0) return candidate;
+        free(candidate);
+        if (end == NULL) break;
+        cursor = end + 1;
+    }
+    return NULL;
 #endif
+}
 
 static int axyne_test_git_command(const char *root, const char *const *arguments,
                                   size_t argument_count)
@@ -93,15 +116,11 @@ static int axyne_test_git_command(const char *root, const char *const *arguments
     AxyneTestProcessResult result;
     AxyneError error = {0};
     AxyneStatus status;
-#ifdef _WIN32
     char *git_executable = axyne_test_find_git();
     if (git_executable == NULL) {
-        fprintf(stderr, "git.exe was not found on PATH\n");
+        fprintf(stderr, "git was not found on PATH\n");
         return 0;
     }
-#else
-    const char *git_executable = "git";
-#endif
 #ifdef _WIN32
     result.exit_code = -1;
     result.done_event = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -126,9 +145,7 @@ static int axyne_test_git_command(const char *root, const char *const *arguments
     spec.on_exit = axyne_test_process_exit;
     spec.user_data = &result;
     status = axyne_process_start(&spec, &process, &error);
-#ifdef _WIN32
     free(git_executable);
-#endif
     if (status != AXYNE_STATUS_OK) {
 #ifdef _WIN32
         (void)CloseHandle(result.done_event);
