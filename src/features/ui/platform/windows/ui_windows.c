@@ -102,6 +102,7 @@ typedef struct AxyneWindowState {
     AxyneCreateLexer create_lexer;
     HWND editor;
     HFONT ui_font;
+    HFONT ui_font_italic; /* 12px italic: preview tab titles */
     HFONT code_font;
     HFONT badge_font;
     HFONT tab_badge_font;
@@ -317,6 +318,8 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run);
 static void axyne_new_document(HWND window, AxyneWindowState *state);
 static void axyne_open_document(HWND window, AxyneWindowState *state,
                                 const char *path);
+static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
+                                   const char *known_path, int preview);
 static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index);
 static void axyne_find(HWND window, AxyneWindowState *state, int replace,
                        int replace_all);
@@ -2072,7 +2075,9 @@ static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
         state->documents.active_index, text, (size_t)length, &error) : AXYNE_STATUS_OK;
     free(text);
     if (status == AXYNE_STATUS_OK) {
-        doc->is_dirty = modified;
+        if (modified) (void)axyne_documents_mark_dirty(&state->documents,
+            state->documents.active_index, NULL);
+        else doc->is_dirty = 0;
         if (changed) axyne_lsp_sync_active(state);
     }
     return status == AXYNE_STATUS_OK;
@@ -2208,6 +2213,16 @@ static void axyne_new_document(HWND window, AxyneWindowState *state)
 static void axyne_open_document(HWND window, AxyneWindowState *state,
                                 const char *known_path)
 {
+    axyne_open_document_ex(window, state, known_path, 0);
+}
+
+/* Explorer clicks open preview tabs (preview != 0); every other entry point
+ * opens a normal tab. A clean preview is replaced in place without a prompt;
+ * its native Scintilla document, LSP state and heap fields are released
+ * once the new document is displayed. */
+static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
+                                   const char *known_path, int preview)
+{
     char *path = NULL;
     if (known_path == NULL && !axyne_choose_path(window, 0, &path)) return;
     const char *chosen = known_path != NULL ? known_path : path;
@@ -2215,9 +2230,15 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
     size_t previous_count = state->documents.count;
     size_t previous_index = state->documents.active_index;
     size_t index = 0;
+    int replaced = 0;
+    AxyneDocument evicted;
     AxyneError error;
-    AxyneStatus status = axyne_documents_open(&state->documents, chosen,
-                                               &index, &error);
+    memset(&evicted, 0, sizeof(evicted));
+    memset(&error, 0, sizeof(error));
+    AxyneStatus status = preview
+        ? axyne_documents_open_preview(&state->documents, chosen, &index,
+                                       &evicted, &replaced, &error)
+        : axyne_documents_open(&state->documents, chosen, &index, &error);
     free(path);
     if (status != AXYNE_STATUS_OK) {
         MessageBoxA(window, error.message, "Axyne - Open failed",
@@ -2225,13 +2246,23 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
         return;
     }
     if (!axyne_show_document(state, index)) {
-        if (state->documents.count > previous_count) {
+        if (replaced) {
+            axyne_documents_revert_preview_open(&state->documents, index,
+                                                &evicted, replaced);
+        } else if (state->documents.count > previous_count) {
             (void)axyne_documents_close(&state->documents, index, NULL);
         }
         (void)axyne_documents_set_active(&state->documents, previous_index, NULL);
         MessageBoxA(window, "Scintilla could not create the document",
                     "Axyne - Open failed", MB_OK | MB_ICONERROR);
         return;
+    }
+    if (replaced) {
+        if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
+        if (evicted.owns_native_editor_document && state->editor != NULL)
+            SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
+                         (LPARAM)evicted.native_editor_document);
+        axyne_document_dispose(&evicted);
     }
     axyne_update_title(window, state);
 }
@@ -2722,10 +2753,12 @@ static void axyne_workspace_open_selected(HWND window,
             axyne_explorer_toggle(&state->explorer, index, NULL) != AXYNE_STATUS_OK)
             MessageBoxA(window, "Unable to read the workspace folder.",
                         "Axyne - Workspace", MB_OK | MB_ICONERROR);
-    } else if (double_click) {
+    } else if (!double_click) {
+        /* A single click opens (or reuses) the preview tab; the second click
+         * of a double-click does nothing extra. */
         char *file_path = _strdup(node->path);
         if (file_path != NULL) {
-            axyne_open_document(window, state, file_path);
+            axyne_open_document_ex(window, state, file_path, 1);
             free(file_path);
         }
     }
@@ -3658,6 +3691,16 @@ static int axyne_tab_close_width(AxyneWindowState *state)
     return axyne_measure_text(state->font_glyph13, L"\u00d7");
 }
 
+/* One font choice for measuring and painting a tab title, so the italic
+ * preview title never clips. Falls back to the upright font if the italic
+ * one could not be created. */
+static HFONT axyne_tab_title_font(const AxyneWindowState *state,
+                                  const AxyneDocument *doc)
+{
+    return doc->preview && state->ui_font_italic != NULL
+        ? state->ui_font_italic : state->ui_font;
+}
+
 static int axyne_tab_width(AxyneWindowState *state, size_t index)
 {
     const AxyneDocument *doc = &state->documents.documents[index];
@@ -3667,7 +3710,9 @@ static int axyne_tab_width(AxyneWindowState *state, size_t index)
     /* An untouched empty Untitled buffer has no tab and takes no width. */
     if (axyne_document_tab_hidden(doc)) return 0;
     name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
-    name_width = name != NULL ? axyne_measure_text(state->ui_font, name) : 0;
+    name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
+    name_width = name != NULL ? axyne_measure_text(
+        axyne_tab_title_font(state, doc), name) : 0;
     width = 14 + axyne_tab_badge_width(state, doc->title) + 8 + name_width +
                 8 + axyne_tab_close_width(state) + 14;
     free(name);
@@ -4065,7 +4110,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                           badge);
         wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
         if (name != NULL) {
-            axyne_text_rect(dc, state->ui_font, active
+            axyne_text_rect(dc, axyne_tab_title_font(state, doc), active
                 ? AXYNE_TAB_ACTIVE_TEXT : AXYNE_MUTED, title, name, DT_LEFT);
             free(name);
         }
@@ -4164,6 +4209,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state = (AxyneWindowState *)GetWindowLongPtrW(window, GWLP_USERDATA);
         HINSTANCE instance = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
         state->ui_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+            FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        state->ui_font_italic = CreateFontW(-12, 0, 0, 0, FW_NORMAL, TRUE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         state->code_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
@@ -4779,6 +4827,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 FreeLibrary(state->scintilla_module);
             }
             if (state->ui_font != NULL) DeleteObject(state->ui_font);
+            if (state->ui_font_italic != NULL) DeleteObject(state->ui_font_italic);
             if (state->code_font != NULL) DeleteObject(state->code_font);
             if (state->badge_font != NULL) DeleteObject(state->badge_font);
             if (state->tab_badge_font != NULL) DeleteObject(state->tab_badge_font);
