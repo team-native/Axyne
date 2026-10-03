@@ -194,9 +194,6 @@ static NSColor *axyne_preference_color(uint32_t value);
 
 static void axyne_style_popup_menu(NSMenu *menu)
 {
-    static AxynePopupMenuDelegate *delegate = nil;
-    if (delegate == nil) delegate = [[AxynePopupMenuDelegate alloc] init];
-    [menu setDelegate:delegate];
     [menu setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
     [menu setAutoenablesItems:YES];
     NSArray *items = [[menu itemArray] copy];
@@ -214,9 +211,12 @@ static void axyne_style_popup_menu(NSMenu *menu)
             continue;
         }
         if ([item submenu] != nil) axyne_style_popup_menu([item submenu]);
-        AxyneMenuItemView *view = [[[AxyneMenuItemView alloc]
-            initWithMenuItem:item] autorelease];
-        [item setView:view];
+        NSDictionary *attributes = @{
+            NSFontAttributeName:[NSFont systemFontOfSize:12],
+            NSForegroundColorAttributeName:axyne_preference_color(0xc7c9ce)
+        };
+        [item setAttributedTitle:[[[NSAttributedString alloc]
+            initWithString:[item title] attributes:attributes] autorelease]];
     }
     [items release];
 }
