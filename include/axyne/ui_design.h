@@ -34,6 +34,17 @@ static inline int axyne_ui_suffix_equal(const char *a, const char *b)
     return *a == *b;
 }
 
+static inline int axyne_ui_ends_with(const char *name, const char *suffix)
+{
+    size_t name_length;
+    size_t suffix_length;
+    if (name == NULL || suffix == NULL) return 0;
+    name_length = strlen(name);
+    suffix_length = strlen(suffix);
+    return name_length >= suffix_length &&
+        axyne_ui_suffix_equal(name + name_length - suffix_length, suffix);
+}
+
 static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
 {
     const char *ext = name == NULL ? NULL : strrchr(name, '.');
@@ -46,12 +57,15 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
         (ext != NULL && axyne_ui_suffix_equal(ext, ".cmake")))) {
         badge.label = "CM"; badge.color = 0xa3c98a;
     } else if (ext != NULL) {
-        if (axyne_ui_suffix_equal(ext, ".c")) {
-            badge.label = "C"; badge.color = 0x7db5e3;
-        } else if (axyne_ui_suffix_equal(ext, ".h") || axyne_ui_suffix_equal(ext, ".hpp")) {
+        if (axyne_ui_ends_with(name, ".h.in") || axyne_ui_suffix_equal(ext, ".h")) {
             badge.label = "H"; badge.color = 0xc79ad9;
-        } else if (axyne_ui_suffix_equal(ext, ".cpp") || axyne_ui_suffix_equal(ext, ".cc")) {
+        } else if (axyne_ui_ends_with(name, ".c.in") || axyne_ui_suffix_equal(ext, ".c")) {
+            badge.label = "C"; badge.color = 0x7db5e3;
+        } else if (axyne_ui_ends_with(name, ".cpp.in") || axyne_ui_suffix_equal(ext, ".cpp") ||
+                   axyne_ui_suffix_equal(ext, ".cc")) {
             badge.label = "C++"; badge.color = 0x7db5e3;
+        } else if (axyne_ui_suffix_equal(ext, ".hpp")) {
+            badge.label = "H"; badge.color = 0xc79ad9;
         } else if (axyne_ui_suffix_equal(ext, ".json")) {
             badge.label = "{}"; badge.color = 0xd9b36c;
         } else if (axyne_ui_suffix_equal(ext, ".rc")) {
