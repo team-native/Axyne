@@ -28,6 +28,10 @@ int main(int argc, char **argv)
     char root[1024];
     int written;
 
+    /* Deterministic child used by the process-start race test: exits with the
+     * given status without touching any fixture directory. */
+    if (argc == 3 && strcmp(argv[1], "exit-with") == 0)
+        return atoi(argv[2]);
     if (argc < 3) {
         fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
