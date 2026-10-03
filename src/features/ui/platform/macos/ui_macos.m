@@ -4309,6 +4309,18 @@ static void axyne_install_menu(NSApplication *application,
             axyne_macos_add_item(submenu, @"자동 줄 바꿈", @selector(toggleWordWrap:),
                 workspace, @"z", NSEventModifierFlagCommand | NSEventModifierFlagOption);
         } else if (menuIndex == 5) {
+            /* Figma Tools lists the terminal and settings; the application
+             * menu's Preferences is not reachable from the in-window bar. */
+            axyne_macos_add_item(submenu, @"새 터미널", @selector(startTerminal:),
+                workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
+            axyne_macos_add_item(submenu, @"설정…", @selector(showGlobalPreferences:),
+                workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"작업 영역 설정…",
+                @selector(showWorkspacePreferences:), workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"preferences.json 열기",
+                @selector(openPreferencesFile:), workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
             NSMenuItem *definition = [submenu addItemWithTitle:@"정의로 이동"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
             NSMenuItem *references = [submenu addItemWithTitle:@"참조 찾기"
@@ -4318,9 +4330,6 @@ static void axyne_install_menu(NSApplication *application,
             /* Cmd+R belongs to Build > Run, so References adds Shift. */
             [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
             [references setTag:1];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"preferences.json 열기",
-                @selector(openPreferencesFile:), workspace, @"", 0);
         } else if (menuIndex == 6) {
             NSMenuItem *help = [submenu addItemWithTitle:@"Axyne 도움말"
                 action:@selector(openHelp:) keyEquivalent:@"?"];
@@ -4331,6 +4340,12 @@ static void axyne_install_menu(NSApplication *application,
                 @selector(showKeyboardShortcuts:), workspace, @"", 0);
             axyne_macos_add_item(submenu, @"문제 보고…", @selector(reportIssue:),
                 workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
+            /* Figma Help ends with "Axyne 정보"; the application menu's copy
+             * is not reachable from the in-window bar. */
+            NSMenuItem *about = [submenu addItemWithTitle:@"Axyne 정보"
+                action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+            [about setTarget:application];
             [application setHelpMenu:submenu];
         }
         [item setSubmenu:submenu];
