@@ -20,6 +20,7 @@
 #include "axyne/git.h"
 #include "axyne/lsp.h"
 #include "axyne/ui_design.h"
+#include "axyne/syntax.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
 
@@ -219,34 +220,6 @@ static char *axyne_macos_workspace_preferences_path(const char *root)
     directory = [rootPath stringByAppendingPathComponent:@".axyne"];
     path = [directory stringByAppendingPathComponent:@"preferences.json"];
     return strdup([path UTF8String]);
-}
-
-static const char *axyne_macos_editor_lexer(const char *path)
-{
-    const char *extension;
-    const char *slash;
-    if (path == NULL || path[0] == '\0') return "cpp";
-    extension = strrchr(path, '.');
-    slash = strrchr(path, '/');
-    if (extension == NULL || (slash != NULL && extension < slash)) return "cpp";
-    if (strcasecmp(extension, ".c") == 0 || strcasecmp(extension, ".h") == 0 ||
-        strcasecmp(extension, ".cc") == 0 || strcasecmp(extension, ".cpp") == 0 ||
-        strcasecmp(extension, ".cxx") == 0 || strcasecmp(extension, ".hpp") == 0 ||
-        strcasecmp(extension, ".m") == 0 || strcasecmp(extension, ".mm") == 0)
-        return "cpp";
-    if (strcasecmp(extension, ".py") == 0) return "python";
-    if (strcasecmp(extension, ".js") == 0 || strcasecmp(extension, ".jsx") == 0 ||
-        strcasecmp(extension, ".ts") == 0 || strcasecmp(extension, ".tsx") == 0)
-        return "javascript";
-    if (strcasecmp(extension, ".json") == 0) return "json";
-    if (strcasecmp(extension, ".html") == 0 || strcasecmp(extension, ".htm") == 0 ||
-        strcasecmp(extension, ".xml") == 0) return "hypertext";
-    if (strcasecmp(extension, ".css") == 0) return "css";
-    if (strcasecmp(extension, ".sh") == 0 || strcasecmp(extension, ".bash") == 0)
-        return "bash";
-    if (strcasecmp(extension, ".md") == 0 || strcasecmp(extension, ".markdown") == 0)
-        return "markdown";
-    return "null";
 }
 
 static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
@@ -814,32 +787,45 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)applyEditorLexer
 {
     AxyneDocument *document = [self activeDocument];
-    const char *language = axyne_macos_editor_lexer(
+    const AxyneSyntaxLanguage *language = axyne_syntax_for_path(
         document == NULL ? NULL : document->path);
+    BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
     void *lexer;
     if (_editorView == nil || _createLexer == NULL) return;
-    lexer = _createLexer(language);
-    if (lexer == NULL && strcmp(language, "null") != 0)
+    lexer = _createLexer(language->lexer);
+    if (lexer == NULL) {
+        NSLog(@"Axyne: Lexilla CreateLexer(\"%s\") failed; using plain text",
+              language->lexer);
         lexer = _createLexer("null");
-    if (lexer != NULL) {
-        (void)[self sendEditorMessage:SCI_SETILEXER wParam:0
-                                 lParam:(intptr_t)lexer];
-        if (strcmp(language, "cpp") == 0) {
-            const unsigned int styles[] = { 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 15, 16 };
-            const uint32_t colors[] = { 0x5f8c5a, 0x5f8c5a, 0x5f8c5a, 0xd9b36c,
-                0xd98e73, 0xc79ad9, 0xc79ad9, 0xc79ad9, 0xd5d8dd, 0xd5d8dd,
-                0x8cc7c0, 0xe3cf86 };
-            BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
-            for (size_t i = 0; i < sizeof(styles) / sizeof(styles[0]); ++i) {
-                uint32_t color = reference ? colors[i] : (i < 3 ? _preferences.theme.muted :
-                    (styles[i] == 10 || styles[i] == 11 ? _preferences.theme.editor_text :
-                     _preferences.theme.accent));
-                (void)[self sendEditorMessage:SCI_STYLESETFORE wParam:styles[i]
-                    lParam:axyne_editor_color(color)];
-            }
-        }
-        (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
     }
+    if (lexer == NULL) {
+        NSLog(@"Axyne: Lexilla CreateLexer(\"null\") failed; no lexer applied");
+        return;
+    }
+    (void)[self sendEditorMessage:SCI_SETILEXER wParam:0
+                             lParam:(intptr_t)lexer];
+    /* The previous language may have coloured styles this one does not use.
+     * STYLECLEARALL already ran (after the font was set) in applyPreferences;
+     * here the lexer-owned ids return to the text colour so a language switch
+     * cannot leak colours. Ids 32-39 are Scintilla's own and are left alone. */
+    for (unsigned int style = 0; style < 128; ++style) {
+        if (style >= 32 && style < 40) continue;
+        (void)[self sendEditorMessage:SCI_STYLESETFORE wParam:style
+            lParam:axyne_editor_color(_preferences.theme.editor_text)];
+    }
+    for (unsigned int set = 0; set < AXYNE_SYNTAX_KEYWORD_SETS; ++set) {
+        if (language->keywords[set] == NULL) continue;
+        (void)[self sendEditorMessage:SCI_SETKEYWORDS wParam:set
+            lParam:(intptr_t)language->keywords[set]];
+    }
+    for (size_t i = 0; i < language->style_count; ++i) {
+        uint32_t color = language->styles[i].color;
+        if (!reference && color == AXYNE_SYNTAX_PLAIN)
+            color = _preferences.theme.editor_text;
+        (void)[self sendEditorMessage:SCI_STYLESETFORE
+            wParam:language->styles[i].style lParam:axyne_editor_color(color)];
+    }
+    (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
 }
 
 - (void)updateLineNumberMargin
@@ -995,6 +981,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
         [self sendEditorMessage:SCI_STYLESETBACK wParam:32
                               lParam:axyne_editor_color(_preferences.theme.editor_background)];
+        /* STYLECLEARALL copies style 32 into every style, so the font must
+         * be set first or lexer styles never inherit it. */
+        [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
+        [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_STYLECLEARALL wParam:0 lParam:0];
         [self sendEditorMessage:SCI_STYLESETFORE wParam:33
                               lParam:axyne_editor_color(_preferences.theme.muted)];
@@ -1014,8 +1004,6 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                               lParam:axyne_editor_color(_preferences.theme.accent)];
         [self sendEditorMessage:SCI_SETCARETFORE wParam:0
                               lParam:axyne_editor_color(_preferences.theme.accent)];
-        [self sendEditorMessage:SCI_STYLESETSIZE wParam:32 lParam:(intptr_t)fontSize];
-        [self sendEditorMessage:SCI_STYLESETFONT wParam:32 lParam:(intptr_t)fontUTF8];
         [self sendEditorMessage:SCI_SETINDENT wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETTABWIDTH wParam:_preferences.editor.tab_width lParam:0];
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
@@ -1740,13 +1728,21 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         if (lexillaPath != nil) {
             _lexillaModule = dlopen([lexillaPath fileSystemRepresentation],
                                     RTLD_NOW | RTLD_LOCAL);
-            if (_lexillaModule != NULL)
+            if (_lexillaModule == NULL) {
+                const char *reason = dlerror();
+                NSLog(@"Axyne: dlopen(%@) failed: %s", lexillaPath,
+                      reason != NULL ? reason : "unknown error");
+            } else {
                 _createLexer = (void *(*)(const char *))dlsym(
                     _lexillaModule, "CreateLexer");
-            if (_createLexer == NULL && _lexillaModule != NULL) {
-                dlclose(_lexillaModule);
-                _lexillaModule = NULL;
+                if (_createLexer == NULL) {
+                    NSLog(@"Axyne: Lexilla.dylib has no CreateLexer symbol");
+                    dlclose(_lexillaModule);
+                    _lexillaModule = NULL;
+                }
             }
+        } else {
+            NSLog(@"Axyne: could not resolve the Lexilla.dylib path");
         }
     }
 }
