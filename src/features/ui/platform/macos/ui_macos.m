@@ -826,10 +826,10 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
-        _targetButton = axyne_macos_toolbar_button(@"▷  Runner 설정  ⌄", self, @selector(configureRunnerAction:));
+        _targetButton = axyne_macos_toolbar_button(@"▷  Debug · x64 (MSVC)  ˅", self, @selector(configureRunnerAction:));
         _searchButton = axyne_macos_toolbar_button(@"⌕  파일 이동                         ⌘P", self, @selector(quickFile:));
-        _buildButton = axyne_macos_toolbar_button(@"빌드  ⌘B", self, @selector(buildDocument:));
-        _runButton = axyne_macos_toolbar_button(@"▷  실행  F5", self, @selector(runDocument:));
+        _buildButton = axyne_macos_toolbar_button(@"빌드  Ctrl+B", self, @selector(buildDocument:));
+        _runButton = axyne_macos_toolbar_button(@"▷  실행 F5", self, @selector(runDocument:));
         [self addSubview:_newButton]; [self addSubview:_openButton];
         [self addSubview:_saveButton]; [self addSubview:_undoButton];
         [self addSubview:_redoButton]; [self addSubview:_buildButton];
@@ -920,9 +920,9 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
     [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_saveButton setEnabled:document != NULL];
-    NSString *target = _actionRunner.executable == NULL ? @"Runner 설정" :
+    NSString *target = _actionRunner.executable == NULL ? @"Debug · x64 (MSVC)" :
         [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
-    [_targetButton setTitle:[NSString stringWithFormat:@"▷  %@  ⌄", target]];
+    [_targetButton setTitle:[NSString stringWithFormat:@"▷  %@  ˅", target]];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
 }
@@ -2963,21 +2963,20 @@ else [_terminalInput setStringValue:@""];
     [_terminalStart setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
     [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
     [_terminalStop setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
-    CGFloat x = 8;
-    size_t icon = 0;
+    [_newButton setHidden:NO]; [_openButton setHidden:NO]; [_saveButton setHidden:NO];
+    [_undoButton setHidden:NO]; [_redoButton setHidden:NO]; [_searchButton setHidden:NO];
+    CGFloat x = 12;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
         [button setFrame:NSMakeRect(x, AXYNE_MENU + 5, 28, 28)];
-        x += 30;
-        if (++icon == 3) x += 2;
+        x += 32;
     }
-    x += 2;
-    [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 170, 26)]; x += 178;
-    [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
-    [_runButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 86, 26)]; x += 94;
+    x += 15;
+    [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 162, 26)]; x += 172;
+    [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 92, 26)]; x += 100;
+    [_runButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
     CGFloat searchLeft = MAX(x + 8, width - 348);
-    CGFloat searchWidth = width - 8 - searchLeft;
-    [_searchButton setHidden:searchWidth < 120];
-    [_searchButton setFrame:NSMakeRect(searchLeft, AXYNE_MENU + 6, MAX(0, searchWidth), 26)];
+    [_searchButton setFrame:NSMakeRect(searchLeft, AXYNE_MENU + 6,
+        MAX(0, width - 8 - searchLeft), 26)];
     for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(
             [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
@@ -3049,12 +3048,13 @@ else [_terminalInput setStringValue:@""];
         @"디버그(D)", @"도구(T)", @"도움말(H)"];
     for (NSString *label in menuLabels) {
         CGFloat itemWidth = [label sizeWithAttributes:@{
-            NSFontAttributeName:[NSFont systemFontOfSize:12]}].width + 16;
+            NSFontAttributeName:[NSFont systemFontOfSize:14]}].width + 20;
         if ([label hasPrefix:@"파일"]) {
             [axyne_preference_color(0x2a2e35) setFill];
-            NSRectFill(NSMakeRect(menuX, 0, itemWidth, AXYNE_MENU));
+            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(menuX, 3,
+                itemWidth, AXYNE_MENU - 6) xRadius:4 yRadius:4] fill];
         }
-        [self drawLabel:label at:NSMakePoint(menuX + 8, 6) size:12
+        [self drawLabel:label at:NSMakePoint(menuX + 10, 4) size:14
             color:menuText family:@"SF Pro Text"];
         menuX += itemWidth + 2;
     }
