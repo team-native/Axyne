@@ -66,6 +66,8 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
             badge.label = "C++"; badge.color = 0x7db5e3;
         } else if (axyne_ui_suffix_equal(ext, ".hpp")) {
             badge.label = "H"; badge.color = 0xc79ad9;
+        } else if (axyne_ui_suffix_equal(ext, ".m") || axyne_ui_suffix_equal(ext, ".mm")) {
+            badge.label = "OC"; badge.color = 0x738ed9;
         } else if (axyne_ui_suffix_equal(ext, ".json")) {
             badge.label = "{}"; badge.color = 0xd9b36c;
         } else if (axyne_ui_suffix_equal(ext, ".rc")) {
@@ -85,6 +87,14 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
                    axyne_ui_suffix_equal(ext, ".jpeg") || axyne_ui_suffix_equal(ext, ".gif") ||
                    axyne_ui_suffix_equal(ext, ".svg")) {
             badge.label = "IMG"; badge.color = 0xd98e73;
+        } else if (axyne_ui_suffix_equal(ext, ".pdf")) {
+            badge.label = "PDF"; badge.color = 0xd98e73;
+        } else if (axyne_ui_suffix_equal(ext, ".mp3") || axyne_ui_suffix_equal(ext, ".wav") ||
+                   axyne_ui_suffix_equal(ext, ".m4a") || axyne_ui_suffix_equal(ext, ".flac")) {
+            badge.label = "AUD"; badge.color = 0xc79ad9;
+        } else if (axyne_ui_suffix_equal(ext, ".mp4") || axyne_ui_suffix_equal(ext, ".mov") ||
+                   axyne_ui_suffix_equal(ext, ".mkv") || axyne_ui_suffix_equal(ext, ".webm")) {
+            badge.label = "VID"; badge.color = 0xa66bf0;
         } else if (axyne_ui_suffix_equal(ext, ".txt")) {
             badge.label = "TXT"; badge.color = 0xc4c8ce;
         } else if (axyne_ui_suffix_equal(ext, ".toml") || axyne_ui_suffix_equal(ext, ".yaml") ||
