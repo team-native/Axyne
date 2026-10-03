@@ -2403,7 +2403,9 @@ static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
         {L"Ctrl+`", L"터미널"}, {L"Ctrl+=  Ctrl+-  Ctrl+0", L"확대 / 축소 / 기본 크기"},
         {L"Alt+Z", L"자동 줄 바꿈"}, {L"F11", L"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)"},
         {L"Shift+F11", L"프로시저 나가기"}, {L"Shift+F5", L"디버깅 중지"},
-        {L"Ctrl+Shift+F9", L"모든 중단점 삭제"}
+        {L"Ctrl+Shift+F9", L"모든 중단점 삭제"},
+        {L"Ctrl+Shift+S", L"다른 이름으로 저장"},
+        {L"Ctrl+Alt+D / Ctrl+Alt+R", L"정의로 이동 / 참조 찾기"}
     };
     wchar_t text[4096];
     size_t i;
