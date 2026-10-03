@@ -248,6 +248,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     NSScrollView *_terminalScroll;
     NSTextField *_problemSummary;
     NSInteger _panelMode;
+    NSInteger _activeMenuIndex;
     NSInteger _explorerFirstRow;
     CGFloat _tabScroll;
     void *_lexillaModule;
@@ -764,6 +765,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 {
     self = [super initWithFrame:frame];
     if (self != nil) {
+        _activeMenuIndex = -1;
         if (axyne_explorer_initialize(&_explorer, NULL) != AXYNE_STATUS_OK ||
             axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
             axyne_explorer_destroy(&_explorer);
@@ -1960,11 +1962,15 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
             CGFloat itemWidth = [label sizeWithAttributes:@{
                 NSFontAttributeName:[NSFont systemFontOfSize:14]}].width + 20;
             if (point.x >= x && point.x < x + itemWidth) {
+                _activeMenuIndex = (NSInteger)i;
+                [self setNeedsDisplay:YES];
                 NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
                 NSMenuItem *item = [mainMenu itemAtIndex:i + 1];
                 if ([item submenu] != nil)
                     [[item submenu] popUpMenuPositioningItem:nil
                         atLocation:NSMakePoint(x, AXYNE_MENU) inView:self];
+                _activeMenuIndex = -1;
+                [self setNeedsDisplay:YES];
                 return;
             }
             x += itemWidth + 2;
@@ -3046,9 +3052,15 @@ else [_terminalInput setStringValue:@""];
     CGFloat menuX = 8;
     NSArray *menuLabels = @[@"파일(F)", @"편집(E)", @"보기(V)", @"빌드(B)",
         @"디버그(D)", @"도구(T)", @"도움말(H)"];
-    for (NSString *label in menuLabels) {
+    for (NSUInteger menuIndex = 0; menuIndex < [menuLabels count]; ++menuIndex) {
+        NSString *label = [menuLabels objectAtIndex:menuIndex];
         CGFloat itemWidth = [label sizeWithAttributes:@{
             NSFontAttributeName:[NSFont systemFontOfSize:14]}].width + 20;
+        if ((NSInteger)menuIndex == _activeMenuIndex) {
+            [axyne_preference_color(0x2a2e35) setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(menuX, 3,
+                itemWidth, AXYNE_MENU - 6) xRadius:4 yRadius:4] fill];
+        }
         [self drawLabel:label at:NSMakePoint(menuX + 10, 4) size:14
             color:menuText family:@"SF Pro Text"];
         menuX += itemWidth + 2;
@@ -3312,6 +3324,7 @@ else [_terminalInput setStringValue:@""];
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace)
 {
+    [application setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
     NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
         action:nil keyEquivalent:@""];
