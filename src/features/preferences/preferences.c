@@ -99,6 +99,10 @@ void axyne_preferences_defaults(AxynePreferences *preferences)
     preferences->editor.insert_spaces = 1;
     preferences->editor.word_wrap = 0;
     preferences->editor.show_whitespace = 0;
+    preferences->editor.line_numbers = 1;
+    preferences->editor.highlight_current_line = 1;
+    preferences->editor.auto_indent = 1;
+    preferences->editor.rendering = AXYNE_RENDERING_DIRECTWRITE;
     preferences->editor.font_family[0] = '\0';
     axyne_theme_defaults(&preferences->theme, AXYNE_THEME_DARK);
     axyne_add_binding(preferences, AXYNE_ACTION_NEW, AXYNE_KEY_MODIFIER_COMMAND, "N");
@@ -288,6 +292,17 @@ static AxyneStatus axyne_load_values(AxyneSettings *settings,
     GET_BOOL("/editor/insertSpaces", &preferences->editor.insert_spaces, AXYNE_PREFERENCE_EDITOR_INSERT_SPACES);
     GET_BOOL("/editor/wordWrap", &preferences->editor.word_wrap, AXYNE_PREFERENCE_EDITOR_WORD_WRAP);
     GET_BOOL("/editor/showWhitespace", &preferences->editor.show_whitespace, AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE);
+    GET_BOOL("/editor/lineNumbers", &preferences->editor.line_numbers, AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS);
+    GET_BOOL("/editor/highlightCurrentLine", &preferences->editor.highlight_current_line, AXYNE_PREFERENCE_EDITOR_HIGHLIGHT_CURRENT_LINE);
+    GET_BOOL("/editor/autoIndent", &preferences->editor.auto_indent, AXYNE_PREFERENCE_EDITOR_AUTO_INDENT);
+    if (axyne_value_present(settings, "/editor/rendering", error)) {
+        status = axyne_get_string(settings, "/editor/rendering", text, sizeof(text), error);
+        if (status != AXYNE_STATUS_OK) return status;
+        if (strcmp(text, "gdi") == 0) preferences->editor.rendering = AXYNE_RENDERING_GDI;
+        else if (strcmp(text, "directwrite") == 0) preferences->editor.rendering = AXYNE_RENDERING_DIRECTWRITE;
+        else return AXYNE_STATUS_INVALID_ARGUMENT;
+        preferences->present_fields |= AXYNE_PREFERENCE_EDITOR_RENDERING;
+    }
     if (axyne_value_present(settings, "/editor/fontFamily", error)) {
         status = axyne_get_string(settings, "/editor/fontFamily", text, sizeof(text), error);
         if (status != AXYNE_STATUS_OK) return status;
@@ -368,6 +383,10 @@ static AxyneStatus axyne_save_values(const AxynePreferences *preferences,
     if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_INSERT_SPACES)) SET_BOOL("/editor/insertSpaces", preferences->editor.insert_spaces);
     if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_WORD_WRAP)) SET_BOOL("/editor/wordWrap", preferences->editor.word_wrap);
     if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE)) SET_BOOL("/editor/showWhitespace", preferences->editor.show_whitespace);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS)) SET_BOOL("/editor/lineNumbers", preferences->editor.line_numbers);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_HIGHLIGHT_CURRENT_LINE)) SET_BOOL("/editor/highlightCurrentLine", preferences->editor.highlight_current_line);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_AUTO_INDENT)) SET_BOOL("/editor/autoIndent", preferences->editor.auto_indent);
+    if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_RENDERING)) { status = axyne_set_text(settings, "/editor/rendering", preferences->editor.rendering == AXYNE_RENDERING_GDI ? "gdi" : "directwrite", error); if (status != AXYNE_STATUS_OK) goto done; }
     if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_FAMILY)) { status = axyne_set_text(settings, "/editor/fontFamily", preferences->editor.font_family, error); if (status != AXYNE_STATUS_OK) goto done; }
     if (!workspace || (preferences->present_fields & AXYNE_PREFERENCE_THEME_PRESET)) { status = axyne_set_text(settings, "/theme/preset", preferences->theme.preset == AXYNE_THEME_LIGHT ? "light" : preferences->theme.preset == AXYNE_THEME_SYSTEM ? "system" : "dark", error); if (status != AXYNE_STATUS_OK) goto done; }
     { const uint32_t *colors = &preferences->theme.background; const char *names[] = {"background", "panel", "toolbar", "border", "text", "muted", "accent", "editorBackground", "editorText"}; const uint32_t bits[] = {AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL, AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER, AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED, AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND, AXYNE_PREFERENCE_THEME_EDITOR_TEXT}; for (size_t i = 0; i < 9; ++i) if (!workspace || (preferences->present_fields & bits[i])) { char path[64]; (void)snprintf(path, sizeof(path), "/theme/%s", names[i]); SET_UINT(path, colors[i]); } }
@@ -403,6 +422,10 @@ void axyne_preferences_apply_workspace(AxynePreferences *effective, const AxyneP
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_INSERT_SPACES) effective->editor.insert_spaces = workspace->editor.insert_spaces;
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_WORD_WRAP) effective->editor.word_wrap = workspace->editor.word_wrap;
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE) effective->editor.show_whitespace = workspace->editor.show_whitespace;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS) effective->editor.line_numbers = workspace->editor.line_numbers;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_HIGHLIGHT_CURRENT_LINE) effective->editor.highlight_current_line = workspace->editor.highlight_current_line;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_AUTO_INDENT) effective->editor.auto_indent = workspace->editor.auto_indent;
+    if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_RENDERING) effective->editor.rendering = workspace->editor.rendering;
     if (workspace->present_fields & AXYNE_PREFERENCE_EDITOR_FONT_FAMILY) axyne_copy_text(effective->editor.font_family, sizeof(effective->editor.font_family), workspace->editor.font_family);
     if (workspace->present_fields & AXYNE_PREFERENCE_THEME_PRESET)
         /* A workspace preset changes the effective palette as well as the
@@ -424,4 +447,108 @@ const char *axyne_preferences_action_name(AxynePreferenceAction action)
 {
     static const char *names[] = {"New", "Open", "Save", "Close", "Find", "Replace", "Search Workspace", "Quick File", "Build", "Run", "Preferences"};
     return action >= 0 && action < AXYNE_ACTION_COUNT ? names[action] : "Unknown";
+}
+
+AxynePreferenceCheck axyne_preferences_check_font_size(unsigned long value)
+{
+    return value >= 6 && value <= 72 ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_FONT_SIZE;
+}
+
+AxynePreferenceCheck axyne_preferences_check_tab_width(unsigned long value)
+{
+    return value >= 1 && value <= 16 ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_TAB_WIDTH;
+}
+
+AxynePreferenceCheck axyne_preferences_check_font_family(const char *utf8)
+{
+    return utf8 != NULL && strlen(utf8) < AXYNE_PREFERENCE_TEXT_MAX ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_FONT_FAMILY;
+}
+
+AxynePreferenceCheck axyne_preferences_check_key(const char *utf8)
+{
+    return utf8 != NULL && utf8[0] != '\0' && strlen(utf8) < AXYNE_PREFERENCE_KEY_MAX ? AXYNE_PREFERENCE_CHECK_OK : AXYNE_PREFERENCE_CHECK_KEY;
+}
+
+void axyne_preferences_select_theme(AxyneThemePreferences *theme, AxyneThemePreset preset)
+{
+    if (theme == NULL) return;
+    axyne_theme_defaults(theme, preset);
+}
+
+void axyne_preferences_restore_binding(AxynePreferences *preferences, AxynePreferenceAction action)
+{
+    AxynePreferences defaults;
+    const AxyneKeyBinding *restored;
+    int index;
+    if (preferences == NULL) return;
+    axyne_preferences_defaults(&defaults);
+    restored = axyne_preferences_find_binding(&defaults, action);
+    index = axyne_binding_index(preferences, action);
+    if (restored != NULL && index >= 0) preferences->bindings[index] = *restored;
+}
+
+uint32_t axyne_preferences_changed_fields(
+    const AxynePreferences *before, const AxynePreferences *after,
+    unsigned char bindings_changed[AXYNE_ACTION_COUNT])
+{
+    uint32_t fields = 0;
+    static const uint32_t color_bits[] = {
+        AXYNE_PREFERENCE_THEME_BACKGROUND, AXYNE_PREFERENCE_THEME_PANEL,
+        AXYNE_PREFERENCE_THEME_TOOLBAR, AXYNE_PREFERENCE_THEME_BORDER,
+        AXYNE_PREFERENCE_THEME_TEXT, AXYNE_PREFERENCE_THEME_MUTED,
+        AXYNE_PREFERENCE_THEME_ACCENT, AXYNE_PREFERENCE_THEME_EDITOR_BACKGROUND,
+        AXYNE_PREFERENCE_THEME_EDITOR_TEXT
+    };
+    if (bindings_changed != NULL)
+        memset(bindings_changed, 0, AXYNE_ACTION_COUNT);
+    if (before == NULL || after == NULL) return 0;
+#define AXYNE_DIFF(member, bit) if (before->editor.member != after->editor.member) fields |= (bit)
+    AXYNE_DIFF(tab_width, AXYNE_PREFERENCE_EDITOR_TAB_WIDTH);
+    AXYNE_DIFF(font_size, AXYNE_PREFERENCE_EDITOR_FONT_SIZE);
+    AXYNE_DIFF(insert_spaces, AXYNE_PREFERENCE_EDITOR_INSERT_SPACES);
+    AXYNE_DIFF(word_wrap, AXYNE_PREFERENCE_EDITOR_WORD_WRAP);
+    AXYNE_DIFF(show_whitespace, AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE);
+    AXYNE_DIFF(line_numbers, AXYNE_PREFERENCE_EDITOR_LINE_NUMBERS);
+    AXYNE_DIFF(highlight_current_line, AXYNE_PREFERENCE_EDITOR_HIGHLIGHT_CURRENT_LINE);
+    AXYNE_DIFF(auto_indent, AXYNE_PREFERENCE_EDITOR_AUTO_INDENT);
+    AXYNE_DIFF(rendering, AXYNE_PREFERENCE_EDITOR_RENDERING);
+#undef AXYNE_DIFF
+    if (strcmp(before->editor.font_family, after->editor.font_family) != 0)
+        fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
+    if (before->theme.preset != after->theme.preset) {
+        fields |= AXYNE_PREFERENCE_THEME_PRESET;
+    } else {
+        const uint32_t *a = &before->theme.background;
+        const uint32_t *b = &after->theme.background;
+        for (size_t i = 0; i < sizeof(color_bits) / sizeof(color_bits[0]); ++i)
+            if (a[i] != b[i]) fields |= color_bits[i];
+    }
+    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
+        const AxyneKeyBinding *x = axyne_preferences_find_binding(before, (AxynePreferenceAction)action);
+        const AxyneKeyBinding *y = axyne_preferences_find_binding(after, (AxynePreferenceAction)action);
+        int changed = (x == NULL) != (y == NULL) ||
+            (x != NULL && (x->modifiers != y->modifiers || x->enabled != y->enabled ||
+                           strcmp(x->key, y->key) != 0));
+        if (changed && bindings_changed != NULL) bindings_changed[action] = 1;
+    }
+    return fields;
+}
+
+void axyne_preferences_prepare_save(AxynePreferences *out,
+                                    const AxynePreferences *base,
+                                    const AxynePreferences *edited,
+                                    int workspace)
+{
+    unsigned char bindings[AXYNE_ACTION_COUNT];
+    uint32_t fields;
+    if (out == NULL || edited == NULL) return;
+    *out = *edited;
+    if (!workspace || base == NULL) {
+        axyne_preferences_mark_all(out);
+        return;
+    }
+    fields = axyne_preferences_changed_fields(base, edited, bindings);
+    out->present_fields = (base->present_fields | fields) & AXYNE_PREFERENCE_ALL_FIELDS;
+    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action)
+        out->binding_present[action] = (unsigned char)(base->binding_present[action] || bindings[action]);
 }
