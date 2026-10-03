@@ -43,6 +43,12 @@ static char *axyne_explorer_strdup(const char *text)
     return copy;
 }
 
+static int axyne_explorer_is_hidden_entry(const char *name)
+{
+    /* Repository metadata belongs to the workspace, not the source tree. */
+    return name != NULL && strcmp(name, ".git") == 0;
+}
+
 static void axyne_explorer_free_nodes(AxyneExplorer *explorer)
 {
     size_t i;
@@ -414,6 +420,8 @@ static AxyneStatus axyne_explorer_append_directory(AxyneExplorer *explorer,
     qsort(list.entries, list.count, sizeof(*list.entries),
           axyne_explorer_compare_entries);
     for (i = 0; i < list.count; ++i) {
+        if (axyne_explorer_is_hidden_entry(list.entries[i].name))
+            continue;
         if (!axyne_explorer_append(explorer, &list.entries[i], depth)) {
             axyne_fs_free_directory_list(&list);
             axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
@@ -495,7 +503,6 @@ AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
     AxyneExplorerNode *old_nodes;
     size_t old_count, old_capacity;
     AxyneStatus status;
-    AxyneFileEntry root_entry;
     if (explorer == NULL || explorer->root == NULL) {
         axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                              "workspace root is required");
@@ -505,18 +512,7 @@ AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
     old_count = explorer->count;
     old_capacity = explorer->capacity;
     explorer->nodes = NULL; explorer->count = 0; explorer->capacity = 0;
-    root_entry.name = explorer->root;
-    root_entry.path = explorer->root;
-    root_entry.kind = AXYNE_FILE_KIND_DIRECTORY;
-    if (!axyne_explorer_append(explorer, &root_entry, 0)) {
-        free(explorer->nodes);
-        explorer->nodes = old_nodes; explorer->count = old_count;
-        explorer->capacity = old_capacity;
-        axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
-                             "out of memory");
-        return AXYNE_STATUS_OUT_OF_MEMORY;
-    }
-    status = axyne_explorer_append_directory(explorer, explorer->root, 1,
+    status = axyne_explorer_append_directory(explorer, explorer->root, 0,
                                               error);
     if (status != AXYNE_STATUS_OK) {
         axyne_explorer_free_nodes(explorer);
