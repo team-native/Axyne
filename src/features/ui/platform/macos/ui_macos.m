@@ -844,7 +844,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
  * editor) that should receive Edit commands instead of the source editor. */
 - (NSResponder *)externalTextResponder
 {
-    NSResponder *responder = [[self window] firstResponder];
+    /* Use the key window: prompts and the preferences window are separate
+     * windows whose field editors must receive Edit commands. */
+    NSWindow *keyWindow = [NSApp keyWindow] != nil ? [NSApp keyWindow] : [self window];
+    NSResponder *responder = [keyWindow firstResponder];
     if (responder == nil || ![responder isKindOfClass:[NSText class]]) return nil;
     if (_editorView != nil && [responder isKindOfClass:[NSView class]] &&
         [(NSView *)responder isDescendantOf:_editorView]) return nil;
