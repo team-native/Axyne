@@ -12,6 +12,7 @@
 
 #include "axyne/ui.h"
 #include "axyne/ui_design.h"
+#include "axyne/syntax.h"
 #include "axyne/document.h"
 #include "axyne/search.h"
 #include "axyne/explorer.h"
@@ -468,61 +469,38 @@ static char *axyne_workspace_preferences_path(const char *root)
     return axyne_utf8(path);
 }
 
-static const char *axyne_editor_lexer(const char *path)
+static void axyne_debug_log(const char *format, const char *detail, unsigned long code)
 {
-    const char *extension;
-    const char *slash;
-    if (path == NULL || path[0] == '\0') return "cpp";
-    extension = strrchr(path, '.');
-    slash = strrchr(path, '/');
-    {
-        const char *backslash = strrchr(path, '\\');
-        if (backslash != NULL && (slash == NULL || backslash > slash))
-            slash = backslash;
-    }
-    if (extension == NULL || (slash != NULL && extension < slash)) return "cpp";
-    if (_stricmp(extension, ".c") == 0 || _stricmp(extension, ".h") == 0 ||
-        _stricmp(extension, ".cc") == 0 || _stricmp(extension, ".cpp") == 0 ||
-        _stricmp(extension, ".cxx") == 0 || _stricmp(extension, ".hpp") == 0 ||
-        _stricmp(extension, ".m") == 0 || _stricmp(extension, ".mm") == 0)
-        return "cpp";
-    if (_stricmp(extension, ".py") == 0) return "python";
-    if (_stricmp(extension, ".js") == 0 || _stricmp(extension, ".jsx") == 0 ||
-        _stricmp(extension, ".ts") == 0 || _stricmp(extension, ".tsx") == 0)
-        return "javascript";
-    if (_stricmp(extension, ".json") == 0) return "json";
-    if (_stricmp(extension, ".html") == 0 || _stricmp(extension, ".htm") == 0 ||
-        _stricmp(extension, ".xml") == 0) return "hypertext";
-    if (_stricmp(extension, ".css") == 0) return "css";
-    if (_stricmp(extension, ".sh") == 0 || _stricmp(extension, ".bash") == 0)
-        return "bash";
-    if (_stricmp(extension, ".md") == 0 || _stricmp(extension, ".markdown") == 0)
-        return "markdown";
-    return "null";
+    char line[256];
+    (void)snprintf(line, sizeof(line), format, detail == NULL ? "" : detail, code);
+    OutputDebugStringA(line);
 }
 
-/* Figma editor palette for the C-family lexer: comments grey, strings green,
- * keywords orange, type names blue, preprocessor purple, numbers amber and
- * constants teal. Other palettes keep their configured colours. */
+/* Applies the shared language table (include/axyne/syntax.h) after the lexer
+ * is attached. The base styles were cleared by STYLECLEARALL (font set first)
+ * in the preferences path; lexer-owned ids are returned to the text colour so
+ * a language switch cannot leak colours. Ids 32-39 are Scintilla's own. */
 static void axyne_apply_syntax_styles(AxyneWindowState *state,
-                                      const char *language)
+                                      const AxyneSyntaxLanguage *language)
 {
-    static const unsigned int styles[] = { 1, 2, 3, 15, 4, 5, 6, 7, 9, 10, 11,
-                                           16, 19 };
-    static const uint32_t colors[] = { 0x7a828e, 0x7a828e, 0x7a828e, 0x7a828e,
-        0xd9b36c, 0xd98e73, 0xa3c98a, 0xa3c98a, 0xc79ad9, 0xd5d8dd, 0xd5d8dd,
-        0x7db5e3, 0x8cc7c0 };
     const AxyneThemePreferences *theme = &state->preferences.theme;
+    unsigned int style;
     size_t i;
-    if (strcmp(language, "cpp") != 0) return;
-    for (i = 0; i < sizeof(styles) / sizeof(styles[0]); ++i) {
-        uint32_t color = colors[i];
-        if (!AXYNE_REFERENCE) {
-            if (i < 4) color = theme->muted;
-            else if (styles[i] == 10 || styles[i] == 11) color = theme->editor_text;
-            else color = theme->accent;
-        }
-        SendMessageA(state->editor, SCI_STYLESETFORE, styles[i],
+    for (style = 0; style < 128; ++style) {
+        if (style >= 32 && style < 40) continue;
+        SendMessageA(state->editor, SCI_STYLESETFORE, style,
+                     (LPARAM)axyne_theme_color(theme->editor_text));
+    }
+    for (i = 0; i < AXYNE_SYNTAX_KEYWORD_SETS; ++i) {
+        if (language->keywords[i] == NULL) continue;
+        SendMessageA(state->editor, SCI_SETKEYWORDS, i,
+                     (LPARAM)language->keywords[i]);
+    }
+    for (i = 0; i < language->style_count; ++i) {
+        uint32_t color = language->styles[i].color;
+        if (!AXYNE_REFERENCE && color == AXYNE_SYNTAX_PLAIN)
+            color = theme->editor_text;
+        SendMessageA(state->editor, SCI_STYLESETFORE, language->styles[i].style,
                      (LPARAM)axyne_theme_color(color));
     }
 }
@@ -530,36 +508,26 @@ static void axyne_apply_syntax_styles(AxyneWindowState *state,
 static void axyne_apply_editor_lexer(AxyneWindowState *state,
                                      const AxyneDocument *document)
 {
-    const char *language;
+    const AxyneSyntaxLanguage *language;
     void *lexer;
     if (state == NULL || state->editor == NULL || state->create_lexer == NULL)
         return;
-    language = axyne_editor_lexer(document == NULL ? NULL : document->path);
-    lexer = state->create_lexer(language);
-    if (lexer == NULL && strcmp(language, "null") != 0)
-        lexer = state->create_lexer("null");
-    if (lexer != NULL) {
-        SendMessageA(state->editor, SCI_SETILEXER, 0, (LPARAM)lexer);
-        if (strcmp(language, "cpp") == 0) {
-            /* Set 0: control and storage keywords; set 1: builtin types;
-             * set 3: well-known constants (NULL, true, false). */
-            SendMessageA(state->editor, SCI_SETKEYWORDS, 0,
-                (LPARAM)"auto break case const continue default do else enum "
-                    "extern for goto if inline register restrict return sizeof "
-                    "static struct switch typedef union volatile while");
-            SendMessageA(state->editor, SCI_SETKEYWORDS, 1,
-                (LPARAM)"void char short int long float double signed unsigned "
-                    "bool size_t ssize_t ptrdiff_t intptr_t uintptr_t int8_t "
-                    "int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t "
-                    "FILE HWND HDC HMENU HFONT HBRUSH HICON HANDLE HINSTANCE "
-                    "LRESULT WPARAM LPARAM UINT DWORD WORD BYTE BOOL WCHAR "
-                    "LPCSTR LPCWSTR LPSTR LPWSTR COLORREF RECT POINT SIZE");
-            SendMessageA(state->editor, SCI_SETKEYWORDS, 3,
-                (LPARAM)"NULL true false TRUE FALSE");
-        }
-        axyne_apply_syntax_styles(state, language);
-        SendMessageA(state->editor, SCI_COLOURISE, 0, (LPARAM)-1);
+    language = axyne_syntax_for_path(document == NULL ? NULL : document->path);
+    lexer = state->create_lexer(language->lexer);
+    if (lexer == NULL) {
+        axyne_debug_log("Axyne: Lexilla CreateLexer(\"%s\") failed (%lu); "
+                        "using plain text\n", language->lexer, 0);
+        language = axyne_syntax_by_id("text");
+        lexer = state->create_lexer(language->lexer);
     }
+    if (lexer == NULL) {
+        axyne_debug_log("Axyne: Lexilla CreateLexer(\"%s\") failed (%lu); "
+                        "no lexer applied\n", "null", 0);
+        return;
+    }
+    SendMessageA(state->editor, SCI_SETILEXER, 0, (LPARAM)lexer);
+    axyne_apply_syntax_styles(state, language);
+    SendMessageA(state->editor, SCI_COLOURISE, 0, (LPARAM)-1);
 }
 
 static void axyne_update_line_number_margin(AxyneWindowState *state)
@@ -3086,24 +3054,37 @@ static void axyne_text_rect(HDC dc, HFONT font, COLORREF color,
     SelectObject(dc, previous);
 }
 
+/* File-type chip shared with macOS: 14px high rounded rectangle (radius 3)
+ * filled with the badge colour at 18% over whatever is already painted, no
+ * border, bold label centred both ways. */
 static void axyne_paint_badge(HDC dc, HFONT font, const char *name, RECT rect)
 {
     AxyneFileBadge badge = axyne_ui_file_badge(name);
-    if (badge.label[0] == '\0') {
-        HPEN pen = CreatePen(PS_SOLID, 1, axyne_theme_color(badge.color));
-        HGDIOBJ previous_pen = SelectObject(dc, pen);
-        HGDIOBJ previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        int x = (rect.left + rect.right - 8) / 2;
-        int y = (rect.top + rect.bottom - 10) / 2;
-        Rectangle(dc, x, y, x + 8, y + 10);
-        SelectObject(dc, previous_brush);
+    COLORREF accent = axyne_theme_color(badge.color);
+    COLORREF behind = GetPixel(dc, rect.left - 2, (rect.top + rect.bottom) / 2);
+    int alpha = AXYNE_UI_BADGE_ALPHA_PERCENT;
+    RECT chip = rect;
+    wchar_t *label;
+    if (behind == CLR_INVALID) behind = RGB(0, 0, 0);
+    chip.top = (rect.top + rect.bottom - AXYNE_UI_BADGE_HEIGHT) / 2;
+    chip.bottom = chip.top + AXYNE_UI_BADGE_HEIGHT;
+    {
+        COLORREF fill = RGB(
+            (GetRValue(accent) * alpha + GetRValue(behind) * (100 - alpha)) / 100,
+            (GetGValue(accent) * alpha + GetGValue(behind) * (100 - alpha)) / 100,
+            (GetBValue(accent) * alpha + GetBValue(behind) * (100 - alpha)) / 100);
+        HBRUSH brush = CreateSolidBrush(fill);
+        HGDIOBJ previous_brush = SelectObject(dc, brush);
+        HGDIOBJ previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, chip.left, chip.top, chip.right + 1, chip.bottom + 1,
+                  AXYNE_UI_BADGE_RADIUS * 2, AXYNE_UI_BADGE_RADIUS * 2);
         SelectObject(dc, previous_pen);
-        DeleteObject(pen);
-        return;
+        SelectObject(dc, previous_brush);
+        DeleteObject(brush);
     }
-    wchar_t *label = axyne_wide(badge.label);
+    label = axyne_wide(badge.label);
     if (label != NULL) {
-        axyne_text_rect(dc, font, axyne_theme_color(badge.color), rect, label, DT_CENTER);
+        axyne_text_rect(dc, font, accent, chip, label, DT_CENTER);
         free(label);
     }
 }
@@ -3244,15 +3225,8 @@ static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
  * close glyph, 14px padding. Painting, hit-testing and scrolling share these. */
 static int axyne_tab_badge_width(AxyneWindowState *state, const char *title)
 {
-    AxyneFileBadge badge = axyne_ui_file_badge(title);
-    wchar_t *label;
-    int width;
-    if (badge.label[0] == '\0') return 8;
-    label = axyne_wide(badge.label);
-    if (label == NULL) return 20;
-    width = axyne_measure_text(state->tab_badge_font, label);
-    free(label);
-    return width;
+    (void)state; (void)title;
+    return AXYNE_UI_BADGE_WIDTH;
 }
 
 static int axyne_tab_close_width(AxyneWindowState *state)
@@ -3397,10 +3371,15 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     state->lexilla_module = LoadLibraryExW(
         L"Lexilla.dll", NULL,
         LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (state->lexilla_module != NULL) {
+    if (state->lexilla_module == NULL) {
+        axyne_debug_log("Axyne: LoadLibrary(Lexilla.dll)%s failed (%lu)\n", "",
+                        (unsigned long)GetLastError());
+    } else {
         state->create_lexer = (AxyneCreateLexer)(uintptr_t)GetProcAddress(
             state->lexilla_module, "CreateLexer");
         if (state->create_lexer == NULL) {
+            axyne_debug_log("Axyne: Lexilla.dll has no CreateLexer%s (%lu)\n",
+                            "", (unsigned long)GetLastError());
             FreeLibrary(state->lexilla_module);
             state->lexilla_module = NULL;
         }
@@ -3452,7 +3431,7 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
                     ? L"⌄" : L"›", DT_CENTER);
         } else {
             slot.right = x + AXYNE_UI_BADGE_WIDTH;
-            axyne_paint_badge(dc, state->badge_font, node->name, slot);
+            axyne_paint_badge(dc, state->tab_badge_font, node->name, slot);
             label.left = slot.right + 6;
         }
         axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
@@ -3640,7 +3619,9 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         }
         if (!AXYNE_REFERENCE)
             axyne_fill(dc, tab_right - 1, tab_top, tab_right, editor_top, AXYNE_BORDER);
-        axyne_paint_badge(dc, state->tab_badge_font, doc->title, badge);
+        axyne_paint_badge(dc, state->tab_badge_font,
+                          doc->path != NULL && doc->path[0] != '\0' ? doc->path : doc->title,
+                          badge);
         wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
         if (name != NULL) {
             axyne_text_rect(dc, state->ui_font, active
@@ -3750,7 +3731,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->badge_font = CreateFontW(-9, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
-        state->tab_badge_font = CreateFontW(-11, 0, 0, 0, FW_BOLD, FALSE, FALSE,
+        state->tab_badge_font = CreateFontW(-AXYNE_UI_BADGE_FONT_PT, 0, 0, 0, FW_BOLD, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         state->font_small = axyne_make_ui_font(-11, FW_NORMAL);

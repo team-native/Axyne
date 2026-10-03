@@ -20,10 +20,26 @@ enum {
     AXYNE_UI_BADGE_WIDTH = 20
 };
 
+/* File-type chip: a rounded rectangle filled with the badge colour at
+ * AXYNE_UI_BADGE_ALPHA_PERCENT, no border, and a bold label centred both
+ * ways. Both native adapters draw the same geometry. */
+enum {
+    AXYNE_UI_BADGE_HEIGHT = 14,
+    AXYNE_UI_BADGE_RADIUS = 3,
+    AXYNE_UI_BADGE_ALPHA_PERCENT = 18,
+    AXYNE_UI_BADGE_FONT_PT = 9
+};
+
 typedef struct AxyneFileBadge {
-    const char *label;
+    char label[8];
     uint32_t color;
 } AxyneFileBadge;
+
+typedef struct AxyneBadgeEntry {
+    const char *extension; /* lower case, without the dot */
+    const char *label;
+    uint32_t color;
+} AxyneBadgeEntry;
 
 static inline int axyne_ui_suffix_equal(const char *a, const char *b)
 {
@@ -33,35 +49,79 @@ static inline int axyne_ui_suffix_equal(const char *a, const char *b)
     return *a == *b;
 }
 
+static inline const char *axyne_ui_basename(const char *path)
+{
+    const char *base = path;
+    const char *p;
+    if (path == NULL) return "";
+    for (p = path; *p != '\0'; ++p)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    return base;
+}
+
+static inline AxyneFileBadge axyne_ui_make_badge(const char *label, uint32_t color)
+{
+    AxyneFileBadge badge;
+    size_t i = 0;
+    memset(&badge, 0, sizeof(badge));
+    while (label[i] != '\0' && i + 1 < sizeof(badge.label)) {
+        badge.label[i] = label[i];
+        ++i;
+    }
+    badge.color = color;
+    return badge;
+}
+
+/* Badge for a file name or path. Unknown extensions fall back to the
+ * upper-cased extension truncated to three characters; names without an
+ * extension get "TXT". The label is never empty. */
 static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
 {
-    const char *ext = name == NULL ? NULL : strrchr(name, '.');
-    AxyneFileBadge badge = { "", 0x8b919b };
-    if (name != NULL && (axyne_ui_suffix_equal(name, "CMakeLists.txt") ||
-        (ext != NULL && axyne_ui_suffix_equal(ext, ".cmake")))) {
-        badge.label = "CM"; badge.color = 0xa3c98a;
-    } else if (ext != NULL) {
-        if (axyne_ui_suffix_equal(ext, ".c")) {
-            badge.label = "C"; badge.color = 0x7db5e3;
-        } else if (axyne_ui_suffix_equal(ext, ".h") || axyne_ui_suffix_equal(ext, ".hpp")) {
-            badge.label = "H"; badge.color = 0xc79ad9;
-        } else if (axyne_ui_suffix_equal(ext, ".cpp") || axyne_ui_suffix_equal(ext, ".cc")) {
-            badge.label = "C++"; badge.color = 0x7db5e3;
-        } else if (axyne_ui_suffix_equal(ext, ".json")) {
-            badge.label = "{}"; badge.color = 0xd9b36c;
-        } else if (axyne_ui_suffix_equal(ext, ".rc")) {
-            badge.label = "RC"; badge.color = 0x8cc7c0;
-        } else if (axyne_ui_suffix_equal(ext, ".ps1")) {
-            badge.label = "PS"; badge.color = 0xd98e73;
-        } else if (axyne_ui_suffix_equal(ext, ".bat")) {
-            badge.label = "BAT"; badge.color = 0xd98e73;
-        } else if (axyne_ui_suffix_equal(ext, ".py")) {
-            badge.label = "PY"; badge.color = 0xd9b36c;
-        } else if (axyne_ui_suffix_equal(ext, ".js") || axyne_ui_suffix_equal(ext, ".ts")) {
-            badge.label = axyne_ui_suffix_equal(ext, ".ts") ? "TS" : "JS";
-            badge.color = 0x7db5e3;
-        }
-    }
-    return badge;
+    static const AxyneBadgeEntry table[] = {
+        { "c", "C", 0x7db5e3 }, { "h", "H", 0xc79ad9 }, { "hpp", "H", 0xc79ad9 },
+        { "hh", "H", 0xc79ad9 }, { "cpp", "C++", 0x7db5e3 },
+        { "cc", "C++", 0x7db5e3 }, { "cxx", "C++", 0x7db5e3 },
+        { "m", "M", 0x7db5e3 }, { "mm", "MM", 0x7db5e3 },
+        { "swift", "SW", 0xd98e73 }, { "go", "GO", 0x8cc7c0 },
+        { "rs", "RS", 0xd98e73 }, { "java", "JV", 0xd98e73 },
+        { "json", "{}", 0xd9b36c }, { "rc", "RC", 0x8cc7c0 },
+        { "ps1", "PS", 0xd98e73 }, { "bat", "BAT", 0xd98e73 },
+        { "sh", "SH", 0xa3c98a }, { "bash", "SH", 0xa3c98a },
+        { "zsh", "SH", 0xa3c98a }, { "py", "PY", 0xd9b36c },
+        { "js", "JS", 0x7db5e3 }, { "mjs", "JS", 0x7db5e3 },
+        { "jsx", "JSX", 0xd9b36c }, { "ts", "TS", 0x7db5e3 },
+        { "tsx", "TSX", 0x7db5e3 }, { "html", "HTM", 0xd98e73 },
+        { "htm", "HTM", 0xd98e73 }, { "css", "CSS", 0x7db5e3 },
+        { "xml", "XML", 0xd98e73 }, { "plist", "XML", 0xd98e73 },
+        { "yml", "YML", 0xc79ad9 }, { "yaml", "YML", 0xc79ad9 },
+        { "md", "MD", 0x8cc7c0 }, { "markdown", "MD", 0x8cc7c0 },
+        { "txt", "TXT", 0x8b919b }, { "cmake", "CM", 0xa3c98a }
+    };
+    const char *base = axyne_ui_basename(name);
+    const char *ext = strrchr(base, '.');
+    size_t i;
+    char label[4];
+    size_t length = 0;
+    if (axyne_ui_suffix_equal(base, "CMakeLists.txt"))
+        return axyne_ui_make_badge("CM", 0xa3c98a);
+    if (axyne_ui_suffix_equal(base, "Makefile"))
+        return axyne_ui_make_badge("MK", 0xd98e73);
+    if (ext == NULL || ext[1] == '\0') return axyne_ui_make_badge("TXT", 0x8b919b);
+    for (i = 0; i < sizeof(table) / sizeof(table[0]); ++i)
+        if (axyne_ui_suffix_equal(ext + 1, table[i].extension))
+            return axyne_ui_make_badge(table[i].label, table[i].color);
+    for (i = 1; ext[i] != '\0' && length < 3; ++i)
+        if (isalnum((unsigned char)ext[i]))
+            label[length++] = (char)toupper((unsigned char)ext[i]);
+    label[length] = '\0';
+    return axyne_ui_make_badge(length == 0 ? "TXT" : label, 0x8b919b);
+}
+
+/* Badge for a document: the saved path decides when present, otherwise the
+ * tab title (untitled or unsaved documents). */
+static inline AxyneFileBadge axyne_ui_document_badge(const char *path,
+                                                     const char *title)
+{
+    return axyne_ui_file_badge(path != NULL && path[0] != '\0' ? path : title);
 }
 #endif
