@@ -18,6 +18,7 @@
 - (void)notification:(SCNotification *)notification;
 - (BOOL)loadActiveDocument;
 - (BOOL)selectDocumentAtIndex:(size_t)index;
+- (NSRect)tabFrameAtIndex:(size_t)index;
 - (BOOL)captureEditor;
 - (void)openPath:(NSString *)path;
 - (void)newDocument:(id)sender;
@@ -210,6 +211,16 @@ static int run_tests(NSString *pngPath)
         CHECK(documents->count == 1 && documents->documents[0].is_untitled);
         CHECK(documents->documents[0].owns_native_editor_document);
         CHECK(editor_equals(workspace, "", 0));
+        // The replacement is an untouched placeholder: no tab, and closing it
+        // is a no-op that keeps the same buffer.
+        CHECK(axyne_document_tab_hidden(&documents->documents[0]));
+        CHECK(NSIsEmptyRect([workspace tabFrameAtIndex:0]));
+        {
+            void *placeholderBuffer = documents->documents[0].native_editor_document;
+            [workspace closeDocument:nil];
+            CHECK(documents->count == 1 &&
+                  documents->documents[0].native_editor_document == placeholderBuffer);
+        }
         CHECK(editor_message(workspace, SCI_GETINDENT, 0, 0) == 6);
         CHECK(editor_message(workspace, SCI_GETUSETABS, 0, 0) == 0);
         [workspace openPath:firstPath];
