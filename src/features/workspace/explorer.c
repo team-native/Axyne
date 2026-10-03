@@ -43,6 +43,21 @@ static char *axyne_explorer_strdup(const char *text)
     return copy;
 }
 
+int axyne_explorer_is_hidden_name(const char *name)
+{
+    /* Repository metadata belongs to the workspace, not the source tree.
+       ".git" is a directory in a clone and a file in a linked worktree. */
+    return name != NULL && strcmp(name, ".git") == 0;
+}
+
+int axyne_explorer_is_dimmed(const AxyneExplorerNode *node)
+{
+    /* Figma spec frame 29:857: the build/ folder is shown dimmed. */
+    return node != NULL && node->name != NULL &&
+        node->kind == AXYNE_FILE_KIND_DIRECTORY && node->depth > 0 &&
+        strcmp(node->name, "build") == 0;
+}
+
 static void axyne_explorer_free_nodes(AxyneExplorer *explorer)
 {
     size_t i;
@@ -414,6 +429,8 @@ static AxyneStatus axyne_explorer_append_directory(AxyneExplorer *explorer,
     qsort(list.entries, list.count, sizeof(*list.entries),
           axyne_explorer_compare_entries);
     for (i = 0; i < list.count; ++i) {
+        if (axyne_explorer_is_hidden_name(list.entries[i].name))
+            continue;
         if (!axyne_explorer_append(explorer, &list.entries[i], depth)) {
             axyne_fs_free_directory_list(&list);
             axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
@@ -489,12 +506,38 @@ AxyneStatus axyne_explorer_set_root(AxyneExplorer *explorer,
     return AXYNE_STATUS_OK;
 }
 
+static char *axyne_explorer_root_display_name(const char *path)
+{
+    size_t length;
+    size_t start;
+    char *name;
+
+    if (path == NULL) return NULL;
+    length = strlen(path);
+    while (length > 1 && (path[length - 1] == '/' ||
+                          path[length - 1] == '\\'))
+        --length;
+    start = length;
+    while (start > 0 && path[start - 1] != '/' && path[start - 1] != '\\')
+        --start;
+    if (start == length) {
+        name = axyne_explorer_strdup(path);
+        return name;
+    }
+    name = (char *)malloc(length - start + 1);
+    if (name == NULL) return NULL;
+    memcpy(name, path + start, length - start);
+    name[length - start] = '\0';
+    return name;
+}
+
 AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
                                   AxyneError *error)
 {
     AxyneExplorerNode *old_nodes;
     size_t old_count, old_capacity;
     AxyneStatus status;
+    char *root_display_name;
     AxyneFileEntry root_entry;
     if (explorer == NULL || explorer->root == NULL) {
         axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
@@ -505,10 +548,8 @@ AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
     old_count = explorer->count;
     old_capacity = explorer->capacity;
     explorer->nodes = NULL; explorer->count = 0; explorer->capacity = 0;
-    root_entry.name = explorer->root;
-    root_entry.path = explorer->root;
-    root_entry.kind = AXYNE_FILE_KIND_DIRECTORY;
-    if (!axyne_explorer_append(explorer, &root_entry, 0)) {
+    root_display_name = axyne_explorer_root_display_name(explorer->root);
+    if (root_display_name == NULL) {
         free(explorer->nodes);
         explorer->nodes = old_nodes; explorer->count = old_count;
         explorer->capacity = old_capacity;
@@ -516,6 +557,19 @@ AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
                              "out of memory");
         return AXYNE_STATUS_OUT_OF_MEMORY;
     }
+    root_entry.name = root_display_name;
+    root_entry.path = explorer->root;
+    root_entry.kind = AXYNE_FILE_KIND_DIRECTORY;
+    if (!axyne_explorer_append(explorer, &root_entry, 0)) {
+        free(root_display_name);
+        free(explorer->nodes);
+        explorer->nodes = old_nodes; explorer->count = old_count;
+        explorer->capacity = old_capacity;
+        axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                             "out of memory");
+        return AXYNE_STATUS_OUT_OF_MEMORY;
+    }
+    free(root_display_name);
     status = axyne_explorer_append_directory(explorer, explorer->root, 1,
                                               error);
     if (status != AXYNE_STATUS_OK) {

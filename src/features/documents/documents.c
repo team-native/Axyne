@@ -124,7 +124,7 @@ AxyneStatus axyne_documents_initialize(AxyneDocumentSet *set,
     if (set == NULL) return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                        "Document set is required");
     memset(set, 0, sizeof(*set));
-    return axyne_documents_new(set, NULL, error);
+    return axyne_documents_new_placeholder(set, NULL, error);
 }
 
 void axyne_documents_destroy(AxyneDocumentSet *set)
@@ -141,8 +141,9 @@ void axyne_documents_destroy(AxyneDocumentSet *set)
     memset(set, 0, sizeof(*set));
 }
 
-AxyneStatus axyne_documents_new(AxyneDocumentSet *set, size_t *index,
-                                AxyneError *error)
+static AxyneStatus axyne_documents_add_untitled(AxyneDocumentSet *set,
+                                                size_t *index, int requested,
+                                                AxyneError *error)
 {
     if (set == NULL) return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                        "Document set is required");
@@ -150,6 +151,7 @@ AxyneStatus axyne_documents_new(AxyneDocumentSet *set, size_t *index,
     doc.title = axyne_copy("Untitled", sizeof("Untitled") - 1);
     doc.contents = axyne_copy("", 0);
     doc.is_untitled = 1;
+    doc.tab_requested = requested;
     if (doc.title == NULL || doc.contents == NULL) {
         free(doc.title);
         free(doc.contents);
@@ -160,6 +162,34 @@ AxyneStatus axyne_documents_new(AxyneDocumentSet *set, size_t *index,
     free(doc.title);
     free(doc.contents);
     return status;
+}
+
+AxyneStatus axyne_documents_new(AxyneDocumentSet *set, size_t *index,
+                                AxyneError *error)
+{
+    return axyne_documents_add_untitled(set, index, 1, error);
+}
+
+AxyneStatus axyne_documents_new_placeholder(AxyneDocumentSet *set,
+                                            size_t *index, AxyneError *error)
+{
+    return axyne_documents_add_untitled(set, index, 0, error);
+}
+
+int axyne_document_tab_hidden(const AxyneDocument *document)
+{
+    return document != NULL && document->is_untitled &&
+        !document->tab_requested && !document->is_dirty &&
+        document->length == 0 && document->path == NULL;
+}
+
+size_t axyne_documents_visible_count(const AxyneDocumentSet *set)
+{
+    size_t visible = 0;
+    if (set == NULL) return 0;
+    for (size_t i = 0; i < set->count; ++i)
+        if (!axyne_document_tab_hidden(&set->documents[i])) ++visible;
+    return visible;
 }
 
 AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *path,
@@ -305,7 +335,7 @@ AxyneStatus axyne_documents_close(AxyneDocumentSet *set, size_t index,
         set->documents[i - 1] = set->documents[i];
     --set->count;
     if (set->count == 0) {
-        AxyneStatus status = axyne_documents_new(set, NULL, error);
+        AxyneStatus status = axyne_documents_new_placeholder(set, NULL, error);
         if (status != AXYNE_STATUS_OK) return status;
     } else if (set->active_index >= set->count) {
         set->active_index = set->count - 1;
