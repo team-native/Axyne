@@ -72,3 +72,18 @@ Reference: Figma main window `6:399`, menu frames above, design spec `29:857` (m
 | Hover / active | The item under the pointer and the item whose popup is open share one highlight. Hovering another item while a popup is open does not switch menus on macOS (AppKit owns menu tracking) | DELEGATED | ASSUMED |
 
 Dropped from the team branch: the per-item `AxyneMenuItemView`/separator/delegate drawing (superseded by the commits that removed it), the hard-coded dark application appearance, the toolbar label changes in `match macOS toolbar proportions` (dev's Figma toolbar parity already covers them), and `finish macOS workspace polish` (unrelated to the menu bar).
+
+## Menu function repair
+
+Audit of every entry of the seven menus (click, action or command id, handler, effect, enabled rule) on both platforms after reports that menu items did not work. The macOS and Windows adapters are checked statically by `axyne-menu-consistency` (macOS selectors against implementations, Windows command ids against `WM_COMMAND` and `axyne_action_command`, unique ids outside the Open Recent range, and the shared entries present on both platforms).
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Debug controls | Pause, Continue, Step Over/Into/Out and Stop depend only on a live debug session (`axyne_debugger_can_control`), not on the shown document being saved and clean: editing the debuggee or switching tabs used to disable every control of a paused session. Start still needs a saved, clean file with no terminal or session running. Toggle Breakpoint needs a document that has a path (breakpoints are keyed by path and line), clean or not. The rules are shared in `debugger_actions.h` | DELEGATED | ASSUMED |
+| Output visibility | Build, Run, Debug start and the Git actions select the Output tab and reveal the bottom panel when View > Bottom Panel hid it, so their messages and errors are never produced invisibly; New Terminal reveals the Terminal tab. Windows and macOS behave the same | DELEGATED | ASSUMED |
+| Edit commands in text fields | Undo/Redo/Cut/Copy/Paste/Select All act on a focused text field (terminal input) before the Scintilla editor. Windows edit controls have no redo, so Redo is shown unavailable there | DELEGATED | ASSUMED |
+| macOS bar lookup | Bar item N opens the main-menu entry tagged `100 + N` instead of main-menu index `N + 1`, so the application menu or later insertions cannot shift the bar onto a neighbouring submenu | IMPLEMENTATION | CONFIRMED |
+| macOS first click | A click on the bar while the window is inactive opens the menu immediately | DELEGATED | ASSUMED |
+| macOS Tools / Help | Tools gains New Terminal, Settings and Workspace Settings; Help gains Axyne 정보, because the application menu (which holds Preferences and About) is not shown by the in-window bar. No key equivalents are added (Cmd+, stays on the application menu) | DELEGATED | ASSUMED |
+| Windows shortcuts | Ctrl+Alt+D / Ctrl+Alt+R (go to definition / references) are handled with the other shortcuts because Alt chords arrive as `WM_SYSKEYDOWN`, which the old `WM_KEYDOWN` branch never saw; they are enabled only for a saved file. Ctrl+Shift+S is Save As (Figma), enabled with an open document | DELEGATED | ASSUMED |
+| Not changed | Cmd+Option+D (Definition) collides with the macOS system "hide Dock" shortcut and Figma's Block comment, Save All, Auto save, Rebuild/Clean, Command palette and similar rows stay omitted per the earlier decisions | DELEGATED | ASSUMED |
