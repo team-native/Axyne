@@ -176,7 +176,8 @@ enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_LSP_REFERENCES, AXYNE_CMD_UNDO, AXYNE_CMD_REDO,
        AXYNE_CMD_CUT, AXYNE_CMD_COPY, AXYNE_CMD_PASTE,
        AXYNE_CMD_SELECT_ALL, AXYNE_CMD_PANEL_OUTPUT,
-       AXYNE_CMD_PANEL_TERMINAL, AXYNE_CMD_PANEL_PROBLEMS };
+       AXYNE_CMD_PANEL_TERMINAL, AXYNE_CMD_PANEL_PROBLEMS,
+       AXYNE_CMD_ABOUT };
 
 enum { AXYNE_CMD_EXIT = 1090 };
 
@@ -2022,10 +2023,22 @@ static int axyne_capture_editor(AxyneWindowState *state)
     return 0;
 }
 
+/* The editor must own a native document before saving; otherwise the stored
+ * contents may be stale and writing them would clobber the file. */
+static int axyne_editor_ready_for_save(HWND window, AxyneWindowState *state)
+{
+    AxyneDocument *doc = axyne_active(state);
+    if (doc != NULL && state->editor != NULL && doc->native_editor_document != NULL)
+        return 1;
+    MessageBoxA(window, "The editor is not available for this document, so nothing was written to disk.",
+                "Axyne - Save failed", MB_OK | MB_ICONERROR);
+    return 0;
+}
+
 static int axyne_save_active(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
-    if (doc == NULL) return 0;
+    if (doc == NULL || !axyne_editor_ready_for_save(window, state)) return 0;
     if (!axyne_capture_editor(state)) return 0;
     char *path = NULL;
     AxyneStatus status;
@@ -2111,14 +2124,21 @@ static void axyne_new_document(HWND window, AxyneWindowState *state)
     size_t previous_index = state->documents.active_index;
     AxyneError error;
     size_t index;
+    memset(&error, 0, sizeof(error));
     if (axyne_documents_new(&state->documents, &index, &error) == AXYNE_STATUS_OK) {
         if (!axyne_show_document(state, index)) {
             (void)axyne_documents_close(&state->documents, index, NULL);
             (void)axyne_documents_set_active(&state->documents,
                                                previous_index, NULL);
+            MessageBoxA(window, "Scintilla could not create the document.",
+                        "Axyne - New failed", MB_OK | MB_ICONERROR);
             return;
         }
         axyne_update_title(window, state);
+    } else {
+        MessageBoxA(window, error.message[0] != '\0' ? error.message :
+                    "Unable to create a new document.",
+                    "Axyne - New failed", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -2332,19 +2352,27 @@ static int axyne_workspace_row_at(HWND window, AxyneWindowState *state, int y)
     return (int)row;
 }
 
+/* A single click selects (and expands or collapses folders); a double
+ * click opens the selected file. */
 static void axyne_workspace_open_selected(HWND window,
-                                          AxyneWindowState *state, size_t index)
+                                          AxyneWindowState *state, size_t index,
+                                          int double_click)
 {
     AxyneExplorerNode *node;
     if (index >= state->explorer.count) return;
     node = &state->explorer.nodes[index];
     state->explorer_selection = index; state->explorer_has_selection = 1;
     if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
-        if (axyne_explorer_toggle(&state->explorer, index, NULL) != AXYNE_STATUS_OK)
+        if (!double_click &&
+            axyne_explorer_toggle(&state->explorer, index, NULL) != AXYNE_STATUS_OK)
             MessageBoxA(window, "Unable to read the workspace folder.",
                         "Axyne - Workspace", MB_OK | MB_ICONERROR);
-    } else {
-        axyne_open_document(window, state, node->path);
+    } else if (double_click) {
+        char *file_path = _strdup(node->path);
+        if (file_path != NULL) {
+            axyne_open_document(window, state, file_path);
+            free(file_path);
+        }
     }
     InvalidateRect(window, NULL, FALSE);
 }
@@ -2370,7 +2398,7 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
 {
     AxyneExplorerNode *node = NULL;
     const char *parent;
-    char *name = NULL, *old_path = NULL, *owned_parent = NULL;
+    char *name = NULL, *old_path = NULL, *owned_parent = NULL, *node_name = NULL;
     AxyneError error;
     AxyneStatus status;
     if (command == AXYNE_CMD_WORKSPACE) {
@@ -2387,11 +2415,29 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
                     "Axyne - Workspace", MB_OK | MB_ICONWARNING);
         return;
     }
-    owned_parent = node != NULL && node->kind != AXYNE_FILE_KIND_DIRECTORY
-        ? axyne_workspace_parent(node->path) : NULL;
-    parent = node != NULL && node->kind == AXYNE_FILE_KIND_DIRECTORY
-        ? node->path : (node != NULL ? owned_parent : state->explorer.root);
-    if (parent == NULL) return;
+    if ((command == AXYNE_CMD_EXPLORER_RENAME ||
+         command == AXYNE_CMD_EXPLORER_REMOVE) && node == NULL) {
+        MessageBoxA(window, "Select a file or folder in the explorer first.",
+                    "Axyne - Workspace", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    /* Prompts below run a modal loop during which the explorer can reload,
+     * so work from private copies rather than the node pointer. */
+    /* Rename and delete act on a child of the node's parent folder, even
+     * when the node itself is a directory. */
+    owned_parent = node != NULL && (node->kind != AXYNE_FILE_KIND_DIRECTORY ||
+        command == AXYNE_CMD_EXPLORER_RENAME ||
+        command == AXYNE_CMD_EXPLORER_REMOVE)
+        ? axyne_workspace_parent(node->path)
+        : _strdup(node != NULL ? node->path : state->explorer.root);
+    parent = owned_parent;
+    if (node != NULL) node_name = _strdup(node->name);
+    if (parent == NULL || (node != NULL && node_name == NULL)) {
+        free(owned_parent); free(node_name);
+        MessageBoxA(window, "Unable to allocate the requested path.",
+                    "Axyne - Workspace", MB_OK | MB_ICONERROR);
+        return;
+    }
     if (command == AXYNE_CMD_EXPLORER_NEW_FILE ||
         command == AXYNE_CMD_EXPLORER_NEW_FOLDER) {
         name = axyne_prompt_utf8(window,
@@ -2402,7 +2448,7 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
                 MessageBoxA(window,
                     "Use one valid file or folder name without separators, . or ..",
                     "Axyne - Workspace", MB_OK | MB_ICONWARNING);
-                free(name); free(owned_parent);
+                free(name); free(owned_parent); free(node_name);
                 return;
             }
             status = command == AXYNE_CMD_EXPLORER_NEW_FILE
@@ -2415,17 +2461,30 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
             MessageBoxA(window,
                 "Use one valid file or folder name without separators, . or ..",
                 "Axyne - Workspace", MB_OK | MB_ICONWARNING);
-            free(name); free(old_path); free(owned_parent);
+            free(name); free(old_path); free(owned_parent); free(node_name);
             return;
         }
-        old_path = axyne_workspace_parent(node->path);
+        old_path = _strdup(parent);
         status = name == NULL ? AXYNE_STATUS_OK :
             (old_path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
-             axyne_fs_rename_at(old_path, node->name, name, &error));
+             axyne_fs_rename_at(old_path, node_name, name, &error));
     } else if (node != NULL && command == AXYNE_CMD_EXPLORER_REMOVE) {
-        old_path = axyne_workspace_parent(node->path);
+        wchar_t *wide_name = axyne_wide(node_name);
+        wchar_t prompt[600];
+        int answer;
+        (void)swprintf_s(prompt, 600,
+            L"Delete \"%ls\"?\n\nThis cannot be undone.",
+            wide_name != NULL ? wide_name : L"this item");
+        free(wide_name);
+        answer = MessageBoxW(window, prompt, L"Axyne - Delete",
+                             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+        if (answer != IDYES) {
+            free(owned_parent); free(node_name);
+            return;
+        }
+        old_path = _strdup(parent);
         status = old_path == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
-            axyne_fs_remove_at(old_path, node->name, &error);
+            axyne_fs_remove_at(old_path, node_name, &error);
     } else status = AXYNE_STATUS_OK;
     if (status != AXYNE_STATUS_OK) {
         if (status == AXYNE_STATUS_OUT_OF_MEMORY)
@@ -2441,7 +2500,7 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
             InvalidateRect(window, NULL, FALSE);
         }
     }
-    free(name); free(old_path); free(owned_parent);
+    free(name); free(old_path); free(owned_parent); free(node_name);
 }
 
 static void axyne_find(HWND window, AxyneWindowState *state, int replace,
@@ -2933,7 +2992,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_UNSTAGE_ALL, L"모두 스테이지 해제", NULL,
                        git_flags);
     } else {
-        axyne_menu_add(menu, &pool, 0, L"Axyne 정보", NULL, MF_GRAYED);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_ABOUT, L"Axyne 정보", NULL, MF_ENABLED);
     }
     axyne_menu_track(window, state, menu_index, menu, pool);
 }
@@ -3718,6 +3777,20 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         if (axyne_handle_key(window, state, w_param)) return 0;
         break;
+    case WM_LBUTTONDBLCLK: {
+        int x = GET_X_LPARAM(l_param);
+        int y = GET_Y_LPARAM(l_param);
+        RECT client;
+        GetClientRect(window, &client);
+        if (x >= 0 && x < AXYNE_SIDEBAR &&
+            y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
+            int row = axyne_workspace_row_at(window, state, y);
+            if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row, 1);
+            return 0;
+        }
+        /* Elsewhere a rapid second click must behave like a normal click. */
+        return axyne_window_proc(window, WM_LBUTTONDOWN, w_param, l_param);
+    }
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(l_param);
         int y = GET_Y_LPARAM(l_param);
@@ -3755,7 +3828,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (x >= 0 && x < AXYNE_SIDEBAR &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
             int row = axyne_workspace_row_at(window, state, y);
-            if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row);
+            if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row, 0);
             else if (state->explorer.root == NULL &&
                      y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER &&
                      y < AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER + AXYNE_UI_ROW)
@@ -3902,6 +3975,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             else if (state->editor != NULL) SetFocus(state->editor);
         }
         else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
+        else if (command == AXYNE_CMD_ABOUT)
+            MessageBoxW(window,
+                L"Axyne\nLightweight native IDE\n\nhttps://github.com/team-native/Axyne",
+                L"About Axyne", MB_OK | MB_ICONINFORMATION);
         else if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
         else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
         else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
@@ -3932,6 +4009,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_SAVE) (void)axyne_save_active(window, state);
         else if (command == AXYNE_CMD_SAVE_AS) {
             char *path = NULL;
+            if (axyne_active(state) == NULL ||
+                !axyne_editor_ready_for_save(window, state)) return 0;
             if (axyne_choose_path(window, 1, &path)) {
                 if (!axyne_capture_editor(state)) {
                     free(path);
@@ -4283,6 +4362,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     WNDCLASSEXW window_class = {0};
     window_class.cbSize = sizeof(window_class);
     window_class.hInstance = instance;
+    window_class.style = CS_DBLCLKS;
     window_class.lpfnWndProc = axyne_window_proc;
     window_class.lpszClassName = AXYNE_WINDOW_CLASS;
     window_class.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
