@@ -38,7 +38,11 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
 {
     const char *ext = name == NULL ? NULL : strrchr(name, '.');
     AxyneFileBadge badge = { "", 0x8b919b };
-    if (name != NULL && (axyne_ui_suffix_equal(name, "CMakeLists.txt") ||
+    if (name != NULL && axyne_ui_suffix_equal(name, ".gitignore")) {
+        badge.label = "GIT"; badge.color = 0xc79ad9;
+    } else if (name != NULL && axyne_ui_suffix_equal(name, "LICENSE")) {
+        badge.label = "LIC"; badge.color = 0xd5d8dd;
+    } else if (name != NULL && (axyne_ui_suffix_equal(name, "CMakeLists.txt") ||
         (ext != NULL && axyne_ui_suffix_equal(ext, ".cmake")))) {
         badge.label = "CM"; badge.color = 0xa3c98a;
     } else if (ext != NULL) {
@@ -61,6 +65,29 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
         } else if (axyne_ui_suffix_equal(ext, ".js") || axyne_ui_suffix_equal(ext, ".ts")) {
             badge.label = axyne_ui_suffix_equal(ext, ".ts") ? "TS" : "JS";
             badge.color = 0x7db5e3;
+        } else if (axyne_ui_suffix_equal(ext, ".md") || axyne_ui_suffix_equal(ext, ".markdown")) {
+            badge.label = "MD"; badge.color = 0xc4c8ce;
+        } else if (axyne_ui_suffix_equal(ext, ".png") || axyne_ui_suffix_equal(ext, ".jpg") ||
+                   axyne_ui_suffix_equal(ext, ".jpeg") || axyne_ui_suffix_equal(ext, ".gif") ||
+                   axyne_ui_suffix_equal(ext, ".svg")) {
+            badge.label = "IMG"; badge.color = 0xd98e73;
+        } else if (axyne_ui_suffix_equal(ext, ".txt")) {
+            badge.label = "TXT"; badge.color = 0xc4c8ce;
+        } else if (axyne_ui_suffix_equal(ext, ".toml") || axyne_ui_suffix_equal(ext, ".yaml") ||
+                   axyne_ui_suffix_equal(ext, ".yml")) {
+            badge.label = "CFG"; badge.color = 0xd9b36c;
+        } else if (axyne_ui_suffix_equal(ext, ".html") || axyne_ui_suffix_equal(ext, ".htm")) {
+            badge.label = "HTML"; badge.color = 0xd98e73;
+        } else if (axyne_ui_suffix_equal(ext, ".css")) {
+            badge.label = "CSS"; badge.color = 0x738ed9;
+        } else if (axyne_ui_suffix_equal(ext, ".sh") || axyne_ui_suffix_equal(ext, ".bash")) {
+            badge.label = "SH"; badge.color = 0xa3c98a;
+        } else if (axyne_ui_suffix_equal(ext, ".rs")) {
+            badge.label = "RS"; badge.color = 0xd98e73;
+        } else if (axyne_ui_suffix_equal(ext, ".go")) {
+            badge.label = "GO"; badge.color = 0x7db5e3;
+        } else if (axyne_ui_suffix_equal(ext, ".java")) {
+            badge.label = "JAVA"; badge.color = 0xd98e73;
         }
     }
     return badge;
