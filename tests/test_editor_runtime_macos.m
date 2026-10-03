@@ -106,6 +106,16 @@ static int editor_equals(NSView *workspace, const char *bytes, size_t length)
     return equal;
 }
 
+static NSScrollView *find_scroll_view(NSView *view)
+{
+    if ([view isKindOfClass:[NSScrollView class]]) return (NSScrollView *)view;
+    for (NSView *child in [view subviews]) {
+        NSScrollView *scroll = find_scroll_view(child);
+        if (scroll != nil) return scroll;
+    }
+    return nil;
+}
+
 static int file_equals(NSString *path, const char *bytes, size_t length)
 {
     NSData *data = [NSData dataWithContentsOfFile:path];
@@ -140,6 +150,10 @@ static int run_tests(NSString *pngPath)
         id editor = object_getIvar(workspace, editorIvar);
         CHECK(editor != nil);
         CHECK([editor isKindOfClass:NSClassFromString(@"ScintillaView")]);
+        NSScrollView *editorScroll = find_scroll_view(editor);
+        CHECK(editorScroll != nil);
+        CHECK([editorScroll scrollerStyle] == NSScrollerStyleOverlay);
+        CHECK([[editorScroll verticalScroller] knobStyle] == NSScrollerKnobStyleDark);
         CHECK([workspace sendEditorMessage:SCI_GETDOCPOINTER wParam:0 lParam:0] != 0);
 
         Ivar bundleIvar = class_getInstanceVariable(workspaceClass, "_scintillaBundle");

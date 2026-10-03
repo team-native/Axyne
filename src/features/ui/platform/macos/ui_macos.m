@@ -598,6 +598,22 @@ static NSString *axyne_macos_file_badge(const char *name)
     return [NSString stringWithUTF8String:axyne_ui_file_badge(name).label];
 }
 
+static void axyne_macos_style_editor_scrollbars(NSView *view)
+{
+    if ([view isKindOfClass:[NSScrollView class]]) {
+        NSScrollView *scroll = (NSScrollView *)view;
+        [scroll setBorderType:NSNoBorder];
+        [scroll setDrawsBackground:NO];
+        [scroll setScrollerStyle:NSScrollerStyleOverlay];
+        [scroll setScrollerKnobStyle:NSScrollerKnobStyleDark];
+        [scroll setAutohidesScrollers:YES];
+        [[scroll verticalScroller] setControlSize:NSControlSizeSmall];
+        [[scroll horizontalScroller] setControlSize:NSControlSizeSmall];
+    }
+    for (NSView *child in [view subviews])
+        axyne_macos_style_editor_scrollbars(child);
+}
+
 @implementation AxyneWorkspaceView
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -982,7 +998,10 @@ static NSString *axyne_macos_file_badge(const char *name)
     [_problemSummary setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setBackgroundColor:axyne_preference_color(_preferences.theme.panel)];
-    [_terminalInput setDrawsBackground:YES];
+    [_terminalInput setDrawsBackground:NO];
+    [_terminalInput setBezeled:NO];
+    [_terminalInput setFocusRingType:NSFocusRingTypeNone];
+    [_terminalInput setFont:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular]];
     for (NSButton *button in @[_terminalStart, _terminalStop, _terminalSend,
                                _debugStart, _debugPause, _debugContinue,
                                _debugNext, _debugBreakpoint]) {
@@ -1747,7 +1766,7 @@ static NSString *axyne_macos_file_badge(const char *name)
         [_editorView setAccessibilityRole:NSAccessibilityTextAreaRole];
         [_editorView setAccessibilityLabel:@"Source editor"];
         [_editorView setAccessibilityRoleDescription:@"source editor"];
-        [_editorView setFocusRingType:NSFocusRingTypeExterior];
+        [_editorView setFocusRingType:NSFocusRingTypeNone];
         (void)[self sendEditorMessage:SCI_SETMARGINTYPEN wParam:0
                                  lParam:SC_MARGIN_NUMBER];
         (void)[self sendEditorMessage:SCI_SETMARGINMASKN wParam:0 lParam:0];
@@ -1757,6 +1776,7 @@ static NSString *axyne_macos_file_badge(const char *name)
                                  wParam:SC_IV_LOOKBOTH lParam:0];
         (void)[self sendEditorMessage:SCI_SETBACKSPACEUNINDENTS wParam:1 lParam:0];
         (void)[self sendEditorMessage:SCI_SETTABINDENTS wParam:1 lParam:0];
+        axyne_macos_style_editor_scrollbars(_editorView);
         [self addSubview:_editorView];
         [self setNeedsLayout:YES];
 
