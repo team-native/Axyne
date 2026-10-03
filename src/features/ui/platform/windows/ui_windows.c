@@ -3841,7 +3841,9 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
             label.left = slot.right + 6;
         }
         axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
-                       ? RGB(255, 255, 255) : AXYNE_SIDEBAR_TEXT, label,
+                       ? RGB(255, 255, 255)
+                       : (axyne_explorer_is_dimmed(node) ? AXYNE_SIDEBAR_MUTED
+                                                         : AXYNE_SIDEBAR_TEXT), label,
                        name != NULL ? name : L"(invalid name)", DT_LEFT);
         free(name);
         y += AXYNE_UI_ROW;

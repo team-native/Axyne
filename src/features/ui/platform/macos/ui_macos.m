@@ -3851,7 +3851,8 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
                 NSString *name = [NSString stringWithUTF8String:node->name];
                 [self drawLabel:name != nil ? name : @"(invalid name)"
                     at:NSMakePoint(nameX, explorerY + 3) size:12
-                    color:selectedRow ? text : axyne_preference_color(light ? 0x24272d : 0xc4c8ce)
+                    color:selectedRow ? text : (axyne_explorer_is_dimmed(node) ? muted :
+                        axyne_preference_color(light ? 0x24272d : 0xc4c8ce))
                     family:@"SF Pro Text"];
             }
         }
