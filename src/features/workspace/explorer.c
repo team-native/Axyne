@@ -503,6 +503,9 @@ AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
     AxyneExplorerNode *old_nodes;
     size_t old_count, old_capacity;
     AxyneStatus status;
+    char *root_name;
+    char *separator;
+    AxyneFileEntry root_entry;
     if (explorer == NULL || explorer->root == NULL) {
         axyne_explorer_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                              "workspace root is required");
@@ -512,7 +515,22 @@ AxyneStatus axyne_explorer_reload(AxyneExplorer *explorer,
     old_count = explorer->count;
     old_capacity = explorer->capacity;
     explorer->nodes = NULL; explorer->count = 0; explorer->capacity = 0;
-    status = axyne_explorer_append_directory(explorer, explorer->root, 0,
+    root_name = strrchr(explorer->root, '/');
+    separator = strrchr(explorer->root, '\\');
+    if (separator != NULL && (root_name == NULL || separator > root_name))
+        root_name = separator;
+    root_entry.name = root_name == NULL ? explorer->root : root_name + 1;
+    root_entry.path = explorer->root;
+    root_entry.kind = AXYNE_FILE_KIND_DIRECTORY;
+    if (!axyne_explorer_append(explorer, &root_entry, 0)) {
+        free(explorer->nodes);
+        explorer->nodes = old_nodes; explorer->count = old_count;
+        explorer->capacity = old_capacity;
+        axyne_explorer_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                             "out of memory");
+        return AXYNE_STATUS_OUT_OF_MEMORY;
+    }
+    status = axyne_explorer_append_directory(explorer, explorer->root, 1,
                                               error);
     if (status != AXYNE_STATUS_OK) {
         axyne_explorer_free_nodes(explorer);
