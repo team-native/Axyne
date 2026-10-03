@@ -8,6 +8,7 @@
 /* Figma 7J8SYhLpybJgpxD3qFqL5u / 6:399. Coordinates are logical pixels;
  * each native adapter owns its OS title bar and menu. */
 enum {
+    AXYNE_UI_MENU = 26,
     AXYNE_UI_SIDEBAR = 248,
     AXYNE_UI_TOOLBAR = 38,
     AXYNE_UI_TABS = 34,

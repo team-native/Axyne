@@ -33,10 +33,12 @@ static const CGFloat AXYNE_SIDEBAR = AXYNE_UI_SIDEBAR;
 /* These bands follow the 1440x900 Figma work area: toolbar 38px, tabs 34px,
  * output panel 230px, and status bar 24px. The macOS titlebar remains owned
  * by AppKit so its traffic-light controls stay native and accessible. */
+static const CGFloat AXYNE_MENU = AXYNE_UI_MENU;
 static const CGFloat AXYNE_TOOLBAR = AXYNE_UI_TOOLBAR;
 static const CGFloat AXYNE_TABS = AXYNE_UI_TABS;
 static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
 static const CGFloat AXYNE_BOTTOM = AXYNE_UI_PANEL;
+static const CGFloat AXYNE_CONTENT_TOP = AXYNE_MENU + AXYNE_TOOLBAR;
 
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
@@ -311,6 +313,8 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)scrollTabsBy:(CGFloat)delta;
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
 - (void)showWorkspaceMessage:(NSString *)message;
+- (void)drawLabel:(NSString *)label at:(NSPoint)point
+             size:(CGFloat)size color:(NSColor *)color family:(NSString *)family;
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
 - (NSRect)tabFrameAtIndex:(size_t)index;
@@ -1506,7 +1510,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
 {
-    const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    const CGFloat explorerTop = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
     NSInteger row;
     if (_explorer.root == NULL || point.x < 0 || point.x >= AXYNE_SIDEBAR ||
@@ -1521,13 +1525,13 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     if (point.x >= AXYNE_SIDEBAR && point.x < NSWidth([self bounds]) &&
-        point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS) {
+        point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS) {
         CGFloat delta = [event scrollingDeltaX] != 0 ? [event scrollingDeltaX] :
             [event scrollingDeltaY];
         [self scrollTabsBy:-delta * ([event hasPreciseScrollingDeltas] ? 1 : 40)];
         return;
     }
-    CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM;
     if (point.x < AXYNE_SIDEBAR && point.y >= top && point.y < bottom) {
         NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
@@ -1807,7 +1811,27 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 - (void)mouseDown:(NSEvent *)event
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
-    if (point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS &&
+    if (point.y < AXYNE_MENU) {
+        NSArray *labels = @[@"파일(F)", @"편집(E)", @"보기(V)", @"빌드(B)",
+            @"디버그(D)", @"도구(T)", @"도움말(H)"];
+        CGFloat x = 8;
+        for (NSUInteger i = 0; i < [labels count]; ++i) {
+            NSString *label = labels[i];
+            CGFloat itemWidth = [label sizeWithAttributes:@{
+                NSFontAttributeName:[NSFont systemFontOfSize:12]}].width + 16;
+            if (point.x >= x && point.x < x + itemWidth) {
+                NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
+                NSMenuItem *item = [mainMenu itemAtIndex:i + 1];
+                if ([item submenu] != nil)
+                    [[item submenu] popUpMenuPositioningItem:nil
+                        atLocation:NSMakePoint(x, AXYNE_MENU) inView:self];
+                return;
+            }
+            x += itemWidth + 2;
+        }
+        return;
+    }
+    if (point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.x >= AXYNE_SIDEBAR) {
         for (size_t index = 0; index < _documents.count; ++index) {
             NSRect tab = [self tabFrameAtIndex:index];
@@ -1821,7 +1845,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
             return;
         }
     }
-    if (point.x < AXYNE_SIDEBAR && point.y >= AXYNE_TOOLBAR + AXYNE_TABS &&
+    if (point.x < AXYNE_SIDEBAR && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM) {
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
@@ -1847,7 +1871,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     NSInteger row = [self explorerNodeAtPoint:point];
-    if (point.x >= AXYNE_SIDEBAR || point.y < AXYNE_TOOLBAR + AXYNE_TABS ||
+    if (point.x >= AXYNE_SIDEBAR || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
         point.y >= NSHeight([self bounds]) - AXYNE_STATUS - AXYNE_BOTTOM) {
         [super rightMouseDown:event];
         return;
@@ -2753,7 +2777,7 @@ else [_terminalInput setStringValue:@""];
         CGFloat badgeWidth = [axyne_macos_file_badge(doc->title)
             length] != 0 ? 24 : 0;
         CGFloat width = MIN(240, MAX(100, nameWidth + badgeWidth + 54));
-        if (i == index) return NSMakeRect(x, AXYNE_TOOLBAR, width, AXYNE_TABS);
+        if (i == index) return NSMakeRect(x, AXYNE_CONTENT_TOP, width, AXYNE_TABS);
         x += width;
     }
     return NSZeroRect;
@@ -2774,7 +2798,7 @@ else [_terminalInput setStringValue:@""];
     NSRect bounds = [self bounds];
     CGFloat width = NSWidth(bounds);
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - AXYNE_BOTTOM;
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
         MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
@@ -2802,18 +2826,18 @@ else [_terminalInput setStringValue:@""];
     CGFloat x = 8;
     size_t icon = 0;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
-        [button setFrame:NSMakeRect(x, 5, 28, 28)];
+        [button setFrame:NSMakeRect(x, AXYNE_MENU + 5, 28, 28)];
         x += 30;
         if (++icon == 3) x += 2;
     }
     x += 2;
-    [_targetButton setFrame:NSMakeRect(x, 6, 170, 26)]; x += 178;
-    [_buildButton setFrame:NSMakeRect(x, 6, 88, 26)]; x += 96;
-    [_runButton setFrame:NSMakeRect(x, 6, 86, 26)]; x += 94;
+    [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 170, 26)]; x += 178;
+    [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
+    [_runButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 86, 26)]; x += 94;
     CGFloat searchLeft = MAX(x + 8, width - 348);
     CGFloat searchWidth = width - 8 - searchLeft;
     [_searchButton setHidden:searchWidth < 120];
-    [_searchButton setFrame:NSMakeRect(searchLeft, 6, MAX(0, searchWidth), 26)];
+    [_searchButton setFrame:NSMakeRect(searchLeft, AXYNE_MENU + 6, MAX(0, searchWidth), 26)];
     for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(
             [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
@@ -2868,7 +2892,7 @@ else [_terminalInput setStringValue:@""];
     CGFloat width = NSWidth(bounds), height = NSHeight(bounds);
     CGFloat bottomTop = height - AXYNE_STATUS - AXYNE_BOTTOM;
     CGFloat statusTop = height - AXYNE_STATUS;
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     NSColor *background = axyne_preference_color(_preferences.theme.background);
     NSColor *panel = axyne_preference_color(_preferences.theme.panel);
     NSColor *muted = axyne_preference_color(_preferences.theme.muted);
@@ -2878,18 +2902,34 @@ else [_terminalInput setStringValue:@""];
     BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
     NSColor *tabBackground = axyne_preference_color(reference ? 0x17191c : _preferences.theme.toolbar);
     [background setFill]; NSRectFill(bounds);
-    [toolbar setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_TOOLBAR));
-    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, width, AXYNE_TABS));
+    [background setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_MENU));
+    NSColor *menuText = axyne_preference_color(0xc7c9ce);
+    CGFloat menuX = 8;
+    NSArray *menuLabels = @[@"파일(F)", @"편집(E)", @"보기(V)", @"빌드(B)",
+        @"디버그(D)", @"도구(T)", @"도움말(H)"];
+    for (NSString *label in menuLabels) {
+        CGFloat itemWidth = [label sizeWithAttributes:@{
+            NSFontAttributeName:[NSFont systemFontOfSize:12]}].width + 16;
+        if ([label hasPrefix:@"파일"]) {
+            [axyne_preference_color(0x2a2e35) setFill];
+            NSRectFill(NSMakeRect(menuX, 0, itemWidth, AXYNE_MENU));
+        }
+        [self drawLabel:label at:NSMakePoint(menuX + 8, 6) size:12
+            color:menuText family:@"SF Pro Text"];
+        menuX += itemWidth + 2;
+    }
+    [toolbar setFill]; NSRectFill(NSMakeRect(0, AXYNE_MENU, width, AXYNE_TOOLBAR));
+    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, width, AXYNE_TABS));
     [panel setFill]; NSRectFill(NSMakeRect(0, editorTop, AXYNE_SIDEBAR, statusTop - editorTop));
     [axyne_preference_color(reference ? 0x191b1f : _preferences.theme.toolbar) setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, AXYNE_SIDEBAR, AXYNE_TABS));
+    NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, AXYNE_SIDEBAR, AXYNE_TABS));
     [tabBackground setFill];
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR, bottomTop, width - AXYNE_SIDEBAR, 32));
     [axyne_preference_color(axyne_macos_output_background(&_preferences.theme)) setFill];
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR, bottomTop + 32, width - AXYNE_SIDEBAR, 198));
     [toolbar setFill]; NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR - 1, width, 1));
+    NSRectFill(NSMakeRect(0, AXYNE_MENU + AXYNE_TOOLBAR - 1, width, 1));
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR - 1, editorTop, 1, statusTop - editorTop));
     NSRectFill(NSMakeRect(0, bottomTop, width, 1));
     if (![_searchButton isHidden]) {
@@ -2905,7 +2945,7 @@ else [_terminalInput setStringValue:@""];
         size:11 color:muted family:@"SF Pro Text"];
 
     [NSGraphicsContext saveGraphicsState];
-    NSRectClip(NSMakeRect(AXYNE_SIDEBAR, AXYNE_TOOLBAR, MAX(0, width - AXYNE_SIDEBAR), AXYNE_TABS));
+    NSRectClip(NSMakeRect(AXYNE_SIDEBAR, AXYNE_CONTENT_TOP, MAX(0, width - AXYNE_SIDEBAR), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
         NSRect frame = [self tabFrameAtIndex:i];
@@ -2917,16 +2957,16 @@ else [_terminalInput setStringValue:@""];
             NSRectFill(NSMakeRect(NSMinX(frame), NSMinY(frame), NSWidth(frame), 2));
         }
         CGFloat badgeX = NSMinX(frame) + 14;
-        [self drawFileBadge:doc->title inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, 20, 16) tab:YES];
+        [self drawFileBadge:doc->title inRect:NSMakeRect(badgeX, AXYNE_CONTENT_TOP + 10, 20, 16) tab:YES];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
-        NSRectClip(NSMakeRect(badgeX + 26, AXYNE_TOOLBAR + 4, NSWidth(frame) - 64, 28));
+        NSRectClip(NSMakeRect(badgeX + 26, AXYNE_CONTENT_TOP + 4, NSWidth(frame) - 64, 28));
         [self drawLabel:title != nil ? title : @"Untitled"
-            at:NSMakePoint(badgeX + 26, AXYNE_TOOLBAR + 10)
+            at:NSMakePoint(badgeX + 26, AXYNE_CONTENT_TOP + 10)
             size:12 color:active ? axyne_preference_color(reference ? 0xe6e7ea : _preferences.theme.text) : muted family:@"SF Pro Text"];
         [NSGraphicsContext restoreGraphicsState];
         [self drawLabel:doc->is_dirty ? @"●" : @"×"
-            at:NSMakePoint(NSMaxX(frame) - 20, AXYNE_TOOLBAR + 10)
+            at:NSMakePoint(NSMaxX(frame) - 20, AXYNE_CONTENT_TOP + 10)
             size:doc->is_dirty ? 8 : 13 color:muted family:@"SF Pro Text"];
     }
     [NSGraphicsContext restoreGraphicsState];
@@ -3150,9 +3190,9 @@ static void axyne_install_menu(NSApplication *application,
                  keyEquivalent:@"q"];
     [appItem setSubmenu:appMenu];
     [mainMenu addItem:appItem];
-    NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"File"
+    NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"파일(F)"
         action:nil keyEquivalent:@""];
-    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"파일(F)"];
     NSMenuItem *newItem = [fileMenu addItemWithTitle:@"New"
         action:@selector(newDocument:) keyEquivalent:@"n"];
     [newItem setTarget:workspace];
@@ -3197,12 +3237,13 @@ static void axyne_install_menu(NSApplication *application,
     [mainMenu addItem:fileItem];
     [fileItem release]; [recentItem release];
     [recentMenu release]; [fileMenu release];
-    NSArray *titles = @[@"Edit", @"View", @"Build", @"Debug", @"Tools", @"Help"];
+    NSArray *titles = @[@"편집(E)", @"보기(V)", @"빌드(B)", @"디버그(D)",
+        @"도구(T)", @"도움말(H)"];
     for (NSString *title in titles) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
         NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
-        if ([title isEqualToString:@"Edit"]) {
+        if ([title hasPrefix:@"편집"]) {
             [submenu addItemWithTitle:@"Undo" action:@selector(undo:)
                          keyEquivalent:@"z"];
             NSMenuItem *redo = [submenu addItemWithTitle:@"Redo"
@@ -3218,7 +3259,7 @@ static void axyne_install_menu(NSApplication *application,
                          keyEquivalent:@"v"];
             [submenu addItemWithTitle:@"Select All" action:@selector(selectAll:)
                          keyEquivalent:@"a"];
-        } else if ([title isEqualToString:@"Build"]) {
+        } else if ([title hasPrefix:@"빌드"]) {
             NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
                 action:@selector(buildDocument:) keyEquivalent:@"b"];
             NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
@@ -3227,7 +3268,7 @@ static void axyne_install_menu(NSApplication *application,
                 action:@selector(configureRunnerAction:) keyEquivalent:@""];
             [build setTarget:workspace]; [run setTarget:workspace];
             [configure setTarget:workspace];
-        } else if ([title isEqualToString:@"Debug"]) {
+        } else if ([title hasPrefix:@"디버그"]) {
             NSMenuItem *start = [submenu addItemWithTitle:@"Start Debugger"
                 action:@selector(startDebugger:) keyEquivalent:@"F5"];
             NSMenuItem *pause = [submenu addItemWithTitle:@"Pause"
@@ -3242,14 +3283,14 @@ static void axyne_install_menu(NSApplication *application,
             NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
                 action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
             [toggle setTarget:workspace];
-        } else if ([title isEqualToString:@"View"]) {
+        } else if ([title hasPrefix:@"보기"]) {
             NSArray *panels = @[@"출력", @"문제", @"터미널"];
             for (NSInteger i = 0; i < (NSInteger)[panels count]; ++i) {
                 NSMenuItem *panelItem = [submenu addItemWithTitle:panels[(NSUInteger)i]
                     action:@selector(selectPanel:) keyEquivalent:@""];
                 [panelItem setTag:i]; [panelItem setTarget:workspace];
             }
-        } else if ([title isEqualToString:@"Tools"]) {
+        } else if ([title hasPrefix:@"도구"]) {
             NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: Go to Definition"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
             NSMenuItem *references = [submenu addItemWithTitle:@"LSP: Find References"

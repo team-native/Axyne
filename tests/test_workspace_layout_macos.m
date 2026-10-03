@@ -63,7 +63,8 @@ int main(void)
             CHECK(button != nil && [button target] == view && [button action] != NULL);
             CHECK([view respondsToSelector:[button action]]);
             NSRect frame = [button frame];
-            CHECK(NSMinY(frame) >= 0 && NSMaxY(frame) <= AXYNE_UI_TOOLBAR);
+            CHECK(NSMinY(frame) >= AXYNE_UI_MENU &&
+                NSMaxY(frame) <= AXYNE_UI_MENU + AXYNE_UI_TOOLBAR);
             CHECK(NSMinX(frame) >= NSMaxX(previous) && NSMaxX(frame) <= 1440);
             previous = frame;
         }
@@ -108,7 +109,8 @@ int main(void)
         CHECK([view selectWorkspaceURL:[NSURL fileURLWithPath:root]]);
         fprintf(stderr, "Checking explorer fixture: %s\n", [root UTF8String]);
         [view layoutSubtreeIfNeeded];
-        CGFloat top = AXYNE_UI_TOOLBAR + AXYNE_UI_TABS + AXYNE_UI_EXPLORER_HEADER;
+        CGFloat top = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS +
+            AXYNE_UI_EXPLORER_HEADER;
         CGFloat bottom = 842 - AXYNE_UI_STATUS - AXYNE_UI_PANEL;
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, top)] == 0);
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + AXYNE_UI_ROW - 1)] == 0);
