@@ -1150,6 +1150,19 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
                 [self sendEditorMessage:SCI_STYLESETFORE wParam:yamlStyles[i]
                     lParam:axyne_editor_color(yamlColors[i])];
         }
+        if (strcmp(language, "markdown") == 0) {
+            const unsigned int markdownStyles[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
+            const uint32_t markdownColors[] = {0x7a828e, 0xd9b36c, 0xd9b36c,
+                0xd9b36c, 0xc79ad9, 0xc79ad9, 0xa66bf0, 0xa66bf0, 0xa66bf0,
+                0xa66bf0, 0xa66bf0, 0x8cc7c0, 0xd98e73, 0xd98e73, 0x738ed9,
+                0xd98e73, 0x7a828e, 0x7a828e, 0x7db5e3, 0xa3c98a, 0xa3c98a};
+            for (size_t i = 0; i < sizeof(markdownStyles) / sizeof(markdownStyles[0]); ++i)
+                [self sendEditorMessage:SCI_STYLESETFORE wParam:markdownStyles[i]
+                    lParam:axyne_editor_color(markdownColors[i])];
+            for (unsigned int style = 6; style <= 11; ++style)
+                [self sendEditorMessage:SCI_STYLESETBOLD wParam:style lParam:1];
+        }
         (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
     }
 }
