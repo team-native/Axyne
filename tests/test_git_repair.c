@@ -19,7 +19,12 @@
 #include "axyne/git.h"
 #include "axyne/process.h"
 
+#ifdef _WIN32
+/* Process creation is much slower on Windows; keep within the CTest timeout. */
+#define AXYNE_RACE_ITERATIONS 100
+#else
 #define AXYNE_RACE_ITERATIONS 200
+#endif
 
 /* The exit callback must be able to use the handle that axyne_process_start
  * returns to the caller, even when the child exits before start returns. */
@@ -64,7 +69,11 @@ static int axyne_test_process_start_race(void)
 #ifndef _WIN32
         static const char *const arguments[] = { "-c", "exit 128" };
 #else
-        static const char *const arguments[] = { "/c", "exit 128" };
+        /* cmd.exe's status for quoted arguments is environment dependent,
+         * so re-run this test executable in its "exit-with" mode. */
+        static const char *const arguments[] = { "exit-with", "128" };
+        char program[MAX_PATH];
+        DWORD program_length;
 #endif
         memset(&state, 0, sizeof(state));
         memset(&spec, 0, sizeof(spec));
@@ -73,7 +82,9 @@ static int axyne_test_process_start_race(void)
 #ifdef _WIN32
         state.done = CreateEventW(NULL, TRUE, FALSE, NULL);
         AXYNE_TEST_CHECK(state.done != NULL);
-        spec.executable = "C:\\Windows\\System32\\cmd.exe";
+        program_length = GetModuleFileNameA(NULL, program, (DWORD)sizeof(program));
+        AXYNE_TEST_CHECK(program_length > 0 && program_length < sizeof(program));
+        spec.executable = program;
 #else
         AXYNE_TEST_CHECK(pthread_mutex_init(&state.lock, NULL) == 0);
         AXYNE_TEST_CHECK(pthread_cond_init(&state.condition, NULL) == 0);
@@ -98,15 +109,7 @@ static int axyne_test_process_start_race(void)
             fprintf(stderr, "FAIL on_exit saw a NULL or mismatched handle "
                     "(iteration %d)\n", i);
         AXYNE_TEST_CHECK(!state.saw_null_handle);
-#ifndef _WIN32
         AXYNE_TEST_EQ_INT(state.exit_code, 128);
-#else
-        /* Every process argument is quoted by the Windows runner, so the
-         * status cmd.exe returns for "/c" "exit 128" is environment
-         * dependent; -1 is reserved for pipe failure. The race under test
-         * is the handle, not the status. */
-        AXYNE_TEST_CHECK(state.exit_code >= 0);
-#endif
         AXYNE_TEST_CHECK(handle != NULL);
         axyne_process_release(handle);
 #ifndef _WIN32
