@@ -91,6 +91,9 @@ static NSColor *axyne_preference_color(uint32_t value);
 - (void)highlight:(BOOL)highlight;
 @end
 
+@interface AxynePopupMenuDelegate : NSObject <NSMenuDelegate>
+@end
+
 @implementation AxyneMenuItemView
 
 - (instancetype)initWithMenuItem:(NSMenuItem *)menuItem
@@ -118,7 +121,8 @@ static NSColor *axyne_preference_color(uint32_t value);
 {
     (void)dirtyRect;
     NSRect bounds = [self bounds];
-    [_highlighted ? axyne_preference_color(0x2a2e35) :
+    BOOL highlighted = _highlighted || [_menuItem isHighlighted];
+    [highlighted ? axyne_preference_color(0x2a2e35) :
         axyne_preference_color(0x1f2126) setFill];
     NSRectFill(bounds);
 
@@ -153,12 +157,46 @@ static NSColor *axyne_preference_color(uint32_t value);
 }
 @end
 
+@implementation AxynePopupMenuDelegate
+
+- (void)menu:(NSMenu *)menu willHighlightItem:(NSMenuItem *)item
+{
+    for (NSMenuItem *candidate in [menu itemArray]) {
+        AxyneMenuItemView *view = (AxyneMenuItemView *)[candidate view];
+        if ([view isKindOfClass:[AxyneMenuItemView class]])
+            [view highlight:(candidate == item)];
+    }
+}
+
+@end
+
+@interface AxyneMenuSeparatorView : NSView
+@end
+
+@implementation AxyneMenuSeparatorView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    [axyne_preference_color(0x292c32) setFill];
+    NSRectFill(NSMakeRect(10, 3, MAX(0, NSWidth([self bounds]) - 20), 1));
+}
+@end
+
 static void axyne_style_popup_menu(NSMenu *menu)
 {
+    static AxynePopupMenuDelegate *delegate = nil;
+    if (delegate == nil) delegate = [[AxynePopupMenuDelegate alloc] init];
+    [menu setDelegate:delegate];
     [menu setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
     [menu setAutoenablesItems:YES];
     for (NSMenuItem *item in [menu itemArray]) {
-        if ([item isSeparatorItem]) continue;
+        if ([item isSeparatorItem]) {
+            AxyneMenuSeparatorView *separator = [[[AxyneMenuSeparatorView alloc]
+                initWithFrame:NSMakeRect(0, 0, 280, 8)] autorelease];
+            [item setView:separator];
+            continue;
+        }
         if ([item submenu] != nil) axyne_style_popup_menu([item submenu]);
         AxyneMenuItemView *view = [[[AxyneMenuItemView alloc]
             initWithMenuItem:item] autorelease];
@@ -3355,18 +3393,22 @@ static void axyne_install_menu(NSApplication *application,
             [configure setTarget:workspace];
         } else if ([title hasPrefix:@"디버그"]) {
             NSMenuItem *start = [submenu addItemWithTitle:@"디버거 시작"
-                action:@selector(startDebugger:) keyEquivalent:@"F5"];
+                action:@selector(startDebugger:)
+                keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSF5FunctionKey]];
             NSMenuItem *pause = [submenu addItemWithTitle:@"일시 정지"
-                action:@selector(debugCommand:) keyEquivalent:@"F6"];
+                action:@selector(debugCommand:)
+                keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSF6FunctionKey]];
             NSMenuItem *resume = [submenu addItemWithTitle:@"계속"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             [resume setTag:0]; [resume setTarget:workspace];
             NSMenuItem *next = [submenu addItemWithTitle:@"다음 단계"
-                action:@selector(debugCommand:) keyEquivalent:@"F10"];
+                action:@selector(debugCommand:)
+                keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSF10FunctionKey]];
             [start setTarget:workspace]; [pause setTarget:workspace];
             [next setTarget:workspace]; [pause setTag:1]; [next setTag:2];
             NSMenuItem *toggle = [submenu addItemWithTitle:@"중단점 전환"
-                action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
+                action:@selector(toggleBreakpoint:)
+                keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSF9FunctionKey]];
             [toggle setTarget:workspace];
         } else if ([title hasPrefix:@"보기"]) {
             NSArray *panels = @[@"출력", @"문제", @"터미널"];
@@ -3383,6 +3425,10 @@ static void axyne_install_menu(NSApplication *application,
             [definition setTarget:workspace]; [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
             [references setTarget:workspace]; [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
             [references setTag:1];
+        } else if ([title hasPrefix:@"도움말"]) {
+            NSMenuItem *about = [submenu addItemWithTitle:@"Axyne 정보"
+                action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+            [about setTarget:application];
         }
         [item setSubmenu:submenu];
         [submenu release];
