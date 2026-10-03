@@ -132,4 +132,17 @@ static inline int axyne_test_register_cleanup(const char *path)
         } \
     } while (0)
 
+/* Exact string comparison that reports both strings. */
+#define AXYNE_TEST_STREQ(actual, expected) \
+    do { \
+        const char *axyne_test_a = (actual); \
+        const char *axyne_test_e = (expected); \
+        if (axyne_test_a == NULL || strcmp(axyne_test_a, axyne_test_e) != 0) { \
+            fprintf(stderr, "FAIL %s:%d: %s\n  actual:   \"%s\"\n  expected: \"%s\"\n", \
+                    __FILE__, __LINE__, #actual, \
+                    axyne_test_a != NULL ? axyne_test_a : "(null)", axyne_test_e); \
+            return 0; \
+        } \
+    } while (0)
+
 #endif
