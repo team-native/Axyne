@@ -4,6 +4,7 @@ add_executable(axyne_tests
     test_settings_preferences.c
     test_runner_git_lsp.c
     test_process_stability.c
+    test_git_repair.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -43,7 +44,13 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> process-stability
             "${AXYNE_TEST_FIXTURE_DIR}/process-stability"
 )
+add_test(
+    NAME axyne-git-repair
+    COMMAND $<TARGET_FILE:axyne_tests> git-repair
+            "${AXYNE_TEST_FIXTURE_DIR}/git-repair"
+)
 set_tests_properties(
+    axyne-git-repair
     axyne-documents-search
     axyne-settings-preferences
     axyne-runner-git-lsp

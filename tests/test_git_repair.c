@@ -1,0 +1,211 @@
+#include "test_support.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+#include "axyne/git.h"
+#include "axyne/process.h"
+
+#define AXYNE_RACE_ITERATIONS 200
+
+/* The exit callback must be able to use the handle that axyne_process_start
+ * returns to the caller, even when the child exits before start returns. */
+typedef struct AxyneRaceState {
+    AxyneProcess *volatile *handle;
+    volatile int saw_null_handle;
+    volatile int exit_code;
+#ifdef _WIN32
+    HANDLE done;
+#else
+    pthread_mutex_t lock;
+    pthread_cond_t condition;
+    int done;
+#endif
+} AxyneRaceState;
+
+static void axyne_race_exit(AxyneProcess *process, int exit_code, void *user_data)
+{
+    AxyneRaceState *state = (AxyneRaceState *)user_data;
+    /* Mirrors the UI exit callbacks, which read the caller's handle slot. */
+    if (*state->handle == NULL || *state->handle != process)
+        state->saw_null_handle = 1;
+    state->exit_code = exit_code;
+#ifdef _WIN32
+    (void)SetEvent(state->done);
+#else
+    (void)pthread_mutex_lock(&state->lock);
+    state->done = 1;
+    (void)pthread_cond_signal(&state->condition);
+    (void)pthread_mutex_unlock(&state->lock);
+#endif
+}
+
+static int axyne_test_process_start_race(void)
+{
+    int i;
+    for (i = 0; i < AXYNE_RACE_ITERATIONS; ++i) {
+        AxyneRaceState state;
+        AxyneProcessSpec spec;
+        AxyneProcess *volatile handle = NULL;
+        AxyneError error = {0};
+#ifndef _WIN32
+        static const char *const arguments[] = { "-c", "exit 128" };
+#else
+        static const char *const arguments[] = { "/c", "exit 128" };
+#endif
+        memset(&state, 0, sizeof(state));
+        memset(&spec, 0, sizeof(spec));
+        state.handle = &handle;
+        state.exit_code = -1;
+#ifdef _WIN32
+        state.done = CreateEventW(NULL, TRUE, FALSE, NULL);
+        AXYNE_TEST_CHECK(state.done != NULL);
+        spec.executable = "C:\\Windows\\System32\\cmd.exe";
+#else
+        AXYNE_TEST_CHECK(pthread_mutex_init(&state.lock, NULL) == 0);
+        AXYNE_TEST_CHECK(pthread_cond_init(&state.condition, NULL) == 0);
+        spec.executable = "sh";
+#endif
+        spec.arguments = arguments;
+        spec.argument_count = 2;
+        spec.on_exit = axyne_race_exit;
+        spec.user_data = &state;
+        /* Pass the volatile slot directly, as the UI passes &run->process. */
+        AXYNE_TEST_STATUS(axyne_process_start(&spec, (AxyneProcess **)&handle,
+                                              &error), AXYNE_STATUS_OK);
+#ifdef _WIN32
+        AXYNE_TEST_CHECK(WaitForSingleObject(state.done, INFINITE) == WAIT_OBJECT_0);
+        CloseHandle(state.done);
+#else
+        (void)pthread_mutex_lock(&state.lock);
+        while (!state.done) (void)pthread_cond_wait(&state.condition, &state.lock);
+        (void)pthread_mutex_unlock(&state.lock);
+#endif
+        AXYNE_TEST_CHECK(!state.saw_null_handle);
+        AXYNE_TEST_CHECK(state.exit_code == 128);
+        AXYNE_TEST_CHECK(handle != NULL);
+        axyne_process_release(handle);
+#ifndef _WIN32
+        (void)pthread_cond_destroy(&state.condition);
+        (void)pthread_mutex_destroy(&state.lock);
+#endif
+    }
+    return 1;
+}
+
+static int axyne_test_git_capture(void)
+{
+    static const char *const arguments[] = { "--no-pager", "status" };
+    AxyneGitCapture capture;
+    char *report;
+    char *big;
+    size_t i;
+
+    /* stderr is labelled per line and separated from stdout. */
+    axyne_git_capture_init(&capture, 1);
+    AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDOUT, "out", 3));
+    AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDERR,
+                                              "e1\ne2", 5));
+    AXYNE_TEST_CHECK(strcmp(capture.data, "out\n[stderr] e1\n[stderr] e2") == 0);
+    report = axyne_git_format_report(arguments, 2, &capture, 3, "empty");
+    AXYNE_TEST_CHECK(report != NULL);
+    AXYNE_TEST_CHECK(strcmp(report, "$ git --no-pager status\nout\n[stderr] e1\n"
+                                    "[stderr] e2\n[exit 3]\n") == 0);
+    axyne_git_string_free(report);
+    axyne_git_capture_free(&capture);
+
+    /* Unlabelled mode keeps the bytes exactly. */
+    axyne_git_capture_init(&capture, 0);
+    AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDERR, "x\n", 2));
+    AXYNE_TEST_CHECK(strcmp(capture.data, "x\n") == 0);
+    axyne_git_capture_free(&capture);
+
+    /* Empty successful output uses the supplied message, no exit line. */
+    axyne_git_capture_init(&capture, 1);
+    report = axyne_git_format_report(arguments, 2, &capture, 0, "Nothing to show.");
+    AXYNE_TEST_CHECK(report != NULL);
+    AXYNE_TEST_CHECK(strcmp(report, "$ git --no-pager status\nNothing to show.\n") == 0);
+    axyne_git_string_free(report);
+    axyne_git_capture_free(&capture);
+
+    /* Friendly message when the workspace is not a repository. */
+    axyne_git_capture_init(&capture, 1);
+    {
+        const char *text = "fatal: not a git repository (or any of the parent directories): .git\n";
+        AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDERR,
+                                                  text, strlen(text)));
+    }
+    report = axyne_git_format_report(arguments, 2, &capture, 128, "");
+    AXYNE_TEST_CHECK(report != NULL);
+    AXYNE_TEST_CHECK(strstr(report, "not a Git repository") != NULL);
+    AXYNE_TEST_CHECK(strstr(report, "[exit 128]") != NULL);
+    axyne_git_string_free(report);
+    axyne_git_capture_free(&capture);
+
+    /* Truncation keeps the 16 MiB prefix and adds a notice. */
+    big = (char *)malloc(1u << 20);
+    AXYNE_TEST_CHECK(big != NULL);
+    memset(big, 'a', 1u << 20);
+    axyne_git_capture_init(&capture, 0);
+    for (i = 0; i < 16; ++i)
+        AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDOUT,
+                                                  big, 1u << 20));
+    AXYNE_TEST_CHECK(!capture.truncated);
+    AXYNE_TEST_CHECK(!axyne_git_capture_append(&capture, AXYNE_PROCESS_STDOUT, "bcd", 3));
+    AXYNE_TEST_CHECK(capture.truncated);
+    AXYNE_TEST_CHECK(capture.length == AXYNE_GIT_OUTPUT_LIMIT);
+    report = axyne_git_format_report(arguments, 2, &capture, 137, "");
+    AXYNE_TEST_CHECK(report != NULL);
+    AXYNE_TEST_CHECK(strstr(report, "aaaaaaaa") != NULL);
+    AXYNE_TEST_CHECK(strstr(report, "[output truncated") != NULL);
+    axyne_git_string_free(report);
+    axyne_git_capture_free(&capture);
+    free(big);
+
+    AXYNE_TEST_CHECK(strstr(axyne_git_describe_start_failure(AXYNE_STATUS_NOT_FOUND, ""),
+                            "not found") != NULL);
+    return 1;
+}
+
+#ifndef _WIN32
+static int axyne_test_git_not_a_repository(const char *root)
+{
+    AxyneGitResult result = {0};
+    AxyneError error = {0};
+    AxyneStatus status;
+    AXYNE_TEST_CHECK(axyne_test_make_directory(root));
+    /* Keep git from discovering a repository above the fixture directory. */
+    AXYNE_TEST_CHECK(setenv("GIT_CEILING_DIRECTORIES", root, 1) == 0);
+    status = axyne_git_status(root, &result, &error);
+    if (status == AXYNE_STATUS_NOT_FOUND) {
+        fprintf(stderr, "git not installed; skipping not-a-repository check\n");
+        axyne_git_result_free(&result);
+        return 1;
+    }
+    AXYNE_TEST_CHECK(status == AXYNE_STATUS_IO_ERROR);
+    AXYNE_TEST_CHECK(result.exit_code != 0);
+    AXYNE_TEST_CHECK(strstr(error.message, "not a Git repository") != NULL);
+    axyne_git_result_free(&result);
+    return 1;
+}
+#endif
+
+int axyne_test_git_repair(const char *root)
+{
+    AXYNE_TEST_CHECK(axyne_test_process_start_race());
+    AXYNE_TEST_CHECK(axyne_test_git_capture());
+#ifndef _WIN32
+    AXYNE_TEST_CHECK(axyne_test_git_not_a_repository(root));
+    axyne_test_remove_tree(root);
+#else
+    (void)root;
+#endif
+    return 1;
+}
