@@ -194,7 +194,7 @@ static NSColor *axyne_preference_color(uint32_t value);
 
 static void axyne_style_popup_menu(NSMenu *menu)
 {
-    [menu setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+    [menu setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameAqua]];
     [menu setAutoenablesItems:YES];
     NSArray *items = [[menu itemArray] copy];
     for (NSUInteger index = 0; index < [items count]; ++index) {
@@ -213,7 +213,7 @@ static void axyne_style_popup_menu(NSMenu *menu)
         if ([item submenu] != nil) axyne_style_popup_menu([item submenu]);
         NSDictionary *attributes = @{
             NSFontAttributeName:[NSFont systemFontOfSize:12],
-            NSForegroundColorAttributeName:axyne_preference_color(0xc7c9ce)
+            NSForegroundColorAttributeName:axyne_preference_color(0x202124)
         };
         [item setAttributedTitle:[[[NSAttributedString alloc]
             initWithString:[item title] attributes:attributes] autorelease]];
@@ -262,6 +262,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
     BOOL _loadingEditor;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
+    NSString *_runnerPreset;
     AxyneDebugger _debugger;
     AxyneProcess *_terminalProcess;
     AxyneProcess *_gitProcess;
@@ -841,8 +842,8 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
-        _targetButton = axyne_macos_toolbar_button(@"▷  Debug · x64 (MSVC)  ˅", self, @selector(showRunnerMenu:));
-        _searchButton = axyne_macos_toolbar_button(@"⌕  파일 이동                         ⌘P", self, @selector(quickFile:));
+        _targetButton = axyne_macos_toolbar_button(@"⌄  Debug · x64 (MSVC)", self, @selector(showRunnerMenu:));
+        _searchButton = axyne_macos_toolbar_button(@"⌕  파일 이동, > 명령 실행                 Ctrl+P", self, @selector(quickFile:));
         _buildButton = axyne_macos_toolbar_button(@"빌드  Ctrl+B", self, @selector(buildDocument:));
         _runButton = axyne_macos_toolbar_button(@"▷  실행 F5", self, @selector(runDocument:));
         [self addSubview:_newButton]; [self addSubview:_openButton];
@@ -903,7 +904,8 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         [_saveButton setToolTip:@"저장 (⌘S)"];
         [_undoButton setToolTip:@"실행 취소 (⌘Z)"];
         [_redoButton setToolTip:@"다시 실행 (⇧⌘Z)"];
-        [_searchButton setToolTip:@"파일 이동 (⌘P)"];
+        [_searchButton setToolTip:@"파일 이동, 명령 실행 (⌘P)"];
+        _runnerPreset = [@"Debug · x64 (MSVC)" retain];
         [self applyPreferences];
         [self refreshActionControls];
     }
@@ -935,8 +937,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
     [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_saveButton setEnabled:document != NULL];
-    NSString *target = _actionRunner.executable == NULL ? @"Debug · x64 (MSVC)" :
-        [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
+    NSString *target = _runnerPreset != nil ? _runnerPreset : @"Debug · x64 (MSVC)";
     [_targetButton setTitle:[NSString stringWithFormat:@"▷  %@  ˅", target]];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
@@ -946,12 +947,15 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 - (void)showRunnerMenu:(id)sender
 {
     NSMenu *menu = [[[NSMenu alloc] initWithTitle:@"Runner"] autorelease];
-    NSString *current = _actionRunner.executable == NULL ? @"Debug · x64 (MSVC)" :
-        [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
-    NSMenuItem *currentItem = [menu addItemWithTitle:current
-        action:@selector(selectRunnerPreset:) keyEquivalent:@""];
-    [currentItem setTarget:self];
-    [currentItem setState:NSControlStateValueOn];
+    NSArray *presets = @[@"Debug · x64 (MSVC)", @"Debug · x86 (MSVC)",
+        @"Debug · ARM64 (MSVC)"];
+    for (NSString *preset in presets) {
+        NSMenuItem *item = [menu addItemWithTitle:preset
+            action:@selector(selectRunnerPreset:) keyEquivalent:@""];
+        [item setTarget:self];
+        [item setState:[preset isEqualToString:_runnerPreset]
+            ? NSControlStateValueOn : NSControlStateValueOff];
+    }
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *configure = [menu addItemWithTitle:@"Runner 설정…"
         action:@selector(configureRunnerAction:) keyEquivalent:@""];
@@ -963,7 +967,9 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 }
 - (void)selectRunnerPreset:(id)sender
 {
-    (void)sender;
+    [_runnerPreset release];
+    _runnerPreset = [[sender title] copy];
+    [_targetButton setTitle:[NSString stringWithFormat:@"⌄  %@", _runnerPreset]];
     [self refreshActionControls];
 }
 - (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
@@ -2045,7 +2051,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         point.x >= AXYNE_SIDEBAR) {
         for (size_t index = 0; index < _documents.count; ++index) {
             AxyneDocument *document = &_documents.documents[index];
-            if (_documents.count > 1 && document->is_untitled && document->length == 0 &&
+            if (document->is_untitled && document->length == 0 &&
                 !document->is_dirty)
                 continue;
             NSRect tab = [self displayTabFrameAtIndex:index];
@@ -3003,7 +3009,7 @@ else [_terminalInput setStringValue:@""];
     NSFont *font = [NSFont systemFontOfSize:12];
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
-        if (_documents.count > 1 && doc->is_untitled && doc->length == 0 &&
+        if (doc->is_untitled && doc->length == 0 &&
             !doc->is_dirty)
             continue;
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
@@ -3207,7 +3213,7 @@ else [_terminalInput setStringValue:@""];
     NSRectClip(NSMakeRect(AXYNE_SIDEBAR, AXYNE_CONTENT_TOP, MAX(0, width - AXYNE_SIDEBAR), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
-        if (_documents.count > 1 && doc->is_untitled && doc->length == 0 &&
+        if (doc->is_untitled && doc->length == 0 &&
             !doc->is_dirty)
             continue;
         NSRect frame = [self displayTabFrameAtIndex:i];
@@ -3336,6 +3342,7 @@ else [_terminalInput setStringValue:@""];
     [_undoButton release]; [_redoButton release];
     [_buildButton release]; [_runButton release];
     [_targetButton release]; [_searchButton release];
+    [_runnerPreset release];
     [_outputTab release]; [_problemsTab release]; [_terminalTab release];
     [_clearOutput release]; [_problemSummary release];
     [_terminalScroll release];
@@ -3439,7 +3446,6 @@ else [_terminalInput setStringValue:@""];
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace)
 {
-    [application setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
     NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
         action:nil keyEquivalent:@""];
