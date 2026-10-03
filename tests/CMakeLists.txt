@@ -51,6 +51,32 @@ set_tests_properties(
     PROPERTIES TIMEOUT 60
 )
 
+# Clear-all-breakpoints helper over the real breakpoint table (no gdb needed).
+add_executable(axyne_debugger_actions_tests test_debugger_actions.c)
+target_include_directories(axyne_debugger_actions_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(axyne_debugger_actions_tests PRIVATE axyne_debugger)
+if(MSVC)
+    target_compile_options(axyne_debugger_actions_tests PRIVATE /W4)
+else()
+    target_compile_options(axyne_debugger_actions_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME axyne-debugger-actions COMMAND $<TARGET_FILE:axyne_debugger_actions_tests>)
+set_tests_properties(axyne-debugger-actions PROPERTIES TIMEOUT 60)
+
+if(DEFINED axyne_scintilla_SOURCE_DIR)
+    # Shared Scintilla command helpers run against an in-memory editor.
+    add_executable(axyne_editor_actions_tests test_editor_actions.c)
+    target_include_directories(axyne_editor_actions_tests PRIVATE
+        "${axyne_scintilla_SOURCE_DIR}/include")
+    if(MSVC)
+        target_compile_options(axyne_editor_actions_tests PRIVATE /W4)
+    else()
+        target_compile_options(axyne_editor_actions_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME axyne-editor-actions COMMAND $<TARGET_FILE:axyne_editor_actions_tests>)
+    set_tests_properties(axyne-editor-actions PROPERTIES TIMEOUT 60)
+endif()
+
 if(NOT WIN32)
     add_executable(axyne_workspace_safety_tests test_workspace_safety_posix.c)
     target_link_libraries(axyne_workspace_safety_tests PRIVATE axyne_core)
