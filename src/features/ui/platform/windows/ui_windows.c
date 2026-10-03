@@ -869,12 +869,15 @@ static void axyne_refresh_action_controls(AxyneWindowState *state)
     EnableWindow(state->terminal_stop, terminal_active);
     EnableWindow(state->terminal_send, terminal_active);
     EnableWindow(state->debug_start,
-                 !terminal_active && !debugger_active && saved_document);
-    EnableWindow(state->debug_pause, debugger_active && saved_document);
-    EnableWindow(state->debug_continue, debugger_active && saved_document);
-    EnableWindow(state->debug_step_over, debugger_active && saved_document);
+                 axyne_debugger_can_start(debugger_active, terminal_active,
+                                          saved_document));
+    EnableWindow(state->debug_pause, axyne_debugger_can_control(debugger_active));
+    EnableWindow(state->debug_continue, axyne_debugger_can_control(debugger_active));
+    EnableWindow(state->debug_step_over, axyne_debugger_can_control(debugger_active));
     EnableWindow(state->debug_breakpoint,
-                 saved_document);
+                 axyne_debugger_can_toggle_breakpoint(
+                     document != NULL && !document->is_untitled &&
+                     document->path != NULL));
 }
 
 static void axyne_terminal_output(AxyneProcess *process,
@@ -2325,8 +2328,7 @@ static int axyne_action_enabled(AxyneWindowState *state, UINT command)
     case AXYNE_CMD_DEBUG_STOP:
         return axyne_debugger_is_active(&state->debugger);
     case AXYNE_CMD_DEBUG_STEP_INTO: case AXYNE_CMD_DEBUG_STEP_OUT:
-        axyne_refresh_action_controls(state);
-        return IsWindowEnabled(state->debug_step_over) != 0;
+        return axyne_debugger_can_control(axyne_debugger_is_active(&state->debugger));
     case AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS:
         return axyne_debugger_enabled_breakpoints(&state->debugger) != 0;
     case AXYNE_CMD_OPEN_PREFERENCES_FILE:

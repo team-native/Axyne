@@ -35,6 +35,16 @@ int main(void)
     CHECK(axyne_debugger_clear_breakpoints(&debugger, &error) == AXYNE_STATUS_OK);
     CHECK(axyne_debugger_enabled_breakpoints(&debugger) == 0);
 
+    /* Menu rules: a live session stays controllable whatever the document. */
+    CHECK(axyne_debugger_can_control(1));
+    CHECK(!axyne_debugger_can_control(0));
+    CHECK(axyne_debugger_can_start(0, 0, 1));
+    CHECK(!axyne_debugger_can_start(0, 0, 0));
+    CHECK(!axyne_debugger_can_start(1, 0, 1));
+    CHECK(!axyne_debugger_can_start(0, 1, 1));
+    CHECK(axyne_debugger_can_toggle_breakpoint(1));
+    CHECK(!axyne_debugger_can_toggle_breakpoint(0));
+
     axyne_debugger_destroy(&debugger);
     if (failures == 0) puts("debugger actions ok");
     return failures == 0 ? 0 : 1;
