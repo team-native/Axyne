@@ -25,6 +25,8 @@
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
+#include "../../preferences_window.h"
+#include <unistd.h>
 
 @interface NSObject (AxyneScintillaMessages)
 - (NSView *)content;
@@ -69,6 +71,11 @@ static void axyne_macos_style_menu(NSMenu *menu)
     }
 }
 
+@class AxyneWorkspaceView;
+typedef struct AxyneMacPreferencesContext {
+    AxyneWorkspaceView *view;
+    BOOL workspace;
+} AxyneMacPreferencesContext;
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
 
@@ -271,6 +278,19 @@ static intptr_t axyne_editor_color(uint32_t rgb)
     return (intptr_t)(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff));
 }
 
+/* Subtle current-line tint: editor background nudged 8% toward the text. */
+static uint32_t axyne_macos_caret_line_color(const AxyneThemePreferences *theme)
+{
+    uint32_t result = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+        uint32_t back = (theme->editor_background >> shift) & 0xffu;
+        uint32_t text = (theme->editor_text >> shift) & 0xffu;
+        uint32_t mixed = (back * 92u + text * 8u) / 100u;
+        result |= (mixed & 0xffu) << shift;
+    }
+    return result;
+}
+
 static void axyne_macos_select_theme(AxyneThemePreferences *theme,
                                      AxyneThemePreset preset)
 {
@@ -464,6 +484,7 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)updateBraceHighlight;
 - (void)autoIndentFromNotification:(SCNotification *)notification;
 - (BOOL)showPreferences:(BOOL)workspace;
+- (BOOL)savePreferences:(AxynePreferences *)edited workspace:(BOOL)workspace;
 - (void)showGitStatus:(id)sender;
 - (void)showGitDiff:(id)sender;
 - (void)stageAllGitChanges:(id)sender;
@@ -1091,6 +1112,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     NSInteger width;
     char digits[32];
     if (_editorView == nil) return;
+    if (!_preferences.editor.line_numbers) {
+        (void)[self sendEditorMessage:SCI_SETMARGINWIDTHN wParam:0 lParam:0];
+        return;
+    }
     lineCount = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
     if (lineCount < 1) lineCount = 1;
     (void)snprintf(digits, sizeof(digits), "%lld", (long long)lineCount);
@@ -1148,6 +1173,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     unsigned int tabWidth = _preferences.editor.tab_width;
     int lastCharacter = 0;
     if (_editorView == nil || notification == NULL) return;
+    if (!_preferences.editor.auto_indent) return;
     if (tabWidth == 0) tabWidth = 4;
     if (notification->ch == '\n') {
         line = [self sendEditorMessage:SCI_LINEFROMPOSITION
@@ -1294,6 +1320,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self sendEditorMessage:SCI_SETUSETABS wParam:_preferences.editor.insert_spaces ? 0 : 1 lParam:0];
         [self sendEditorMessage:SCI_SETWRAPMODE wParam:_preferences.editor.word_wrap ? 1 : 0 lParam:0];
         [self sendEditorMessage:SCI_SETVIEWWS wParam:_preferences.editor.show_whitespace ? 1 : 0 lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEBACK
+                         wParam:(uintptr_t)axyne_editor_color(axyne_macos_caret_line_color(&_preferences.theme))
+                         lParam:0];
+        [self sendEditorMessage:SCI_SETCARETLINEVISIBLE
+                         wParam:_preferences.editor.highlight_current_line ? 1 : 0
+                         lParam:0];
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
         [self applyEditorLexer];
@@ -2770,94 +2802,29 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
     return [alert runModal] == NSAlertFirstButtonReturn ? [field stringValue] : nil;
 }
 
-- (BOOL)showPreferences:(BOOL)workspace
+static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *edited)
 {
-    AxynePreferences next = workspace ? _preferences : _globalPreferences;
-    NSString *theme = [[self askForText:workspace ? @"Workspace Settings" : @"Preferences"
-                                   label:@"Theme: dark, light, or system"] lowercaseString];
-    NSString *fontSize;
-    NSString *tabWidth;
-    NSString *spaces;
-    NSString *wrap;
+    AxyneMacPreferencesContext *info = (AxyneMacPreferencesContext *)context;
+    return [info->view savePreferences:edited workspace:info->workspace] ? 1 : 0;
+}
+
+/* Persists the profile produced by the preferences window and applies it.
+ * Returns NO (after reporting the problem) when saving failed. */
+- (BOOL)savePreferences:(AxynePreferences *)edited workspace:(BOOL)workspace
+{
     AxyneError error;
     AxyneStatus status;
     const char *path = workspace ? _workspacePreferencesPath : _globalPreferencesPath;
-    if (workspace)
-        memcpy(next.binding_present, _workspaceBindingPresent,
-               sizeof(next.binding_present));
-    if ([theme length] == 0 || (![theme isEqualToString:@"dark"] &&
-        ![theme isEqualToString:@"light"] && ![theme isEqualToString:@"system"])) {
-        if (theme != nil) [self showWorkspaceMessage:@"Theme must be dark, light, or system."];
-        return NO;
-    }
-    axyne_macos_select_theme(&next.theme,
-        [theme isEqualToString:@"light"] ? AXYNE_THEME_LIGHT :
-        [theme isEqualToString:@"system"] ? AXYNE_THEME_SYSTEM : AXYNE_THEME_DARK);
-    if (workspace) {
-        next.present_fields = 0;
-        next.present_fields |= AXYNE_PREFERENCE_THEME_PRESET;
-    }
-    fontSize = [self askForText:@"Editor Preferences" label:@"Font size: 6-72"];
-    if (fontSize == nil) return NO;
-    if ([fontSize integerValue] < 6 || [fontSize integerValue] > 72) { [self showWorkspaceMessage:@"Font size must be between 6 and 72."]; return NO; }
-    next.editor.font_size = (unsigned int)[fontSize integerValue];
-    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_SIZE;
-    tabWidth = [self askForText:@"Editor Preferences" label:@"Tab width: 1-16"];
-    if (tabWidth == nil) return NO;
-    if ([tabWidth integerValue] < 1 || [tabWidth integerValue] > 16) { [self showWorkspaceMessage:@"Tab width must be between 1 and 16."]; return NO; }
-    next.editor.tab_width = (unsigned int)[tabWidth integerValue];
-    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_TAB_WIDTH;
-    spaces = [[self askForText:@"Editor Preferences" label:@"Insert spaces: yes or no"] lowercaseString];
-    if (spaces == nil || (![spaces isEqualToString:@"yes"] && ![spaces isEqualToString:@"no"])) { if (spaces != nil) [self showWorkspaceMessage:@"Enter yes or no."]; return NO; }
-    next.editor.insert_spaces = [spaces isEqualToString:@"yes"];
-    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_INSERT_SPACES;
-    wrap = [[self askForText:@"Editor Preferences" label:@"Word wrap: yes or no"] lowercaseString];
-    if (wrap == nil || (![wrap isEqualToString:@"yes"] && ![wrap isEqualToString:@"no"])) { if (wrap != nil) [self showWorkspaceMessage:@"Enter yes or no."]; return NO; }
-    next.editor.word_wrap = [wrap isEqualToString:@"yes"];
-    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_WORD_WRAP;
-    NSString *fontFamily = [self askForText:@"Editor Preferences" label:@"Font family: blank for native default"];
-    if (fontFamily == nil) return NO;
-    if ([[fontFamily dataUsingEncoding:NSUTF8StringEncoding] length] >= AXYNE_PREFERENCE_TEXT_MAX) { [self showWorkspaceMessage:@"The font family is invalid."]; return NO; }
-    const char *fontFamilyUTF8 = [fontFamily UTF8String];
-    (void)snprintf(next.editor.font_family, sizeof(next.editor.font_family), "%s",
-                   fontFamilyUTF8 != NULL ? fontFamilyUTF8 : "");
-    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_FONT_FAMILY;
-    NSString *showWhitespace = [[self askForText:@"Editor Preferences" label:@"Show whitespace: yes or no"] lowercaseString];
-    if (showWhitespace == nil || (![showWhitespace isEqualToString:@"yes"] && ![showWhitespace isEqualToString:@"no"])) { if (showWhitespace != nil) [self showWorkspaceMessage:@"Enter yes or no."]; return NO; }
-    next.editor.show_whitespace = [showWhitespace isEqualToString:@"yes"];
-    if (workspace) next.present_fields |= AXYNE_PREFERENCE_EDITOR_SHOW_WHITESPACE;
-    for (int action = 0; action < AXYNE_ACTION_COUNT; ++action) {
-        AxyneKeyBinding *edited = (AxyneKeyBinding *)axyne_preferences_find_binding(&next, (AxynePreferenceAction)action);
-        if (edited == NULL) continue;
-        NSString *value = [self askForText:@"Key Bindings"
-                                      label:[NSString stringWithFormat:@"%@ (current: %s); enter key, disable, restore, or skip",
-                                               [NSString stringWithUTF8String:axyne_preferences_action_name((AxynePreferenceAction)action)], edited->key]];
-        if (value == nil) return NO;
-        NSString *command = [value lowercaseString];
-        if ([value length] == 0 || [command isEqualToString:@"skip"]) continue;
-        if ([command isEqualToString:@"disable"]) edited->enabled = 0;
-        else if ([command isEqualToString:@"restore"]) {
-            AxynePreferences defaults;
-            axyne_preferences_defaults(&defaults);
-            const AxyneKeyBinding *restored = axyne_preferences_find_binding(&defaults, (AxynePreferenceAction)action);
-            if (restored != NULL) *edited = *restored;
-        } else {
-            const char *key = [value UTF8String];
-            if (key == NULL || strlen(key) >= AXYNE_PREFERENCE_KEY_MAX) { [self showWorkspaceMessage:@"The key binding is invalid."]; return NO; }
-            (void)snprintf(edited->key, sizeof(edited->key), "%s", key);
-            edited->enabled = 1;
-        }
-        if (workspace) axyne_preferences_mark_binding(&next, (AxynePreferenceAction)action);
-    }
     if (path == NULL) { [self showWorkspaceMessage:@"The preference path is unavailable."]; return NO; }
-    status = workspace ? axyne_preferences_save_workspace(&next, path, &error) : axyne_preferences_save_global(&next, path, &error);
+    status = workspace ? axyne_preferences_save_workspace(edited, path, &error)
+                       : axyne_preferences_save_global(edited, path, &error);
     if (status != AXYNE_STATUS_OK) { [self showWorkspaceError:@"Unable to save preferences" error:&error]; return NO; }
-    _preferences = next;
+    _preferences = *edited;
     if (workspace)
-        memcpy(_workspaceBindingPresent, next.binding_present,
+        memcpy(_workspaceBindingPresent, edited->binding_present,
                sizeof(_workspaceBindingPresent));
     if (!workspace) {
-        _globalPreferences = next;
+        _globalPreferences = *edited;
         if (_workspacePreferencesPath != NULL) {
             AxynePreferences workspacePreferences;
             AxyneStatus workspaceStatus = axyne_preferences_load_workspace(
@@ -2869,6 +2836,42 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
         }
     }
     [self applyPreferences];
+    return YES;
+}
+
+/* Opens the Figma preferences window. The "settings.json 열기" link closes it
+ * and opens the profile's file as an editor document; a profile that was
+ * never saved is created first so there is something to open. */
+- (BOOL)showPreferences:(BOOL)workspace
+{
+    AxynePreferences initial = workspace ? _preferences : _globalPreferences;
+    AxyneMacPreferencesContext context = {self, workspace};
+    AxynePreferencesWindowHooks hooks = {&context, axyne_macos_preferences_save_hook};
+    const char *path = workspace ? _workspacePreferencesPath : _globalPreferencesPath;
+    AxyneError error;
+    if (path == NULL) { [self showWorkspaceMessage:@"The preference path is unavailable."]; return NO; }
+    if (workspace) {
+        /* Only fields the workspace file already overrides stay present. */
+        AxynePreferences stored;
+        memset(initial.binding_present, 0, sizeof(initial.binding_present));
+        initial.present_fields = 0;
+        if (axyne_preferences_load(path, &stored, &error) == AXYNE_STATUS_OK) {
+            initial.present_fields = stored.present_fields;
+            memcpy(initial.binding_present, stored.binding_present,
+                   sizeof(initial.binding_present));
+        }
+    }
+    if (!axyne_preferences_window_show([self window], workspace ? 1 : 0, &initial, &hooks))
+        return YES;
+    if (access(path, F_OK) != 0) {
+        AxynePreferences created = workspace ? _preferences : _globalPreferences;
+        AxyneStatus status;
+        if (workspace) { created.present_fields = 0; memset(created.binding_present, 0, sizeof(created.binding_present)); }
+        status = workspace ? axyne_preferences_save_workspace(&created, path, &error)
+                           : axyne_preferences_save_global(&created, path, &error);
+        if (status != AXYNE_STATUS_OK) { [self showWorkspaceError:@"Unable to create settings file" error:&error]; return NO; }
+    }
+    [self openPath:[NSString stringWithUTF8String:path]];
     return YES;
 }
 
