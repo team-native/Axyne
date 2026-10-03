@@ -2455,7 +2455,11 @@ static void axyne_workspace_operation(HWND window, AxyneWindowState *state,
     }
     /* Prompts below run a modal loop during which the explorer can reload,
      * so work from private copies rather than the node pointer. */
-    owned_parent = node != NULL && node->kind != AXYNE_FILE_KIND_DIRECTORY
+    /* Rename and delete act on a child of the node's parent folder, even
+     * when the node itself is a directory. */
+    owned_parent = node != NULL && (node->kind != AXYNE_FILE_KIND_DIRECTORY ||
+        command == AXYNE_CMD_EXPLORER_RENAME ||
+        command == AXYNE_CMD_EXPLORER_REMOVE)
         ? axyne_workspace_parent(node->path)
         : _strdup(node != NULL ? node->path : state->explorer.root);
     parent = owned_parent;
