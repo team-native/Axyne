@@ -421,6 +421,7 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)unstageAllGitChanges:(id)sender;
 - (void)completeGitOperation:(AxyneMacGitCompletion *)completion
                          run:(AxyneMacGitRun *)run;
+- (void)selectOutputPanel;
 - (void)startGitOperationWithEmptyMessage:(const char *)emptyMessage
                                 arguments:(const char *const *)arguments
                                    count:(size_t)argumentCount;
@@ -440,29 +441,25 @@ static intptr_t axyne_macos_editor_message(void *editor, unsigned int message,
 
 struct AxyneMacGitRun {
     AxyneWorkspaceView *view;
+    /* Written by axyne_process_start before the worker thread exists, so the
+     * exit callback may read it; the exit callback also receives the same
+     * pointer as its first argument. */
     AxyneProcess *process;
-    char *output;
-    size_t length;
-    size_t capacity;
+    AxyneGitCapture capture;
+    const char *const *arguments;
+    size_t argument_count;
     const char *empty_message;
-    int allocation_failed;
-    int output_truncated;
-    int exit_code;
     pthread_mutex_t lock;
     int cancelled;
+    int process_released;
     int references;
 };
 
 struct AxyneMacGitCompletion {
     AxyneWorkspaceView *view;
     AxyneProcess *process;
-    char *output;
-    size_t length;
-    const char *empty_message;
-    int allocation_failed;
-    int output_truncated;
-    int exit_code;
-    char failure_message[128];
+    /* Formatted on the worker thread; NULL when allocation failed. */
+    char *report;
 };
 
 static void axyne_install_menu(NSApplication *application,
@@ -2708,60 +2705,21 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
     (void)[self showPreferences:YES];
 }
 
-static int axyne_macos_git_append(AxyneMacGitRun *run,
-                                  const char *bytes, size_t length)
-{
-    size_t required;
-    char *grown;
-    size_t capacity;
-    if (run == NULL || bytes == NULL || length == 0) return 1;
-    if (length > SIZE_MAX - run->length - 1) return 0;
-    required = run->length + length + 1;
-    if (required > AXYNE_GIT_OUTPUT_LIMIT + 1) return 0;
-    if (required > run->capacity) {
-        capacity = run->capacity == 0 ? 4096 : run->capacity;
-        while (capacity < required) {
-            if (capacity > SIZE_MAX / 2) {
-                capacity = required;
-                break;
-            }
-            capacity *= 2;
-        }
-        grown = (char *)realloc(run->output, capacity);
-        if (grown == NULL) return 0;
-        run->output = grown;
-        run->capacity = capacity;
-    }
-    memcpy(run->output + run->length, bytes, length);
-    run->length += length;
-    run->output[run->length] = '\0';
-    return 1;
-}
-
 static void axyne_macos_git_output(AxyneProcess *process,
                                    AxyneProcessStream stream,
                                    const char *bytes, size_t length,
                                    void *user_data)
 {
     AxyneMacGitRun *run = (AxyneMacGitRun *)user_data;
-    (void)stream;
-    if (run != NULL && bytes != NULL && !run->allocation_failed &&
-        !run->output_truncated) {
-        if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
-            length > AXYNE_GIT_OUTPUT_LIMIT - run->length) {
-            run->output_truncated = 1;
-            (void)axyne_process_terminate(process, NULL);
-        } else if (!axyne_macos_git_append(run, bytes, length)) {
-            run->allocation_failed = 1;
-            (void)axyne_process_terminate(process, NULL);
-        }
-    }
+    if (run != NULL && bytes != NULL &&
+        !axyne_git_capture_append(&run->capture, stream, bytes, length))
+        (void)axyne_process_terminate(process, NULL);
 }
 
 static void axyne_macos_git_free(AxyneMacGitRun *run)
 {
     if (run == NULL) return;
-    free(run->output);
+    axyne_git_capture_free(&run->capture);
     (void)pthread_mutex_destroy(&run->lock);
     free(run);
 }
@@ -2776,10 +2734,27 @@ static void axyne_macos_git_release(AxyneMacGitRun *run)
     if (free_run) axyne_macos_git_free(run);
 }
 
+/* The process handle is released exactly once, by whichever path (completion
+ * on the main thread, or view teardown) claims it first. */
+static AxyneProcess *axyne_macos_git_take_process(AxyneMacGitRun *run)
+{
+    AxyneProcess *process = NULL;
+    if (run == NULL) return NULL;
+    (void)pthread_mutex_lock(&run->lock);
+    if (!run->process_released) {
+        run->process_released = 1;
+        process = run->process;
+    }
+    (void)pthread_mutex_unlock(&run->lock);
+    return process;
+}
+
 static void axyne_macos_git_cleanup(AxyneMacGitRun *run)
 {
+    AxyneProcess *process;
     if (run == NULL) return;
-    axyne_process_release(run->process);
+    process = axyne_macos_git_take_process(run);
+    if (process != NULL) axyne_process_release(process);
     axyne_macos_git_release(run);
 }
 
@@ -2789,8 +2764,6 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     AxyneMacGitRun *run = (AxyneMacGitRun *)user_data;
     AxyneMacGitCompletion *completion;
     AxyneWorkspaceView *view = nil;
-    size_t output_size;
-    (void)process;
     if (run == NULL) return;
 
     (void)pthread_mutex_lock(&run->lock);
@@ -2800,40 +2773,21 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         [view retain];
     }
     (void)pthread_mutex_unlock(&run->lock);
+    /* A cancelled run (view teardown) is released by -dealloc's cleanup. */
     if (view == nil) return;
 
+    /* Every non-cancelled path reaches the main thread, even when the
+     * completion record cannot be allocated, so _gitRun/_gitProcess are
+     * always cleared and the process and run references are always dropped. */
     completion = (AxyneMacGitCompletion *)calloc(1, sizeof(*completion));
-    if (completion == NULL) {
-        [view release];
-        axyne_macos_git_release(run);
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            axyne_macos_git_cleanup(run);
-        });
-        return;
-    }
-    completion->view = view;
-    completion->process = run->process;
-    completion->empty_message = run->empty_message;
-    completion->allocation_failed = run->allocation_failed;
-    completion->output_truncated = run->output_truncated;
-    completion->exit_code = exit_code;
-    if (exit_code != 0) {
-        (void)snprintf(completion->failure_message,
-                       sizeof(completion->failure_message),
-                       "Git command failed with exit code %d", exit_code);
-    }
-    if (!completion->allocation_failed && run->output != NULL && run->length != 0) {
-        output_size = run->length + 1;
-        completion->output = (char *)malloc(output_size);
-        if (completion->output == NULL) {
-            completion->allocation_failed = 1;
-        } else {
-            memcpy(completion->output, run->output, output_size);
-            completion->length = run->length;
-        }
+    if (completion != NULL) {
+        completion->view = view;
+        completion->process = process;
+        completion->report = axyne_git_format_report(run->arguments,
+            run->argument_count, &run->capture, exit_code, run->empty_message);
     }
     dispatch_async(dispatch_get_main_queue(), ^{
-        [completion->view completeGitOperation:completion run:run];
+        [view completeGitOperation:completion run:run];
     });
 }
 
@@ -2842,7 +2796,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
                                    count:(size_t)argument_count
 {
     static const char *const utf8_environment[] = {
-        "LANG=C.UTF-8", "LC_ALL=C.UTF-8"
+        "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"
     };
     AxyneMacGitRun *run;
     AxyneProcessSpec spec;
@@ -2864,7 +2818,10 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     }
     run->references = 1;
     run->view = self;
+    run->arguments = arguments;
+    run->argument_count = argument_count;
     run->empty_message = empty_message;
+    axyne_git_capture_init(&run->capture, 1);
     memset(&spec, 0, sizeof(spec));
     spec.executable = "git";
     spec.arguments = arguments;
@@ -2877,45 +2834,76 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     spec.user_data = run;
     status = axyne_process_start(&spec, &run->process, &error);
     if (status != AXYNE_STATUS_OK) {
-        (void)pthread_mutex_destroy(&run->lock);
-        free(run);
-        NSString *message = [NSString stringWithUTF8String:error.message];
+        NSString *message = [NSString stringWithUTF8String:
+            axyne_git_describe_start_failure(status, error.message)];
+        axyne_macos_git_free(run);
         [self showWorkspaceMessage:message != nil
             ? message : @"Unable to start Git operation."];
         return;
     }
     _gitProcess = run->process;
     _gitRun = run;
+    /* Output and Problems share the same area; show the Git output as soon
+     * as the operation starts. */
+    [self selectOutputPanel];
+    [_terminalOutput setString:@""];
+    {
+        /* Use a private empty capture: run->capture belongs to the worker. */
+        AxyneGitCapture pending;
+        char *header;
+        axyne_git_capture_init(&pending, 0);
+        header = axyne_git_format_report(arguments, argument_count,
+            &pending, 0, "Running...");
+        if (header != NULL) {
+            [self terminalAppend:header length:strlen(header)
+                          stream:AXYNE_PROCESS_STDOUT];
+            axyne_git_string_free(header);
+        }
+    }
+}
+
+- (void)selectOutputPanel
+{
+    _panelMode = 0;
+    [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)completeGitOperation:(AxyneMacGitCompletion *)completion
                          run:(AxyneMacGitRun *)run
 {
     const char *text;
-    if (completion == NULL || run == NULL) return;
-    if (completion->allocation_failed) {
-        text = "Unable to allocate Git output.";
-    } else if (completion->output_truncated) {
-        text = "Git output exceeded the 16 MiB limit.";
-    } else if (completion->length != 0) {
-        text = completion->output;
-    } else if (completion->exit_code == 0) {
-        text = completion->empty_message;
-    } else {
-        text = completion->failure_message;
+    AxyneProcess *process;
+    if (run == NULL) {
+        if (completion != NULL) {
+            free(completion->report);
+            free(completion);
+        }
+        [self release];
+        return;
     }
+    text = completion != NULL && completion->report != NULL
+        ? completion->report : "Unable to allocate Git output.\n";
+    /* The Problems or Terminal panel may have been selected while Git ran. */
+    [self selectOutputPanel];
     [_terminalOutput setString:@""];
-    if (text != NULL)
-        [self terminalAppend:text length:strlen(text) stream:AXYNE_PROCESS_STDOUT];
+    [self terminalAppend:text length:strlen(text) stream:AXYNE_PROCESS_STDOUT];
+    [_terminalOutput scrollRangeToVisible:NSMakeRange(0, 0)];
     if (_gitRun == run) {
         _gitRun = NULL;
         _gitProcess = NULL;
     }
-    axyne_process_release(completion->process);
+    process = axyne_macos_git_take_process(run);
+    if (process != NULL) axyne_process_release(process);
+    /* Drop the completion reference taken in the exit callback and the
+     * owner reference taken when the run was created. */
     axyne_macos_git_release(run);
     axyne_macos_git_release(run);
-    free(completion->output);
-    free(completion);
+    if (completion != NULL) {
+        free(completion->report);
+        free(completion);
+    }
     [self setNeedsDisplay:YES];
     [self release];
 }
