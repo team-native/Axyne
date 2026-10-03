@@ -123,9 +123,29 @@ int axyne_test_documents_search(const char *root)
     AXYNE_TEST_STATUS(axyne_documents_initialize(&documents, &error),
                       AXYNE_STATUS_OK);
     AXYNE_TEST_CHECK(documents.count == 1 && documents.documents[0].is_untitled);
+    /* The startup buffer exists but has no tab until it is touched. */
+    AXYNE_TEST_CHECK(axyne_document_tab_hidden(&documents.documents[0]) &&
+                     axyne_documents_visible_count(&documents) == 0);
+    AXYNE_TEST_CHECK(!axyne_document_tab_hidden(NULL));
+    /* An explicit New is a visible tab even though it is empty and clean. */
+    AXYNE_TEST_STATUS(axyne_documents_new(&documents, &index, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 1 && documents.active_index == 1 &&
+                     !axyne_document_tab_hidden(&documents.documents[1]) &&
+                     axyne_documents_visible_count(&documents) == 1);
+    AXYNE_TEST_STATUS(axyne_documents_close(&documents, 1, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(documents.count == 1 && documents.active_index == 0 &&
+                     axyne_documents_visible_count(&documents) == 0);
+    /* Editing reveals the placeholder; Save As turns it into a named tab. */
+    documents.documents[0].is_dirty = 1;
+    AXYNE_TEST_CHECK(!axyne_document_tab_hidden(&documents.documents[0]));
+    documents.documents[0].is_dirty = 0;
+    AXYNE_TEST_CHECK(axyne_document_tab_hidden(&documents.documents[0]));
     AXYNE_TEST_STATUS(axyne_documents_set_contents(&documents, 0, "draft", 5,
                                                    &error), AXYNE_STATUS_OK);
-    AXYNE_TEST_CHECK(documents.documents[0].is_dirty == 1);
+    AXYNE_TEST_CHECK(documents.documents[0].is_dirty == 1 &&
+                     !axyne_document_tab_hidden(&documents.documents[0]));
     AXYNE_TEST_STATUS(axyne_documents_save_as(&documents, 0, saved, &error),
                       AXYNE_STATUS_OK);
     AXYNE_TEST_CHECK(!documents.documents[0].is_untitled &&
@@ -138,7 +158,16 @@ int axyne_test_documents_search(const char *root)
                      documents.recent_count == 1);
     AXYNE_TEST_STATUS(axyne_documents_close(&documents, 0, &error),
                       AXYNE_STATUS_OK);
+    /* Closing the last tab leaves a fresh hidden buffer, not a dead state. */
     AXYNE_TEST_CHECK(documents.count == 1 && documents.documents[0].is_untitled);
+    AXYNE_TEST_CHECK(axyne_document_tab_hidden(&documents.documents[0]) &&
+                     axyne_documents_visible_count(&documents) == 0);
+    AXYNE_TEST_STATUS(axyne_documents_save(&documents, 0, &error),
+                      AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_STATUS(axyne_documents_save_as(&documents, 0, saved, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(!axyne_document_tab_hidden(&documents.documents[0]) &&
+                     axyne_documents_visible_count(&documents) == 1);
     axyne_documents_destroy(&documents);
 
     axyne_test_remove_tree(root);
