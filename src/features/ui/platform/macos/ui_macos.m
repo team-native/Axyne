@@ -415,7 +415,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
     return strcasecmp(extension, ".png") == 0 || strcasecmp(extension, ".jpg") == 0 ||
         strcasecmp(extension, ".jpeg") == 0 || strcasecmp(extension, ".gif") == 0 ||
         strcasecmp(extension, ".tif") == 0 || strcasecmp(extension, ".tiff") == 0 ||
-        strcasecmp(extension, ".bmp") == 0 || strcasecmp(extension, ".webp") == 0;
+        strcasecmp(extension, ".bmp") == 0 || strcasecmp(extension, ".webp") == 0 ||
+        strcasecmp(extension, ".svg") == 0 || strcasecmp(extension, ".ico") == 0;
 }
 
 static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
@@ -1522,7 +1523,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
             [NSString stringWithUTF8String:doc->path]] autorelease];
         [_imagePreview setImage:image];
         [_imagePreview setHidden:image == nil];
-        [_editorView setHidden:YES];
+        [_editorView setHidden:image != nil];
     } else {
         [_imagePreview setImage:nil];
         [_imagePreview setHidden:YES];
@@ -2688,10 +2689,20 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 
 - (void)searchFolder:(BOOL)quickFile
 {
-    NSOpenPanel *folder = [NSOpenPanel openPanel];
-    [folder setCanChooseDirectories:YES]; [folder setCanChooseFiles:NO];
-    [folder setAllowsMultipleSelection:NO];
-    if ([folder runModal] != NSModalResponseOK) return;
+    NSString *searchRoot = nil;
+    if (quickFile && _explorer.root != NULL) {
+        searchRoot = [NSString stringWithUTF8String:_explorer.root];
+    } else {
+        NSOpenPanel *folder = [NSOpenPanel openPanel];
+        [folder setCanChooseDirectories:YES]; [folder setCanChooseFiles:NO];
+        [folder setAllowsMultipleSelection:NO];
+        if ([folder runModal] != NSModalResponseOK) return;
+        searchRoot = [[folder URL] path];
+    }
+    if ([searchRoot length] == 0) {
+        [self showWorkspaceMessage:@"폴더를 먼저 열어주세요."];
+        return;
+    }
     NSString *query = [self askForText:quickFile ? @"Quick File" : @"Search Folder"
                                   label:quickFile ? @"Filename contains" : @"Search text"];
     if ([query length] == 0) return;
@@ -2700,7 +2711,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     size_t selectedLine = 0;
     if (quickFile) {
         char **paths = NULL; size_t count = 0;
-        if (axyne_search_files([[[folder URL] path] UTF8String], [query UTF8String],
+        if (axyne_search_files([searchRoot UTF8String], [query UTF8String],
                                &paths, &count, NULL) == AXYNE_STATUS_OK) {
             for (size_t i = 0; i < count; ++i) {
                 NSString *path = [NSString stringWithUTF8String:paths[i]];
@@ -2717,7 +2728,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         }
     } else {
         AxyneSearchResults results = {0};
-        if (axyne_search_workspace([[[folder URL] path] UTF8String], [query UTF8String],
+        if (axyne_search_workspace([searchRoot UTF8String], [query UTF8String],
                                    0, &results, NULL) == AXYNE_STATUS_OK) {
             for (size_t i = 0; i < results.count; ++i) {
                 NSString *path = [NSString stringWithUTF8String:results.items[i].path];
@@ -3151,7 +3162,9 @@ else [_terminalInput setStringValue:@""];
         MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
     BOOL imageDocument = axyne_macos_is_image_path(activeDocument == NULL
         ? NULL : activeDocument->path);
-    [_editorView setHidden:emptyWorkspace || imageDocument];
+    BOOL imagePreviewVisible = imageDocument && [_imagePreview image] != nil;
+    [_editorView setHidden:emptyWorkspace || imagePreviewVisible];
+    [_imagePreview setHidden:!imagePreviewVisible];
     [_imagePreview setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
         MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
