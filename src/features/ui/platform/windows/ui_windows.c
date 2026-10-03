@@ -2331,6 +2331,12 @@ static int axyne_action_enabled(AxyneWindowState *state, UINT command)
     case AXYNE_CMD_ZOOM_IN: case AXYNE_CMD_ZOOM_OUT:
     case AXYNE_CMD_ZOOM_RESET: case AXYNE_CMD_WORD_WRAP:
         return state->editor != NULL;
+    case AXYNE_CMD_SAVE_AS:
+        return axyne_active(state) != NULL;
+    case AXYNE_CMD_LSP_DEFINITION: case AXYNE_CMD_LSP_REFERENCES: {
+        AxyneDocument *document = axyne_active(state);
+        return document != NULL && !document->is_untitled && document->path != NULL;
+    }
     case AXYNE_CMD_DEBUG_STOP:
         return axyne_debugger_is_active(&state->debugger);
     case AXYNE_CMD_DEBUG_STEP_INTO: case AXYNE_CMD_DEBUG_STEP_OUT:
@@ -2580,8 +2586,14 @@ static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
         else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) command = AXYNE_CMD_ZOOM_OUT;
         else if (key == '0' || key == VK_NUMPAD0) command = AXYNE_CMD_ZOOM_RESET;
         else if (key == VK_OEM_3) command = AXYNE_CMD_PANEL_TERMINAL;
+    } else if (control && alt && !shift) {
+        /* Alt combinations arrive as WM_SYSKEYDOWN, so these are handled
+         * here rather than in the window procedure's WM_KEYDOWN. */
+        if (key == 'D') command = AXYNE_CMD_LSP_DEFINITION;
+        else if (key == 'R') command = AXYNE_CMD_LSP_REFERENCES;
     } else if (control && shift && !alt) {
-        if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
+        if (key == 'S') command = AXYNE_CMD_SAVE_AS;
+        else if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
         else if (key == 'U') command = AXYNE_CMD_PANEL_OUTPUT;
         else if (key == 'M') command = AXYNE_CMD_PANEL_PROBLEMS;
         else if (key == VK_F9) command = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS;
@@ -3293,7 +3305,7 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", document_flags);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", NULL,
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", L"Ctrl+Shift+S",
                    document_flags);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
@@ -4235,11 +4247,6 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
-            (GetKeyState(VK_MENU) & 0x8000) != 0) {
-            if (w_param == 'D') { axyne_lsp_navigate(window, state, 0); return 0; }
-            if (w_param == 'R') { axyne_lsp_navigate(window, state, 1); return 0; }
-        }
         if (axyne_handle_key(window, state, w_param)) return 0;
         break;
     case WM_LBUTTONDBLCLK: {
