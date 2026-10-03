@@ -1,3 +1,7 @@
+/* Strict -std=c17 builds need this for setenv/realpath on non-Apple POSIX. */
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "test_support.h"
 
 #include <stdio.h>
@@ -7,13 +11,20 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #endif
 
 #include "axyne/git.h"
 #include "axyne/process.h"
 
+#ifdef _WIN32
+/* Process creation is much slower on Windows; keep within the CTest timeout. */
+#define AXYNE_RACE_ITERATIONS 100
+#else
 #define AXYNE_RACE_ITERATIONS 200
+#endif
 
 /* The exit callback must be able to use the handle that axyne_process_start
  * returns to the caller, even when the child exits before start returns. */
@@ -58,7 +69,11 @@ static int axyne_test_process_start_race(void)
 #ifndef _WIN32
         static const char *const arguments[] = { "-c", "exit 128" };
 #else
-        static const char *const arguments[] = { "/c", "exit 128" };
+        /* cmd.exe's status for quoted arguments is environment dependent,
+         * so re-run this test executable in its "exit-with" mode. */
+        static const char *const arguments[] = { "exit-with", "128" };
+        char program[MAX_PATH];
+        DWORD program_length;
 #endif
         memset(&state, 0, sizeof(state));
         memset(&spec, 0, sizeof(spec));
@@ -67,7 +82,9 @@ static int axyne_test_process_start_race(void)
 #ifdef _WIN32
         state.done = CreateEventW(NULL, TRUE, FALSE, NULL);
         AXYNE_TEST_CHECK(state.done != NULL);
-        spec.executable = "C:\\Windows\\System32\\cmd.exe";
+        program_length = GetModuleFileNameA(NULL, program, (DWORD)sizeof(program));
+        AXYNE_TEST_CHECK(program_length > 0 && program_length < sizeof(program));
+        spec.executable = program;
 #else
         AXYNE_TEST_CHECK(pthread_mutex_init(&state.lock, NULL) == 0);
         AXYNE_TEST_CHECK(pthread_cond_init(&state.condition, NULL) == 0);
@@ -88,8 +105,11 @@ static int axyne_test_process_start_race(void)
         while (!state.done) (void)pthread_cond_wait(&state.condition, &state.lock);
         (void)pthread_mutex_unlock(&state.lock);
 #endif
+        if (state.saw_null_handle)
+            fprintf(stderr, "FAIL on_exit saw a NULL or mismatched handle "
+                    "(iteration %d)\n", i);
         AXYNE_TEST_CHECK(!state.saw_null_handle);
-        AXYNE_TEST_CHECK(state.exit_code == 128);
+        AXYNE_TEST_EQ_INT(state.exit_code, 128);
         AXYNE_TEST_CHECK(handle != NULL);
         axyne_process_release(handle);
 #ifndef _WIN32
@@ -113,25 +133,25 @@ static int axyne_test_git_capture(void)
     AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDOUT, "out", 3));
     AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDERR,
                                               "e1\ne2", 5));
-    AXYNE_TEST_CHECK(strcmp(capture.data, "out\n[stderr] e1\n[stderr] e2") == 0);
+    AXYNE_TEST_STREQ(capture.data, "out\n[stderr] e1\n[stderr] e2");
     report = axyne_git_format_report(arguments, 2, &capture, 3, "empty");
     AXYNE_TEST_CHECK(report != NULL);
-    AXYNE_TEST_CHECK(strcmp(report, "$ git --no-pager status\nout\n[stderr] e1\n"
-                                    "[stderr] e2\n[exit 3]\n") == 0);
+    AXYNE_TEST_STREQ(report, "$ git --no-pager status\nout\n[stderr] e1\n"
+                             "[stderr] e2\n[exit 3]\n");
     axyne_git_string_free(report);
     axyne_git_capture_free(&capture);
 
     /* Unlabelled mode keeps the bytes exactly. */
     axyne_git_capture_init(&capture, 0);
     AXYNE_TEST_CHECK(axyne_git_capture_append(&capture, AXYNE_PROCESS_STDERR, "x\n", 2));
-    AXYNE_TEST_CHECK(strcmp(capture.data, "x\n") == 0);
+    AXYNE_TEST_STREQ(capture.data, "x\n");
     axyne_git_capture_free(&capture);
 
     /* Empty successful output uses the supplied message, no exit line. */
     axyne_git_capture_init(&capture, 1);
     report = axyne_git_format_report(arguments, 2, &capture, 0, "Nothing to show.");
     AXYNE_TEST_CHECK(report != NULL);
-    AXYNE_TEST_CHECK(strcmp(report, "$ git --no-pager status\nNothing to show.\n") == 0);
+    AXYNE_TEST_STREQ(report, "$ git --no-pager status\nNothing to show.\n");
     axyne_git_string_free(report);
     axyne_git_capture_free(&capture);
 
@@ -144,8 +164,8 @@ static int axyne_test_git_capture(void)
     }
     report = axyne_git_format_report(arguments, 2, &capture, 128, "");
     AXYNE_TEST_CHECK(report != NULL);
-    AXYNE_TEST_CHECK(strstr(report, "not a Git repository") != NULL);
-    AXYNE_TEST_CHECK(strstr(report, "[exit 128]") != NULL);
+    AXYNE_TEST_CONTAINS(report, "not a Git repository");
+    AXYNE_TEST_CONTAINS(report, "[exit 128]");
     axyne_git_string_free(report);
     axyne_git_capture_free(&capture);
 
@@ -160,11 +180,11 @@ static int axyne_test_git_capture(void)
     AXYNE_TEST_CHECK(!capture.truncated);
     AXYNE_TEST_CHECK(!axyne_git_capture_append(&capture, AXYNE_PROCESS_STDOUT, "bcd", 3));
     AXYNE_TEST_CHECK(capture.truncated);
-    AXYNE_TEST_CHECK(capture.length == AXYNE_GIT_OUTPUT_LIMIT);
+    AXYNE_TEST_EQ_INT(capture.length, AXYNE_GIT_OUTPUT_LIMIT);
     report = axyne_git_format_report(arguments, 2, &capture, 137, "");
     AXYNE_TEST_CHECK(report != NULL);
     AXYNE_TEST_CHECK(strstr(report, "aaaaaaaa") != NULL);
-    AXYNE_TEST_CHECK(strstr(report, "[output truncated") != NULL);
+    AXYNE_TEST_CONTAINS(report, "[output truncated");
     axyne_git_string_free(report);
     axyne_git_capture_free(&capture);
     free(big);
@@ -177,21 +197,43 @@ static int axyne_test_git_capture(void)
 #ifndef _WIN32
 static int axyne_test_git_not_a_repository(const char *root)
 {
+    char work[1024];
+    char ceiling[PATH_MAX];
     AxyneGitResult result = {0};
     AxyneError error = {0};
     AxyneStatus status;
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
-    /* Keep git from discovering a repository above the fixture directory. */
-    AXYNE_TEST_CHECK(setenv("GIT_CEILING_DIRECTORIES", root, 1) == 0);
-    status = axyne_git_status(root, &result, &error);
+    AXYNE_TEST_CHECK(axyne_test_path(work, sizeof(work), root, "work"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(work));
+    /* The fixture lives in the build tree, which is inside the source
+     * checkout (a Git repository) on CI. Git only honours a ceiling that is a
+     * strict ancestor of the working directory: a ceiling equal to the
+     * working directory is ignored. Run in "work" and cap discovery at its
+     * canonical parent "root". */
+    if (realpath(root, ceiling) == NULL) {
+        fprintf(stderr, "FAIL realpath(%s) errno=%d\n", root, errno);
+        return 0;
+    }
+    AXYNE_TEST_EQ_INT(setenv("GIT_CEILING_DIRECTORIES", ceiling, 1), 0);
+    (void)unsetenv("GIT_DIR");
+    (void)unsetenv("GIT_WORK_TREE");
+    status = axyne_git_status(work, &result, &error);
+    (void)unsetenv("GIT_CEILING_DIRECTORIES");
     if (status == AXYNE_STATUS_NOT_FOUND) {
         fprintf(stderr, "git not installed; skipping not-a-repository check\n");
         axyne_git_result_free(&result);
         return 1;
     }
-    AXYNE_TEST_CHECK(status == AXYNE_STATUS_IO_ERROR);
-    AXYNE_TEST_CHECK(result.exit_code != 0);
-    AXYNE_TEST_CHECK(strstr(error.message, "not a Git repository") != NULL);
+    if (status != AXYNE_STATUS_IO_ERROR) {
+        fprintf(stderr, "FAIL git status in %s (ceiling %s): status %d "
+                "exit %d message \"%s\" output \"%s\"\n", work, ceiling,
+                (int)status, result.exit_code, error.message,
+                result.output != NULL ? result.output : "(null)");
+        axyne_git_result_free(&result);
+        return 0;
+    }
+    AXYNE_TEST_EQ_INT(result.exit_code, 128);
+    AXYNE_TEST_CONTAINS(error.message, "not a Git repository");
     axyne_git_result_free(&result);
     return 1;
 }
