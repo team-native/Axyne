@@ -89,3 +89,28 @@ Regression repair: the lost fixes from closed PR #32 (`feature/rendering-fidelit
 | Tab scroll and layout | Hidden buffers occupy zero tab width; tab painting, hit testing, scrolling and reveal skip them (macOS `tabFrameAtIndex:` returns an empty rect for them) | IMPLEMENTATION | CONFIRMED |
 
 Units: explorer and search rules with tests; shared document placeholder model with tests; macOS adapter; Windows adapter; build/ dimming; this record.
+
+## Preview tabs
+
+Feature: an editor-style preview mode for files opened from the Explorer. Shared rules live in `AxyneDocument.preview` and `axyne_documents_open_preview` (`include/axyne/document.h`), covered by `axyne-preview-tabs`; both native adapters only draw and call into it.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Preview tab | A file opened from the Explorer by a click opens as a preview tab; while the document is unmodified its tab title is drawn in italic | USER | CONFIRMED |
+| Replacement | While a preview tab exists, opening another file from the Explorer replaces it in the same tab position, so exactly one tab remains. No prompt (it is unmodified); the old document's native Scintilla document, LSP didClose and heap state are released | USER | CONFIRMED |
+| Promotion | The preview becomes a normal tab (italic removed) when the document changes: any edit (dirty), Save, Save As, or other content change. All of these converge in the document model (`set_contents`, `mark_dirty`, `save`, `save_as`) | USER | CONFIRMED |
+| No other pin gesture | No tab double-click pinning or other explicit pin action | USER | CONFIRMED |
+| Preview sources | Only Explorer clicks create preview tabs. File > Open dialog, Open Recent, search and quick-file results, New, Save As, Open settings file open normal tabs | USER | CONFIRMED |
+| Already open | Opening a file that is already open (preview or normal) only activates it; it is never duplicated. If it is the preview tab it stays preview until changed. An Explorer click on a file open as a normal tab does not demote it or replace the preview | USER | CONFIRMED |
+| Normal open | Opening a normal tab never replaces a preview; the preview stays beside it | USER | CONFIRMED |
+| Count | At most one preview tab at a time | USER | CONFIRMED |
+| Explorer click | A single click on a file row opens it as a preview tab; folders keep expand/collapse on click; double-click on a file does nothing extra (before this change a single click only selected and a double-click opened). Rename, delete and the context menu are unchanged | AGENT (from the confirmed preview rules) | ASSUMED |
+| Failed load | If Scintilla cannot display the new document, the previous preview is restored and nothing is released | IMPLEMENTATION | CONFIRMED |
+| Italic face | macOS: the system font's italic face via `NSFontManager`, with `NSObliqueness` 0.2 as fallback; Windows: Segoe UI italic. Tab width is measured with the same face that is drawn | IMPLEMENTATION | CONFIRMED |
+| Badges and markers | File badge chip, dirty marker and close button are unchanged; a preview tab shows the close button until edited | IMPLEMENTATION | CONFIRMED |
+
+## Preview tab units
+
+- Document model and tests: `preview` flag, open/replace/revert/promote helpers, `tests/test_preview_tabs.c`.
+- macOS adapter: Explorer single click, `openPath:asPreview:`, italic title measurement and drawing.
+- Windows adapter: Explorer single click, `axyne_open_document_ex`, italic font creation, measurement and drawing.
