@@ -240,13 +240,12 @@ struct AxyneGitUiRun {
     int owner_released;
     int process_released;
     int completion_posted;
+    /* Written by axyne_process_start before the worker thread runs. */
     AxyneProcess *process;
-    char *output;
-    size_t length;
-    size_t capacity;
+    AxyneGitCapture capture;
+    const char *const *arguments;
+    size_t argument_count;
     const char *empty_message;
-    int allocation_failed;
-    int output_truncated;
     int exit_code;
 };
 
@@ -1073,53 +1072,15 @@ static void axyne_debugger_toggle_current_breakpoint(AxyneWindowState *state)
         axyne_terminal_append(state->terminal_output, error.message,
                               strlen(error.message), AXYNE_PROCESS_STDERR);
 }
-static int axyne_git_ui_append(AxyneGitUiRun *run, const char *bytes,
-                               size_t length)
-{
-    size_t required, capacity;
-    char *grown;
-    if (length == 0) return 1;
-    if (length > SIZE_MAX - run->length - 1) return 0;
-    required = run->length + length + 1;
-    if (required > AXYNE_GIT_OUTPUT_LIMIT + 1) return 0;
-    if (required > run->capacity) {
-        capacity = run->capacity == 0 ? 4096 : run->capacity;
-        while (capacity < required) {
-            if (capacity > SIZE_MAX / 2) {
-                capacity = required;
-                break;
-            }
-            capacity *= 2;
-        }
-        grown = (char *)realloc(run->output, capacity);
-        if (grown == NULL) return 0;
-        run->output = grown;
-        run->capacity = capacity;
-    }
-    memcpy(run->output + run->length, bytes, length);
-    run->length += length;
-    run->output[run->length] = '\0';
-    return 1;
-}
-
 static void axyne_git_ui_output(AxyneProcess *process,
                                 AxyneProcessStream stream,
                                 const char *bytes, size_t length,
                                 void *user_data)
 {
     AxyneGitUiRun *run = (AxyneGitUiRun *)user_data;
-    (void)stream;
-    if (run != NULL && bytes != NULL && !run->allocation_failed &&
-        !run->output_truncated) {
-        if (run->length >= AXYNE_GIT_OUTPUT_LIMIT ||
-            length > AXYNE_GIT_OUTPUT_LIMIT - run->length) {
-            run->output_truncated = 1;
-            (void)axyne_process_terminate(process, NULL);
-        } else if (!axyne_git_ui_append(run, bytes, length)) {
-            run->allocation_failed = 1;
-            (void)axyne_process_terminate(process, NULL);
-        }
-    }
+    if (run != NULL && bytes != NULL &&
+        !axyne_git_capture_append(&run->capture, stream, bytes, length))
+        (void)axyne_process_terminate(process, NULL);
 }
 
 static void axyne_git_ui_release_ref(AxyneGitUiRun *run)
@@ -1131,7 +1092,7 @@ static void axyne_git_ui_release_ref(AxyneGitUiRun *run)
     LeaveCriticalSection(&run->lock);
     if (free_run) {
         DeleteCriticalSection(&run->lock);
-        free(run->output);
+        axyne_git_capture_free(&run->capture);
         free(run);
     }
 }
@@ -1219,38 +1180,77 @@ static void axyne_git_ui_exit(AxyneProcess *process, int exit_code,
     axyne_git_ui_release_ref(run);
 }
 
+/* Multi-line EDIT controls need CRLF line breaks. The text is also capped
+ * to what the Output panel keeps for other output (1 MiB). */
+static char *axyne_git_ui_display_text(const char *text)
+{
+    const size_t limit = 1024u * 1024u;
+    static const char notice[] = "\r\n[display truncated at 1 MiB]\r\n";
+    size_t i, extra = 0, length, out = 0;
+    char *result;
+    int clipped = 0;
+    if (text == NULL) text = "";
+    length = strlen(text);
+    if (length > limit) {
+        length = limit;
+        clipped = 1;
+    }
+    for (i = 0; i < length; ++i)
+        if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r')) ++extra;
+    result = (char *)malloc(length + extra + sizeof(notice));
+    if (result == NULL) return NULL;
+    for (i = 0; i < length; ++i) {
+        if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r'))
+            result[out++] = '\r';
+        result[out++] = text[i];
+    }
+    if (clipped) {
+        memcpy(result + out, notice, sizeof(notice) - 1);
+        out += sizeof(notice) - 1;
+    }
+    result[out] = '\0';
+    return result;
+}
+
 static wchar_t *axyne_git_ui_wide(const char *text)
 {
     if (text == NULL) text = "";
     return axyne_wide(text);
 }
 
+/* Output and Problems share the same area; Git results must be visible even
+ * when Problems or Terminal was the selected panel. */
+static void axyne_git_ui_show_output(HWND window, AxyneWindowState *state)
+{
+    state->terminal_panel_selected = 0;
+    state->problems_panel_selected = 0;
+    axyne_layout(window, state);
+    InvalidateRect(window, NULL, FALSE);
+}
+
 static void axyne_git_ui_complete(HWND window, AxyneWindowState *state,
                                   AxyneGitUiRun *run)
 {
-    const char *text;
-    wchar_t *wide;
-    char error_message[128];
+    char *report;
+    char *display = NULL;
+    wchar_t *wide = NULL;
     if (run == NULL || state == NULL) return;
     if (state->git_run != run) return;
-    if (run->allocation_failed) {
-        text = "Unable to allocate Git output.";
-    } else if (run->output_truncated) {
-        text = "Git output exceeded the 16 MiB limit.";
-    } else if (run->length != 0) {
-        text = run->output;
-    } else if (run->exit_code == 0) {
-        text = run->empty_message;
-    } else {
-        (void)snprintf(error_message, sizeof(error_message),
-                       "Git command failed with exit code %d",
-                       run->exit_code);
-        text = error_message;
-    }
-    wide = axyne_git_ui_wide(text);
+    report = axyne_git_format_report(run->arguments, run->argument_count,
+                                     &run->capture, run->exit_code,
+                                     run->empty_message);
+    display = axyne_git_ui_display_text(
+        report != NULL ? report : "Unable to allocate Git output.\n");
+    wide = axyne_git_ui_wide(display);
+    axyne_git_string_free(report);
+    free(display);
+    axyne_git_ui_show_output(window, state);
     if (state->terminal_output != NULL) {
+        SendMessageW(state->terminal_output, EM_SETLIMITTEXT, 0, 0);
         SetWindowTextW(state->terminal_output,
                        wide != NULL ? wide : L"(invalid Git output)");
+        SendMessageW(state->terminal_output, EM_SETSEL, 0, 0);
+        SendMessageW(state->terminal_output, EM_SCROLLCARET, 0, 0);
     }
     free(wide);
     if (state->git_process == run->process)
@@ -1288,6 +1288,7 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
     AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
+    char *git_executable = NULL;
     if (state->explorer.root == NULL) {
         MessageBoxA(window, "Open a workspace folder before using Git.",
                     "Axyne - Git", MB_OK | MB_ICONINFORMATION);
@@ -1304,8 +1305,16 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
     case AXYNE_CMD_GIT_STAGE_ALL: arguments = stage_arguments; argument_count = 2; break;
     default: arguments = unstage_arguments; argument_count = 2; break;
     }
+    /* CreateProcess does not search PATH for a bare "git", so resolve it. */
+    status = axyne_git_find_executable(&git_executable, &error);
+    if (status != AXYNE_STATUS_OK) {
+        MessageBoxA(window, axyne_git_describe_start_failure(status, error.message),
+                    "Axyne - Git", MB_OK | MB_ICONERROR);
+        return;
+    }
     run = (AxyneGitUiRun *)calloc(1, sizeof(*run));
     if (run == NULL) {
+        axyne_git_string_free(git_executable);
         MessageBoxA(window, "Unable to allocate Git operation.",
                     "Axyne - Git", MB_OK | MB_ICONERROR);
         return;
@@ -1313,9 +1322,12 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
     InitializeCriticalSection(&run->lock);
     run->references = 2;
     run->window = window;
+    run->arguments = arguments;
+    run->argument_count = argument_count;
     run->empty_message = empty_message;
+    axyne_git_capture_init(&run->capture, 1);
     memset(&spec, 0, sizeof(spec));
-    spec.executable = "git";
+    spec.executable = git_executable;
     spec.arguments = arguments;
     spec.argument_count = argument_count;
     spec.working_directory = state->explorer.root;
@@ -1325,14 +1337,33 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
     spec.on_exit = axyne_git_ui_exit;
     spec.user_data = run;
     status = axyne_process_start(&spec, &run->process, &error);
+    axyne_git_string_free(git_executable);
     if (status != AXYNE_STATUS_OK) {
         DeleteCriticalSection(&run->lock);
         free(run);
-        MessageBoxA(window, error.message, "Axyne - Git", MB_OK | MB_ICONERROR);
+        MessageBoxA(window, axyne_git_describe_start_failure(status, error.message),
+                    "Axyne - Git", MB_OK | MB_ICONERROR);
         return;
     }
     state->git_process = run->process;
     state->git_run = run;
+    axyne_git_ui_show_output(window, state);
+    if (state->terminal_output != NULL) {
+        /* Private empty capture: run->capture belongs to the worker thread. */
+        AxyneGitCapture pending;
+        char *header;
+        char *display;
+        wchar_t *wide;
+        axyne_git_capture_init(&pending, 0);
+        header = axyne_git_format_report(arguments, argument_count, &pending, 0,
+                                         "Running...");
+        display = axyne_git_ui_display_text(header);
+        wide = axyne_git_ui_wide(display);
+        SetWindowTextW(state->terminal_output, wide != NULL ? wide : L"");
+        free(wide);
+        free(display);
+        axyne_git_string_free(header);
+    }
 }
 
 static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
