@@ -231,6 +231,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
+    NSImageView *_imagePreview;
     NSBundle *_scintillaBundle;
     NSButton *_newButton;
     NSButton *_openButton;
@@ -405,6 +406,16 @@ static const char *axyne_macos_editor_lexer(const char *path)
     if (strcasecmp(extension, ".rs") == 0) return "rust";
     if (strcasecmp(extension, ".go") == 0) return "cpp";
     return "null";
+}
+
+static BOOL axyne_macos_is_image_path(const char *path)
+{
+    const char *extension = path == NULL ? NULL : strrchr(path, '.');
+    if (extension == NULL) return NO;
+    return strcasecmp(extension, ".png") == 0 || strcasecmp(extension, ".jpg") == 0 ||
+        strcasecmp(extension, ".jpeg") == 0 || strcasecmp(extension, ".gif") == 0 ||
+        strcasecmp(extension, ".tif") == 0 || strcasecmp(extension, ".tiff") == 0 ||
+        strcasecmp(extension, ".bmp") == 0 || strcasecmp(extension, ".webp") == 0;
 }
 
 static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
@@ -1505,6 +1516,17 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
     BOOL loaded = axyne_editor_load_document(doc, axyne_macos_editor_message, self);
     _loadingEditor = NO;
     if (!loaded) return NO;
+    BOOL imageDocument = axyne_macos_is_image_path(doc->path);
+    if (imageDocument) {
+        NSImage *image = [[[NSImage alloc] initWithContentsOfFile:
+            [NSString stringWithUTF8String:doc->path]] autorelease];
+        [_imagePreview setImage:image];
+        [_imagePreview setHidden:image == nil];
+        [_editorView setHidden:YES];
+    } else {
+        [_imagePreview setImage:nil];
+        [_imagePreview setHidden:YES];
+    }
     [self applyPreferences];
     [self applyEditorLexer];
     [self updateLineNumberMargin];
@@ -2072,6 +2094,12 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         (void)[self sendEditorMessage:SCI_SETTABINDENTS wParam:1 lParam:0];
         axyne_macos_style_editor_scrollbars(_editorView);
         [self addSubview:_editorView];
+        _imagePreview = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        [_imagePreview setImageScaling:NSImageScaleProportionallyUpOrDown];
+        [_imagePreview setImageAlignment:NSImageAlignCenter];
+        [_imagePreview setHidden:YES];
+        [_imagePreview setImageFrameStyle:NSImageFrameNone];
+        [self addSubview:_imagePreview positioned:NSWindowAbove relativeTo:_editorView];
         [self setNeedsLayout:YES];
 
         NSString *lexillaPath = [frameworksPath
@@ -3121,7 +3149,11 @@ else [_terminalInput setStringValue:@""];
         activeDocument->length == 0 && !activeDocument->is_dirty;
     [_editorView setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
         MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
-    [_editorView setHidden:emptyWorkspace];
+    BOOL imageDocument = axyne_macos_is_image_path(activeDocument == NULL
+        ? NULL : activeDocument->path);
+    [_editorView setHidden:emptyWorkspace || imageDocument];
+    [_imagePreview setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
+        MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
@@ -3416,6 +3448,9 @@ else [_terminalInput setStringValue:@""];
     [_editorView removeFromSuperview];
     [_editorView release];
     _editorView = nil;
+    [_imagePreview removeFromSuperview];
+    [_imagePreview release];
+    _imagePreview = nil;
     [_newButton release]; [_openButton release]; [_saveButton release];
     [_undoButton release]; [_redoButton release];
     [_buildButton release]; [_runButton release];
