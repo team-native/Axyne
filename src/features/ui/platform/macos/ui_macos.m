@@ -367,6 +367,7 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)closeDocument:(id)sender;
 - (void)closeDocumentAtIndex:(size_t)index;
 - (void)openRecent:(id)sender;
+- (void)openPath:(NSString *)path asPreview:(BOOL)preview;
 - (BOOL)confirmCloseAll;
 - (void)notification:(SCNotification *)notification;
 - (void)setRecentMenu:(NSMenu *)menu;
@@ -1333,7 +1334,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         _documents.active_index, text, (size_t)length, NULL) : AXYNE_STATUS_OK;
     free(text);
     if (status == AXYNE_STATUS_OK) {
-        doc->is_dirty = modified;
+        if (modified) (void)axyne_documents_mark_dirty(&_documents,
+            _documents.active_index, NULL);
+        else doc->is_dirty = 0;
         if (changed) [self syncLspActive];
     }
     return status == AXYNE_STATUS_OK;
@@ -1620,15 +1623,30 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (void)openPath:(NSString *)path
 {
+    [self openPath:path asPreview:NO];
+}
+
+/* Explorer clicks open preview tabs; every other entry point is a normal
+ * tab. A clean preview is replaced in place without a prompt and its native
+ * Scintilla document, LSP state and heap fields are released once the new
+ * document is displayed. */
+- (void)openPath:(NSString *)path asPreview:(BOOL)preview
+{
     if (path == nil) return;
     if (![self requireEditorFor:@"open a file"]) return;
     if (![self captureEditor]) return;
     size_t previousCount = _documents.count;
     size_t previousIndex = _documents.active_index;
     size_t index = 0;
+    int replaced = 0;
+    AxyneDocument evicted;
     AxyneError error;
-    AxyneStatus status = axyne_documents_open(&_documents,
-        [path UTF8String], &index, &error);
+    memset(&evicted, 0, sizeof(evicted));
+    memset(&error, 0, sizeof(error));
+    AxyneStatus status = preview
+        ? axyne_documents_open_preview(&_documents, [path UTF8String], &index,
+                                       &evicted, &replaced, &error)
+        : axyne_documents_open(&_documents, [path UTF8String], &index, &error);
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
         NSString *detail = [NSString stringWithUTF8String:error.message];
@@ -1639,7 +1657,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     }
     (void)axyne_documents_set_active(&_documents, index, NULL);
     if (![self loadActiveDocument]) {
-        if (_documents.count > previousCount)
+        if (replaced)
+            axyne_documents_revert_preview_open(&_documents, index, &evicted, replaced);
+        else if (_documents.count > previousCount)
             (void)axyne_documents_close(&_documents, index, NULL);
         (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
@@ -1648,7 +1668,15 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [alert runModal];
         return;
     }
+    if (replaced) {
+        if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, &evicted, NULL);
+        if (evicted.owns_native_editor_document)
+            (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
+                lParam:(intptr_t)evicted.native_editor_document];
+        axyne_document_dispose(&evicted);
+    }
     [self refreshRecentMenu];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)openDocument:(id)sender
@@ -2663,10 +2691,12 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
                     axyne_explorer_toggle(&_explorer, (size_t)row, NULL) != AXYNE_STATUS_OK)
                     [self showWorkspaceError:@"Unable to read workspace folder" error:NULL];
                 [self setNeedsDisplay:YES];
-            } else if ([event clickCount] >= 2) {
+            } else if ([event clickCount] == 1) {
+                /* A single click on a file opens (or reuses) the preview tab;
+                 * the second click of a double-click does nothing extra. */
                 NSString *filePath = [NSString stringWithUTF8String:node->path];
                 [self setNeedsDisplay:YES];
-                [self openPath:filePath];
+                if (filePath != nil) [self openPath:filePath asPreview:YES];
                 return;
             } else {
                 [self setNeedsDisplay:YES];
@@ -3587,16 +3617,39 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     return ceil([label sizeWithAttributes:@{NSFontAttributeName:font}].width);
 }
 
+/* Tab title attributes shared by measurement and drawing so an italic
+ * preview title never clips or leaves a gap. Preview titles use the system
+ * font's italic face; if it has none, the upright face is skewed with
+ * NSObliqueness. Returns an autoreleased dictionary; `color` may be nil. */
+static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *color)
+{
+    NSFont *font = [NSFont systemFontOfSize:12];
+    NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+    if (preview) {
+        NSFontManager *manager = [NSFontManager sharedFontManager];
+        NSFont *italic = [manager convertFont:font toHaveTrait:NSItalicFontMask];
+        if (italic != nil && ([manager traitsOfFont:italic] & NSItalicFontMask) != 0)
+            font = italic;
+        else
+            [attributes setObject:[NSNumber numberWithDouble:0.2]
+                           forKey:NSObliquenessAttributeName];
+    }
+    [attributes setObject:font forKey:NSFontAttributeName];
+    if (color != nil) [attributes setObject:color forKey:NSForegroundColorAttributeName];
+    return attributes;
+}
+
 - (NSRect)tabFrameAtIndex:(size_t)index
 {
     CGFloat x = [self sidebarWidth] - _tabScroll;
-    NSFont *font = [NSFont systemFontOfSize:12];
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
         /* An untouched empty Untitled buffer has no tab and takes no width. */
         if (axyne_document_tab_hidden(doc)) continue;
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
-        CGFloat nameWidth = [title sizeWithAttributes:@{NSFontAttributeName:font}].width;
+        CGFloat nameWidth = [title sizeWithAttributes:
+            axyne_macos_tab_title_attributes(doc->preview != 0, nil)].width;
+
         /* 14 padding, badge, 8 gap, name, 8 gap, close glyph, 14 padding. */
         CGFloat width = MIN(240, 14 + axyne_macos_tab_badge_width(doc->title) + 8 +
             ceil(nameWidth) + 8 + 8 + 14);
@@ -3836,9 +3889,10 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(NSMakeRect(nameX, AXYNE_CONTENT_TOP + 4, MAX(0, NSMaxX(frame) - 30 - nameX), 28));
-        [self drawLabel:title != nil ? title : @"Untitled"
-            at:NSMakePoint(nameX, AXYNE_CONTENT_TOP + 10)
-            size:12 color:active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted family:@"SF Pro Text"];
+        [(title != nil ? title : @"Untitled")
+            drawAtPoint:NSMakePoint(nameX, AXYNE_CONTENT_TOP + 10)
+            withAttributes:axyne_macos_tab_title_attributes(doc->preview != 0,
+                active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted)];
         [NSGraphicsContext restoreGraphicsState];
         [self drawLabel:doc->is_dirty ? @"●" : @"×"
             at:NSMakePoint(NSMaxX(frame) - (doc->is_dirty ? 19 : 22),
