@@ -8,6 +8,7 @@ add_executable(axyne_tests
     test_preview_tabs.c
     test_palette_problems.c
     test_palette_controller.c
+    test_problems_feed.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -70,6 +71,11 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> palette-controller
             "${AXYNE_TEST_FIXTURE_DIR}/palette-controller"
 )
+add_test(
+    NAME axyne-problems-feed
+    COMMAND $<TARGET_FILE:axyne_tests> problems-feed
+            "${AXYNE_TEST_FIXTURE_DIR}/problems-feed"
+)
 set_tests_properties(
     axyne-git-repair
     axyne-preview-tabs
@@ -79,6 +85,7 @@ set_tests_properties(
     axyne-process-stability
     axyne-palette-problems
     axyne-palette-controller
+    axyne-problems-feed
     PROPERTIES TIMEOUT 60
 )
 
