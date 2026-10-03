@@ -32,12 +32,25 @@
                lParam:(intptr_t)lParam;
 @end
 
-/* These bands follow the 1440x900 Figma work area: toolbar 38px, tabs 34px,
+/* These bands follow the 1440x900 Figma work area: menu bar 26px, toolbar
+ * 38px, tabs 34px,
  * output panel 230px, and status bar 24px. The macOS titlebar remains owned
  * by AppKit so its traffic-light controls stay native and accessible. */
+static const CGFloat AXYNE_MENU = AXYNE_UI_MENU;
 static const CGFloat AXYNE_TOOLBAR = AXYNE_UI_TOOLBAR;
+/* Every band below the in-window menu bar and toolbar starts here. */
+static const CGFloat AXYNE_CONTENT_TOP = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR;
 static const CGFloat AXYNE_TABS = AXYNE_UI_TABS;
 static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
+
+/* Title of the top-level menu at bar position index, from the table shared
+ * with the Windows adapter. */
+static NSString *axyne_macos_menu_label(NSUInteger index)
+{
+    const AxyneMenuTitle *title = axyne_ui_menu_title(index);
+    NSString *label = title != NULL ? [NSString stringWithUTF8String:title->label] : nil;
+    return label != nil ? label : @"";
+}
 
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
@@ -172,6 +185,9 @@ static NSAttributedString *axyne_macos_segments(NSArray *segments)
     NSScrollView *_terminalScroll;
     NSTextField *_problemSummary;
     NSInteger _panelMode;
+    NSInteger _activeMenuIndex; /* bar item whose popup is open, or -1 */
+    NSInteger _hoverMenuIndex;  /* bar item under the pointer, or -1 */
+    NSTrackingArea *_menuTracking;
     NSInteger _explorerFirstRow;
     CGFloat _tabScroll;
     void *_lexillaModule;
@@ -348,6 +364,10 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)openHelp:(id)sender;
 - (CGFloat)sidebarWidth;
 - (CGFloat)panelHeight;
+- (NSRect)menuBarItemRect:(NSUInteger)index;
+- (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
+- (void)openMenuBarMenu:(NSUInteger)index;
+- (void)setMenuHover:(NSInteger)index;
 - (BOOL)editorActionable;
 - (void)goToLine:(id)sender;
 - (void)selectLine:(id)sender;
@@ -670,6 +690,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     self = [super initWithFrame:frame];
     if (self != nil) {
+        _activeMenuIndex = -1;
+        _hoverMenuIndex = -1;
         if (axyne_explorer_initialize(&_explorer, NULL) != AXYNE_STATUS_OK ||
             axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
             axyne_explorer_destroy(&_explorer);
@@ -1714,7 +1736,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
 {
-    const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    const CGFloat explorerTop = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
     NSInteger row;
     if (_explorer.root == NULL || point.x < 0 || point.x >= [self sidebarWidth] ||
@@ -1729,13 +1751,13 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     if (point.x >= [self sidebarWidth] && point.x < NSWidth([self bounds]) &&
-        point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS) {
+        point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS) {
         CGFloat delta = [event scrollingDeltaX] != 0 ? [event scrollingDeltaX] :
             [event scrollingDeltaY];
         [self scrollTabsBy:-delta * ([event hasPreciseScrollingDeltas] ? 1 : 40)];
         return;
     }
-    CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
     if (point.x < [self sidebarWidth] && point.y >= top && point.y < bottom) {
         NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
@@ -1906,6 +1928,95 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (CGFloat)sidebarWidth { return _explorerHidden ? 0 : AXYNE_UI_SIDEBAR; }
 - (CGFloat)panelHeight { return _panelHidden ? 0 : AXYNE_UI_PANEL; }
+
+/* In-window menu bar (Figma menu frames). Items are laid out from the shared
+ * metrics; painting, hit-testing and popup anchoring all use this one rect. */
+- (NSRect)menuBarItemRect:(NSUInteger)index
+{
+    NSDictionary *attributes = @{NSFontAttributeName:[NSFont systemFontOfSize:12]};
+    CGFloat x = AXYNE_UI_MENU_INSET;
+    for (NSUInteger i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
+        CGFloat width = ceil([axyne_macos_menu_label(i) sizeWithAttributes:attributes].width) +
+            2 * AXYNE_UI_MENU_PAD;
+        if (i == index) return NSMakeRect(x, 2, width, AXYNE_MENU - 4);
+        x += width + AXYNE_UI_MENU_GAP;
+    }
+    return NSZeroRect;
+}
+
+- (NSInteger)menuBarIndexAtPoint:(NSPoint)point
+{
+    if (point.y < 0 || point.y >= AXYNE_MENU) return -1;
+    for (NSUInteger i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
+        NSRect rect = [self menuBarItemRect:i];
+        if (point.x >= NSMinX(rect) && point.x < NSMaxX(rect)) return (NSInteger)i;
+    }
+    return -1;
+}
+
+/* The bar shows the submenus of the native main menu (item 0 is the
+ * application menu), so a bar item runs exactly the actions, key equivalents
+ * and validateMenuItem: rules of the matching system-menu entry. */
+- (void)openMenuBarMenu:(NSUInteger)index
+{
+    NSMenu *mainMenu = [NSApp mainMenu];
+    NSMenu *submenu;
+    BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
+        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
+    if (mainMenu == nil || (NSInteger)index + 1 >= [mainMenu numberOfItems]) return;
+    submenu = [[mainMenu itemAtIndex:(NSInteger)index + 1] submenu];
+    if (submenu == nil) return;
+    [submenu setAppearance:[NSAppearance appearanceNamed:
+        light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua]];
+    _activeMenuIndex = (NSInteger)index;
+    [self setNeedsDisplay:YES];
+    [self displayIfNeeded];
+    /* Blocks until the popup is dismissed; a chosen item has already run. */
+    [submenu popUpMenuPositioningItem:nil
+        atLocation:NSMakePoint(NSMinX([self menuBarItemRect:index]), AXYNE_MENU)
+        inView:self];
+    /* The same menu also drops down from the system menu bar, so give it
+     * back its system appearance. */
+    [submenu setAppearance:nil];
+    _activeMenuIndex = -1;
+    _hoverMenuIndex = -1;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setMenuHover:(NSInteger)index
+{
+    if (index == _hoverMenuIndex) return;
+    _hoverMenuIndex = index;
+    [self setNeedsDisplayInRect:NSMakeRect(0, 0, NSWidth([self bounds]), AXYNE_MENU)];
+}
+
+- (void)updateTrackingAreas
+{
+    [super updateTrackingAreas];
+    if (_menuTracking != nil) {
+        [self removeTrackingArea:_menuTracking];
+        [_menuTracking release];
+        _menuTracking = nil;
+    }
+    _menuTracking = [[NSTrackingArea alloc]
+        initWithRect:NSMakeRect(0, 0, NSWidth([self bounds]), AXYNE_MENU)
+        options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                NSTrackingActiveInKeyWindow
+        owner:self userInfo:nil];
+    [self addTrackingArea:_menuTracking];
+}
+
+- (void)mouseMoved:(NSEvent *)event
+{
+    [self setMenuHover:[self menuBarIndexAtPoint:
+        [self convertPoint:[event locationInWindow] fromView:nil]]];
+}
+
+- (void)mouseExited:(NSEvent *)event
+{
+    (void)event;
+    [self setMenuHover:-1];
+}
 
 /* Editor commands apply only to the source editor: not while a prompt or the
  * terminal input owns the keyboard, and not without an open document. */
@@ -2482,7 +2593,12 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
 - (void)mouseDown:(NSEvent *)event
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
-    if (point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS &&
+    if (point.y < AXYNE_MENU) {
+        NSInteger menuIndex = [self menuBarIndexAtPoint:point];
+        if (menuIndex >= 0) [self openMenuBarMenu:(NSUInteger)menuIndex];
+        return;
+    }
+    if (point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.x >= [self sidebarWidth]) {
         for (size_t index = 0; index < _documents.count; ++index) {
             NSRect tab = [self tabFrameAtIndex:index];
@@ -2496,7 +2612,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
             return;
         }
     }
-    if (point.x < [self sidebarWidth] && point.y >= AXYNE_TOOLBAR + AXYNE_TABS &&
+    if (point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
@@ -2530,7 +2646,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     NSInteger row = [self explorerNodeAtPoint:point];
-    if (point.x >= [self sidebarWidth] || point.y < AXYNE_TOOLBAR + AXYNE_TABS ||
+    if (point.x >= [self sidebarWidth] || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
         point.y >= NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         [super rightMouseDown:event];
         return;
@@ -3445,7 +3561,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         /* 14 padding, badge, 8 gap, name, 8 gap, close glyph, 14 padding. */
         CGFloat width = MIN(240, 14 + axyne_macos_tab_badge_width(doc->title) + 8 +
             ceil(nameWidth) + 8 + 8 + 14);
-        if (i == index) return NSMakeRect(x, AXYNE_TOOLBAR, width, AXYNE_TABS);
+        if (i == index) return NSMakeRect(x, AXYNE_CONTENT_TOP, width, AXYNE_TABS);
         x += width;
     }
     return NSZeroRect;
@@ -3467,7 +3583,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     NSRect bounds = [self bounds];
     CGFloat width = NSWidth(bounds);
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - [self panelHeight];
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
         MAX(0, width - [self sidebarWidth]), MAX(0, bottomTop - editorTop))];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
@@ -3495,20 +3611,20 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     CGFloat x = 8;
     size_t icon = 0;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
-        [button setFrame:NSMakeRect(x, 5, 28, 28)];
+        [button setFrame:NSMakeRect(x, AXYNE_MENU + 5, 28, 28)];
         x += 30;
         if (++icon == 3) x += 2;
     }
     x += 2;
     CGFloat targetWidth = MIN(220, MAX(96, ceil([[(AxyneChromeButton *)_targetButton
         richTitle] size].width) + 20));
-    [_targetButton setFrame:NSMakeRect(x, 6, targetWidth, 26)]; x += targetWidth + 8;
-    [_buildButton setFrame:NSMakeRect(x, 6, 88, 26)]; x += 96;
-    [_runButton setFrame:NSMakeRect(x, 6, 86, 26)]; x += 94;
+    [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, targetWidth, 26)]; x += targetWidth + 8;
+    [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
+    [_runButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 86, 26)]; x += 94;
     CGFloat searchLeft = MAX(x + 8, width - 348);
     CGFloat searchWidth = width - 8 - searchLeft;
     [_searchButton setHidden:searchWidth < 120];
-    [_searchButton setFrame:NSMakeRect(searchLeft, 6, MAX(0, searchWidth), 26)];
+    [_searchButton setFrame:NSMakeRect(searchLeft, AXYNE_MENU + 6, MAX(0, searchWidth), 26)];
     for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(
             [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
@@ -3581,7 +3697,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     CGFloat width = NSWidth(bounds), height = NSHeight(bounds);
     CGFloat bottomTop = height - AXYNE_STATUS - [self panelHeight];
     CGFloat statusTop = height - AXYNE_STATUS;
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
         (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
     NSColor *background = axyne_preference_color(_preferences.theme.background);
@@ -3593,11 +3709,39 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
     NSColor *tabBackground = axyne_preference_color(reference ? 0x17191c : _preferences.theme.toolbar);
     [background setFill]; NSRectFill(bounds);
-    [toolbar setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_TOOLBAR));
-    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, width, AXYNE_TABS));
+    {
+        /* Menu bar band: Figma colours on the default dark theme, the user's
+         * theme colours otherwise. */
+        BOOL figma = reference && !light;
+        NSColor *menuBackground = axyne_preference_color(figma ? 0x101216 : _preferences.theme.toolbar);
+        NSColor *menuBorder = axyne_preference_color(figma ? 0x25282e : _preferences.theme.border);
+        NSColor *menuActive = axyne_preference_color(figma ? 0x202329 : _preferences.theme.panel);
+        NSColor *menuText = axyne_preference_color(figma ? 0xd2d5db : _preferences.theme.text);
+        NSColor *menuMuted = axyne_preference_color(figma ? 0x969ba5 : _preferences.theme.muted);
+        NSDictionary *menuAttributes = @{NSFontAttributeName:[NSFont systemFontOfSize:12]};
+        [menuBackground setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_MENU));
+        [menuBorder setFill]; NSRectFill(NSMakeRect(0, AXYNE_MENU - 1, width, 1));
+        for (NSUInteger menuIndex = 0; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {
+            NSString *menuLabel = axyne_macos_menu_label(menuIndex);
+            NSRect itemRect = [self menuBarItemRect:menuIndex];
+            BOOL lit = (NSInteger)menuIndex == _activeMenuIndex ||
+                (NSInteger)menuIndex == _hoverMenuIndex;
+            if (lit) {
+                [menuActive setFill];
+                [[NSBezierPath bezierPathWithRoundedRect:itemRect
+                    xRadius:AXYNE_UI_MENU_ITEM_RADIUS yRadius:AXYNE_UI_MENU_ITEM_RADIUS] fill];
+            }
+            [self drawLabel:menuLabel
+                at:NSMakePoint(NSMinX(itemRect) + AXYNE_UI_MENU_PAD,
+                    floor(NSMidY(itemRect) - [menuLabel sizeWithAttributes:menuAttributes].height / 2))
+                size:12 color:lit ? menuText : menuMuted family:@"SF Pro Text"];
+        }
+    }
+    [toolbar setFill]; NSRectFill(NSMakeRect(0, AXYNE_MENU, width, AXYNE_TOOLBAR));
+    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, width, AXYNE_TABS));
     [panel setFill]; NSRectFill(NSMakeRect(0, editorTop, [self sidebarWidth], statusTop - editorTop));
     [axyne_preference_color(reference ? 0x191b1f : _preferences.theme.toolbar) setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, [self sidebarWidth], AXYNE_TABS));
+    NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, [self sidebarWidth], AXYNE_TABS));
     if (!_panelHidden) {
         [tabBackground setFill];
         NSRectFill(NSMakeRect([self sidebarWidth], bottomTop, width - [self sidebarWidth], 32));
@@ -3606,7 +3750,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     }
     [toolbar setFill]; NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR - 1, width, 1));
+    NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP - 1, width, 1));
     if (!_explorerHidden)
         NSRectFill(NSMakeRect([self sidebarWidth] - 1, editorTop, 1, statusTop - editorTop));
     if (!_panelHidden)
@@ -3626,7 +3770,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     }
 
     [NSGraphicsContext saveGraphicsState];
-    NSRectClip(NSMakeRect([self sidebarWidth], AXYNE_TOOLBAR, MAX(0, width - [self sidebarWidth]), AXYNE_TABS));
+    NSRectClip(NSMakeRect([self sidebarWidth], AXYNE_CONTENT_TOP, MAX(0, width - [self sidebarWidth]), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
         NSRect frame = [self tabFrameAtIndex:i];
@@ -3641,17 +3785,17 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         CGFloat badgeWidth = axyne_macos_tab_badge_width(doc->title);
         CGFloat nameX = badgeX + badgeWidth + 8;
         [self drawFileBadge:(doc->path != NULL && doc->path[0] != '\0') ? doc->path : doc->title
-            inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, badgeWidth, 16) tab:YES];
+            inRect:NSMakeRect(badgeX, AXYNE_CONTENT_TOP + 10, badgeWidth, 16) tab:YES];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
-        NSRectClip(NSMakeRect(nameX, AXYNE_TOOLBAR + 4, MAX(0, NSMaxX(frame) - 30 - nameX), 28));
+        NSRectClip(NSMakeRect(nameX, AXYNE_CONTENT_TOP + 4, MAX(0, NSMaxX(frame) - 30 - nameX), 28));
         [self drawLabel:title != nil ? title : @"Untitled"
-            at:NSMakePoint(nameX, AXYNE_TOOLBAR + 10)
+            at:NSMakePoint(nameX, AXYNE_CONTENT_TOP + 10)
             size:12 color:active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted family:@"SF Pro Text"];
         [NSGraphicsContext restoreGraphicsState];
         [self drawLabel:doc->is_dirty ? @"●" : @"×"
             at:NSMakePoint(NSMaxX(frame) - (doc->is_dirty ? 19 : 22),
-                           AXYNE_TOOLBAR + (doc->is_dirty ? 13 : 10))
+                           AXYNE_CONTENT_TOP + (doc->is_dirty ? 13 : 10))
             size:doc->is_dirty ? 7 : 13
             color:doc->is_dirty && reference && !light ? axyne_preference_color(0x4f535b) : muted
             family:@"SF Pro Text"];
@@ -3741,6 +3885,8 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         axyne_watcher_release(_watcher);
     }
     axyne_explorer_destroy(&_explorer);
+    if (_menuTracking != nil) [self removeTrackingArea:_menuTracking];
+    [_menuTracking release];
     [_recentMenu release];
     if (_editorView != nil) {
         for (size_t i = 0; i < _documents.count; ++i) {
