@@ -90,6 +90,7 @@ static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     NSBundle *_scintillaBundle;
+    NSString *_editorLoadError;
     NSButton *_newButton;
     NSButton *_openButton;
     NSButton *_saveButton;
@@ -295,6 +296,18 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (NSInteger)sendEditorMessage:(unsigned int)message wParam:(uintptr_t)wParam
                         lParam:(intptr_t)lParam;
 - (void)loadScintillaView;
+- (BOOL)requireEditorFor:(NSString *)action;
+- (BOOL)editorReadyForSave;
+- (AxyneExplorerNode *)selectedExplorerNode;
+- (void)editCut:(id)sender;
+- (void)editCopy:(id)sender;
+- (void)editPaste:(id)sender;
+- (void)editSelectAll:(id)sender;
+- (void)findInDocument:(id)sender;
+- (void)replaceInDocument:(id)sender;
+- (void)searchWorkspace:(id)sender;
+- (void)openHelp:(id)sender;
+- (void)showSettingsFolder:(id)sender;
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index;
 - (void)findOrReplace:(BOOL)replace;
 - (void)searchFolder:(BOOL)quickFile;
@@ -801,7 +814,41 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         action == @selector(unstageAllGitChanges:))
         return _explorer.root != NULL && _gitProcess == NULL;
     if (action == @selector(navigateLspReferences:)) return savedDocument;
+    if (action == @selector(findInDocument:) ||
+        action == @selector(replaceInDocument:))
+        return hasDocument && _editorView != nil;
+    if (action == @selector(undo:) || action == @selector(redo:)) {
+        if (_editorView == nil) return NO;
+        return [self sendEditorMessage:action == @selector(undo:)
+            ? SCI_CANUNDO : SCI_CANREDO wParam:0 lParam:0] != 0;
+    }
+    if (action == @selector(editCut:) || action == @selector(editCopy:) ||
+        action == @selector(editPaste:) || action == @selector(editSelectAll:)) {
+        SEL standard = action == @selector(editCut:) ? @selector(cut:) :
+            action == @selector(editCopy:) ? @selector(copy:) :
+            action == @selector(editPaste:) ? @selector(paste:) :
+            @selector(selectAll:);
+        NSResponder *external = [self externalTextResponder];
+        if (external != nil) return [external respondsToSelector:standard];
+        if (_editorView == nil) return NO;
+        if (action == @selector(editPaste:))
+            return [self sendEditorMessage:SCI_CANPASTE wParam:0 lParam:0] != 0;
+        if (action == @selector(editSelectAll:)) return YES;
+        return [self sendEditorMessage:SCI_GETSELECTIONSTART wParam:0 lParam:0] !=
+            [self sendEditorMessage:SCI_GETSELECTIONEND wParam:0 lParam:0];
+    }
     return YES;
+}
+
+/* Returns a text-editing responder (such as the terminal input's field
+ * editor) that should receive Edit commands instead of the source editor. */
+- (NSResponder *)externalTextResponder
+{
+    NSResponder *responder = [[self window] firstResponder];
+    if (responder == nil || ![responder isKindOfClass:[NSText class]]) return nil;
+    if (_editorView != nil && [responder isKindOfClass:[NSView class]] &&
+        [(NSView *)responder isDescendantOf:_editorView]) return nil;
+    return responder;
 }
 
 - (NSInteger)sendEditorMessage:(unsigned int)message wParam:(uintptr_t)wParam
@@ -1235,9 +1282,23 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self refreshActionControls];
 }
 
+- (BOOL)editorReadyForSave
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (doc != NULL && _editorView != nil && doc->native_editor_document != NULL)
+        return YES;
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:@"Could not save file"];
+    [alert setInformativeText:_editorLoadError != nil ? _editorLoadError :
+        @"The editor is not available for this document, so nothing was written to disk."];
+    [alert runModal];
+    return NO;
+}
+
 - (BOOL)saveActiveToPath:(NSString *)path
 {
-    if (![self captureEditor]) return NO;
+    if (path == nil || ![self editorReadyForSave] || ![self captureEditor])
+        return NO;
     const char *utf8Path = [path UTF8String];
     AxyneError error;
     AxyneStatus status = axyne_documents_save_as(&_documents,
@@ -1261,7 +1322,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (BOOL)saveActive
 {
     AxyneDocument *doc = [self activeDocument];
-    if (doc == NULL) return NO;
+    if (doc == NULL || ![self editorReadyForSave]) return NO;
     if (doc->is_untitled) {
         NSSavePanel *panel = [NSSavePanel savePanel];
         if ([panel runModal] != NSModalResponseOK) return NO;
@@ -1290,15 +1351,33 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)newDocument:(id)sender
 {
     (void)sender;
+    if (![self requireEditorFor:@"create a new document"]) return;
     if (![self captureEditor]) return;
     size_t previousIndex = _documents.active_index;
-    size_t index;
-    if (axyne_documents_new(&_documents, &index, NULL) == AXYNE_STATUS_OK) {
+    size_t previousCount = _documents.count;
+    size_t index = 0;
+    AxyneError error;
+    memset(&error, 0, sizeof(error));
+    AxyneStatus status = axyne_documents_new(&_documents, &index, &error);
+    NSString *failure = nil;
+    if (status != AXYNE_STATUS_OK) {
+        NSString *detail = [NSString stringWithUTF8String:error.message];
+        failure = detail != nil && [detail length] > 0 ? detail :
+            @"The document list could not allocate a new document.";
+    } else {
         (void)axyne_documents_set_active(&_documents, index, NULL);
         if (![self loadActiveDocument]) {
-            (void)axyne_documents_close(&_documents, index, NULL);
+            if (_documents.count > previousCount)
+                (void)axyne_documents_close(&_documents, index, NULL);
             (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+            failure = @"Scintilla could not create the editor document.";
         }
+    }
+    if (failure != nil) {
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"Could not create a new document"];
+        [alert setInformativeText:failure];
+        [alert runModal];
     }
 }
 
@@ -1317,7 +1396,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)openPath:(NSString *)path
 {
     if (path == nil) return;
-    [self loadScintillaView];
+    if (![self requireEditorFor:@"open a file"]) return;
     if (![self captureEditor]) return;
     size_t previousCount = _documents.count;
     size_t previousIndex = _documents.active_index;
@@ -1510,26 +1589,43 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self performExplorerOperation:AXYNE_FILE_KIND_DIRECTORY];
 }
 
+- (AxyneExplorerNode *)selectedExplorerNode
+{
+    if (!_hasExplorerSelection) return NULL;
+    if (_explorerSelection < 0 || (size_t)_explorerSelection >= _explorer.count) {
+        _hasExplorerSelection = NO;
+        return NULL;
+    }
+    return &_explorer.nodes[(size_t)_explorerSelection];
+}
+
 - (void)renameExplorerItem:(id)sender
 {
     (void)sender;
-    if (!_hasExplorerSelection) return;
-    AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
+    AxyneExplorerNode *node = [self selectedExplorerNode];
+    if (node == NULL) {
+        [self showWorkspaceMessage:@"Select a file or folder in the explorer first."];
+        return;
+    }
     if (_explorer.root != NULL && strcmp(node->path, _explorer.root) == 0) {
         [self showWorkspaceMessage:@"The workspace root cannot be renamed or deleted."];
         return;
     }
+    /* The prompt below is modal and the watcher may reload the explorer, so
+     * keep private copies instead of holding the node pointer across it. */
+    NSString *nodePath = [NSString stringWithUTF8String:node->path];
+    NSString *nodeName = [NSString stringWithUTF8String:node->name];
+    if (nodePath == nil || nodeName == nil) return;
     NSString *name = [self askForText:@"Rename" label:@"New name"];
     if ([name length] == 0) return;
     if (!axyne_explorer_is_safe_child_name([name UTF8String])) {
         [self showWorkspaceMessage:@"Use one valid file or folder name without separators, . or .."];
         return;
     }
-    NSString *nodePath = [NSString stringWithUTF8String:node->path];
     NSString *parent = [nodePath stringByDeletingLastPathComponent];
     AxyneError error;
-    AxyneStatus status = axyne_fs_rename_at([parent UTF8String], node->name,
-                                            [name UTF8String], &error);
+    AxyneStatus status = axyne_fs_rename_at([parent UTF8String],
+        [nodeName UTF8String], [name UTF8String], &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Rename failed" error:&error];
     else if ([self refreshExplorer]) _hasExplorerSelection = NO;
@@ -1538,17 +1634,32 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)removeExplorerItem:(id)sender
 {
     (void)sender;
-    if (!_hasExplorerSelection) return;
-    AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
+    AxyneExplorerNode *node = [self selectedExplorerNode];
+    if (node == NULL) {
+        [self showWorkspaceMessage:@"Select a file or folder in the explorer first."];
+        return;
+    }
     if (_explorer.root != NULL && strcmp(node->path, _explorer.root) == 0) {
         [self showWorkspaceMessage:@"The workspace root cannot be renamed or deleted."];
         return;
     }
     NSString *nodePath = [NSString stringWithUTF8String:node->path];
+    NSString *nodeName = [NSString stringWithUTF8String:node->name];
+    BOOL isDirectory = node->kind == AXYNE_FILE_KIND_DIRECTORY;
+    if (nodePath == nil || nodeName == nil) return;
+    NSAlert *confirm = [[[NSAlert alloc] init] autorelease];
+    [confirm setAlertStyle:NSAlertStyleWarning];
+    [confirm setMessageText:[NSString stringWithFormat:@"Delete \"%@\"?", nodeName]];
+    [confirm setInformativeText:isDirectory
+        ? @"The folder and everything inside it will be deleted. This cannot be undone."
+        : @"The file will be deleted. This cannot be undone."];
+    [confirm addButtonWithTitle:@"Delete"];
+    [confirm addButtonWithTitle:@"Cancel"];
+    if ([confirm runModal] != NSAlertFirstButtonReturn) return;
     NSString *parent = [nodePath stringByDeletingLastPathComponent];
     AxyneError error;
-    AxyneStatus status = axyne_fs_remove_at([parent UTF8String], node->name,
-                                            &error);
+    AxyneStatus status = axyne_fs_remove_at([parent UTF8String],
+        [nodeName UTF8String], &error);
     if (status != AXYNE_STATUS_OK)
         [self showWorkspaceError:@"Delete failed" error:&error];
     else if ([self refreshExplorer]) _hasExplorerSelection = NO;
@@ -1556,17 +1667,25 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (void)performExplorerOperation:(AxyneFileKind)kind
 {
+    if (_explorer.root == NULL) {
+        [self showWorkspaceMessage:@"Open a workspace folder before creating files or folders."];
+        return;
+    }
+    NSString *parent = [NSString stringWithUTF8String:_explorer.root];
+    AxyneExplorerNode *node = [self selectedExplorerNode];
+    if (node != NULL) {
+        NSString *nodePath = [NSString stringWithUTF8String:node->path];
+        if (nodePath != nil)
+            parent = node->kind == AXYNE_FILE_KIND_DIRECTORY ? nodePath :
+                [nodePath stringByDeletingLastPathComponent];
+    }
+    if ([parent length] == 0) {
+        [self showWorkspaceMessage:@"The target folder could not be determined."];
+        return;
+    }
     NSString *name = [self askForText:kind == AXYNE_FILE_KIND_FILE
         ? @"New File" : @"New Folder" label:@"Name"];
-    NSString *parent = _explorer.root != NULL
-        ? [NSString stringWithUTF8String:_explorer.root] : nil;
-    if (_hasExplorerSelection && (size_t)_explorerSelection < _explorer.count) {
-        AxyneExplorerNode *node = &_explorer.nodes[_explorerSelection];
-        NSString *nodePath = [NSString stringWithUTF8String:node->path];
-        parent = node->kind == AXYNE_FILE_KIND_DIRECTORY ? nodePath :
-            [nodePath stringByDeletingLastPathComponent];
-    }
-    if ([name length] == 0 || [parent length] == 0) return;
+    if ([name length] == 0) return;
     if (!axyne_explorer_is_safe_child_name([name UTF8String])) {
         [self showWorkspaceMessage:@"Use one valid file or folder name without separators, . or .."];
         return;
@@ -1580,6 +1699,65 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     else [self refreshExplorer];
 }
 
+- (void)editCut:(id)sender
+{
+    NSResponder *external = [self externalTextResponder];
+    if (external != nil) { (void)[external tryToPerform:@selector(cut:) with:sender]; return; }
+    (void)[self sendEditorMessage:SCI_CUT wParam:0 lParam:0];
+}
+
+- (void)editCopy:(id)sender
+{
+    NSResponder *external = [self externalTextResponder];
+    if (external != nil) { (void)[external tryToPerform:@selector(copy:) with:sender]; return; }
+    (void)[self sendEditorMessage:SCI_COPY wParam:0 lParam:0];
+}
+
+- (void)editPaste:(id)sender
+{
+    NSResponder *external = [self externalTextResponder];
+    if (external != nil) { (void)[external tryToPerform:@selector(paste:) with:sender]; return; }
+    (void)[self sendEditorMessage:SCI_PASTE wParam:0 lParam:0];
+}
+
+- (void)editSelectAll:(id)sender
+{
+    NSResponder *external = [self externalTextResponder];
+    if (external != nil) { (void)[external tryToPerform:@selector(selectAll:) with:sender]; return; }
+    (void)[self sendEditorMessage:SCI_SELECTALL wParam:0 lParam:0];
+}
+
+- (void)findInDocument:(id)sender { (void)sender; [self findOrReplace:NO]; }
+- (void)replaceInDocument:(id)sender { (void)sender; [self findOrReplace:YES]; }
+- (void)searchWorkspace:(id)sender { (void)sender; [self searchFolder:NO]; }
+
+- (void)openHelp:(id)sender
+{
+    (void)sender;
+    NSURL *url = [NSURL URLWithString:@"https://github.com/team-native/Axyne#readme"];
+    if (url == nil || ![[NSWorkspace sharedWorkspace] openURL:url])
+        [self showWorkspaceMessage:@"Could not open the Axyne documentation."];
+}
+
+- (void)showSettingsFolder:(id)sender
+{
+    (void)sender;
+    if (_globalPreferencesPath == NULL) {
+        [self showWorkspaceMessage:@"The settings location is not available."];
+        return;
+    }
+    NSString *file = [NSString stringWithUTF8String:_globalPreferencesPath];
+    NSString *folder = [file stringByDeletingLastPathComponent];
+    BOOL isDirectory = NO;
+    if ([folder length] == 0 || ![[NSFileManager defaultManager]
+            fileExistsAtPath:folder isDirectory:&isDirectory] || !isDirectory) {
+        [self showWorkspaceMessage:@"The settings folder has not been created yet."];
+        return;
+    }
+    (void)[[NSWorkspace sharedWorkspace] openURL:
+        [NSURL fileURLWithPath:folder isDirectory:YES]];
+}
+
 - (void)saveDocument:(id)sender
 {
     (void)sender;
@@ -1589,6 +1767,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)saveDocumentAs:(id)sender
 {
     (void)sender;
+    if ([self activeDocument] == NULL || ![self editorReadyForSave]) return;
     NSSavePanel *panel = [NSSavePanel savePanel];
     if ([panel runModal] == NSModalResponseOK)
         (void)[self saveActiveToPath:[[panel URL] path]];
@@ -1701,20 +1880,111 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return YES;
 }
 
+- (NSArray *)runtimeSearchDirectories
+{
+    NSMutableArray *directories = [NSMutableArray array];
+    NSBundle *main = [NSBundle mainBundle];
+    const char *override = getenv("AXYNE_FRAMEWORKS_DIR");
+    NSString *executableDir = [[main executablePath] stringByDeletingLastPathComponent];
+    NSMutableArray *candidates = [NSMutableArray array];
+    if (override != NULL && override[0] != '\0')
+        [candidates addObject:[NSString stringWithUTF8String:override]];
+    if ([main privateFrameworksPath] != nil)
+        [candidates addObject:[main privateFrameworksPath]];
+    if ([main bundlePath] != nil)
+        [candidates addObject:[[main bundlePath]
+            stringByAppendingPathComponent:@"Contents/Frameworks"]];
+    if (executableDir != nil) {
+        NSString *bundleContents = [executableDir stringByDeletingLastPathComponent];
+        NSString *buildDir = [[bundleContents stringByDeletingLastPathComponent]
+            stringByDeletingLastPathComponent];
+        [candidates addObject:[bundleContents stringByAppendingPathComponent:@"Frameworks"]];
+        [candidates addObject:executableDir];
+        [candidates addObject:[executableDir stringByAppendingPathComponent:@"Frameworks"]];
+        /* Dev build tree: <build>/Axyne.app/Contents/MacOS with the
+         * framework in <build>/scintilla and Lexilla.dylib in <build>. */
+        [candidates addObject:[executableDir stringByAppendingPathComponent:@"scintilla"]];
+        [candidates addObject:[buildDir stringByAppendingPathComponent:@"scintilla"]];
+        [candidates addObject:buildDir];
+    }
+    for (NSString *candidate in candidates) {
+        NSString *clean = [candidate stringByStandardizingPath];
+        if ([clean length] > 0 && ![directories containsObject:clean])
+            [directories addObject:clean];
+    }
+    return directories;
+}
+
+- (void)reportEditorLoadFailure:(NSString *)detail
+{
+    static BOOL alerted = NO;
+    NSString *message = detail != nil ? detail : @"The Scintilla editor could not be loaded.";
+    [_editorLoadError release];
+    _editorLoadError = [message copy];
+    NSLog(@"Axyne: %@", message);
+    if (alerted) return;
+    alerted = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setAlertStyle:NSAlertStyleCritical];
+        [alert setMessageText:@"The code editor could not be loaded"];
+        [alert setInformativeText:[message stringByAppendingString:
+            @"\n\nFile, edit and save commands are unavailable until Scintilla.framework "
+            @"is found in the app's Contents/Frameworks folder (or set AXYNE_FRAMEWORKS_DIR)."]];
+        [alert runModal];
+    });
+}
+
 - (void)loadScintillaView
 {
     if (_editorView != nil) {
         return;
     }
-    NSString *frameworksPath = [[NSBundle mainBundle] privateFrameworksPath];
-    NSString *frameworkPath = [frameworksPath
-        stringByAppendingPathComponent:@"Scintilla.framework"];
-    NSBundle *bundle = [NSBundle bundleWithPath:frameworkPath];
-    if (bundle == nil || ![bundle load]) return;
-    _scintillaBundle = [bundle retain];
+    NSArray *directories = [self runtimeSearchDirectories];
+    NSMutableString *diagnostics = [NSMutableString string];
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSString *frameworksPath = nil;
+    if (_scintillaBundle == nil) {
+        for (NSString *directory in directories) {
+            NSString *frameworkPath = [directory
+                stringByAppendingPathComponent:@"Scintilla.framework"];
+            if (![manager fileExistsAtPath:frameworkPath]) {
+                [diagnostics appendFormat:@"Not found: %@\n", frameworkPath];
+                continue;
+            }
+            NSBundle *bundle = [NSBundle bundleWithPath:frameworkPath];
+            NSError *loadError = nil;
+            if (bundle == nil) {
+                [diagnostics appendFormat:@"Not a valid bundle: %@\n", frameworkPath];
+                continue;
+            }
+            if (![bundle loadAndReturnError:&loadError]) {
+                const char *dlerr = NULL;
+                if (dlopen([[bundle executablePath] fileSystemRepresentation],
+                           RTLD_NOW | RTLD_LOCAL) == NULL) dlerr = dlerror();
+                [diagnostics appendFormat:@"Failed to load %@: %@ %s\n", frameworkPath,
+                    loadError != nil ? [loadError localizedDescription] : @"unknown error",
+                    dlerr != NULL ? dlerr : ""];
+                continue;
+            }
+            _scintillaBundle = [bundle retain];
+            frameworksPath = directory;
+            break;
+        }
+        if (_scintillaBundle == nil) {
+            [self reportEditorLoadFailure:[@"Scintilla.framework could not be loaded.\n"
+                stringByAppendingString:diagnostics]];
+            return;
+        }
+    }
 
     Class scintillaClass = NSClassFromString(@"ScintillaView");
-    if (scintillaClass != Nil) {
+    if (scintillaClass == Nil) {
+        [self reportEditorLoadFailure:
+            @"Scintilla.framework loaded but the ScintillaView class is missing."];
+        return;
+    }
+    {
         _editorView = [[scintillaClass alloc] initWithFrame:NSZeroRect];
         [(id)_editorView setDelegate:self];
         [_editorView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
@@ -1734,21 +2004,46 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         (void)[self sendEditorMessage:SCI_SETTABINDENTS wParam:1 lParam:0];
         [self addSubview:_editorView];
         [self setNeedsLayout:YES];
+        [_editorLoadError release];
+        _editorLoadError = nil;
 
-        NSString *lexillaPath = [frameworksPath
-            stringByAppendingPathComponent:@"Lexilla.dylib"];
-        if (lexillaPath != nil) {
+        /* Lexilla is optional (syntax highlighting only): look next to the
+         * framework first, then in every other runtime directory. */
+        NSMutableArray *lexillaDirs = [NSMutableArray array];
+        if (frameworksPath != nil) [lexillaDirs addObject:frameworksPath];
+        [lexillaDirs addObjectsFromArray:directories];
+        for (NSString *directory in lexillaDirs) {
+            NSString *lexillaPath = [directory
+                stringByAppendingPathComponent:@"Lexilla.dylib"];
+            if (![manager fileExistsAtPath:lexillaPath]) continue;
             _lexillaModule = dlopen([lexillaPath fileSystemRepresentation],
                                     RTLD_NOW | RTLD_LOCAL);
-            if (_lexillaModule != NULL)
-                _createLexer = (void *(*)(const char *))dlsym(
-                    _lexillaModule, "CreateLexer");
-            if (_createLexer == NULL && _lexillaModule != NULL) {
-                dlclose(_lexillaModule);
-                _lexillaModule = NULL;
+            if (_lexillaModule == NULL) {
+                NSLog(@"Axyne: could not load %@: %s", lexillaPath, dlerror());
+                continue;
             }
+            _createLexer = (void *(*)(const char *))dlsym(
+                _lexillaModule, "CreateLexer");
+            if (_createLexer != NULL) break;
+            NSLog(@"Axyne: %@ has no CreateLexer symbol", lexillaPath);
+            dlclose(_lexillaModule);
+            _lexillaModule = NULL;
         }
+        if (_createLexer == NULL)
+            NSLog(@"Axyne: Lexilla.dylib not found; syntax highlighting is disabled");
     }
+}
+
+- (BOOL)requireEditorFor:(NSString *)action
+{
+    [self loadScintillaView];
+    if (_editorView != nil) return YES;
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:[NSString stringWithFormat:@"Could not %@", action]];
+    [alert setInformativeText:_editorLoadError != nil ? _editorLoadError :
+        @"The code editor is not available."];
+    [alert runModal];
+    return NO;
 }
 
 - (void)viewDidMoveToWindow
@@ -1784,11 +2079,19 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             _hasExplorerSelection = YES;
             AxyneExplorerNode *node = &_explorer.nodes[(size_t)row];
             if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
-                if (axyne_explorer_toggle(&_explorer, (size_t)row, NULL) != AXYNE_STATUS_OK)
+                /* Only the first click of a double-click toggles, so the
+                 * second click does not collapse the folder again. */
+                if ([event clickCount] == 1 &&
+                    axyne_explorer_toggle(&_explorer, (size_t)row, NULL) != AXYNE_STATUS_OK)
                     [self showWorkspaceError:@"Unable to read workspace folder" error:NULL];
                 [self setNeedsDisplay:YES];
+            } else if ([event clickCount] >= 2) {
+                NSString *filePath = [NSString stringWithUTF8String:node->path];
+                [self setNeedsDisplay:YES];
+                [self openPath:filePath];
+                return;
             } else {
-                [self openPath:[NSString stringWithUTF8String:node->path]];
+                [self setNeedsDisplay:YES];
             }
         } else if (_explorer.root == NULL) {
             [self openWorkspace:nil];
@@ -3008,6 +3311,7 @@ else [_terminalInput setStringValue:@""];
     if (_lexillaModule != NULL) dlclose(_lexillaModule);
     [_scintillaBundle unload];
     [_scintillaBundle release];
+    [_editorLoadError release];
     free(_globalPreferencesPath);
     free(_workspacePreferencesPath);
     [super dealloc];
@@ -3055,6 +3359,13 @@ else [_terminalInput setStringValue:@""];
     axyne_install_menu([NSApplication sharedApplication], workspace);
     [_window center];
     [_window makeKeyAndOrderFront:nil];
+    /* Without explicit activation a binary started from a terminal or a
+     * fresh build keeps another app's menu bar and ignores menu clicks. */
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [NSApp activateIgnoringOtherApps:YES];
+#pragma clang diagnostic pop
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender
@@ -3090,6 +3401,15 @@ else [_terminalInput setStringValue:@""];
 
 @end
 
+/* Function keys must be given to AppKit as the private-use Unicode
+ * characters (NSF5FunctionKey, ...) with an empty modifier mask. */
+static void axyne_set_function_key(NSMenuItem *item, unichar key,
+                                   NSEventModifierFlags modifiers)
+{
+    [item setKeyEquivalent:[NSString stringWithCharacters:&key length:1]];
+    [item setKeyEquivalentModifierMask:modifiers];
+}
+
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace)
 {
@@ -3097,7 +3417,9 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
         action:nil keyEquivalent:@""];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Axyne"];
-    [appMenu addItemWithTitle:@"About Axyne" action:nil keyEquivalent:@""];
+    NSMenuItem *aboutItem = [appMenu addItemWithTitle:@"About Axyne"
+        action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [aboutItem setTarget:application];
     [appMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"Preferences…"
         action:@selector(showGlobalPreferences:) keyEquivalent:@","];
@@ -3159,21 +3481,33 @@ static void axyne_install_menu(NSApplication *application,
             action:nil keyEquivalent:@""];
         NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
         if ([title isEqualToString:@"Edit"]) {
-            [submenu addItemWithTitle:@"Undo" action:@selector(undo:)
-                         keyEquivalent:@"z"];
+            NSMenuItem *undo = [submenu addItemWithTitle:@"Undo"
+                action:@selector(undo:) keyEquivalent:@"z"];
             NSMenuItem *redo = [submenu addItemWithTitle:@"Redo"
                 action:@selector(redo:) keyEquivalent:@"Z"];
             [redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
                                           NSEventModifierFlagShift];
             [submenu addItem:[NSMenuItem separatorItem]];
-            [submenu addItemWithTitle:@"Cut" action:@selector(cut:)
-                         keyEquivalent:@"x"];
-            [submenu addItemWithTitle:@"Copy" action:@selector(copy:)
-                         keyEquivalent:@"c"];
-            [submenu addItemWithTitle:@"Paste" action:@selector(paste:)
-                         keyEquivalent:@"v"];
-            [submenu addItemWithTitle:@"Select All" action:@selector(selectAll:)
-                         keyEquivalent:@"a"];
+            NSMenuItem *cut = [submenu addItemWithTitle:@"Cut"
+                action:@selector(editCut:) keyEquivalent:@"x"];
+            NSMenuItem *copy = [submenu addItemWithTitle:@"Copy"
+                action:@selector(editCopy:) keyEquivalent:@"c"];
+            NSMenuItem *paste = [submenu addItemWithTitle:@"Paste"
+                action:@selector(editPaste:) keyEquivalent:@"v"];
+            NSMenuItem *selectAll = [submenu addItemWithTitle:@"Select All"
+                action:@selector(editSelectAll:) keyEquivalent:@"a"];
+            [submenu addItem:[NSMenuItem separatorItem]];
+            NSMenuItem *find = [submenu addItemWithTitle:@"Find…"
+                action:@selector(findInDocument:) keyEquivalent:@"f"];
+            NSMenuItem *replace = [submenu addItemWithTitle:@"Replace…"
+                action:@selector(replaceInDocument:) keyEquivalent:@"h"];
+            NSMenuItem *findInWorkspace = [submenu addItemWithTitle:@"Find in Workspace…"
+                action:@selector(searchWorkspace:) keyEquivalent:@""];
+            NSMenuItem *quickOpen = [submenu addItemWithTitle:@"Go to File…"
+                action:@selector(quickFile:) keyEquivalent:@""];
+            NSArray *editItems = @[undo, redo, cut, copy, paste, selectAll,
+                find, replace, findInWorkspace, quickOpen];
+            for (NSMenuItem *editItem in editItems) [editItem setTarget:workspace];
         } else if ([title isEqualToString:@"Build"]) {
             NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
                 action:@selector(buildDocument:) keyEquivalent:@"b"];
@@ -3185,18 +3519,24 @@ static void axyne_install_menu(NSApplication *application,
             [configure setTarget:workspace];
         } else if ([title isEqualToString:@"Debug"]) {
             NSMenuItem *start = [submenu addItemWithTitle:@"Start Debugger"
-                action:@selector(startDebugger:) keyEquivalent:@"F5"];
+                action:@selector(startDebugger:) keyEquivalent:@""];
+            /* F5 is the default Run binding in preferences, so Start Debugger
+             * takes Shift+F5 to keep both shortcuts reachable. */
+            axyne_set_function_key(start, NSF5FunctionKey, NSEventModifierFlagShift);
             NSMenuItem *pause = [submenu addItemWithTitle:@"Pause"
-                action:@selector(debugCommand:) keyEquivalent:@"F6"];
+                action:@selector(debugCommand:) keyEquivalent:@""];
+            axyne_set_function_key(pause, NSF6FunctionKey, 0);
             NSMenuItem *resume = [submenu addItemWithTitle:@"Continue"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             [resume setTag:0]; [resume setTarget:workspace];
             NSMenuItem *next = [submenu addItemWithTitle:@"Step Over"
-                action:@selector(debugCommand:) keyEquivalent:@"F10"];
+                action:@selector(debugCommand:) keyEquivalent:@""];
+            axyne_set_function_key(next, NSF10FunctionKey, 0);
             [start setTarget:workspace]; [pause setTarget:workspace];
             [next setTarget:workspace]; [pause setTag:1]; [next setTag:2];
             NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
-                action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
+                action:@selector(toggleBreakpoint:) keyEquivalent:@""];
+            axyne_set_function_key(toggle, NSF9FunctionKey, 0);
             [toggle setTarget:workspace];
         } else if ([title isEqualToString:@"View"]) {
             NSArray *panels = @[@"출력", @"문제", @"터미널"];
@@ -3211,8 +3551,17 @@ static void axyne_install_menu(NSApplication *application,
             NSMenuItem *references = [submenu addItemWithTitle:@"LSP: Find References"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"r"];
             [definition setTarget:workspace]; [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
-            [references setTarget:workspace]; [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+            [references setTarget:workspace];
+            /* Cmd+R belongs to Build > Run, so References adds Shift. */
+            [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
             [references setTag:1];
+        } else if ([title isEqualToString:@"Help"]) {
+            NSMenuItem *help = [submenu addItemWithTitle:@"Axyne Help"
+                action:@selector(openHelp:) keyEquivalent:@"?"];
+            NSMenuItem *folder = [submenu addItemWithTitle:@"Show Settings Folder"
+                action:@selector(showSettingsFolder:) keyEquivalent:@""];
+            [help setTarget:workspace]; [folder setTarget:workspace];
+            [application setHelpMenu:submenu];
         }
         [item setSubmenu:submenu];
         [submenu release];
@@ -3235,6 +3584,10 @@ int axyne_ui_run(const char *app_name)
         AxyneApplicationDelegate *delegate =
             [[AxyneApplicationDelegate alloc] initWithAppName:title];
         [application setDelegate:delegate];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [application activateIgnoringOtherApps:YES];
+#pragma clang diagnostic pop
         [application run];
         [application setDelegate:nil];
         [delegate release];
