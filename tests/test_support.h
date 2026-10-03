@@ -107,4 +107,42 @@ static inline int axyne_test_register_cleanup(const char *path)
         } \
     } while (0)
 
+/* Integer comparison that reports both values, so CI logs show the cause. */
+#define AXYNE_TEST_EQ_INT(actual, expected) \
+    do { \
+        long long axyne_test_actual = (long long)(actual); \
+        long long axyne_test_expected = (long long)(expected); \
+        if (axyne_test_actual != axyne_test_expected) { \
+            fprintf(stderr, "FAIL %s:%d: %s == %lld, expected %lld\n", \
+                    __FILE__, __LINE__, #actual, axyne_test_actual, \
+                    axyne_test_expected); \
+            return 0; \
+        } \
+    } while (0)
+
+/* String-contains check that reports the text that was searched. */
+#define AXYNE_TEST_CONTAINS(haystack, needle) \
+    do { \
+        const char *axyne_test_text = (haystack); \
+        if (axyne_test_text == NULL || strstr(axyne_test_text, (needle)) == NULL) { \
+            fprintf(stderr, "FAIL %s:%d: %s lacks \"%s\"; actual: \"%s\"\n", \
+                    __FILE__, __LINE__, #haystack, (needle), \
+                    axyne_test_text != NULL ? axyne_test_text : "(null)"); \
+            return 0; \
+        } \
+    } while (0)
+
+/* Exact string comparison that reports both strings. */
+#define AXYNE_TEST_STREQ(actual, expected) \
+    do { \
+        const char *axyne_test_a = (actual); \
+        const char *axyne_test_e = (expected); \
+        if (axyne_test_a == NULL || strcmp(axyne_test_a, axyne_test_e) != 0) { \
+            fprintf(stderr, "FAIL %s:%d: %s\n  actual:   \"%s\"\n  expected: \"%s\"\n", \
+                    __FILE__, __LINE__, #actual, \
+                    axyne_test_a != NULL ? axyne_test_a : "(null)", axyne_test_e); \
+            return 0; \
+        } \
+    } while (0)
+
 #endif
