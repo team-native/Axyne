@@ -72,3 +72,20 @@ Reference: Figma main window `6:399`, menu frames above, design spec `29:857` (m
 | Hover / active | The item under the pointer and the item whose popup is open share one highlight. Hovering another item while a popup is open does not switch menus on macOS (AppKit owns menu tracking) | DELEGATED | ASSUMED |
 
 Dropped from the team branch: the per-item `AxyneMenuItemView`/separator/delegate drawing (superseded by the commits that removed it), the hard-coded dark application appearance, the toolbar label changes in `match macOS toolbar proportions` (dev's Figma toolbar parity already covers them), and `finish macOS workspace polish` (unrelated to the menu bar).
+
+## Workspace rules restore
+
+Regression repair: the lost fixes from closed PR #32 (`feature/rendering-fidelity-repair`: `b2b4e6f`, `d0eb714`, `f89ddb2`, `13667e4`, `eeed58e`) are ported onto the current base. Branch `feature/workspace-rules-restore`.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Explorer metadata | An entry named `.git` (directory in a clone, file in a linked worktree) is never listed in the explorer and is skipped by project file and text search. One shared rule, `axyne_explorer_is_hidden_name`. Other dot entries such as `.gitignore` stay visible; no other metadata folders (`.hg`, `.svn`) are hidden because the earlier fix only named `.git` | USER (report) / AGENT_PARAMETER | CONFIRMED / ASSUMED |
+| Root label | The root row shows the folder name (last path component, trailing separators ignored), while its `path` stays the full path | USER (PR #32) | CONFIRMED |
+| build/ dimming | A directory named `build` below the root is drawn in the muted colour on both platforms (`axyne_explorer_is_dimmed`); nested `build` folders are dimmed too; contents of a dimmed folder are not | USER (Figma 29:857) / AGENT_PARAMETER | CONFIRMED / ASSUMED |
+| Untitled tab | An untitled buffer that is empty, clean and not requested through New is a placeholder with no tab and no width (`axyne_document_tab_hidden`). It exists at startup and after the last tab is closed (`axyne_documents_new_placeholder`), so the editor never has a dead state | USER (report) | CONFIRMED |
+| Reveal rule | The tab appears when the user edits the buffer (dirty), saves it (named file), or invokes New (`tab_requested`, kept while empty and clean) | USER (report) | CONFIRMED |
+| Hidden buffer actions | Save and Save As stay enabled and work on the hidden buffer (Save falls through to Save As as before). Close is disabled on both platforms and the close command is a no-op for it, so Cmd/Ctrl+W never swaps or discards an invisible buffer | DELEGATED | ASSUMED |
+| Close successor | When the active tab closes, the next shown tab is activated, else the previous shown tab, else any neighbour | DELEGATED | ASSUMED |
+| Tab scroll and layout | Hidden buffers occupy zero tab width; tab painting, hit testing, scrolling and reveal skip them (macOS `tabFrameAtIndex:` returns an empty rect for them) | IMPLEMENTATION | CONFIRMED |
+
+Units: explorer and search rules with tests; shared document placeholder model with tests; macOS adapter; Windows adapter; build/ dimming; this record.
