@@ -190,6 +190,10 @@ static void *process_worker(void *opaque)
 {
     AxyneProcess *process = (AxyneProcess *)opaque;
     ProcessState *state = (ProcessState *)process->implementation;
+    /* axyne_process_start holds child_lock across pthread_create, so state->worker
+     * is published before any callback can observe the handle. */
+    (void)pthread_mutex_lock(&state->child_lock);
+    (void)pthread_mutex_unlock(&state->child_lock);
     int descriptors[2] = { state->stdout_read, state->stderr_read };
     int eof[2] = { 0, 0 }, child_done = 0, pipe_error = 0;
     char buffer[4096];
@@ -371,7 +375,14 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     }
     process->implementation = state; process->on_output = spec->on_output;
     process->on_exit = spec->on_exit; process->user_data = spec->user_data;
+    /* Publish the handle before the worker exists: a fast-exiting child can
+     * reach on_exit (and call release on the handle) before pthread_create
+     * returns to the caller. child_lock keeps state->worker valid too. */
+    *out = process;
+    (void)pthread_mutex_lock(&state->child_lock);
     if (pthread_create(&state->worker, NULL, process_worker, process) != 0) {
+        (void)pthread_mutex_unlock(&state->child_lock);
+        *out = NULL;
         (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
         pthread_mutex_destroy(&state->child_lock);
         pthread_mutex_destroy(&state->write_lock);
@@ -381,7 +392,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
                                          "Unable to start process output worker");
         goto cleanup;
     }
-    *out = process;
+    (void)pthread_mutex_unlock(&state->child_lock);
     free(executable); free(arguments); free_environment(environment);
     return axyne_process_set_error(error, AXYNE_STATUS_OK, "");
 cleanup:
