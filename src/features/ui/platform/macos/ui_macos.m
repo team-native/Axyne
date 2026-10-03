@@ -2791,24 +2791,33 @@ else [_terminalInput setStringValue:@""];
 
 - (void)drawFileBadge:(const char *)name inRect:(NSRect)rect tab:(BOOL)tab
 {
+    /* Chip shared with Windows: 14pt high, radius 3, badge colour at 18%
+     * alpha, no border, bold 9pt label centred both ways. The label is never
+     * empty (see axyne_ui_file_badge). Everything here is autoreleased. */
     AxyneFileBadge badge = axyne_ui_file_badge(name);
     NSString *label = [NSString stringWithUTF8String:badge.label];
-    if ([label length] == 0) {
-        /* Unspecified file types get a neutral document outline rather than
-         * an arbitrary extension-sized word shifting the file name. */
-        NSRect icon = NSMakeRect(NSMinX(rect) + 6, NSMinY(rect) + 3, 8, 10);
-        [axyne_preference_color(badge.color) setStroke];
-        [[NSBezierPath bezierPathWithRect:icon] stroke];
-        return;
-    }
-    NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
-    [style setAlignment:NSTextAlignmentCenter];
-    CGFloat size = tab ? 11 : 9;
-    NSFont *font = tab ? [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightBold] :
-        [NSFont systemFontOfSize:size];
-    [label drawInRect:rect withAttributes:@{NSFontAttributeName:font,
-        NSForegroundColorAttributeName:axyne_preference_color(badge.color),
-        NSParagraphStyleAttributeName:style}];
+    NSColor *accent = axyne_preference_color(badge.color);
+    NSRect chip;
+    NSFont *font;
+    NSDictionary *attributes;
+    NSSize extent;
+    (void)tab;
+    if (label == nil || [label length] == 0) return;
+    chip = NSMakeRect(NSMinX(rect),
+        NSMinY(rect) + floor((NSHeight(rect) - AXYNE_UI_BADGE_HEIGHT) / 2.0),
+        NSWidth(rect), AXYNE_UI_BADGE_HEIGHT);
+    [[accent colorWithAlphaComponent:AXYNE_UI_BADGE_ALPHA_PERCENT / 100.0] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:chip
+        xRadius:AXYNE_UI_BADGE_RADIUS yRadius:AXYNE_UI_BADGE_RADIUS] fill];
+    font = [NSFont monospacedSystemFontOfSize:AXYNE_UI_BADGE_FONT_PT
+                                       weight:NSFontWeightBold];
+    attributes = @{NSFontAttributeName: font,
+                   NSForegroundColorAttributeName: accent};
+    extent = [label sizeWithAttributes:attributes];
+    [label drawAtPoint:NSMakePoint(
+            NSMinX(chip) + floor((NSWidth(chip) - extent.width) / 2.0),
+            NSMinY(chip) + floor((NSHeight(chip) - extent.height) / 2.0))
+        withAttributes:attributes];
 }
 
 - (void)drawRect:(NSRect)dirtyRect
@@ -2869,7 +2878,8 @@ else [_terminalInput setStringValue:@""];
             NSRectFill(NSMakeRect(NSMinX(frame), NSMinY(frame), NSWidth(frame), 2));
         }
         CGFloat badgeX = NSMinX(frame) + 14;
-        [self drawFileBadge:doc->title inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, 20, 16) tab:YES];
+        [self drawFileBadge:(doc->path != NULL && doc->path[0] != '\0') ? doc->path : doc->title
+                     inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, 20, 16) tab:YES];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(NSMakeRect(badgeX + 26, AXYNE_TOOLBAR + 4, NSWidth(frame) - 64, 28));
