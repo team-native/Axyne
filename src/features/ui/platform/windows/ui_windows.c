@@ -2236,14 +2236,30 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
     axyne_update_title(window, state);
 }
 
+/* Tab to activate when `closing` goes away: the next shown tab, else the
+ * previous shown one, else any neighbour (only hidden buffers remain). */
+static size_t axyne_successor_index(const AxyneDocumentSet *set, size_t closing)
+{
+    size_t next, previous;
+    for (next = closing + 1; next < set->count; ++next)
+        if (!axyne_document_tab_hidden(&set->documents[next])) return next;
+    for (previous = closing; previous > 0; --previous)
+        if (!axyne_document_tab_hidden(&set->documents[previous - 1]))
+            return previous - 1;
+    return closing + 1 < set->count ? closing + 1 : closing - 1;
+}
+
 static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
 {
     if (!axyne_capture_editor(state)) return;
-    if (index >= state->documents.count ||
-        !axyne_confirm_document_close(window, state, index)) return;
+    if (index >= state->documents.count) return;
+    /* A hidden placeholder has no tab to close. */
+    if (axyne_document_tab_hidden(&state->documents.documents[index])) return;
+    if (!axyne_confirm_document_close(window, state, index)) return;
     if (state->documents.count == 1) {
         size_t replacement;
-        if (axyne_documents_new(&state->documents, &replacement, NULL) != AXYNE_STATUS_OK)
+        if (axyne_documents_new_placeholder(&state->documents, &replacement, NULL) !=
+            AXYNE_STATUS_OK)
             return;
         if (!axyne_show_document(state, replacement)) {
             (void)axyne_documents_close(&state->documents, replacement, NULL);
@@ -2251,7 +2267,7 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
             return;
         }
     } else if (state->documents.active_index == index) {
-        size_t successor = index + 1 < state->documents.count ? index + 1 : index - 1;
+        size_t successor = axyne_successor_index(&state->documents, index);
         if (!axyne_show_document(state, successor)) return;
     }
     AxyneDocument *doc = &state->documents.documents[index];
@@ -3247,7 +3263,9 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
     axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_CLOSE, L"닫기", L"Ctrl+W", document_flags);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_CLOSE, L"닫기", L"Ctrl+W",
+                   document != NULL && !axyne_document_tab_hidden(document)
+                       ? MF_ENABLED : MF_GRAYED);
     axyne_menu_add(menu, &pool, AXYNE_CMD_EXIT, L"종료", L"Alt+F4", MF_ENABLED);
     axyne_menu_track(window, state, 0, menu, pool);
 }
@@ -3643,9 +3661,14 @@ static int axyne_tab_close_width(AxyneWindowState *state)
 static int axyne_tab_width(AxyneWindowState *state, size_t index)
 {
     const AxyneDocument *doc = &state->documents.documents[index];
-    wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
-    int name_width = name != NULL ? axyne_measure_text(state->ui_font, name) : 0;
-    int width = 14 + axyne_tab_badge_width(state, doc->title) + 8 + name_width +
+    wchar_t *name;
+    int name_width;
+    int width;
+    /* An untouched empty Untitled buffer has no tab and takes no width. */
+    if (axyne_document_tab_hidden(doc)) return 0;
+    name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
+    name_width = name != NULL ? axyne_measure_text(state->ui_font, name) : 0;
+    width = 14 + axyne_tab_badge_width(state, doc->title) + 8 + name_width +
                 8 + axyne_tab_close_width(state) + 14;
     free(name);
     return width < 96 ? 96 : (width > 240 ? 240 : width);
@@ -3841,7 +3864,9 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
             label.left = slot.right + 6;
         }
         axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
-                       ? RGB(255, 255, 255) : AXYNE_SIDEBAR_TEXT, label,
+                       ? RGB(255, 255, 255)
+                       : (axyne_explorer_is_dimmed(node) ? AXYNE_SIDEBAR_MUTED
+                                                         : AXYNE_SIDEBAR_TEXT), label,
                        name != NULL ? name : L"(invalid name)", DT_LEFT);
         free(name);
         y += AXYNE_UI_ROW;
@@ -4019,6 +4044,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     for (size_t i = state->first_visible_tab; i < state->documents.count &&
          i - state->first_visible_tab < visible_tabs && tab_left < width; ++i) {
         AxyneDocument *doc = &state->documents.documents[i];
+        if (axyne_document_tab_hidden(doc)) continue;
         int tab_right = tab_left + axyne_tab_width(state, i);
         int tab_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
         int saved_dc = SaveDC(dc);
@@ -4275,6 +4301,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             for (size_t i = state->first_visible_tab; i < state->documents.count &&
                  i - state->first_visible_tab < visible_tabs && left < client.right; ++i) {
                 int tab_width = axyne_tab_width(state, i);
+                if (tab_width == 0) continue;
                 if (x >= left && x < left + tab_width && x < client.right) {
                     RECT badge, title, close;
                     if (!axyne_capture_editor(state)) return 0;

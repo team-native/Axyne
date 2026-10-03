@@ -18,15 +18,95 @@
 - (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
 @end
 
-#define CHECK(value) do { if (!(value)) { \
-    fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #value); return 1; \
-} } while (0)
-
 static id field(id view, const char *name)
 {
     Ivar ivar = class_getInstanceVariable([view class], name);
     return ivar == NULL ? nil : object_getIvar(view, ivar);
 }
+
+static void *value_field(id view, const char *name)
+{
+    Ivar ivar = class_getInstanceVariable([view class], name);
+    return ivar == NULL ? NULL : (char *)view + ivar_getOffset(ivar);
+}
+
+/* Failure diagnostics: every failed check dumps the document set, the tab
+ * frames and the explorer rows, so a CI log shows the actual state. */
+static NSView *diagnosticView;
+
+static void dump_state(void)
+{
+    if (diagnosticView == nil) return;
+    AxyneDocumentSet *documents = value_field(diagnosticView, "_documents");
+    AxyneExplorer *explorer = value_field(diagnosticView, "_explorer");
+    fprintf(stderr, "  view bounds=%s sidebar=%g\n",
+        [NSStringFromRect([diagnosticView bounds]) UTF8String],
+        (double)AXYNE_UI_SIDEBAR);
+    if (documents != NULL) {
+        fprintf(stderr, "  documents: count=%zu active=%zu visible=%zu\n",
+            documents->count, documents->active_index,
+            axyne_documents_visible_count(documents));
+        for (size_t i = 0; i < documents->count && i < 32; ++i) {
+            const AxyneDocument *doc = &documents->documents[i];
+            fprintf(stderr, "    #%zu title=%s length=%zu dirty=%d untitled=%d "
+                "requested=%d hidden=%d tab=%s\n", i,
+                doc->title != NULL ? doc->title : "(null)", doc->length,
+                doc->is_dirty, doc->is_untitled, doc->tab_requested,
+                axyne_document_tab_hidden(doc),
+                [NSStringFromRect([diagnosticView tabFrameAtIndex:i]) UTF8String]);
+        }
+    }
+    if (explorer != NULL) {
+        fprintf(stderr, "  explorer: root=%s count=%zu\n",
+            explorer->root != NULL ? explorer->root : "(null)", explorer->count);
+        for (size_t i = 0; i < explorer->count && i < 4; ++i)
+            fprintf(stderr, "    row %zu depth=%zu name=%s\n", i,
+                explorer->nodes[i].depth, explorer->nodes[i].name);
+    }
+}
+
+#define CHECK(value) do { if (!(value)) { \
+    fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #value); \
+    dump_state(); return 1; \
+} } while (0)
+
+#define CHECK_EMPTY_RECT(expression) do { \
+    NSRect rect_ = (expression); \
+    if (!NSIsEmptyRect(rect_)) { \
+        fprintf(stderr, "FAIL %s:%d: %s is %s, expected an empty rect\n", \
+            __FILE__, __LINE__, #expression, [NSStringFromRect(rect_) UTF8String]); \
+        dump_state(); return 1; \
+    } \
+} while (0)
+
+#define CHECK_X(expression, relation, bound) do { \
+    CGFloat actual_ = NSMinX((expression)); \
+    if (!(actual_ relation (CGFloat)(bound))) { \
+        fprintf(stderr, "FAIL %s:%d: minX of %s is %g, expected %s %g\n", \
+            __FILE__, __LINE__, #expression, (double)actual_, #relation, \
+            (double)(bound)); \
+        dump_state(); return 1; \
+    } \
+} while (0)
+
+#define CHECK_MAX_X(expression, limit) do { \
+    CGFloat actual_ = NSMaxX((expression)); \
+    if (!(actual_ <= (CGFloat)(limit))) { \
+        fprintf(stderr, "FAIL %s:%d: maxX of %s is %g, expected <= %g\n", \
+            __FILE__, __LINE__, #expression, (double)actual_, (double)(limit)); \
+        dump_state(); return 1; \
+    } \
+} while (0)
+
+#define CHECK_ROW(point, expected) do { \
+    NSInteger actual_ = [view explorerNodeAtPoint:(point)]; \
+    NSInteger want_ = (NSInteger)(expected); \
+    if (actual_ != want_) { \
+        fprintf(stderr, "FAIL %s:%d: explorerNodeAtPoint:%s is %ld, expected %ld\n", \
+            __FILE__, __LINE__, #point, (long)actual_, (long)want_); \
+        dump_state(); return 1; \
+    } \
+} while (0)
 
 /* Never let a native alert block the unattended regression suite. */
 static NSModalResponse fail_alert(id alert, SEL selector)
@@ -35,12 +115,6 @@ static NSModalResponse fail_alert(id alert, SEL selector)
     fprintf(stderr, "Unexpected alert: %s: %s\n", [[alert messageText] UTF8String],
         [[alert informativeText] UTF8String]);
     return NSAlertThirdButtonReturn;
-}
-
-static void *value_field(id view, const char *name)
-{
-    Ivar ivar = class_getInstanceVariable([view class], name);
-    return ivar == NULL ? NULL : (char *)view + ivar_getOffset(ivar);
 }
 
 int main(void)
@@ -55,6 +129,7 @@ int main(void)
         CHECK(type != Nil);
         NSView *view = [[type alloc] initWithFrame:NSMakeRect(0, 0, 1440, 842)];
         CHECK(view != nil);
+        diagnosticView = view;
         fprintf(stderr, "Checking toolbar and panels\n");
         [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
         NSRect previous = NSZeroRect;
@@ -130,13 +205,13 @@ int main(void)
         CGFloat top = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS +
             AXYNE_UI_EXPLORER_HEADER;
         CGFloat bottom = 842 - AXYNE_UI_STATUS - AXYNE_UI_PANEL;
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, top)] == 0);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + AXYNE_UI_ROW - 1)] == 0);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + AXYNE_UI_ROW)] == 1);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(AXYNE_UI_SIDEBAR, top)] == NSNotFound);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, top - 1)] == NSNotFound);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, bottom)] == NSNotFound);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, 842 - AXYNE_UI_STATUS)] == NSNotFound);
+        CHECK_ROW(NSMakePoint(80, top), 0);
+        CHECK_ROW(NSMakePoint(80, top + AXYNE_UI_ROW - 1), 0);
+        CHECK_ROW(NSMakePoint(80, top + AXYNE_UI_ROW), 1);
+        CHECK_ROW(NSMakePoint(AXYNE_UI_SIDEBAR, top), NSNotFound);
+        CHECK_ROW(NSMakePoint(80, top - 1), NSNotFound);
+        CHECK_ROW(NSMakePoint(80, bottom), NSNotFound);
+        CHECK_ROW(NSMakePoint(80, 842 - AXYNE_UI_STATUS), NSNotFound);
 
         /* A reload after external deletions clamps the old scroll position. */
         NSInteger *firstRow = value_field(view, "_explorerFirstRow");
@@ -149,7 +224,7 @@ int main(void)
         CHECK([view refreshExplorer]);
         [view layoutSubtreeIfNeeded];
         CHECK(*firstRow == 0);
-        CHECK([view explorerNodeAtPoint:NSMakePoint(80, top)] == 0);
+        CHECK_ROW(NSMakePoint(80, top), 0);
 
         AxynePreferences *preferences = value_field(view, "_preferences");
         CHECK(preferences != NULL);
@@ -171,11 +246,16 @@ int main(void)
         for (int i = 0; i < 12; ++i)
             CHECK(axyne_documents_new(documents, NULL, NULL) == AXYNE_STATUS_OK);
         [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
-        CHECK(NSMinX([view tabFrameAtIndex:0]) < AXYNE_UI_SIDEBAR);
+        fprintf(stderr, "Checking tab strip scrolling\n");
+        /* Index 0 is the hidden startup buffer; the first shown tab is 1. */
+        CHECK(documents->count == 13);
+        CHECK_EMPTY_RECT([view tabFrameAtIndex:0]);
+        CHECK_X([view tabFrameAtIndex:1], <, AXYNE_UI_SIDEBAR);
         [view scrollTabsBy:-100000];
-        CHECK(NSMinX([view tabFrameAtIndex:0]) == AXYNE_UI_SIDEBAR);
+        CHECK_X([view tabFrameAtIndex:1], ==, AXYNE_UI_SIDEBAR);
         [view scrollTabsBy:100000];
-        CHECK(NSMaxX([view tabFrameAtIndex:documents->count - 1]) <= 800);
+        CHECK_MAX_X([view tabFrameAtIndex:documents->count - 1], 800);
+        diagnosticView = nil;
         [view release];
         CHECK([[NSFileManager defaultManager] removeItemAtPath:root error:NULL]);
         method_setImplementation(alertMethod, originalAlert);

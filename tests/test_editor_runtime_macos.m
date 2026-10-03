@@ -18,6 +18,7 @@
 - (void)notification:(SCNotification *)notification;
 - (BOOL)loadActiveDocument;
 - (BOOL)selectDocumentAtIndex:(size_t)index;
+- (NSRect)tabFrameAtIndex:(size_t)index;
 - (BOOL)captureEditor;
 - (void)openPath:(NSString *)path;
 - (void)newDocument:(id)sender;
@@ -29,12 +30,51 @@
                         lParam:(intptr_t)lParam;
 @end
 
+/* Failure diagnostics: the document set under test is dumped next to every
+ * failed check, so a CI log shows the actual counts, indices and tab state
+ * instead of only the failing expression. */
+static AxyneDocumentSet *diagnosticDocuments;
+static const char *diagnosticName = "workspace";
+
+static void dump_documents(void)
+{
+    if (diagnosticDocuments == NULL) return;
+    fprintf(stderr, "  [%s] documents: count=%zu active=%zu visible=%zu\n",
+        diagnosticName, diagnosticDocuments->count,
+        diagnosticDocuments->active_index,
+        axyne_documents_visible_count(diagnosticDocuments));
+    for (size_t i = 0; i < diagnosticDocuments->count; ++i) {
+        const AxyneDocument *doc = &diagnosticDocuments->documents[i];
+        fprintf(stderr, "  [%s]   #%zu title=%s path=%s length=%zu dirty=%d "
+            "untitled=%d requested=%d hidden=%d native=%p owns=%d\n",
+            diagnosticName, i, doc->title != NULL ? doc->title : "(null)",
+            doc->path != NULL ? doc->path : "(null)", doc->length,
+            doc->is_dirty, doc->is_untitled, doc->tab_requested,
+            axyne_document_tab_hidden(doc), doc->native_editor_document,
+            doc->owns_native_editor_document);
+    }
+}
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition); \
+        dump_documents(); \
         return EXIT_FAILURE; \
     } \
 } while (0)
+
+#define CHECK_EMPTY_RECT(expression) do { \
+    NSRect rect_ = (expression); \
+    if (!NSIsEmptyRect(rect_)) { \
+        fprintf(stderr, "FAIL %s:%d: %s is %s, expected an empty rect\n", \
+            __FILE__, __LINE__, #expression, \
+            [NSStringFromRect(rect_) UTF8String]); \
+        dump_documents(); \
+        return EXIT_FAILURE; \
+    } \
+} while (0)
+
+#define STAGE(name) fprintf(stderr, "stage: %s\n", (name))
 
 typedef NS_ENUM(int, LoadFault) {
     LoadFaultNone, LoadFaultCreate, LoadFaultShortInsert, LoadFaultInsertStatus,
@@ -163,6 +203,9 @@ static int run_tests(NSString *pngPath)
         // cannot silently truncate or normalize the file's buffer.
         const char first[] = "first \xed\x95\x9c\xea\xb8\x80\r\nembedded\0tail\n";
         AxyneDocumentSet *documents = document_set(workspace);
+        diagnosticDocuments = documents;
+        diagnosticName = "workspace";
+        STAGE("first bind");
         CHECK(axyne_documents_set_contents(documents, 0, first, sizeof(first) - 1, NULL)
             == AXYNE_STATUS_OK);
         CHECK(axyne_documents_mark_clean(documents, 0, NULL) == AXYNE_STATUS_OK);
@@ -199,6 +242,7 @@ static int run_tests(NSString *pngPath)
         CHECK(axyne_fs_write_file([emptyPath fileSystemRepresentation], "", 0, NULL)
             == AXYNE_STATUS_OK);
 
+        STAGE("close initial document");
         // Closing the initial document must create an independently owned
         // replacement. Opening real files then exercises the production path.
         loadFault = LoadFaultCreate;
@@ -210,8 +254,20 @@ static int run_tests(NSString *pngPath)
         CHECK(documents->count == 1 && documents->documents[0].is_untitled);
         CHECK(documents->documents[0].owns_native_editor_document);
         CHECK(editor_equals(workspace, "", 0));
+        // The replacement is an untouched placeholder: no tab, and closing it
+        // is a no-op that keeps the same buffer.
+        CHECK(axyne_document_tab_hidden(&documents->documents[0]));
+        CHECK_EMPTY_RECT([workspace tabFrameAtIndex:0]);
+        STAGE("hidden placeholder");
+        {
+            void *placeholderBuffer = documents->documents[0].native_editor_document;
+            [workspace closeDocument:nil];
+            CHECK(documents->count == 1 &&
+                  documents->documents[0].native_editor_document == placeholderBuffer);
+        }
         CHECK(editor_message(workspace, SCI_GETINDENT, 0, 0) == 6);
         CHECK(editor_message(workspace, SCI_GETUSETABS, 0, 0) == 0);
+        STAGE("open files");
         [workspace openPath:firstPath];
         CHECK(documents->count == 2 && documents->active_index == 1);
         CHECK(editor_equals(workspace, first, sizeof(first) - 1));
@@ -226,6 +282,7 @@ static int run_tests(NSString *pngPath)
         CHECK(editor_message(workspace, SCI_GETLEXER, 0, 0) != 0);
         CHECK([window firstResponder] == [editor content]);
 
+        STAGE("tab switching");
         // Keep edits and undo history in the first tab across repeated switches.
         CHECK([workspace selectDocumentAtIndex:1]);
         editor_message(workspace, SCI_GOTOPOS, sizeof(first) - 1, 0);
@@ -255,6 +312,7 @@ static int run_tests(NSString *pngPath)
         const char edited[] = "first \xed\x95\x9c\xea\xb8\x80\r\nembedded\0tail\nedit";
         CHECK(file_equals(firstPath, edited, sizeof(edited) - 1));
 
+        STAGE("reopen and close");
         // Reopening an already-open path selects its existing native buffer.
         [workspace openPath:secondPath];
         [workspace openPath:firstPath];
@@ -266,6 +324,7 @@ static int run_tests(NSString *pngPath)
         CHECK(documents->count == 3);
         CHECK(editor_equals(workspace, edited, sizeof(edited) - 1));
 
+        STAGE("load failures");
         // All load failures preserve the old active tab and displayed bytes.
         size_t previousIndex = documents->active_index;
         intptr_t previousPointer = editor_message(workspace, SCI_GETDOCPOINTER, 0, 0);
@@ -317,6 +376,9 @@ static int run_tests(NSString *pngPath)
         CHECK(earlyWorkspace != nil);
         [earlyWorkspace openPath:firstPath];
         AxyneDocumentSet *earlyDocuments = document_set(earlyWorkspace);
+        diagnosticDocuments = earlyDocuments;
+        diagnosticName = "early";
+        STAGE("early workspace");
         CHECK(earlyDocuments->count == 2 && earlyDocuments->active_index == 1);
         CHECK(editor_equals(earlyWorkspace, edited, sizeof(edited) - 1));
         CHECK(earlyDocuments->documents[1].owns_native_editor_document);
@@ -346,10 +408,15 @@ static int run_tests(NSString *pngPath)
         [earlyWorkspace openPath:firstPath];
         CHECK(editor_equals(earlyWorkspace, edited, sizeof(edited) - 1));
         [earlyWorkspace release];
+        diagnosticDocuments = documents;
+        diagnosticName = "workspace";
 
         // Actual indentation must use the effective profile on fresh buffers.
         NSView *indentWorkspace = [[testClass alloc] initWithFrame:NSZeroRect];
         CHECK(indentWorkspace != nil);
+        diagnosticDocuments = document_set(indentWorkspace);
+        diagnosticName = "indent";
+        STAGE("indent workspace");
         AxynePreferences *indentPreferences = preferences_for(indentWorkspace);
         indentPreferences->editor.tab_width = 6;
         indentPreferences->editor.insert_spaces = 1;
@@ -382,6 +449,8 @@ static int run_tests(NSString *pngPath)
         CHECK(editor_message(indentWorkspace, SCI_GETTABWIDTH, 0, 0) == 3);
         CHECK(editor_message(indentWorkspace, SCI_GETUSETABS, 0, 0) == 1);
         [indentWorkspace release];
+        diagnosticDocuments = documents;
+        diagnosticName = "workspace";
 
         if (pngPath != nil) {
             CHECK([workspace selectDocumentAtIndex:1]);
@@ -397,6 +466,8 @@ static int run_tests(NSString *pngPath)
             printf("Workspace PNG: %s (%ld x %ld)\n", [pngPath fileSystemRepresentation],
                 (long)[bitmap pixelsWide], (long)[bitmap pixelsHigh]);
         }
+        STAGE("teardown");
+        diagnosticDocuments = NULL;
         [window setContentView:nil];
         [workspace release];
         [window release];
