@@ -12,6 +12,7 @@ int axyne_test_documents_search(const char *root);
 int axyne_test_settings_preferences(const char *root);
 int axyne_test_runner_git_lsp(const char *root, const char *source_root);
 int axyne_test_process_stability(const char *root);
+int axyne_test_git_repair(const char *root);
 
 static unsigned long axyne_test_process_id(void)
 {
@@ -28,7 +29,7 @@ int main(int argc, char **argv)
     int written;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability> <fixture-root> [source-root]\n", argv[0]);
+        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
     }
     written = snprintf(root, sizeof(root), "%s-%lu", argv[2],
@@ -45,6 +46,8 @@ int main(int argc, char **argv)
         return axyne_test_runner_git_lsp(root, argv[3]) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "process-stability") == 0)
         return axyne_test_process_stability(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (strcmp(argv[1], "git-repair") == 0)
+        return axyne_test_git_repair(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     fprintf(stderr, "unknown test case: %s\n", argv[1]);
     return EXIT_FAILURE;
 }

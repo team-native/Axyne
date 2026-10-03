@@ -16,11 +16,7 @@
 
 typedef struct AxyneGitRun {
     AxyneGitResult *result;
-    char *output;
-    size_t length;
-    size_t capacity;
-    int allocation_failed;
-    int output_truncated;
+    AxyneGitCapture capture;
 #ifdef _WIN32
     HANDLE finished;
 #else
@@ -42,7 +38,7 @@ static AxyneStatus axyne_git_error(AxyneError *error, AxyneStatus status,
 }
 
 #ifdef _WIN32
-static AxyneStatus axyne_git_find_executable(char **path, AxyneError *error)
+AxyneStatus axyne_git_find_executable(char **path, AxyneError *error)
 {
     wchar_t *wide_path = NULL;
     DWORD capacity = MAX_PATH;
@@ -63,7 +59,7 @@ static AxyneStatus axyne_git_find_executable(char **path, AxyneError *error)
                              NULL);
         if (length == 0) {
             free(wide_path);
-            return axyne_git_error(error, AXYNE_STATUS_IO_ERROR,
+            return axyne_git_error(error, AXYNE_STATUS_NOT_FOUND,
                                    "Git executable was not found on PATH");
         }
         if (length < capacity) break;
@@ -94,57 +90,228 @@ static AxyneStatus axyne_git_find_executable(char **path, AxyneError *error)
     *path = utf8_path;
     return AXYNE_STATUS_OK;
 }
+#else
+AxyneStatus axyne_git_find_executable(char **path, AxyneError *error)
+{
+    if (path == NULL)
+        return axyne_git_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "Git executable output is required");
+    *path = (char *)malloc(sizeof("git"));
+    if (*path == NULL)
+        return axyne_git_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                               "Unable to allocate Git executable path");
+    memcpy(*path, "git", sizeof("git"));
+    return axyne_git_error(error, AXYNE_STATUS_OK, "");
+}
 #endif
 
-static int axyne_git_append(AxyneGitRun *run, const char *bytes, size_t length)
+void axyne_git_string_free(char *text)
 {
-    size_t required;
+    free(text);
+}
+
+const char *axyne_git_describe_start_failure(AxyneStatus status,
+                                             const char *fallback)
+{
+    if (status == AXYNE_STATUS_NOT_FOUND)
+        return "Git was not found on PATH. Install Git and make sure the "
+               "git command is available, then try again.";
+    if (status == AXYNE_STATUS_PERMISSION_DENIED)
+        return "Git could not be started: permission denied.";
+    return fallback != NULL && fallback[0] != '\0'
+        ? fallback : "Unable to start Git operation.";
+}
+
+void axyne_git_capture_init(AxyneGitCapture *capture, int label_stderr)
+{
+    if (capture == NULL) return;
+    memset(capture, 0, sizeof(*capture));
+    capture->label_stderr = label_stderr;
+    capture->last_stream = AXYNE_PROCESS_STDOUT;
+    capture->line_start = 1;
+}
+
+void axyne_git_capture_free(AxyneGitCapture *capture)
+{
+    if (capture == NULL) return;
+    free(capture->data);
+    capture->data = NULL;
+    capture->length = 0;
+    capture->capacity = 0;
+}
+
+/* Appends up to the remaining payload budget. Returns 0 when the limit was
+ * reached or memory ran out; the accepted prefix is always kept. */
+static int axyne_git_capture_raw(AxyneGitCapture *capture, const char *bytes,
+                                 size_t length)
+{
+    size_t accepted, required;
     char *grown;
     if (length == 0) return 1;
-    if (length > SIZE_MAX - run->length - 1) return 0;
-    required = run->length + length + 1;
-    if (required > run->capacity) {
-        size_t capacity = run->capacity == 0 ? 4096 : run->capacity;
-        while (capacity < required) {
-            if (capacity > SIZE_MAX / 2) {
-                capacity = required;
-                break;
-            }
-            capacity *= 2;
-        }
-        grown = (char *)realloc(run->output, capacity);
-        if (grown == NULL) return 0;
-        run->output = grown;
-        run->capacity = capacity;
+    accepted = capture->length < AXYNE_GIT_OUTPUT_LIMIT
+        ? AXYNE_GIT_OUTPUT_LIMIT - capture->length : 0;
+    if (length > accepted) {
+        length = accepted;
+        capture->truncated = 1;
     }
-    memcpy(run->output + run->length, bytes, length);
-    run->length += length;
-    run->output[run->length] = '\0';
+    if (length != 0) {
+        required = capture->length + length + 1;
+        if (required > capture->capacity) {
+            size_t capacity = capture->capacity == 0 ? 4096 : capture->capacity;
+            while (capacity < required) {
+                if (capacity > SIZE_MAX / 2) {
+                    capacity = required;
+                    break;
+                }
+                capacity *= 2;
+            }
+            grown = (char *)realloc(capture->data, capacity);
+            if (grown == NULL) {
+                capture->allocation_failed = 1;
+                return 0;
+            }
+            capture->data = grown;
+            capture->capacity = capacity;
+        }
+        memcpy(capture->data + capture->length, bytes, length);
+        capture->length += length;
+        capture->data[capture->length] = '\0';
+    }
+    return !capture->truncated;
+}
+
+int axyne_git_capture_append(AxyneGitCapture *capture,
+                             AxyneProcessStream stream,
+                             const char *bytes, size_t length)
+{
+    static const char label[] = "[stderr] ";
+    size_t offset = 0;
+    if (capture == NULL || bytes == NULL) return 1;
+    if (capture->allocation_failed || capture->truncated) return 0;
+    if (!capture->label_stderr) return axyne_git_capture_raw(capture, bytes, length);
+    if ((int)stream != capture->last_stream) {
+        /* Keep stdout and stderr text on separate lines. */
+        if (!capture->line_start && !axyne_git_capture_raw(capture, "\n", 1))
+            return 0;
+        capture->line_start = 1;
+        capture->last_stream = (int)stream;
+    }
+    while (offset < length) {
+        size_t span = length - offset;
+        const char *newline = (const char *)memchr(bytes + offset, '\n', span);
+        if (newline != NULL) span = (size_t)(newline - (bytes + offset)) + 1;
+        if (stream == AXYNE_PROCESS_STDERR && capture->line_start &&
+            !axyne_git_capture_raw(capture, label, sizeof(label) - 1))
+            return 0;
+        if (!axyne_git_capture_raw(capture, bytes + offset, span)) return 0;
+        capture->line_start = bytes[offset + span - 1] == '\n';
+        offset += span;
+    }
     return 1;
+}
+
+static int axyne_git_contains(const AxyneGitCapture *capture, const char *needle)
+{
+    size_t needle_length = strlen(needle), i;
+    if (capture->data == NULL || capture->length < needle_length) return 0;
+    for (i = 0; i + needle_length <= capture->length; ++i) {
+        size_t j;
+        for (j = 0; j < needle_length; ++j) {
+            char c = capture->data[i + j];
+            if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+            if (c != needle[j]) break;
+        }
+        if (j == needle_length) return 1;
+    }
+    return 0;
+}
+
+static int axyne_git_report_append(char **buffer, size_t *length,
+                                   size_t *capacity, const char *bytes,
+                                   size_t count)
+{
+    if (count > SIZE_MAX - *length - 1) return 0;
+    if (*length + count + 1 > *capacity) {
+        size_t wanted = *capacity == 0 ? 256 : *capacity;
+        char *grown;
+        while (wanted < *length + count + 1) {
+            if (wanted > SIZE_MAX / 2) return 0;
+            wanted *= 2;
+        }
+        grown = (char *)realloc(*buffer, wanted);
+        if (grown == NULL) return 0;
+        *buffer = grown;
+        *capacity = wanted;
+    }
+    memcpy(*buffer + *length, bytes, count);
+    *length += count;
+    (*buffer)[*length] = '\0';
+    return 1;
+}
+
+char *axyne_git_format_report(const char *const *arguments,
+                              size_t argument_count,
+                              const AxyneGitCapture *capture, int exit_code,
+                              const char *empty_message)
+{
+    char *report = NULL;
+    size_t length = 0, capacity = 0, i;
+    char number[32];
+    int ok = 1;
+    int has_output;
+    if (capture == NULL) return NULL;
+    has_output = capture->data != NULL && capture->length != 0;
+    ok = axyne_git_report_append(&report, &length, &capacity, "$ git", 5);
+    for (i = 0; ok && i < argument_count; ++i) {
+        ok = axyne_git_report_append(&report, &length, &capacity, " ", 1) &&
+             axyne_git_report_append(&report, &length, &capacity, arguments[i],
+                                     strlen(arguments[i]));
+    }
+    ok = ok && axyne_git_report_append(&report, &length, &capacity, "\n", 1);
+    if (ok && capture->allocation_failed && !has_output) {
+        const char *text = "Unable to allocate Git output.\n";
+        ok = axyne_git_report_append(&report, &length, &capacity, text, strlen(text));
+    } else if (ok && exit_code != 0 && axyne_git_contains(capture, "not a git repository")) {
+        const char *text = "This workspace folder is not a Git repository. "
+                           "Run \"git init\" in it to create one.\n";
+        ok = axyne_git_report_append(&report, &length, &capacity, text, strlen(text));
+    } else if (ok && has_output) {
+        ok = axyne_git_report_append(&report, &length, &capacity, capture->data,
+                                     capture->length);
+        if (ok && capture->data[capture->length - 1] != '\n')
+            ok = axyne_git_report_append(&report, &length, &capacity, "\n", 1);
+    } else if (ok && exit_code == 0 && !capture->truncated && empty_message != NULL) {
+        ok = axyne_git_report_append(&report, &length, &capacity, empty_message,
+                                     strlen(empty_message)) &&
+             axyne_git_report_append(&report, &length, &capacity, "\n", 1);
+    }
+    if (ok && capture->allocation_failed && has_output) {
+        const char *text = "[output incomplete: unable to allocate memory]\n";
+        ok = axyne_git_report_append(&report, &length, &capacity, text, strlen(text));
+    }
+    if (ok && capture->truncated) {
+        const char *text = "[output truncated: exceeded the 16 MiB limit]\n";
+        ok = axyne_git_report_append(&report, &length, &capacity, text, strlen(text));
+    }
+    if (ok && exit_code != 0) {
+        int written = snprintf(number, sizeof(number), "[exit %d]\n", exit_code);
+        ok = written > 0 && axyne_git_report_append(&report, &length, &capacity,
+                                                    number, (size_t)written);
+    }
+    if (!ok) {
+        free(report);
+        return NULL;
+    }
+    return report;
 }
 
 static void axyne_git_output(AxyneProcess *process, AxyneProcessStream stream,
                              const char *bytes, size_t length, void *user_data)
 {
     AxyneGitRun *run = (AxyneGitRun *)user_data;
-    size_t accepted;
-    (void)process;
-    (void)stream;
-    if (run != NULL && bytes != NULL && !run->allocation_failed &&
-        !run->output_truncated) {
-        accepted = run->length < AXYNE_GIT_OUTPUT_LIMIT
-            ? AXYNE_GIT_OUTPUT_LIMIT - run->length : 0;
-        if (length > accepted) {
-            if (accepted != 0 && !axyne_git_append(run, bytes, accepted)) {
-                run->allocation_failed = 1;
-            }
-            run->output_truncated = 1;
-            (void)axyne_process_terminate(process, NULL);
-        } else if (!axyne_git_append(run, bytes, length)) {
-            run->allocation_failed = 1;
-            (void)axyne_process_terminate(process, NULL);
-        }
-    }
+    if (run != NULL && bytes != NULL &&
+        !axyne_git_capture_append(&run->capture, stream, bytes, length))
+        (void)axyne_process_terminate(process, NULL);
 }
 
 static void axyne_git_exit(AxyneProcess *process, int exit_code, void *user_data)
@@ -182,7 +349,7 @@ static void axyne_git_run_cleanup(AxyneGitRun *run)
     (void)pthread_cond_destroy(&run->condition);
     (void)pthread_mutex_destroy(&run->lock);
 #endif
-    free(run->output);
+    axyne_git_capture_free(&run->capture);
 }
 
 static AxyneStatus axyne_git_run(const char *workspace,
@@ -209,6 +376,7 @@ static AxyneStatus axyne_git_run(const char *workspace,
     result->output_truncated = 0;
     memset(&run, 0, sizeof(run));
     run.result = result;
+    axyne_git_capture_init(&run.capture, 0);
 #ifdef _WIN32
     run.finished = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (run.finished == NULL)
@@ -249,28 +417,41 @@ static AxyneStatus axyne_git_run(const char *workspace,
     free(windows_executable);
 #endif
     if (status != AXYNE_STATUS_OK) {
+        if (error != NULL) {
+            char described[sizeof(error->message)];
+            (void)snprintf(described, sizeof(described), "%s",
+                           axyne_git_describe_start_failure(status, error->message));
+            (void)snprintf(error->message, sizeof(error->message), "%s", described);
+        }
         axyne_git_run_cleanup(&run);
         return status;
     }
     axyne_git_wait(&run);
     axyne_process_release(process);
-    if (run.allocation_failed) {
+    if (run.capture.allocation_failed) {
         axyne_git_run_cleanup(&run);
         return axyne_git_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
                                "Unable to allocate Git output");
     }
-    result->output = run.output;
-    result->length = run.length;
-    result->output_truncated = run.output_truncated;
-    run.output = NULL;
+    result->output = run.capture.data;
+    result->length = run.capture.length;
+    result->output_truncated = run.capture.truncated;
+    run.capture.data = NULL;
     axyne_git_run_cleanup(&run);
     if (result->output_truncated)
         return axyne_git_error(error, AXYNE_STATUS_OK, "");
     if (result->exit_code != 0) {
-        char message[128];
-        (void)snprintf(message, sizeof(message),
-                       "Git command failed with exit code %d",
-                       result->exit_code);
+        char message[160];
+        if (result->output != NULL &&
+            strstr(result->output, "not a git repository") != NULL) {
+            (void)snprintf(message, sizeof(message),
+                           "This workspace folder is not a Git repository "
+                           "(exit code %d)", result->exit_code);
+        } else {
+            (void)snprintf(message, sizeof(message),
+                           "Git command failed with exit code %d",
+                           result->exit_code);
+        }
         return axyne_git_error(error, AXYNE_STATUS_IO_ERROR, message);
     }
     return axyne_git_error(error, AXYNE_STATUS_OK, "");
