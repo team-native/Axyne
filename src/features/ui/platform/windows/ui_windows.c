@@ -1924,6 +1924,8 @@ static int axyne_windows_palette_shift_matches(const AxyneWindowState *state,
     return toupper((unsigned char)binding->key[0]) == toupper((int)key);
 }
 
+static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key);
+
 static int axyne_palette_handle_open_key(HWND window, AxyneWindowState *state,
                                          WPARAM key)
 {
@@ -3890,8 +3892,14 @@ static int axyne_pal_text_width(HDC dc, HFONT font, const wchar_t *text)
 static RECT axyne_palette_field_rect(HWND window)
 {
     RECT client;
+    RECT field;
     GetClientRect(window, &client);
-    return axyne_toolbar_rect(8, client.right);
+    field.left = client.right - AXYNE_TOOLBAR_SEARCH_WIDTH - 8;
+    field.right = client.right - 8;
+    field.top = AXYNE_TOP_MENU + 6;
+    field.bottom = field.top + 26;
+    if (field.left < 558) field.left = field.right;
+    return field;
 }
 
 static RECT axyne_palette_edit_rect(HWND window)
