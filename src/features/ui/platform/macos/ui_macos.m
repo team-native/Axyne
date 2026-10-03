@@ -399,6 +399,8 @@ static const char *axyne_macos_editor_lexer(const char *path)
         return "bash";
     if (strcasecmp(extension, ".md") == 0 || strcasecmp(extension, ".markdown") == 0)
         return "markdown";
+    if (strcasecmp(extension, ".yaml") == 0 || strcasecmp(extension, ".yml") == 0)
+        return "yaml";
     if (strcasecmp(extension, ".java") == 0) return "java";
     if (strcasecmp(extension, ".rs") == 0) return "rust";
     if (strcasecmp(extension, ".go") == 0) return "cpp";
@@ -1117,6 +1119,11 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
                 "CMAKE_BUILD_TYPE CMAKE_CXX_STANDARD CMAKE_C_STANDARD CMAKE_INSTALL_PREFIX "
                 "CMAKE_OSX_ARCHITECTURES CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_SOURCE_DIR "
                 "CMAKE_BINARY_DIR CMAKE_CURRENT_SOURCE_DIR CMAKE_CURRENT_BINARY_DIR"];
+        } else if (strcmp(language, "yaml") == 0) {
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
+                "true false null yes no on off name on push pull_request permissions "
+                "jobs runs-on strategy matrix steps uses with if run env needs outputs "
+                "branches paths tags permissions contents read write"];
         }
         const unsigned int commonStyles[] = {1, 2, 3, 4, 5, 6, 7, 8};
         const uint32_t commonColors[] = {0x7a828e, 0xd9b36c, 0xc79ad9, 0xa3c98a,
@@ -1133,6 +1140,15 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
             for (size_t i = 0; i < sizeof(cmakeStyles) / sizeof(cmakeStyles[0]); ++i)
                 [self sendEditorMessage:SCI_STYLESETFORE wParam:cmakeStyles[i]
                     lParam:axyne_editor_color(cmakeColors[i])];
+        }
+        if (strcmp(language, "yaml") == 0) {
+            const unsigned int yamlStyles[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+            const uint32_t yamlColors[] = {0x7a828e, 0x7a828e, 0xd9b36c, 0xd9b36c,
+                0xa3c98a, 0x738ed9, 0xd98e73, 0xc79ad9, 0xd9b36c, 0xd5d8dd,
+                0x8cc7c0};
+            for (size_t i = 0; i < sizeof(yamlStyles) / sizeof(yamlStyles[0]); ++i)
+                [self sendEditorMessage:SCI_STYLESETFORE wParam:yamlStyles[i]
+                    lParam:axyne_editor_color(yamlColors[i])];
         }
         (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
     }

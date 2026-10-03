@@ -75,7 +75,7 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
             badge.label = "TXT"; badge.color = 0xc4c8ce;
         } else if (axyne_ui_suffix_equal(ext, ".toml") || axyne_ui_suffix_equal(ext, ".yaml") ||
                    axyne_ui_suffix_equal(ext, ".yml")) {
-            badge.label = "CFG"; badge.color = 0xd9b36c;
+            badge.label = "CF"; badge.color = 0xd9b36c;
         } else if (axyne_ui_suffix_equal(ext, ".html") || axyne_ui_suffix_equal(ext, ".htm")) {
             badge.label = "HTML"; badge.color = 0xd98e73;
         } else if (axyne_ui_suffix_equal(ext, ".css")) {
