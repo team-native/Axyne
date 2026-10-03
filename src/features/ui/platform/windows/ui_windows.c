@@ -2995,24 +2995,37 @@ static void axyne_text_rect(HDC dc, HFONT font, COLORREF color,
     SelectObject(dc, previous);
 }
 
+/* File-type chip shared with macOS: 14px high rounded rectangle (radius 3)
+ * filled with the badge colour at 18% over whatever is already painted, no
+ * border, bold label centred both ways. */
 static void axyne_paint_badge(HDC dc, HFONT font, const char *name, RECT rect)
 {
     AxyneFileBadge badge = axyne_ui_file_badge(name);
-    if (badge.label[0] == '\0') {
-        HPEN pen = CreatePen(PS_SOLID, 1, axyne_theme_color(badge.color));
-        HGDIOBJ previous_pen = SelectObject(dc, pen);
-        HGDIOBJ previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        int x = (rect.left + rect.right - 8) / 2;
-        int y = (rect.top + rect.bottom - 10) / 2;
-        Rectangle(dc, x, y, x + 8, y + 10);
-        SelectObject(dc, previous_brush);
+    COLORREF accent = axyne_theme_color(badge.color);
+    COLORREF behind = GetPixel(dc, rect.left - 2, (rect.top + rect.bottom) / 2);
+    int alpha = AXYNE_UI_BADGE_ALPHA_PERCENT;
+    RECT chip = rect;
+    wchar_t *label;
+    if (behind == CLR_INVALID) behind = RGB(0, 0, 0);
+    chip.top = (rect.top + rect.bottom - AXYNE_UI_BADGE_HEIGHT) / 2;
+    chip.bottom = chip.top + AXYNE_UI_BADGE_HEIGHT;
+    {
+        COLORREF fill = RGB(
+            (GetRValue(accent) * alpha + GetRValue(behind) * (100 - alpha)) / 100,
+            (GetGValue(accent) * alpha + GetGValue(behind) * (100 - alpha)) / 100,
+            (GetBValue(accent) * alpha + GetBValue(behind) * (100 - alpha)) / 100);
+        HBRUSH brush = CreateSolidBrush(fill);
+        HGDIOBJ previous_brush = SelectObject(dc, brush);
+        HGDIOBJ previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, chip.left, chip.top, chip.right + 1, chip.bottom + 1,
+                  AXYNE_UI_BADGE_RADIUS * 2, AXYNE_UI_BADGE_RADIUS * 2);
         SelectObject(dc, previous_pen);
-        DeleteObject(pen);
-        return;
+        SelectObject(dc, previous_brush);
+        DeleteObject(brush);
     }
-    wchar_t *label = axyne_wide(badge.label);
+    label = axyne_wide(badge.label);
     if (label != NULL) {
-        axyne_text_rect(dc, font, axyne_theme_color(badge.color), rect, label, DT_CENTER);
+        axyne_text_rect(dc, font, accent, chip, label, DT_CENTER);
         free(label);
     }
 }
@@ -3153,15 +3166,8 @@ static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
  * close glyph, 14px padding. Painting, hit-testing and scrolling share these. */
 static int axyne_tab_badge_width(AxyneWindowState *state, const char *title)
 {
-    AxyneFileBadge badge = axyne_ui_file_badge(title);
-    wchar_t *label;
-    int width;
-    if (badge.label[0] == '\0') return 8;
-    label = axyne_wide(badge.label);
-    if (label == NULL) return 20;
-    width = axyne_measure_text(state->tab_badge_font, label);
-    free(label);
-    return width;
+    (void)state; (void)title;
+    return AXYNE_UI_BADGE_WIDTH;
 }
 
 static int axyne_tab_close_width(AxyneWindowState *state)
@@ -3366,7 +3372,7 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
                     ? L"⌄" : L"›", DT_CENTER);
         } else {
             slot.right = x + AXYNE_UI_BADGE_WIDTH;
-            axyne_paint_badge(dc, state->badge_font, node->name, slot);
+            axyne_paint_badge(dc, state->tab_badge_font, node->name, slot);
             label.left = slot.right + 6;
         }
         axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
@@ -3554,7 +3560,9 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         }
         if (!AXYNE_REFERENCE)
             axyne_fill(dc, tab_right - 1, tab_top, tab_right, editor_top, AXYNE_BORDER);
-        axyne_paint_badge(dc, state->tab_badge_font, doc->title, badge);
+        axyne_paint_badge(dc, state->tab_badge_font,
+                          doc->path != NULL && doc->path[0] != '\0' ? doc->path : doc->title,
+                          badge);
         wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
         if (name != NULL) {
             axyne_text_rect(dc, state->ui_font, active
@@ -3664,7 +3672,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->badge_font = CreateFontW(-9, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
-        state->tab_badge_font = CreateFontW(-11, 0, 0, 0, FW_BOLD, FALSE, FALSE,
+        state->tab_badge_font = CreateFontW(-AXYNE_UI_BADGE_FONT_PT, 0, 0, 0, FW_BOLD, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         state->font_small = axyne_make_ui_font(-11, FW_NORMAL);
