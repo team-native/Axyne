@@ -1,3 +1,7 @@
+/* Strict -std=c17 builds need this for setenv/realpath on non-Apple POSIX. */
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "test_support.h"
 
 #include <stdio.h>
@@ -7,6 +11,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #endif
 
@@ -177,21 +183,43 @@ static int axyne_test_git_capture(void)
 #ifndef _WIN32
 static int axyne_test_git_not_a_repository(const char *root)
 {
+    char work[1024];
+    char ceiling[PATH_MAX];
     AxyneGitResult result = {0};
     AxyneError error = {0};
     AxyneStatus status;
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
-    /* Keep git from discovering a repository above the fixture directory. */
-    AXYNE_TEST_CHECK(setenv("GIT_CEILING_DIRECTORIES", root, 1) == 0);
-    status = axyne_git_status(root, &result, &error);
+    AXYNE_TEST_CHECK(axyne_test_path(work, sizeof(work), root, "work"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(work));
+    /* The fixture lives in the build tree, which is inside the source
+     * checkout (a Git repository) on CI. Git only honours a ceiling that is a
+     * strict ancestor of the working directory: a ceiling equal to the
+     * working directory is ignored. Run in "work" and cap discovery at its
+     * canonical parent "root". */
+    if (realpath(root, ceiling) == NULL) {
+        fprintf(stderr, "FAIL realpath(%s) errno=%d\n", root, errno);
+        return 0;
+    }
+    AXYNE_TEST_EQ_INT(setenv("GIT_CEILING_DIRECTORIES", ceiling, 1), 0);
+    (void)unsetenv("GIT_DIR");
+    (void)unsetenv("GIT_WORK_TREE");
+    status = axyne_git_status(work, &result, &error);
+    (void)unsetenv("GIT_CEILING_DIRECTORIES");
     if (status == AXYNE_STATUS_NOT_FOUND) {
         fprintf(stderr, "git not installed; skipping not-a-repository check\n");
         axyne_git_result_free(&result);
         return 1;
     }
-    AXYNE_TEST_CHECK(status == AXYNE_STATUS_IO_ERROR);
-    AXYNE_TEST_CHECK(result.exit_code != 0);
-    AXYNE_TEST_CHECK(strstr(error.message, "not a Git repository") != NULL);
+    if (status != AXYNE_STATUS_IO_ERROR) {
+        fprintf(stderr, "FAIL git status in %s (ceiling %s): status %d "
+                "exit %d message \"%s\" output \"%s\"\n", work, ceiling,
+                (int)status, result.exit_code, error.message,
+                result.output != NULL ? result.output : "(null)");
+        axyne_git_result_free(&result);
+        return 0;
+    }
+    AXYNE_TEST_EQ_INT(result.exit_code, 128);
+    AXYNE_TEST_CONTAINS(error.message, "not a Git repository");
     axyne_git_result_free(&result);
     return 1;
 }
