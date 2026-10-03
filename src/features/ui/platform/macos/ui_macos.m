@@ -32,12 +32,42 @@
                lParam:(intptr_t)lParam;
 @end
 
-/* These bands follow the 1440x900 Figma work area: toolbar 38px, tabs 34px,
+/* These bands follow the 1440x900 Figma work area: menu bar 26px, toolbar
+ * 38px, tabs 34px,
  * output panel 230px, and status bar 24px. The macOS titlebar remains owned
  * by AppKit so its traffic-light controls stay native and accessible. */
+static const CGFloat AXYNE_MENU = AXYNE_UI_MENU;
 static const CGFloat AXYNE_TOOLBAR = AXYNE_UI_TOOLBAR;
+/* Every band below the in-window menu bar and toolbar starts here. */
+static const CGFloat AXYNE_CONTENT_TOP = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR;
 static const CGFloat AXYNE_TABS = AXYNE_UI_TABS;
 static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
+
+/* Title of the top-level menu at bar position index, from the table shared
+ * with the Windows adapter. */
+static NSString *axyne_macos_menu_label(NSUInteger index)
+{
+    const AxyneMenuTitle *title = axyne_ui_menu_title(index);
+    NSString *label = title != NULL ? [NSString stringWithUTF8String:title->label] : nil;
+    return label != nil ? label : @"";
+}
+
+/* Menu text at the Figma 12pt size. Only the font is set so AppKit keeps
+ * choosing the colour (which also dims disabled entries) and draws the
+ * key-equivalent column itself. */
+static void axyne_macos_style_menu(NSMenu *menu)
+{
+    NSDictionary *attributes = @{NSFontAttributeName:[NSFont systemFontOfSize:12]};
+    for (NSMenuItem *item in [menu itemArray]) {
+        NSAttributedString *title;
+        if ([item isSeparatorItem]) continue;
+        if ([item submenu] != nil) axyne_macos_style_menu([item submenu]);
+        title = [[NSAttributedString alloc] initWithString:[item title]
+            attributes:attributes];
+        [item setAttributedTitle:title];
+        [title release];
+    }
+}
 
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
@@ -172,6 +202,9 @@ static NSAttributedString *axyne_macos_segments(NSArray *segments)
     NSScrollView *_terminalScroll;
     NSTextField *_problemSummary;
     NSInteger _panelMode;
+    NSInteger _activeMenuIndex; /* bar item whose popup is open, or -1 */
+    NSInteger _hoverMenuIndex;  /* bar item under the pointer, or -1 */
+    NSTrackingArea *_menuTracking;
     NSInteger _explorerFirstRow;
     CGFloat _tabScroll;
     void *_lexillaModule;
@@ -348,6 +381,10 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (void)openHelp:(id)sender;
 - (CGFloat)sidebarWidth;
 - (CGFloat)panelHeight;
+- (NSRect)menuBarItemRect:(NSUInteger)index;
+- (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
+- (void)openMenuBarMenu:(NSUInteger)index;
+- (void)setMenuHover:(NSInteger)index;
 - (BOOL)editorActionable;
 - (void)goToLine:(id)sender;
 - (void)selectLine:(id)sender;
@@ -670,6 +707,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     self = [super initWithFrame:frame];
     if (self != nil) {
+        _activeMenuIndex = -1;
+        _hoverMenuIndex = -1;
         if (axyne_explorer_initialize(&_explorer, NULL) != AXYNE_STATUS_OK ||
             axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
             axyne_explorer_destroy(&_explorer);
@@ -1714,7 +1753,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point
 {
-    const CGFloat explorerTop = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    const CGFloat explorerTop = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
     NSInteger row;
     if (_explorer.root == NULL || point.x < 0 || point.x >= [self sidebarWidth] ||
@@ -1729,13 +1768,13 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     if (point.x >= [self sidebarWidth] && point.x < NSWidth([self bounds]) &&
-        point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS) {
+        point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS) {
         CGFloat delta = [event scrollingDeltaX] != 0 ? [event scrollingDeltaX] :
             [event scrollingDeltaY];
         [self scrollTabsBy:-delta * ([event hasPreciseScrollingDeltas] ? 1 : 40)];
         return;
     }
-    CGFloat top = AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
     if (point.x < [self sidebarWidth] && point.y >= top && point.y < bottom) {
         NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
@@ -1906,6 +1945,95 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (CGFloat)sidebarWidth { return _explorerHidden ? 0 : AXYNE_UI_SIDEBAR; }
 - (CGFloat)panelHeight { return _panelHidden ? 0 : AXYNE_UI_PANEL; }
+
+/* In-window menu bar (Figma menu frames). Items are laid out from the shared
+ * metrics; painting, hit-testing and popup anchoring all use this one rect. */
+- (NSRect)menuBarItemRect:(NSUInteger)index
+{
+    NSDictionary *attributes = @{NSFontAttributeName:[NSFont systemFontOfSize:12]};
+    CGFloat x = AXYNE_UI_MENU_INSET;
+    for (NSUInteger i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
+        CGFloat width = ceil([axyne_macos_menu_label(i) sizeWithAttributes:attributes].width) +
+            2 * AXYNE_UI_MENU_PAD;
+        if (i == index) return NSMakeRect(x, 2, width, AXYNE_MENU - 4);
+        x += width + AXYNE_UI_MENU_GAP;
+    }
+    return NSZeroRect;
+}
+
+- (NSInteger)menuBarIndexAtPoint:(NSPoint)point
+{
+    if (point.y < 0 || point.y >= AXYNE_MENU) return -1;
+    for (NSUInteger i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
+        NSRect rect = [self menuBarItemRect:i];
+        if (point.x >= NSMinX(rect) && point.x < NSMaxX(rect)) return (NSInteger)i;
+    }
+    return -1;
+}
+
+/* The bar shows the submenus of the native main menu (item 0 is the
+ * application menu), so a bar item runs exactly the actions, key equivalents
+ * and validateMenuItem: rules of the matching system-menu entry. */
+- (void)openMenuBarMenu:(NSUInteger)index
+{
+    NSMenu *mainMenu = [NSApp mainMenu];
+    NSMenu *submenu;
+    BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
+        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
+    if (mainMenu == nil || (NSInteger)index + 1 >= [mainMenu numberOfItems]) return;
+    submenu = [[mainMenu itemAtIndex:(NSInteger)index + 1] submenu];
+    if (submenu == nil) return;
+    [submenu setAppearance:[NSAppearance appearanceNamed:
+        light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua]];
+    _activeMenuIndex = (NSInteger)index;
+    [self setNeedsDisplay:YES];
+    [self displayIfNeeded];
+    /* Blocks until the popup is dismissed; a chosen item has already run. */
+    [submenu popUpMenuPositioningItem:nil
+        atLocation:NSMakePoint(NSMinX([self menuBarItemRect:index]), AXYNE_MENU)
+        inView:self];
+    /* The same menu also drops down from the system menu bar, so give it
+     * back its system appearance. */
+    [submenu setAppearance:nil];
+    _activeMenuIndex = -1;
+    _hoverMenuIndex = -1;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setMenuHover:(NSInteger)index
+{
+    if (index == _hoverMenuIndex) return;
+    _hoverMenuIndex = index;
+    [self setNeedsDisplayInRect:NSMakeRect(0, 0, NSWidth([self bounds]), AXYNE_MENU)];
+}
+
+- (void)updateTrackingAreas
+{
+    [super updateTrackingAreas];
+    if (_menuTracking != nil) {
+        [self removeTrackingArea:_menuTracking];
+        [_menuTracking release];
+        _menuTracking = nil;
+    }
+    _menuTracking = [[NSTrackingArea alloc]
+        initWithRect:NSMakeRect(0, 0, NSWidth([self bounds]), AXYNE_MENU)
+        options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                NSTrackingActiveInKeyWindow
+        owner:self userInfo:nil];
+    [self addTrackingArea:_menuTracking];
+}
+
+- (void)mouseMoved:(NSEvent *)event
+{
+    [self setMenuHover:[self menuBarIndexAtPoint:
+        [self convertPoint:[event locationInWindow] fromView:nil]]];
+}
+
+- (void)mouseExited:(NSEvent *)event
+{
+    (void)event;
+    [self setMenuHover:-1];
+}
 
 /* Editor commands apply only to the source editor: not while a prompt or the
  * terminal input owns the keyboard, and not without an open document. */
@@ -2214,11 +2342,12 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
     if (_recentMenu == nil) return;
     [_recentMenu removeAllItems];
     if (_documents.recent_count == 0) {
-        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"No Recent Files"
+        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"최근 항목 없음"
             action:nil keyEquivalent:@""];
         [empty setEnabled:NO];
         [_recentMenu addItem:empty];
         [empty release];
+        axyne_macos_style_menu(_recentMenu);
         return;
     }
     for (size_t i = 0; i < _documents.recent_count; ++i) {
@@ -2231,6 +2360,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
         [_recentMenu addItem:item];
         [item release];
     }
+    axyne_macos_style_menu(_recentMenu);
 }
 
 - (BOOL)confirmCloseDocumentAtIndex:(size_t)index
@@ -2482,7 +2612,12 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
 - (void)mouseDown:(NSEvent *)event
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
-    if (point.y >= AXYNE_TOOLBAR && point.y < AXYNE_TOOLBAR + AXYNE_TABS &&
+    if (point.y < AXYNE_MENU) {
+        NSInteger menuIndex = [self menuBarIndexAtPoint:point];
+        if (menuIndex >= 0) [self openMenuBarMenu:(NSUInteger)menuIndex];
+        return;
+    }
+    if (point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.x >= [self sidebarWidth]) {
         for (size_t index = 0; index < _documents.count; ++index) {
             NSRect tab = [self tabFrameAtIndex:index];
@@ -2496,7 +2631,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
             return;
         }
     }
-    if (point.x < [self sidebarWidth] && point.y >= AXYNE_TOOLBAR + AXYNE_TABS &&
+    if (point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
@@ -2530,7 +2665,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     NSInteger row = [self explorerNodeAtPoint:point];
-    if (point.x >= [self sidebarWidth] || point.y < AXYNE_TOOLBAR + AXYNE_TABS ||
+    if (point.x >= [self sidebarWidth] || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
         point.y >= NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         [super rightMouseDown:event];
         return;
@@ -3445,7 +3580,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         /* 14 padding, badge, 8 gap, name, 8 gap, close glyph, 14 padding. */
         CGFloat width = MIN(240, 14 + axyne_macos_tab_badge_width(doc->title) + 8 +
             ceil(nameWidth) + 8 + 8 + 14);
-        if (i == index) return NSMakeRect(x, AXYNE_TOOLBAR, width, AXYNE_TABS);
+        if (i == index) return NSMakeRect(x, AXYNE_CONTENT_TOP, width, AXYNE_TABS);
         x += width;
     }
     return NSZeroRect;
@@ -3467,7 +3602,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     NSRect bounds = [self bounds];
     CGFloat width = NSWidth(bounds);
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - [self panelHeight];
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
         MAX(0, width - [self sidebarWidth]), MAX(0, bottomTop - editorTop))];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
@@ -3495,20 +3630,20 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     CGFloat x = 8;
     size_t icon = 0;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
-        [button setFrame:NSMakeRect(x, 5, 28, 28)];
+        [button setFrame:NSMakeRect(x, AXYNE_MENU + 5, 28, 28)];
         x += 30;
         if (++icon == 3) x += 2;
     }
     x += 2;
     CGFloat targetWidth = MIN(220, MAX(96, ceil([[(AxyneChromeButton *)_targetButton
         richTitle] size].width) + 20));
-    [_targetButton setFrame:NSMakeRect(x, 6, targetWidth, 26)]; x += targetWidth + 8;
-    [_buildButton setFrame:NSMakeRect(x, 6, 88, 26)]; x += 96;
-    [_runButton setFrame:NSMakeRect(x, 6, 86, 26)]; x += 94;
+    [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, targetWidth, 26)]; x += targetWidth + 8;
+    [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
+    [_runButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 86, 26)]; x += 94;
     CGFloat searchLeft = MAX(x + 8, width - 348);
     CGFloat searchWidth = width - 8 - searchLeft;
     [_searchButton setHidden:searchWidth < 120];
-    [_searchButton setFrame:NSMakeRect(searchLeft, 6, MAX(0, searchWidth), 26)];
+    [_searchButton setFrame:NSMakeRect(searchLeft, AXYNE_MENU + 6, MAX(0, searchWidth), 26)];
     for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(
             [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
@@ -3581,7 +3716,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     CGFloat width = NSWidth(bounds), height = NSHeight(bounds);
     CGFloat bottomTop = height - AXYNE_STATUS - [self panelHeight];
     CGFloat statusTop = height - AXYNE_STATUS;
-    CGFloat editorTop = AXYNE_TOOLBAR + AXYNE_TABS;
+    CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
         (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
     NSColor *background = axyne_preference_color(_preferences.theme.background);
@@ -3593,11 +3728,39 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
     NSColor *tabBackground = axyne_preference_color(reference ? 0x17191c : _preferences.theme.toolbar);
     [background setFill]; NSRectFill(bounds);
-    [toolbar setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_TOOLBAR));
-    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, width, AXYNE_TABS));
+    {
+        /* Menu bar band: Figma colours on the default dark theme, the user's
+         * theme colours otherwise. */
+        BOOL figma = reference && !light;
+        NSColor *menuBackground = axyne_preference_color(figma ? 0x101216 : _preferences.theme.toolbar);
+        NSColor *menuBorder = axyne_preference_color(figma ? 0x25282e : _preferences.theme.border);
+        NSColor *menuActive = axyne_preference_color(figma ? 0x202329 : _preferences.theme.panel);
+        NSColor *menuText = axyne_preference_color(figma ? 0xd2d5db : _preferences.theme.text);
+        NSColor *menuMuted = axyne_preference_color(figma ? 0x969ba5 : _preferences.theme.muted);
+        NSDictionary *menuAttributes = @{NSFontAttributeName:[NSFont systemFontOfSize:12]};
+        [menuBackground setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_MENU));
+        [menuBorder setFill]; NSRectFill(NSMakeRect(0, AXYNE_MENU - 1, width, 1));
+        for (NSUInteger menuIndex = 0; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {
+            NSString *menuLabel = axyne_macos_menu_label(menuIndex);
+            NSRect itemRect = [self menuBarItemRect:menuIndex];
+            BOOL lit = (NSInteger)menuIndex == _activeMenuIndex ||
+                (NSInteger)menuIndex == _hoverMenuIndex;
+            if (lit) {
+                [menuActive setFill];
+                [[NSBezierPath bezierPathWithRoundedRect:itemRect
+                    xRadius:AXYNE_UI_MENU_ITEM_RADIUS yRadius:AXYNE_UI_MENU_ITEM_RADIUS] fill];
+            }
+            [self drawLabel:menuLabel
+                at:NSMakePoint(NSMinX(itemRect) + AXYNE_UI_MENU_PAD,
+                    floor(NSMidY(itemRect) - [menuLabel sizeWithAttributes:menuAttributes].height / 2))
+                size:12 color:lit ? menuText : menuMuted family:@"SF Pro Text"];
+        }
+    }
+    [toolbar setFill]; NSRectFill(NSMakeRect(0, AXYNE_MENU, width, AXYNE_TOOLBAR));
+    [tabBackground setFill]; NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, width, AXYNE_TABS));
     [panel setFill]; NSRectFill(NSMakeRect(0, editorTop, [self sidebarWidth], statusTop - editorTop));
     [axyne_preference_color(reference ? 0x191b1f : _preferences.theme.toolbar) setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR, [self sidebarWidth], AXYNE_TABS));
+    NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, [self sidebarWidth], AXYNE_TABS));
     if (!_panelHidden) {
         [tabBackground setFill];
         NSRectFill(NSMakeRect([self sidebarWidth], bottomTop, width - [self sidebarWidth], 32));
@@ -3606,7 +3769,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     }
     [toolbar setFill]; NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
-    NSRectFill(NSMakeRect(0, AXYNE_TOOLBAR - 1, width, 1));
+    NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP - 1, width, 1));
     if (!_explorerHidden)
         NSRectFill(NSMakeRect([self sidebarWidth] - 1, editorTop, 1, statusTop - editorTop));
     if (!_panelHidden)
@@ -3626,7 +3789,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     }
 
     [NSGraphicsContext saveGraphicsState];
-    NSRectClip(NSMakeRect([self sidebarWidth], AXYNE_TOOLBAR, MAX(0, width - [self sidebarWidth]), AXYNE_TABS));
+    NSRectClip(NSMakeRect([self sidebarWidth], AXYNE_CONTENT_TOP, MAX(0, width - [self sidebarWidth]), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
         NSRect frame = [self tabFrameAtIndex:i];
@@ -3641,17 +3804,17 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         CGFloat badgeWidth = axyne_macos_tab_badge_width(doc->title);
         CGFloat nameX = badgeX + badgeWidth + 8;
         [self drawFileBadge:(doc->path != NULL && doc->path[0] != '\0') ? doc->path : doc->title
-            inRect:NSMakeRect(badgeX, AXYNE_TOOLBAR + 10, badgeWidth, 16) tab:YES];
+            inRect:NSMakeRect(badgeX, AXYNE_CONTENT_TOP + 10, badgeWidth, 16) tab:YES];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
-        NSRectClip(NSMakeRect(nameX, AXYNE_TOOLBAR + 4, MAX(0, NSMaxX(frame) - 30 - nameX), 28));
+        NSRectClip(NSMakeRect(nameX, AXYNE_CONTENT_TOP + 4, MAX(0, NSMaxX(frame) - 30 - nameX), 28));
         [self drawLabel:title != nil ? title : @"Untitled"
-            at:NSMakePoint(nameX, AXYNE_TOOLBAR + 10)
+            at:NSMakePoint(nameX, AXYNE_CONTENT_TOP + 10)
             size:12 color:active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted family:@"SF Pro Text"];
         [NSGraphicsContext restoreGraphicsState];
         [self drawLabel:doc->is_dirty ? @"●" : @"×"
             at:NSMakePoint(NSMaxX(frame) - (doc->is_dirty ? 19 : 22),
-                           AXYNE_TOOLBAR + (doc->is_dirty ? 13 : 10))
+                           AXYNE_CONTENT_TOP + (doc->is_dirty ? 13 : 10))
             size:doc->is_dirty ? 7 : 13
             color:doc->is_dirty && reference && !light ? axyne_preference_color(0x4f535b) : muted
             family:@"SF Pro Text"];
@@ -3741,6 +3904,8 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
         axyne_watcher_release(_watcher);
     }
     axyne_explorer_destroy(&_explorer);
+    if (_menuTracking != nil) [self removeTrackingArea:_menuTracking];
+    [_menuTracking release];
     [_recentMenu release];
     if (_editorView != nil) {
         for (size_t i = 0; i < _documents.count; ++i) {
@@ -3904,57 +4069,57 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
         action:nil keyEquivalent:@""];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Axyne"];
-    NSMenuItem *aboutItem = [appMenu addItemWithTitle:@"About Axyne"
+    NSMenuItem *aboutItem = [appMenu addItemWithTitle:@"Axyne 정보"
         action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [aboutItem setTarget:application];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"Preferences…"
+    NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"환경설정…"
         action:@selector(showGlobalPreferences:) keyEquivalent:@","];
     [preferencesItem setTarget:workspace];
-    [appMenu addItemWithTitle:@"Quit Axyne" action:@selector(terminate:)
+    [appMenu addItemWithTitle:@"Axyne 종료" action:@selector(terminate:)
                  keyEquivalent:@"q"];
     [appItem setSubmenu:appMenu];
     [mainMenu addItem:appItem];
-    NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"File"
+    NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:axyne_macos_menu_label(0)
         action:nil keyEquivalent:@""];
-    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
-    NSMenuItem *newItem = [fileMenu addItemWithTitle:@"New"
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:axyne_macos_menu_label(0)];
+    NSMenuItem *newItem = [fileMenu addItemWithTitle:@"새 파일"
         action:@selector(newDocument:) keyEquivalent:@"n"];
     [newItem setTarget:workspace];
-    NSMenuItem *openItem = [fileMenu addItemWithTitle:@"Open…"
+    NSMenuItem *openItem = [fileMenu addItemWithTitle:@"열기…"
         action:@selector(openDocument:) keyEquivalent:@"o"];
     [openItem setTarget:workspace];
-    NSMenuItem *saveItem = [fileMenu addItemWithTitle:@"Save"
+    NSMenuItem *saveItem = [fileMenu addItemWithTitle:@"저장"
         action:@selector(saveDocument:) keyEquivalent:@"s"];
     [saveItem setTarget:workspace];
-    NSMenuItem *saveAsItem = [fileMenu addItemWithTitle:@"Save As…"
+    NSMenuItem *saveAsItem = [fileMenu addItemWithTitle:@"다른 이름으로 저장…"
         action:@selector(saveDocumentAs:) keyEquivalent:@"S"];
     [saveAsItem setTarget:workspace];
-    NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"Close Tab"
+    NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"닫기"
         action:@selector(closeDocument:) keyEquivalent:@"w"];
     [closeItem setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"Open Workspace Folder…"
+    NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"폴더 열기…"
         action:@selector(openWorkspace:) keyEquivalent:@""];
     [workspaceItem setTarget:workspace];
-    NSMenuItem *workspacePreferences = [fileMenu addItemWithTitle:@"Workspace Settings…"
+    NSMenuItem *workspacePreferences = [fileMenu addItemWithTitle:@"작업 영역 설정…"
         action:@selector(showWorkspacePreferences:) keyEquivalent:@""];
     [workspacePreferences setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *gitStatus = [fileMenu addItemWithTitle:@"Git Status"
+    NSMenuItem *gitStatus = [fileMenu addItemWithTitle:@"Git 상태"
         action:@selector(showGitStatus:) keyEquivalent:@""];
-    NSMenuItem *gitDiff = [fileMenu addItemWithTitle:@"Git Diff"
+    NSMenuItem *gitDiff = [fileMenu addItemWithTitle:@"Git 변경 사항"
         action:@selector(showGitDiff:) keyEquivalent:@""];
-    NSMenuItem *gitStage = [fileMenu addItemWithTitle:@"Git Stage All"
+    NSMenuItem *gitStage = [fileMenu addItemWithTitle:@"모두 스테이지"
         action:@selector(stageAllGitChanges:) keyEquivalent:@""];
-    NSMenuItem *gitUnstage = [fileMenu addItemWithTitle:@"Git Unstage All"
+    NSMenuItem *gitUnstage = [fileMenu addItemWithTitle:@"모두 스테이지 해제"
         action:@selector(unstageAllGitChanges:) keyEquivalent:@""];
     [gitStatus setTarget:workspace]; [gitDiff setTarget:workspace];
     [gitStage setTarget:workspace]; [gitUnstage setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent"
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"최근 항목"
         action:nil keyEquivalent:@""];
-    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];
+    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"최근 항목"];
     [recentItem setSubmenu:recentMenu];
     [fileMenu addItem:recentItem];
     [workspace setRecentMenu:recentMenu];
@@ -3962,117 +4127,118 @@ static void axyne_install_menu(NSApplication *application,
     [mainMenu addItem:fileItem];
     [fileItem release]; [recentItem release];
     [recentMenu release]; [fileMenu release];
-    NSArray *titles = @[@"Edit", @"View", @"Build", @"Debug", @"Tools", @"Help"];
-    for (NSString *title in titles) {
+    /* Bar order after File: 편집, 보기, 빌드, 디버그, 도구, 도움말. */
+    for (NSUInteger menuIndex = 1; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {
+        NSString *title = axyne_macos_menu_label(menuIndex);
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
         NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
-        if ([title isEqualToString:@"Edit"]) {
-            NSMenuItem *undo = [submenu addItemWithTitle:@"Undo"
+        if (menuIndex == 1) {
+            NSMenuItem *undo = [submenu addItemWithTitle:@"실행 취소"
                 action:@selector(undo:) keyEquivalent:@"z"];
-            NSMenuItem *redo = [submenu addItemWithTitle:@"Redo"
+            NSMenuItem *redo = [submenu addItemWithTitle:@"다시 실행"
                 action:@selector(redo:) keyEquivalent:@"Z"];
             [redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
                                           NSEventModifierFlagShift];
             [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *cut = [submenu addItemWithTitle:@"Cut"
+            NSMenuItem *cut = [submenu addItemWithTitle:@"잘라내기"
                 action:@selector(editCut:) keyEquivalent:@"x"];
-            NSMenuItem *copy = [submenu addItemWithTitle:@"Copy"
+            NSMenuItem *copy = [submenu addItemWithTitle:@"복사"
                 action:@selector(editCopy:) keyEquivalent:@"c"];
-            NSMenuItem *paste = [submenu addItemWithTitle:@"Paste"
+            NSMenuItem *paste = [submenu addItemWithTitle:@"붙여넣기"
                 action:@selector(editPaste:) keyEquivalent:@"v"];
-            NSMenuItem *selectAll = [submenu addItemWithTitle:@"Select All"
+            NSMenuItem *selectAll = [submenu addItemWithTitle:@"모두 선택"
                 action:@selector(editSelectAll:) keyEquivalent:@"a"];
             [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *find = [submenu addItemWithTitle:@"Find…"
+            NSMenuItem *find = [submenu addItemWithTitle:@"찾기…"
                 action:@selector(findInDocument:) keyEquivalent:@"f"];
-            NSMenuItem *replace = [submenu addItemWithTitle:@"Replace…"
+            NSMenuItem *replace = [submenu addItemWithTitle:@"바꾸기…"
                 action:@selector(replaceInDocument:) keyEquivalent:@"h"];
-            NSMenuItem *findInWorkspace = [submenu addItemWithTitle:@"Find in Workspace…"
+            NSMenuItem *findInWorkspace = [submenu addItemWithTitle:@"파일에서 찾기…"
                 action:@selector(searchWorkspace:) keyEquivalent:@""];
-            NSMenuItem *quickOpen = [submenu addItemWithTitle:@"Go to File…"
+            NSMenuItem *quickOpen = [submenu addItemWithTitle:@"파일 이동…"
                 action:@selector(quickFile:) keyEquivalent:@""];
             NSArray *editItems = @[undo, redo, cut, copy, paste, selectAll,
                 find, replace, findInWorkspace, quickOpen];
             for (NSMenuItem *editItem in editItems) [editItem setTarget:workspace];
-            axyne_macos_add_item(submenu, @"Go to Line…", @selector(goToLine:),
+            axyne_macos_add_item(submenu, @"줄로 이동…", @selector(goToLine:),
                 workspace, @"l", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"Select Line", @selector(selectLine:),
+            axyne_macos_add_item(submenu, @"줄 선택", @selector(selectLine:),
                 workspace, @"", 0);
             [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"Toggle Line Comment",
+            axyne_macos_add_item(submenu, @"줄 주석 토글",
                 @selector(toggleLineComment:), workspace, @"/",
                 NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"Duplicate Line", @selector(duplicateLine:),
+            axyne_macos_add_item(submenu, @"줄 복제", @selector(duplicateLine:),
                 workspace, @"d", NSEventModifierFlagCommand | NSEventModifierFlagShift);
-            axyne_macos_add_item(submenu, @"Move Line Up", @selector(moveLineUp:),
+            axyne_macos_add_item(submenu, @"줄 위로 이동", @selector(moveLineUp:),
                 workspace, axyne_macos_special_key(NSUpArrowFunctionKey),
                 NSEventModifierFlagOption);
-            axyne_macos_add_item(submenu, @"Move Line Down", @selector(moveLineDown:),
+            axyne_macos_add_item(submenu, @"줄 아래로 이동", @selector(moveLineDown:),
                 workspace, axyne_macos_special_key(NSDownArrowFunctionKey),
                 NSEventModifierFlagOption);
             [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"Indent", @selector(indentSelection:),
+            axyne_macos_add_item(submenu, @"들여쓰기", @selector(indentSelection:),
                 workspace, @"]", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"Outdent", @selector(outdentSelection:),
+            axyne_macos_add_item(submenu, @"내어쓰기", @selector(outdentSelection:),
                 workspace, @"[", NSEventModifierFlagCommand);
-        } else if ([title isEqualToString:@"Build"]) {
-            NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
+        } else if (menuIndex == 3) {
+            NSMenuItem *build = [submenu addItemWithTitle:@"빌드"
                 action:@selector(buildDocument:) keyEquivalent:@"b"];
-            NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
+            NSMenuItem *run = [submenu addItemWithTitle:@"실행"
                 action:@selector(runDocument:) keyEquivalent:@"r"];
-            NSMenuItem *configure = [submenu addItemWithTitle:@"Configure Build/Run Runner…"
+            NSMenuItem *configure = [submenu addItemWithTitle:@"실행 구성…"
                 action:@selector(configureRunnerAction:) keyEquivalent:@""];
             [build setTarget:workspace]; [run setTarget:workspace];
             [configure setTarget:workspace];
             [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"Cancel Build", @selector(cancelBuild:),
+            axyne_macos_add_item(submenu, @"빌드 취소", @selector(cancelBuild:),
                 workspace, @".", NSEventModifierFlagCommand);
-        } else if ([title isEqualToString:@"Debug"]) {
-            NSMenuItem *start = [submenu addItemWithTitle:@"Start Debugger"
+        } else if (menuIndex == 4) {
+            NSMenuItem *start = [submenu addItemWithTitle:@"디버깅 시작"
                 action:@selector(startDebugger:) keyEquivalent:@""];
             /* F5 is the default Run binding in preferences, so Start Debugger
              * takes Shift+F5 to keep both shortcuts reachable. */
             axyne_set_function_key(start, NSF5FunctionKey, NSEventModifierFlagShift);
             [start setTarget:workspace];
-            axyne_macos_add_item(submenu, @"Stop Debugger", @selector(stopDebugger:),
+            axyne_macos_add_item(submenu, @"중지", @selector(stopDebugger:),
                 workspace, @".", NSEventModifierFlagCommand | NSEventModifierFlagShift);
             [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *pause = [submenu addItemWithTitle:@"Pause"
+            NSMenuItem *pause = [submenu addItemWithTitle:@"일시 중지"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             axyne_set_function_key(pause, NSF6FunctionKey, 0);
-            NSMenuItem *resume = [submenu addItemWithTitle:@"Continue"
+            NSMenuItem *resume = [submenu addItemWithTitle:@"계속"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             [resume setTag:AXYNE_DEBUGGER_CONTINUE]; [resume setTarget:workspace];
             [pause setTarget:workspace]; [pause setTag:AXYNE_DEBUGGER_PAUSE];
             [submenu addItem:[NSMenuItem separatorItem]];
             /* debugCommand: carries AxyneDebuggerCommand in the item tag. */
-            NSMenuItem *next = [submenu addItemWithTitle:@"Step Over"
+            NSMenuItem *next = [submenu addItemWithTitle:@"프로시저 단위 실행"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             axyne_set_function_key(next, NSF10FunctionKey, 0);
             [next setTarget:workspace]; [next setTag:AXYNE_DEBUGGER_STEP_OVER];
-            NSMenuItem *into = [submenu addItemWithTitle:@"Step Into"
+            NSMenuItem *into = [submenu addItemWithTitle:@"한 단계씩 코드 실행"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             axyne_set_function_key(into, NSF11FunctionKey, 0);
             [into setTarget:workspace]; [into setTag:AXYNE_DEBUGGER_STEP_INTO];
-            NSMenuItem *out = [submenu addItemWithTitle:@"Step Out"
+            NSMenuItem *out = [submenu addItemWithTitle:@"프로시저 나가기"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             axyne_set_function_key(out, NSF11FunctionKey, NSEventModifierFlagShift);
             [out setTarget:workspace]; [out setTag:AXYNE_DEBUGGER_STEP_OUT];
             [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
+            NSMenuItem *toggle = [submenu addItemWithTitle:@"중단점 토글"
                 action:@selector(toggleBreakpoint:) keyEquivalent:@""];
             axyne_set_function_key(toggle, NSF9FunctionKey, 0);
             [toggle setTarget:workspace];
-            NSMenuItem *clearBreakpoints = [submenu addItemWithTitle:@"Clear All Breakpoints"
+            NSMenuItem *clearBreakpoints = [submenu addItemWithTitle:@"모든 중단점 삭제"
                 action:@selector(clearBreakpoints:) keyEquivalent:@""];
             axyne_set_function_key(clearBreakpoints, NSF9FunctionKey,
                 NSEventModifierFlagCommand | NSEventModifierFlagShift);
             [clearBreakpoints setTarget:workspace];
-        } else if ([title isEqualToString:@"View"]) {
-            axyne_macos_add_item(submenu, @"Explorer", @selector(toggleExplorer:),
+        } else if (menuIndex == 2) {
+            axyne_macos_add_item(submenu, @"탐색기", @selector(toggleExplorer:),
                 workspace, @"e", NSEventModifierFlagCommand | NSEventModifierFlagShift);
-            axyne_macos_add_item(submenu, @"Bottom Panel", @selector(togglePanel:),
+            axyne_macos_add_item(submenu, @"하단 패널", @selector(togglePanel:),
                 workspace, @"j", NSEventModifierFlagCommand);
             [submenu addItem:[NSMenuItem separatorItem]];
             NSArray *panels = @[@"출력", @"문제", @"터미널"];
@@ -4088,20 +4254,20 @@ static void axyne_install_menu(NSApplication *application,
                 [panelItem setTag:i];
             }
             [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"Zoom In", @selector(zoomInEditor:),
+            axyne_macos_add_item(submenu, @"확대", @selector(zoomInEditor:),
                 workspace, @"=", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"Zoom Out", @selector(zoomOutEditor:),
+            axyne_macos_add_item(submenu, @"축소", @selector(zoomOutEditor:),
                 workspace, @"-", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"Actual Size", @selector(zoomResetEditor:),
+            axyne_macos_add_item(submenu, @"기본 크기", @selector(zoomResetEditor:),
                 workspace, @"0", NSEventModifierFlagCommand);
             [submenu addItem:[NSMenuItem separatorItem]];
             /* Option+Z types a character, so Word Wrap takes Command+Option. */
-            axyne_macos_add_item(submenu, @"Word Wrap", @selector(toggleWordWrap:),
+            axyne_macos_add_item(submenu, @"자동 줄 바꿈", @selector(toggleWordWrap:),
                 workspace, @"z", NSEventModifierFlagCommand | NSEventModifierFlagOption);
-        } else if ([title isEqualToString:@"Tools"]) {
-            NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: Go to Definition"
+        } else if (menuIndex == 5) {
+            NSMenuItem *definition = [submenu addItemWithTitle:@"정의로 이동"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
-            NSMenuItem *references = [submenu addItemWithTitle:@"LSP: Find References"
+            NSMenuItem *references = [submenu addItemWithTitle:@"참조 찾기"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"r"];
             [definition setTarget:workspace]; [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
             [references setTarget:workspace];
@@ -4109,17 +4275,17 @@ static void axyne_install_menu(NSApplication *application,
             [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
             [references setTag:1];
             [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"Open Preferences File",
+            axyne_macos_add_item(submenu, @"preferences.json 열기",
                 @selector(openPreferencesFile:), workspace, @"", 0);
-        } else if ([title isEqualToString:@"Help"]) {
-            NSMenuItem *help = [submenu addItemWithTitle:@"Axyne Help"
+        } else if (menuIndex == 6) {
+            NSMenuItem *help = [submenu addItemWithTitle:@"Axyne 도움말"
                 action:@selector(openHelp:) keyEquivalent:@"?"];
-            NSMenuItem *folder = [submenu addItemWithTitle:@"Show Settings Folder"
+            NSMenuItem *folder = [submenu addItemWithTitle:@"설정 폴더 표시"
                 action:@selector(showSettingsFolder:) keyEquivalent:@""];
             [help setTarget:workspace]; [folder setTarget:workspace];
-            axyne_macos_add_item(submenu, @"Keyboard Shortcuts…",
+            axyne_macos_add_item(submenu, @"키보드 단축키 참조",
                 @selector(showKeyboardShortcuts:), workspace, @"", 0);
-            axyne_macos_add_item(submenu, @"Report Issue…", @selector(reportIssue:),
+            axyne_macos_add_item(submenu, @"문제 보고…", @selector(reportIssue:),
                 workspace, @"", 0);
             [application setHelpMenu:submenu];
         }
@@ -4128,6 +4294,8 @@ static void axyne_install_menu(NSApplication *application,
         [mainMenu addItem:item];
         [item release];
     }
+    for (NSUInteger styleIndex = 1; styleIndex < (NSUInteger)[mainMenu numberOfItems]; ++styleIndex)
+        axyne_macos_style_menu([[mainMenu itemAtIndex:(NSInteger)styleIndex] submenu]);
     [application setMainMenu:mainMenu];
     [mainMenu release];
     [appMenu release];

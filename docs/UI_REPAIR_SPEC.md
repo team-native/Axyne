@@ -6,7 +6,7 @@ Reference: Figma `7J8SYhLpybJgpxD3qFqL5u`, main window `6:399`.
 |---|---|---|---|
 | Goal | Files open inside Scintilla; toolbar, file badges, terminal and chrome match the referenced design | USER | CONFIRMED |
 | Native title bar | macOS keeps AppKit traffic lights and system menu | USER | CONFIRMED |
-| Geometry | Toolbar 38, tabs 34, explorer 248, rows 22, output panel 230 with header 32, status 24 logical pixels | USER (Figma) | CONFIRMED |
+| Geometry | Menu bar 26, toolbar 38, tabs 34, explorer 248, rows 22, output panel 230 with header 32, status 24 logical pixels | USER (Figma) | CONFIRMED |
 | Badges | Separate centered 20px labels, 9px explorer text, per-language reference colors; tabs use 11px monospaced badges | USER (Figma) | CONFIRMED |
 | Dynamic values | Show real file names, target, shell and editor position; do not show sample build success/diagnostic/RAM numbers as actual state | IMPLEMENTATION | CONFIRMED |
 | Output controls | Compact native interactive controls in the panel header; debugger actions remain available in the menu | DELEGATED | ASSUMED |
@@ -55,3 +55,20 @@ All behaviour rows below are provisional choices made under delegation and can b
 - Shared helpers and tests: comment token, line parsing and selection, line comment toggle, breakpoint clearing.
 - macOS adapter: menu items, `validateMenuItem:` rules, explorer/panel visibility in layout, drawing and hit testing.
 - Windows adapter: popup items, one shared enabled rule for menu flags and shortcuts, `WM_COMMAND` routing, Alt shortcuts through `WM_SYSKEYDOWN`.
+
+## In-window menu bar
+
+Reference: Figma main window `6:399`, menu frames above, design spec `29:857` (menu height 26, owner-drawn popups). The bar `파일(F) 편집(E) 보기(V) 빌드(B) 디버그(D) 도구(T) 도움말(H)` is a regression on `dev`: macOS lost it when PR #32 (`feature/rendering-fidelity-repair`) was closed unmerged, and the work was ported from that branch. Windows still had its owner-drawn bar and only adopted the shared metrics.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Bar geometry | 26px band above the 38px toolbar; items inset 8, padded 9 either side, 2px apart, 3px radius, 12pt text. Titles and metrics are one shared table in `include/axyne/ui_design.h` (`AXYNE_UI_MENU*`, `axyne_ui_menu_title`), used by both adapters and covered by `axyne-ui-design` | USER (Figma) | CONFIRMED |
+| Bar colours | Default dark theme uses the Figma values (bar `#101216`, border `#25282e`, lit item `#202329`, text `#969ba5`, lit text `#d2d5db`); any other theme uses its own toolbar/border/panel/text/muted colours | AGENT_PARAMETER | ASSUMED |
+| Native NSMenu on macOS | Kept. It supplies the system menu bar, key equivalents and `validateMenuItem:`, and it is the single item table: the in-window bar has no item list of its own and pops up the submenu of the matching main-menu entry (bar item N is main-menu item N+1; item 0 is the application menu). Actions, targets, validation, checkmarks and the Open Recent submenu are therefore identical by construction | DELEGATED | ASSUMED |
+| No double firing | The bar never registers key equivalents and never calls an action itself; a pop-up only runs the item the user picked, and shortcuts are handled once, by AppKit, from the main menu | IMPLEMENTATION | CONFIRMED |
+| Popup rendering | Native `NSMenu` popup, forced to the dark or light appearance for the active theme while shown (reset to the system appearance afterwards so the system menu bar is unaffected), 12pt item text, AppKit's own key-equivalent column (command glyphs, not Figma's `Ctrl+` text) and highlight. A fully owner-drawn popup on macOS is not done: the team branch tried per-item `NSView`s and removed them because they broke hover, keyboard navigation and disabled-state handling | DELEGATED | ASSUMED |
+| Item wording | macOS menus use the Korean wording already used by the Windows popups, so both platforms read the same. Entries that exist on one platform only keep their own place (macOS keeps Git items in the first menu, Windows in Tools) | AGENT_PARAMETER | ASSUMED |
+| Mnemonics | The `(F)`-style hint is shown in each label. Opening a menu with Alt+letter works on Windows only; on macOS Option+letter types characters, so the bar is opened with the mouse | DELEGATED | ASSUMED |
+| Hover / active | The item under the pointer and the item whose popup is open share one highlight. Hovering another item while a popup is open does not switch menus on macOS (AppKit owns menu tracking) | DELEGATED | ASSUMED |
+
+Dropped from the team branch: the per-item `AxyneMenuItemView`/separator/delegate drawing (superseded by the commits that removed it), the hard-coded dark application appearance, the toolbar label changes in `match macOS toolbar proportions` (dev's Figma toolbar parity already covers them), and `finish macOS workspace polish` (unrelated to the menu bar).

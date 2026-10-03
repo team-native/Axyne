@@ -18,8 +18,34 @@ static void expect(const char *name, const char *label)
     CHECK(strlen(b.label) <= 3);
 }
 
+static void check_menu_titles(void)
+{
+    static const char *const expected[] = {
+        "\xed\x8c\x8c\xec\x9d\xbc", "\xed\x8e\xb8\xec\xa7\x91",
+        "\xeb\xb3\xb4\xea\xb8\xb0", "\xeb\xb9\x8c\xeb\x93\x9c",
+        "\xeb\x94\x94\xeb\xb2\x84\xea\xb7\xb8", "\xeb\x8f\x84\xea\xb5\xac",
+        "\xeb\x8f\x84\xec\x9b\x80\xeb\xa7\x90" };
+    static const char letters[] = "FEVBDTH";
+    size_t i;
+    CHECK(AXYNE_UI_MENU == 26);
+    CHECK(axyne_ui_menu_title(AXYNE_UI_MENU_COUNT) == NULL);
+    for (i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
+        const AxyneMenuTitle *title = axyne_ui_menu_title(i);
+        size_t base = strlen(expected[i]);
+        CHECK(title != NULL);
+        if (title == NULL) continue;
+        /* "<name>(X)": the name, then the mnemonic in parentheses. */
+        CHECK(strncmp(title->label, expected[i], base) == 0);
+        CHECK(strlen(title->label) == base + 3);
+        CHECK(title->label[base] == '(' && title->label[base + 2] == ')');
+        CHECK(title->mnemonic == letters[i]);
+        CHECK(title->label[base + 1] == title->mnemonic);
+    }
+}
+
 int main(void)
 {
+    check_menu_titles();
     static const char *names[] = { "a.c", "a.h", "a.cpp", "a.m", "a.mm",
         "a.md", "a.txt", "a.html", "a.css", "a.sh", "a.java", "a.tsx",
         "a.jsx", "a.yml", "a.yaml", "a.xml", "a.swift", "a.go", "a.rs",

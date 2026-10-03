@@ -29,7 +29,7 @@
 #include "../../debugger_actions.h"
 
 enum {
-    AXYNE_TOP_MENU = 26,
+    AXYNE_TOP_MENU = AXYNE_UI_MENU,
     AXYNE_TOOLBAR = AXYNE_UI_TOOLBAR,
     AXYNE_TABS = AXYNE_UI_TABS,
     AXYNE_STATUS = AXYNE_UI_STATUS,
@@ -3012,11 +3012,22 @@ static HFONT axyne_make_ui_font(int height, int weight)
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 }
 
-enum { AXYNE_MENU_COUNT = 7 };
-static const wchar_t *const AXYNE_MENU_LABELS[AXYNE_MENU_COUNT] = {
-    L"파일(F)", L"편집(E)", L"보기(V)", L"빌드(B)", L"디버그(D)", L"도구(T)",
-    L"도움말(H)"
-};
+enum { AXYNE_MENU_COUNT = AXYNE_UI_MENU_COUNT };
+
+/* Titles come from the table shared with macOS (ui_design.h), widened once. */
+static const wchar_t *axyne_menu_label(int index)
+{
+    static wchar_t labels[AXYNE_MENU_COUNT][16];
+    const AxyneMenuTitle *title;
+    if (index < 0 || index >= AXYNE_MENU_COUNT) return L"";
+    if (labels[index][0] == L'\0') {
+        title = axyne_ui_menu_title((size_t)index);
+        if (title == NULL || MultiByteToWideChar(CP_UTF8, 0, title->label, -1,
+                labels[index], 16) <= 0)
+            return L"";
+    }
+    return labels[index];
+}
 
 static int axyne_measure_text(HFONT font, const wchar_t *text)
 {
@@ -3149,21 +3160,23 @@ static void axyne_menu_measure(AxyneWindowState *state, MEASUREITEMSTRUCT *measu
     measure->itemHeight = (UINT)height;
 }
 
-/* Figma menu bar: 8px leading inset, items padded 8px either side, 2px gaps.
+/* Figma menu bar: AXYNE_UI_MENU_INSET leading inset, items padded
+ * AXYNE_UI_MENU_PAD either side, AXYNE_UI_MENU_GAP between them.
  * Painting, popup anchoring and hit-testing all use this one geometry. */
 static RECT axyne_menu_bar_rect(AxyneWindowState *state, int index)
 {
-    int x = 8;
+    int x = AXYNE_UI_MENU_INSET;
     int i;
     RECT rect = {0, 0, 0, AXYNE_TOP_MENU};
     for (i = 0; i < AXYNE_MENU_COUNT; ++i) {
-        int width = 16 + axyne_measure_text(state->ui_font, AXYNE_MENU_LABELS[i]);
+        int width = 2 * AXYNE_UI_MENU_PAD +
+            axyne_measure_text(state->ui_font, axyne_menu_label(i));
         if (i == index) {
             rect.left = x;
             rect.right = x + width;
             break;
         }
-        x += width + 2;
+        x += width + AXYNE_UI_MENU_GAP;
     }
     return rect;
 }
@@ -3935,7 +3948,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                 axyne_round_fill(dc, rect.left, rect.top, rect.right,
                     rect.bottom - 1, 3, AXYNE_MENU_ACTIVE, AXYNE_MENU_ACTIVE);
             axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect,
-                            AXYNE_MENU_LABELS[i], DT_CENTER);
+                            axyne_menu_label((int)i), DT_CENTER);
         }
     }
     {

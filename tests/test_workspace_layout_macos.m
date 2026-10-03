@@ -14,6 +14,8 @@
 - (void)applyPreferences;
 - (void)scrollTabsBy:(CGFloat)delta;
 - (NSRect)tabFrameAtIndex:(size_t)index;
+- (NSRect)menuBarItemRect:(NSUInteger)index;
+- (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
 @end
 
 #define CHECK(value) do { if (!(value)) { \
@@ -63,11 +65,28 @@ int main(void)
             CHECK(button != nil && [button target] == view && [button action] != NULL);
             CHECK([view respondsToSelector:[button action]]);
             NSRect frame = [button frame];
-            CHECK(NSMinY(frame) >= 0 && NSMaxY(frame) <= AXYNE_UI_TOOLBAR);
+            CHECK(NSMinY(frame) >= AXYNE_UI_MENU &&
+                NSMaxY(frame) <= AXYNE_UI_MENU + AXYNE_UI_TOOLBAR);
             CHECK(NSMinX(frame) >= NSMaxX(previous) && NSMaxX(frame) <= 1440);
             previous = frame;
         }
         CHECK(![field(view, "_searchButton") isHidden]);
+        fprintf(stderr, "Checking menu bar\n");
+        {
+            CGFloat edge = 0;
+            for (NSUInteger i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
+                NSRect item = [view menuBarItemRect:i];
+                NSPoint inside = NSMakePoint(NSMidX(item), NSMidY(item));
+                CHECK(NSWidth(item) > 2 * AXYNE_UI_MENU_PAD);
+                CHECK(NSMinY(item) >= 0 && NSMaxY(item) <= AXYNE_UI_MENU);
+                CHECK(NSMinX(item) >= edge && NSMaxX(item) <= 1440);
+                CHECK([view menuBarIndexAtPoint:inside] == (NSInteger)i);
+                CHECK([view menuBarIndexAtPoint:NSMakePoint(NSMidX(item), AXYNE_UI_MENU)] == -1);
+                edge = NSMaxX(item);
+            }
+            CHECK(NSIsEmptyRect([view menuBarItemRect:AXYNE_UI_MENU_COUNT]));
+            CHECK([view menuBarIndexAtPoint:NSMakePoint(1439, 10)] == -1);
+        }
         NSScrollView *output = field(view, "_terminalScroll");
         CHECK(NSMinX([output frame]) >= AXYNE_UI_SIDEBAR);
         CHECK(NSMaxY([output frame]) <= 842 - AXYNE_UI_STATUS);
@@ -108,7 +127,8 @@ int main(void)
         CHECK([view selectWorkspaceURL:[NSURL fileURLWithPath:root]]);
         fprintf(stderr, "Checking explorer fixture: %s\n", [root UTF8String]);
         [view layoutSubtreeIfNeeded];
-        CGFloat top = AXYNE_UI_TOOLBAR + AXYNE_UI_TABS + AXYNE_UI_EXPLORER_HEADER;
+        CGFloat top = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS +
+            AXYNE_UI_EXPLORER_HEADER;
         CGFloat bottom = 842 - AXYNE_UI_STATUS - AXYNE_UI_PANEL;
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, top)] == 0);
         CHECK([view explorerNodeAtPoint:NSMakePoint(80, top + AXYNE_UI_ROW - 1)] == 0);
