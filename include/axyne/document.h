@@ -20,6 +20,11 @@ typedef struct AxyneDocument {
      * keeps its tab even while empty and clean; startup and replacement
      * buffers leave it clear so they stay hidden until touched. */
     int tab_requested;
+    /* Preview tab: opened by an Explorer click and still unmodified. At most
+     * one document in a set has it. The tab title is drawn italic and the
+     * next Explorer open replaces this document in place. Any edit, save or
+     * save-as clears it permanently (see axyne_documents_promote). */
+    int preview;
     /* Opaque, adapter-owned Scintilla document; the shared core ignores it. */
     void *native_editor_document;
     int owns_native_editor_document;
@@ -54,6 +59,36 @@ int axyne_document_tab_hidden(const AxyneDocument *document);
 size_t axyne_documents_visible_count(const AxyneDocumentSet *set);
 AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *utf8_path,
                                  size_t *index, AxyneError *error);
+/* Explorer-click open. An already-open path is only activated (its preview
+ * flag is left untouched). Otherwise the file is read and, when a clean
+ * preview document exists, it is replaced in place (same index, same tab
+ * position) by the new preview document; with no preview the new document is
+ * appended as for axyne_documents_open but marked preview. The new document
+ * becomes active. When a document was replaced, `*replaced` is 1 and its
+ * metadata and native handle ownership move to `*evicted`: the adapter must
+ * afterwards run LSP didClose, SCI_RELEASEDOCUMENT when
+ * owns_native_editor_document, and axyne_document_dispose. If the native load
+ * of the new document fails, axyne_documents_revert_preview_open restores the
+ * old preview document. `evicted` and `replaced` may be NULL only when the
+ * caller has no native state (then the evicted document is disposed here). */
+AxyneStatus axyne_documents_open_preview(AxyneDocumentSet *set,
+                                         const char *utf8_path, size_t *index,
+                                         AxyneDocument *evicted, int *replaced,
+                                         AxyneError *error);
+/* Undo axyne_documents_open_preview after a native load failure: with
+ * `replaced` the old document is put back at `index` and the new one is
+ * freed; otherwise the appended document is closed. Does not change the
+ * active index; callers restore it. */
+void axyne_documents_revert_preview_open(AxyneDocumentSet *set, size_t index,
+                                         AxyneDocument *evicted, int replaced);
+/* Index of the preview document or (size_t)-1. */
+size_t axyne_documents_preview_index(const AxyneDocumentSet *set);
+/* Clears the preview flag (idempotent; ignores invalid indexes). Called by
+ * set_contents, mark_dirty, save and save_as, so every edit path on both
+ * platforms converges here. */
+void axyne_documents_promote(AxyneDocumentSet *set, size_t index);
+/* Frees the heap fields of a document value (not native editor state). */
+void axyne_document_dispose(AxyneDocument *document);
 AxyneStatus axyne_documents_set_contents(AxyneDocumentSet *set, size_t index,
                                          const char *contents, size_t length,
                                          AxyneError *error);
