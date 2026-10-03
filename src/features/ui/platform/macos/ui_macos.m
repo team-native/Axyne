@@ -392,6 +392,9 @@ static const char *axyne_macos_editor_lexer(const char *path)
         return "bash";
     if (strcasecmp(extension, ".md") == 0 || strcasecmp(extension, ".markdown") == 0)
         return "markdown";
+    if (strcasecmp(extension, ".java") == 0) return "java";
+    if (strcasecmp(extension, ".rs") == 0) return "rust";
+    if (strcasecmp(extension, ".go") == 0) return "cpp";
     return "null";
 }
 
@@ -459,9 +462,12 @@ static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
 - (NSRect)tabFrameAtIndex:(size_t)index;
+- (NSRect)displayTabFrameAtIndex:(size_t)index;
 - (void)selectPanel:(id)sender;
 - (void)clearOutput:(id)sender;
 - (void)quickFile:(id)sender;
+- (void)showRunnerMenu:(id)sender;
+- (void)selectRunnerPreset:(id)sender;
 - (void)configureRunnerAction:(id)sender;
 - (void)performExplorerOperation:(AxyneFileKind)kind;
 - (NSString *)askForText:(NSString *)title label:(NSString *)label;
@@ -723,6 +729,13 @@ static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
     return field;
 }
 
+@interface AxyneFlippedView : NSView
+@end
+
+@implementation AxyneFlippedView
+- (BOOL)isFlipped { return YES; }
+@end
+
 static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                                             SEL action)
 {
@@ -828,7 +841,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
-        _targetButton = axyne_macos_toolbar_button(@"▷  Debug · x64 (MSVC)  ˅", self, @selector(configureRunnerAction:));
+        _targetButton = axyne_macos_toolbar_button(@"▷  Debug · x64 (MSVC)  ˅", self, @selector(showRunnerMenu:));
         _searchButton = axyne_macos_toolbar_button(@"⌕  파일 이동                         ⌘P", self, @selector(quickFile:));
         _buildButton = axyne_macos_toolbar_button(@"빌드  Ctrl+B", self, @selector(buildDocument:));
         _runButton = axyne_macos_toolbar_button(@"▷  실행 F5", self, @selector(runDocument:));
@@ -930,6 +943,29 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
 }
 
 - (void)quickFile:(id)sender { (void)sender; [self searchFolder:YES]; }
+- (void)showRunnerMenu:(id)sender
+{
+    NSMenu *menu = [[[NSMenu alloc] initWithTitle:@"Runner"] autorelease];
+    NSString *current = _actionRunner.executable == NULL ? @"Debug · x64 (MSVC)" :
+        [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
+    NSMenuItem *currentItem = [menu addItemWithTitle:current
+        action:@selector(selectRunnerPreset:) keyEquivalent:@""];
+    [currentItem setTarget:self];
+    [currentItem setState:NSControlStateValueOn];
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *configure = [menu addItemWithTitle:@"Runner 설정…"
+        action:@selector(configureRunnerAction:) keyEquivalent:@""];
+    [configure setTarget:self];
+    axyne_style_popup_menu(menu);
+    NSRect frame = [sender frame];
+    [menu popUpMenuPositioningItem:nil
+        atLocation:NSMakePoint(0, NSHeight(frame)) inView:sender];
+}
+- (void)selectRunnerPreset:(id)sender
+{
+    (void)sender;
+    [self refreshActionControls];
+}
 - (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
 - (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
 - (void)selectPanel:(id)sender
@@ -1018,7 +1054,31 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
                 (void)[self sendEditorMessage:SCI_STYLESETFORE wParam:styles[i]
                     lParam:axyne_editor_color(color)];
             }
+        } else if (strcmp(language, "python") == 0) {
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
+                "and as assert async await break case class continue def del elif else "
+                "except finally for from global if import in is lambda match nonlocal "
+                "not or pass raise return try while with yield"];
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:1 lParam:(intptr_t)
+                "False None True self int str float bool list dict set tuple print len range"];
+        } else if (strcmp(language, "javascript") == 0) {
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
+                "as async await break case catch class const continue debugger default "
+                "delete do else export extends finally for from function if import in "
+                "instanceof let new of return static super switch this throw typeof var "
+                "void while with yield"];
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:1 lParam:(intptr_t)
+                "true false null undefined console window document Promise Array Object"];
+        } else if (strcmp(language, "json") == 0) {
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
+                "true false null"];
         }
+        const unsigned int commonStyles[] = {1, 2, 3, 4, 5, 6, 7, 8};
+        const uint32_t commonColors[] = {0x7a828e, 0xd9b36c, 0xc79ad9, 0xa3c98a,
+            0xd98e73, 0x738ed9, 0xd5d8dd, 0x7db5e3};
+        for (size_t i = 0; i < sizeof(commonStyles) / sizeof(commonStyles[0]); ++i)
+            [self sendEditorMessage:SCI_STYLESETFORE wParam:commonStyles[i]
+                lParam:axyne_editor_color(commonColors[i])];
         (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
     }
 }
@@ -1366,6 +1426,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
     [self updateLineNumberMargin];
     [self updateBraceHighlight];
     [self setNeedsDisplay:YES];
+    [self setNeedsLayout:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
     if ([self window] != nil)
@@ -1534,6 +1595,9 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         [alert runModal];
         return;
     }
+    [self updateWindowTitle];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
     [self refreshRecentMenu];
 }
 
@@ -1980,7 +2044,11 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
     if (point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.x >= AXYNE_SIDEBAR) {
         for (size_t index = 0; index < _documents.count; ++index) {
-            NSRect tab = [self tabFrameAtIndex:index];
+            AxyneDocument *document = &_documents.documents[index];
+            if (_documents.count > 1 && document->is_untitled && document->length == 0 &&
+                !document->is_dirty)
+                continue;
+            NSRect tab = [self displayTabFrameAtIndex:index];
             if (!NSPointInRect(point, tab)) continue;
             if (![self captureEditor]) return;
             if (point.x >= NSMaxX(tab) - 24) {
@@ -2742,13 +2810,13 @@ else [_terminalInput setStringValue:@""];
 - (BOOL)configureRunner
 {
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 280)];
-    NSTextField *executable = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 246, 460, 24)];
-    NSTextField *workingDirectory = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 201, 460, 24)];
-    NSTextView *arguments = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 70)];
-    NSTextView *environment = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 70)];
-    NSScrollView *argumentsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 122, 460, 70)];
-    NSScrollView *environmentScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 32, 460, 70)];
+    NSView *accessory = [[AxyneFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 460, 330)];
+    NSTextField *executable = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 28, 460, 28)];
+    NSTextField *workingDirectory = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 188, 460, 28)];
+    NSTextView *arguments = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 74)];
+    NSTextView *environment = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 74)];
+    NSScrollView *argumentsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 88, 460, 74)];
+    NSScrollView *environmentScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 252, 460, 74)];
     NSString *initialExecutable = _actionRunner.executable != NULL
         ? [NSString stringWithUTF8String:_actionRunner.executable] : @"";
     NSString *initialWorkingDirectory = _actionRunner.working_directory != NULL
@@ -2766,14 +2834,14 @@ else [_terminalInput setStringValue:@""];
     [argumentsScroll setDocumentView:arguments];
     [environmentScroll setHasVerticalScroller:YES];
     [environmentScroll setDocumentView:environment];
-    [accessory addSubview:axyne_macos_label(@"Executable", 224)];
+    [accessory addSubview:axyne_macos_label(@"Executable", 4)];
     [accessory addSubview:executable];
-    [accessory addSubview:axyne_macos_label(@"Arguments (one per line)", 194)];
+    [accessory addSubview:axyne_macos_label(@"Arguments (one per line)", 64)];
     [accessory addSubview:argumentsScroll];
-    [accessory addSubview:axyne_macos_label(@"Working directory (optional)", 179)];
+    [accessory addSubview:axyne_macos_label(@"Working directory (optional)", 168)];
     [accessory addSubview:workingDirectory];
     [accessory addSubview:axyne_macos_label(
-        @"Environment overrides (NAME=VALUE per line)", 104)];
+        @"Environment overrides (NAME=VALUE per line)", 232)];
     [accessory addSubview:environmentScroll];
     [alert setMessageText:@"Configure Build/Run Runner"];
     [alert setInformativeText:@"Arguments are passed directly to the executable; no shell is used."];
@@ -2929,6 +2997,25 @@ else [_terminalInput setStringValue:@""];
     return NSZeroRect;
 }
 
+- (NSRect)displayTabFrameAtIndex:(size_t)index
+{
+    CGFloat x = AXYNE_SIDEBAR - _tabScroll;
+    NSFont *font = [NSFont systemFontOfSize:12];
+    for (size_t i = 0; i < _documents.count; ++i) {
+        AxyneDocument *doc = &_documents.documents[i];
+        if (_documents.count > 1 && doc->is_untitled && doc->length == 0 &&
+            !doc->is_dirty)
+            continue;
+        NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
+        CGFloat nameWidth = [title sizeWithAttributes:@{NSFontAttributeName:font}].width;
+        CGFloat badgeWidth = [axyne_macos_file_badge(doc->title) length] != 0 ? 24 : 0;
+        CGFloat width = MIN(240, MAX(100, nameWidth + badgeWidth + 54));
+        if (i == index) return NSMakeRect(x, AXYNE_CONTENT_TOP, width, AXYNE_TABS);
+        x += width;
+    }
+    return NSZeroRect;
+}
+
 - (void)scrollTabsBy:(CGFloat)delta
 {
     if (_documents.count == 0) { _tabScroll = 0; return; }
@@ -2945,8 +3032,12 @@ else [_terminalInput setStringValue:@""];
     CGFloat width = NSWidth(bounds);
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - AXYNE_BOTTOM;
     CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
+    AxyneDocument *activeDocument = [self activeDocument];
+    BOOL emptyWorkspace = activeDocument != NULL && activeDocument->is_untitled &&
+        activeDocument->length == 0 && !activeDocument->is_dirty;
     [_editorView setFrame:NSMakeRect(AXYNE_SIDEBAR, editorTop,
         MAX(0, width - AXYNE_SIDEBAR), MAX(0, bottomTop - editorTop))];
+    [_editorView setHidden:emptyWorkspace];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
@@ -3079,6 +3170,27 @@ else [_terminalInput setStringValue:@""];
     NSRectFill(NSMakeRect(0, AXYNE_MENU + AXYNE_TOOLBAR - 1, width, 1));
     NSRectFill(NSMakeRect(AXYNE_SIDEBAR - 1, editorTop, 1, statusTop - editorTop));
     NSRectFill(NSMakeRect(0, bottomTop, width, 1));
+    AxyneDocument *activeDocument = [self activeDocument];
+    BOOL emptyWorkspace = activeDocument != NULL && activeDocument->is_untitled &&
+        activeDocument->length == 0 && !activeDocument->is_dirty;
+    if (emptyWorkspace) {
+        CGFloat centerX = AXYNE_SIDEBAR + (width - AXYNE_SIDEBAR) / 2.0;
+        CGFloat centerY = editorTop + (bottomTop - editorTop) / 2.0;
+        NSString *title = @"파일을 열어 시작하세요";
+        NSString *hint = @"⌘O 파일 열기    ⌘N 새 파일";
+        NSFont *titleFont = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
+        NSFont *hintFont = [NSFont systemFontOfSize:12];
+        NSDictionary *titleAttributes = @{NSFontAttributeName:titleFont,
+            NSForegroundColorAttributeName:text};
+        NSDictionary *hintAttributes = @{NSFontAttributeName:hintFont,
+            NSForegroundColorAttributeName:muted};
+        NSSize titleSize = [title sizeWithAttributes:titleAttributes];
+        NSSize hintSize = [hint sizeWithAttributes:hintAttributes];
+        [title drawAtPoint:NSMakePoint(centerX - titleSize.width / 2.0,
+            centerY + 8) withAttributes:titleAttributes];
+        [hint drawAtPoint:NSMakePoint(centerX - hintSize.width / 2.0,
+            centerY - 18) withAttributes:hintAttributes];
+    }
     if (![_searchButton isHidden]) {
         [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
         [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
@@ -3095,7 +3207,10 @@ else [_terminalInput setStringValue:@""];
     NSRectClip(NSMakeRect(AXYNE_SIDEBAR, AXYNE_CONTENT_TOP, MAX(0, width - AXYNE_SIDEBAR), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
-        NSRect frame = [self tabFrameAtIndex:i];
+        if (_documents.count > 1 && doc->is_untitled && doc->length == 0 &&
+            !doc->is_dirty)
+            continue;
+        NSRect frame = [self displayTabFrameAtIndex:i];
         if (NSMaxX(frame) <= AXYNE_SIDEBAR || NSMinX(frame) >= width) continue;
         BOOL active = i == _documents.active_index;
         if (active) {
