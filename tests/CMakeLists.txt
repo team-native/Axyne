@@ -180,3 +180,15 @@ else()
 endif()
 add_test(NAME axyne-ui-design COMMAND $<TARGET_FILE:axyne_ui_design_tests>)
 set_tests_properties(axyne-ui-design PROPERTIES TIMEOUT 30)
+
+# Static check of the macOS/Windows menu definitions against their handlers
+# (reads the adapter sources as text; uses POSIX strtok_r, so not for MSVC).
+if(NOT MSVC)
+    add_executable(axyne_menu_consistency_tests test_menu_consistency.c)
+    target_include_directories(axyne_menu_consistency_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    target_compile_definitions(axyne_menu_consistency_tests PRIVATE
+        AXYNE_SOURCE_DIR="${PROJECT_SOURCE_DIR}" _POSIX_C_SOURCE=200809L)
+    target_compile_options(axyne_menu_consistency_tests PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME axyne-menu-consistency COMMAND $<TARGET_FILE:axyne_menu_consistency_tests>)
+    set_tests_properties(axyne-menu-consistency PROPERTIES TIMEOUT 30)
+endif()
