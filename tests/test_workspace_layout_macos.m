@@ -231,7 +231,8 @@ int main(void)
             NSRect box = [field(view, "_searchButton") frame];
             CHECK(NSMinX([paletteField frame]) > NSMinX(box));
             CHECK(NSMaxX([paletteField frame]) < NSMaxX(box));
-            CHECK(NSMinY([paletteField frame]) >= 0 && NSMaxY([paletteField frame]) <= AXYNE_UI_TOOLBAR);
+            CHECK(NSMinY([paletteField frame]) >= AXYNE_UI_MENU &&
+                  NSMaxY([paletteField frame]) <= AXYNE_UI_MENU + AXYNE_UI_TOOLBAR);
             /* the workspace walk is incremental; finish it for the check */
             while (axyne_palette_ctl_walk_step(palette, 100000, NULL)) {}
             CHECK(palette->path_count == 40);
