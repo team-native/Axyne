@@ -6,6 +6,7 @@ add_executable(axyne_tests
     test_process_stability.c
     test_git_repair.c
     test_preview_tabs.c
+    test_palette_problems.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -16,6 +17,9 @@ target_link_libraries(axyne_tests PRIVATE
 )
 if(MSVC)
     target_compile_options(axyne_tests PRIVATE /W4 /permissive-)
+    # The palette and problems tests contain UTF-8 Korean literals.
+    set_source_files_properties(test_palette_problems.c
+        PROPERTIES COMPILE_OPTIONS "/utf-8")
 else()
     target_compile_options(axyne_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -55,6 +59,11 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> preview-tabs
             "${AXYNE_TEST_FIXTURE_DIR}/preview-tabs"
 )
+add_test(
+    NAME axyne-palette-problems
+    COMMAND $<TARGET_FILE:axyne_tests> palette-problems
+            "${AXYNE_TEST_FIXTURE_DIR}/palette-problems"
+)
 set_tests_properties(
     axyne-git-repair
     axyne-preview-tabs
@@ -62,6 +71,7 @@ set_tests_properties(
     axyne-settings-preferences
     axyne-runner-git-lsp
     axyne-process-stability
+    axyne-palette-problems
     PROPERTIES TIMEOUT 60
 )
 
