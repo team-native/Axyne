@@ -373,7 +373,13 @@ static const char *axyne_macos_editor_lexer(const char *path)
     const char *extension;
     const char *slash;
     if (path == NULL || path[0] == '\0') return "cpp";
+    slash = strrchr(path, '/');
+    if ((slash == NULL ? path : slash + 1) != NULL &&
+        strcasecmp(slash == NULL ? path : slash + 1, "CMakeLists.txt") == 0)
+        return "cmake";
     extension = strrchr(path, '.');
+    if (extension != NULL && strcasecmp(extension, ".cmake") == 0)
+        return "cmake";
     slash = strrchr(path, '/');
     if (extension == NULL || (slash != NULL && extension < slash)) return "cpp";
     if (strcasecmp(extension, ".c") == 0 || strcasecmp(extension, ".h") == 0 ||
@@ -1078,6 +1084,39 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         } else if (strcmp(language, "json") == 0) {
             [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
                 "true false null"];
+        } else if (strcmp(language, "cmake") == 0) {
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:0 lParam:(intptr_t)
+                "add_compile_definitions add_compile_options add_custom_command "
+                "add_custom_target add_definitions add_dependencies add_executable "
+                "add_library add_link_options add_subdirectory add_test "
+                "aux_source_directory build_command cmake_host_system_information "
+                "cmake_minimum_required configure_file create_test_sourcelist "
+                "define_property enable_language enable_testing execute_process "
+                "export file find_file find_library find_package find_path "
+                "find_program fltk_wrap_ui function get_cmake_property "
+                "get_directory_property get_filename_component get_property "
+                "get_source_file_property get_target_property get_test_property "
+                "include include_directories include_external_msproject "
+                "include_guard include_regular_expression install link_directories "
+                "link_libraries list load_cache macro mark_as_advanced math "
+                "message option project qt_wrap_cpp qt_wrap_ui remove_definitions "
+                "return separate_arguments set set_directory_properties "
+                "set_property set_source_files_properties set_target_properties "
+                "set_tests_properties site_name source_group string target_compile_definitions "
+                "target_compile_features target_compile_options target_include_directories "
+                "target_link_directories target_link_libraries target_link_options "
+                "target_precompile_headers target_sources try_compile try_run "
+                "unset variable_watch while"];
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:1 lParam:(intptr_t)
+                "ARCHIVE DESTINATION COMPONENT CONFIGURATIONS EXCLUDE_FROM_ALL "
+                "FILES FILES_MATCHING GLOB GLOB_RECURSE INCLUDES PATTERN PERMISSIONS "
+                "PROGRAMS RENAME TARGETS USE_SOURCE_PERMISSIONS VERSION OPTIONAL "
+                "REQUIRED QUIET CONFIG CONFIGURE_DEPENDS PUBLIC PRIVATE INTERFACE "
+                "BEFORE AFTER SYSTEM BUILD_INTERFACE INSTALL_INTERFACE"];
+            [self sendEditorMessage:SCI_SETKEYWORDS wParam:2 lParam:(intptr_t)
+                "CMAKE_BUILD_TYPE CMAKE_CXX_STANDARD CMAKE_C_STANDARD CMAKE_INSTALL_PREFIX "
+                "CMAKE_OSX_ARCHITECTURES CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_SOURCE_DIR "
+                "CMAKE_BINARY_DIR CMAKE_CURRENT_SOURCE_DIR CMAKE_CURRENT_BINARY_DIR"];
         }
         const unsigned int commonStyles[] = {1, 2, 3, 4, 5, 6, 7, 8};
         const uint32_t commonColors[] = {0x7a828e, 0xd9b36c, 0xc79ad9, 0xa3c98a,
@@ -1085,6 +1124,16 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         for (size_t i = 0; i < sizeof(commonStyles) / sizeof(commonStyles[0]); ++i)
             [self sendEditorMessage:SCI_STYLESETFORE wParam:commonStyles[i]
                 lParam:axyne_editor_color(commonColors[i])];
+        if (strcmp(language, "cmake") == 0) {
+            const unsigned int cmakeStyles[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                12, 13, 14};
+            const uint32_t cmakeColors[] = {0x7a828e, 0xd98e73, 0xd9b36c, 0xd9b36c,
+                0xa3c98a, 0x738ed9, 0xe3b57d, 0xc79ad9, 0xd98e73, 0xd98e73,
+                0xd98e73, 0xd98e73, 0xd9b36c, 0xd9b36c};
+            for (size_t i = 0; i < sizeof(cmakeStyles) / sizeof(cmakeStyles[0]); ++i)
+                [self sendEditorMessage:SCI_STYLESETFORE wParam:cmakeStyles[i]
+                    lParam:axyne_editor_color(cmakeColors[i])];
+        }
         (void)[self sendEditorMessage:SCI_COLOURISE wParam:0 lParam:-1];
     }
 }
