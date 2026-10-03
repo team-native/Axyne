@@ -1958,7 +1958,7 @@ static void axyne_macos_style_editor_scrollbars(NSView *view)
         for (NSUInteger i = 0; i < [labels count]; ++i) {
             NSString *label = labels[i];
             CGFloat itemWidth = [label sizeWithAttributes:@{
-                NSFontAttributeName:[NSFont systemFontOfSize:12]}].width + 16;
+                NSFontAttributeName:[NSFont systemFontOfSize:14]}].width + 20;
             if (point.x >= x && point.x < x + itemWidth) {
                 NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
                 NSMenuItem *item = [mainMenu itemAtIndex:i + 1];
@@ -3049,11 +3049,6 @@ else [_terminalInput setStringValue:@""];
     for (NSString *label in menuLabels) {
         CGFloat itemWidth = [label sizeWithAttributes:@{
             NSFontAttributeName:[NSFont systemFontOfSize:14]}].width + 20;
-        if ([label hasPrefix:@"파일"]) {
-            [axyne_preference_color(0x2a2e35) setFill];
-            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(menuX, 3,
-                itemWidth, AXYNE_MENU - 6) xRadius:4 yRadius:4] fill];
-        }
         [self drawLabel:label at:NSMakePoint(menuX + 10, 4) size:14
             color:menuText family:@"SF Pro Text"];
         menuX += itemWidth + 2;
