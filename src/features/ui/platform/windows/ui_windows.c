@@ -869,12 +869,15 @@ static void axyne_refresh_action_controls(AxyneWindowState *state)
     EnableWindow(state->terminal_stop, terminal_active);
     EnableWindow(state->terminal_send, terminal_active);
     EnableWindow(state->debug_start,
-                 !terminal_active && !debugger_active && saved_document);
-    EnableWindow(state->debug_pause, debugger_active && saved_document);
-    EnableWindow(state->debug_continue, debugger_active && saved_document);
-    EnableWindow(state->debug_step_over, debugger_active && saved_document);
+                 axyne_debugger_can_start(debugger_active, terminal_active,
+                                          saved_document));
+    EnableWindow(state->debug_pause, axyne_debugger_can_control(debugger_active));
+    EnableWindow(state->debug_continue, axyne_debugger_can_control(debugger_active));
+    EnableWindow(state->debug_step_over, axyne_debugger_can_control(debugger_active));
     EnableWindow(state->debug_breakpoint,
-                 saved_document);
+                 axyne_debugger_can_toggle_breakpoint(
+                     document != NULL && !document->is_untitled &&
+                     document->path != NULL));
 }
 
 static void axyne_terminal_output(AxyneProcess *process,
@@ -952,6 +955,7 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     AxyneStatus status;
     state->terminal_panel_selected = 1;
     state->problems_panel_selected = 0;
+    state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->terminal_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
@@ -1010,8 +1014,11 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *document;
     AxyneError error;
-    (void)window;
     if (axyne_debugger_is_active(&state->debugger)) return;
+    state->terminal_panel_selected = 0;
+    state->problems_panel_selected = 0;
+    state->panel_hidden = 0;
+    axyne_layout(window, state);
     if (state->terminal_process != NULL) {
         const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\r\n";
         axyne_terminal_append(state->terminal_output, message, strlen(message),
@@ -1224,6 +1231,7 @@ static void axyne_git_ui_show_output(HWND window, AxyneWindowState *state)
 {
     state->terminal_panel_selected = 0;
     state->problems_panel_selected = 0;
+    state->panel_hidden = 0;
     axyne_layout(window, state);
     InvalidateRect(window, NULL, FALSE);
 }
@@ -1671,6 +1679,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     AxyneStatus status;
     state->terminal_panel_selected = 0;
     state->problems_panel_selected = 0;
+    state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->terminal_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
@@ -2322,11 +2331,16 @@ static int axyne_action_enabled(AxyneWindowState *state, UINT command)
     case AXYNE_CMD_ZOOM_IN: case AXYNE_CMD_ZOOM_OUT:
     case AXYNE_CMD_ZOOM_RESET: case AXYNE_CMD_WORD_WRAP:
         return state->editor != NULL;
+    case AXYNE_CMD_SAVE_AS:
+        return axyne_active(state) != NULL;
+    case AXYNE_CMD_LSP_DEFINITION: case AXYNE_CMD_LSP_REFERENCES: {
+        AxyneDocument *document = axyne_active(state);
+        return document != NULL && !document->is_untitled && document->path != NULL;
+    }
     case AXYNE_CMD_DEBUG_STOP:
         return axyne_debugger_is_active(&state->debugger);
     case AXYNE_CMD_DEBUG_STEP_INTO: case AXYNE_CMD_DEBUG_STEP_OUT:
-        axyne_refresh_action_controls(state);
-        return IsWindowEnabled(state->debug_step_over) != 0;
+        return axyne_debugger_can_control(axyne_debugger_is_active(&state->debugger));
     case AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS:
         return axyne_debugger_enabled_breakpoints(&state->debugger) != 0;
     case AXYNE_CMD_OPEN_PREFERENCES_FILE:
@@ -2389,7 +2403,9 @@ static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
         {L"Ctrl+`", L"터미널"}, {L"Ctrl+=  Ctrl+-  Ctrl+0", L"확대 / 축소 / 기본 크기"},
         {L"Alt+Z", L"자동 줄 바꿈"}, {L"F11", L"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)"},
         {L"Shift+F11", L"프로시저 나가기"}, {L"Shift+F5", L"디버깅 중지"},
-        {L"Ctrl+Shift+F9", L"모든 중단점 삭제"}
+        {L"Ctrl+Shift+F9", L"모든 중단점 삭제"},
+        {L"Ctrl+Shift+S", L"다른 이름으로 저장"},
+        {L"Ctrl+Alt+D / Ctrl+Alt+R", L"정의로 이동 / 참조 찾기"}
     };
     wchar_t text[4096];
     size_t i;
@@ -2419,6 +2435,49 @@ static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
         }
     }
     MessageBoxW(window, text, L"Keyboard Shortcuts", MB_OK | MB_ICONINFORMATION);
+}
+
+/* Edit commands act on the focused text field (terminal input) when it owns
+ * the keyboard and on the Scintilla editor otherwise. Edit controls have no
+ * redo, so Redo is unavailable for them. */
+static int axyne_edit_field_focused(const AxyneWindowState *state)
+{
+    HWND focus = GetFocus();
+    return focus != NULL && focus == state->terminal_input;
+}
+
+static UINT axyne_edit_flags(const AxyneWindowState *state, UINT command)
+{
+    if (axyne_edit_field_focused(state))
+        return command == AXYNE_CMD_REDO ? MF_GRAYED : MF_ENABLED;
+    return state->editor != NULL ? MF_ENABLED : MF_GRAYED;
+}
+
+static int axyne_edit_command(AxyneWindowState *state, UINT command)
+{
+    if (axyne_edit_field_focused(state)) {
+        HWND field = state->terminal_input;
+        switch (command) {
+        case AXYNE_CMD_UNDO: SendMessageW(field, EM_UNDO, 0, 0); break;
+        case AXYNE_CMD_CUT: SendMessageW(field, WM_CUT, 0, 0); break;
+        case AXYNE_CMD_COPY: SendMessageW(field, WM_COPY, 0, 0); break;
+        case AXYNE_CMD_PASTE: SendMessageW(field, WM_PASTE, 0, 0); break;
+        case AXYNE_CMD_SELECT_ALL: SendMessageW(field, EM_SETSEL, 0, (LPARAM)-1); break;
+        default: break;
+        }
+        return 1;
+    }
+    if (state->editor == NULL) return 1;
+    switch (command) {
+    case AXYNE_CMD_UNDO: SendMessageA(state->editor, 2176, 0, 0); break;
+    case AXYNE_CMD_REDO: SendMessageA(state->editor, 2011, 0, 0); break;
+    case AXYNE_CMD_CUT: SendMessageW(state->editor, WM_CUT, 0, 0); break;
+    case AXYNE_CMD_COPY: SendMessageW(state->editor, WM_COPY, 0, 0); break;
+    case AXYNE_CMD_PASTE: SendMessageW(state->editor, WM_PASTE, 0, 0); break;
+    case AXYNE_CMD_SELECT_ALL: SendMessageA(state->editor, 2013, 0, 0); break;
+    default: break;
+    }
+    return 1;
 }
 
 static int axyne_action_command(HWND window, AxyneWindowState *state, UINT command)
@@ -2529,8 +2588,14 @@ static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
         else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) command = AXYNE_CMD_ZOOM_OUT;
         else if (key == '0' || key == VK_NUMPAD0) command = AXYNE_CMD_ZOOM_RESET;
         else if (key == VK_OEM_3) command = AXYNE_CMD_PANEL_TERMINAL;
+    } else if (control && alt && !shift) {
+        /* Alt combinations arrive as WM_SYSKEYDOWN, so these are handled
+         * here rather than in the window procedure's WM_KEYDOWN. */
+        if (key == 'D') command = AXYNE_CMD_LSP_DEFINITION;
+        else if (key == 'R') command = AXYNE_CMD_LSP_REFERENCES;
     } else if (control && shift && !alt) {
-        if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
+        if (key == 'S') command = AXYNE_CMD_SAVE_AS;
+        else if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
         else if (key == 'U') command = AXYNE_CMD_PANEL_OUTPUT;
         else if (key == 'M') command = AXYNE_CMD_PANEL_PROBLEMS;
         else if (key == VK_F9) command = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS;
@@ -3242,7 +3307,7 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", document_flags);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", NULL,
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", L"Ctrl+Shift+S",
                    document_flags);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
@@ -3256,18 +3321,17 @@ static void axyne_edit_popup(HWND window, AxyneWindowState *state)
 {
     AxyneMenuItem *pool = NULL;
     HMENU menu = axyne_menu_create();
-    UINT has_editor = state->editor != NULL ? MF_ENABLED : MF_GRAYED;
     UINT saved_document_flags = axyne_active(state) != NULL &&
         !axyne_active(state)->is_untitled && axyne_active(state)->path != NULL
         ? MF_ENABLED : MF_GRAYED;
     if (menu == NULL) return;
-    axyne_menu_add(menu, &pool, AXYNE_CMD_UNDO, L"실행 취소", L"Ctrl+Z", has_editor);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_REDO, L"다시 실행", L"Ctrl+Y", has_editor);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_UNDO, L"실행 취소", L"Ctrl+Z", axyne_edit_flags(state, AXYNE_CMD_UNDO));
+    axyne_menu_add(menu, &pool, AXYNE_CMD_REDO, L"다시 실행", L"Ctrl+Y", axyne_edit_flags(state, AXYNE_CMD_REDO));
     axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_CUT, L"잘라내기", L"Ctrl+X", has_editor);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_COPY, L"복사", L"Ctrl+C", has_editor);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_PASTE, L"붙여넣기", L"Ctrl+V", has_editor);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SELECT_ALL, L"모두 선택", L"Ctrl+A", has_editor);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_CUT, L"잘라내기", L"Ctrl+X", axyne_edit_flags(state, AXYNE_CMD_CUT));
+    axyne_menu_add(menu, &pool, AXYNE_CMD_COPY, L"복사", L"Ctrl+C", axyne_edit_flags(state, AXYNE_CMD_COPY));
+    axyne_menu_add(menu, &pool, AXYNE_CMD_PASTE, L"붙여넣기", L"Ctrl+V", axyne_edit_flags(state, AXYNE_CMD_PASTE));
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SELECT_ALL, L"모두 선택", L"Ctrl+A", axyne_edit_flags(state, AXYNE_CMD_SELECT_ALL));
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_FIND, L"찾기...", L"Ctrl+F", MF_ENABLED);
     axyne_menu_add(menu, &pool, AXYNE_CMD_REPLACE, L"바꾸기...", L"Ctrl+H", MF_ENABLED);
@@ -4185,11 +4249,6 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
-            (GetKeyState(VK_MENU) & 0x8000) != 0) {
-            if (w_param == 'D') { axyne_lsp_navigate(window, state, 0); return 0; }
-            if (w_param == 'R') { axyne_lsp_navigate(window, state, 1); return 0; }
-        }
         if (axyne_handle_key(window, state, w_param)) return 0;
         break;
     case WM_LBUTTONDBLCLK: {
@@ -4461,21 +4520,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_git_start(window, state, "All changes unstaged.", command);
         else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
         else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
-        else if (state->editor != NULL &&
-                 (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO ||
-                  command == AXYNE_CMD_CUT || command == AXYNE_CMD_COPY ||
-                  command == AXYNE_CMD_PASTE)) {
-            if (command == AXYNE_CMD_UNDO)
-                SendMessageA(state->editor, 2176, 0, 0);
-            else if (command == AXYNE_CMD_REDO)
-                SendMessageA(state->editor, 2011, 0, 0);
-            else {
-                UINT message_id = command == AXYNE_CMD_CUT ? WM_CUT :
-                    command == AXYNE_CMD_COPY ? WM_COPY : WM_PASTE;
-                SendMessageW(state->editor, message_id, 0, 0);
-            }
-        } else if (command == AXYNE_CMD_SELECT_ALL && state->editor != NULL)
-            SendMessageA(state->editor, 2013, 0, 0);
+        else if (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO ||
+                 command == AXYNE_CMD_CUT || command == AXYNE_CMD_COPY ||
+                 command == AXYNE_CMD_PASTE || command == AXYNE_CMD_SELECT_ALL)
+            (void)axyne_edit_command(state, command);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
             axyne_workspace_operation(window, state, command);
         else if (command >= AXYNE_CMD_RECENT_BASE &&
