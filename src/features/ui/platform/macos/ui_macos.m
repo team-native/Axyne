@@ -4103,7 +4103,9 @@ static void axyne_install_menu(NSApplication *application,
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
             NSMenuItem *references = [submenu addItemWithTitle:@"LSP: Find References"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"r"];
-            [definition setTarget:workspace]; [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+            [definition setTarget:workspace];
+            /* Cmd+Option+D is the system Dock hide/show shortcut, so Go to Definition adds Shift. */
+            [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
             [references setTarget:workspace];
             /* Cmd+R belongs to Build > Run, so References adds Shift. */
             [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
