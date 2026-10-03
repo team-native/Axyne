@@ -429,7 +429,11 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         goto os_error;
     }
     CloseHandle(info.hThread);
-    state->worker = CreateThread(NULL, 0, process_worker, process, 0, NULL);
+    /* The worker starts suspended so *out and state->worker are published
+     * before any callback can run; a fast-exiting child must not observe a
+     * NULL process handle in on_exit. */
+    state->worker = CreateThread(NULL, 0, process_worker, process,
+                                 CREATE_SUSPENDED, NULL);
     if (state->worker == NULL) {
         terminate_orphan(state);
         CloseHandle(state->process); CloseHandle(state->job); CloseHandle(state->stdin_write);
@@ -438,6 +442,16 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         goto os_error;
     }
     *out = process;
+    if (ResumeThread(state->worker) == (DWORD)-1) {
+        *out = NULL;
+        terminate_orphan(state);
+        (void)TerminateThread(state->worker, 1);
+        CloseHandle(state->worker);
+        CloseHandle(state->process); CloseHandle(state->job); CloseHandle(state->stdin_write);
+        CloseHandle(state->stdout_read); CloseHandle(state->stderr_read);
+        DeleteCriticalSection(&state->write_lock); free(state); free(process);
+        goto os_error;
+    }
     if (error != NULL) { error->code = AXYNE_STATUS_OK; error->message[0] = '\0'; }
     result = AXYNE_STATUS_OK;
     goto done;
