@@ -70,6 +70,8 @@ add_test(
     NAME axyne-palette-controller
     COMMAND $<TARGET_FILE:axyne_tests> palette-controller
             "${AXYNE_TEST_FIXTURE_DIR}/palette-controller"
+)
+add_test(
     NAME axyne-problems-feed
     COMMAND $<TARGET_FILE:axyne_tests> problems-feed
             "${AXYNE_TEST_FIXTURE_DIR}/problems-feed"
