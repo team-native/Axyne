@@ -81,6 +81,91 @@ typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
 }
 @end
 
+static NSColor *axyne_preference_color(uint32_t value);
+
+@interface AxyneMenuItemView : NSView {
+    NSMenuItem *_menuItem;
+    BOOL _highlighted;
+}
+- (instancetype)initWithMenuItem:(NSMenuItem *)menuItem;
+- (void)highlight:(BOOL)highlight;
+@end
+
+@implementation AxyneMenuItemView
+
+- (instancetype)initWithMenuItem:(NSMenuItem *)menuItem
+{
+    self = [super initWithFrame:NSMakeRect(0, 0, 280, 28)];
+    if (self != nil) {
+        _menuItem = menuItem;
+        [self setAutoresizingMask:NSViewWidthSizable];
+    }
+    return self;
+}
+
+- (BOOL)isFlipped
+{
+    return YES;
+}
+
+- (void)highlight:(BOOL)highlight
+{
+    _highlighted = highlight;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    NSRect bounds = [self bounds];
+    [_highlighted ? axyne_preference_color(0x2a2e35) :
+        axyne_preference_color(0x1f2126) setFill];
+    NSRectFill(bounds);
+
+    NSDictionary *attributes = @{
+        NSFontAttributeName:[NSFont systemFontOfSize:12],
+        NSForegroundColorAttributeName:axyne_preference_color(0xc7c9ce)
+    };
+    [[_menuItem title] drawAtPoint:NSMakePoint(12, 7) withAttributes:attributes];
+
+    NSString *key = [_menuItem keyEquivalent];
+    if ([key length] != 0) {
+        NSUInteger modifiers = [_menuItem keyEquivalentModifierMask];
+        NSMutableString *shortcut = [NSMutableString string];
+        if ((modifiers & NSEventModifierFlagCommand) != 0) [shortcut appendString:@"⌘"];
+        if ((modifiers & NSEventModifierFlagShift) != 0) [shortcut appendString:@"⇧"];
+        if ((modifiers & NSEventModifierFlagOption) != 0) [shortcut appendString:@"⌥"];
+        if ((modifiers & NSEventModifierFlagControl) != 0) [shortcut appendString:@"⌃"];
+        [shortcut appendString:[key uppercaseString]];
+        NSDictionary *shortcutAttributes = @{
+            NSFontAttributeName:[NSFont systemFontOfSize:11],
+            NSForegroundColorAttributeName:axyne_preference_color(0x8b919b)
+        };
+        NSSize shortcutSize = [shortcut sizeWithAttributes:shortcutAttributes];
+        [shortcut drawAtPoint:NSMakePoint(NSMaxX(bounds) - shortcutSize.width - 12, 8)
+            withAttributes:shortcutAttributes];
+    }
+}
+
+- (void)dealloc
+{
+    [super dealloc];
+}
+@end
+
+static void axyne_style_popup_menu(NSMenu *menu)
+{
+    [menu setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+    [menu setAutoenablesItems:YES];
+    for (NSMenuItem *item in [menu itemArray]) {
+        if ([item isSeparatorItem]) continue;
+        if ([item submenu] != nil) axyne_style_popup_menu([item submenu]);
+        AxyneMenuItemView *view = [[[AxyneMenuItemView alloc]
+            initWithMenuItem:item] autorelease];
+        [item setView:view];
+    }
+}
+
 static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 {
     return [NSColor colorWithCalibratedRed:red / 255.0
@@ -3181,9 +3266,9 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
         action:nil keyEquivalent:@""];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Axyne"];
-    [appMenu addItemWithTitle:@"About Axyne" action:nil keyEquivalent:@""];
+    [appMenu addItemWithTitle:@"Axyne 정보" action:nil keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"Preferences…"
+    NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"환경설정…"
         action:@selector(showGlobalPreferences:) keyEquivalent:@","];
     [preferencesItem setTarget:workspace];
     [appMenu addItemWithTitle:@"Quit Axyne" action:@selector(terminate:)
@@ -3193,43 +3278,43 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"파일(F)"
         action:nil keyEquivalent:@""];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"파일(F)"];
-    NSMenuItem *newItem = [fileMenu addItemWithTitle:@"New"
+    NSMenuItem *newItem = [fileMenu addItemWithTitle:@"새 파일"
         action:@selector(newDocument:) keyEquivalent:@"n"];
     [newItem setTarget:workspace];
-    NSMenuItem *openItem = [fileMenu addItemWithTitle:@"Open…"
+    NSMenuItem *openItem = [fileMenu addItemWithTitle:@"파일 열기…"
         action:@selector(openDocument:) keyEquivalent:@"o"];
     [openItem setTarget:workspace];
-    NSMenuItem *saveItem = [fileMenu addItemWithTitle:@"Save"
+    NSMenuItem *saveItem = [fileMenu addItemWithTitle:@"저장"
         action:@selector(saveDocument:) keyEquivalent:@"s"];
     [saveItem setTarget:workspace];
-    NSMenuItem *saveAsItem = [fileMenu addItemWithTitle:@"Save As…"
+    NSMenuItem *saveAsItem = [fileMenu addItemWithTitle:@"다른 이름으로 저장…"
         action:@selector(saveDocumentAs:) keyEquivalent:@"S"];
     [saveAsItem setTarget:workspace];
-    NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"Close Tab"
+    NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"탭 닫기"
         action:@selector(closeDocument:) keyEquivalent:@"w"];
     [closeItem setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"Open Workspace Folder…"
+    NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"작업 폴더 열기…"
         action:@selector(openWorkspace:) keyEquivalent:@""];
     [workspaceItem setTarget:workspace];
-    NSMenuItem *workspacePreferences = [fileMenu addItemWithTitle:@"Workspace Settings…"
+    NSMenuItem *workspacePreferences = [fileMenu addItemWithTitle:@"워크스페이스 설정…"
         action:@selector(showWorkspacePreferences:) keyEquivalent:@""];
     [workspacePreferences setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *gitStatus = [fileMenu addItemWithTitle:@"Git Status"
+    NSMenuItem *gitStatus = [fileMenu addItemWithTitle:@"Git 상태"
         action:@selector(showGitStatus:) keyEquivalent:@""];
-    NSMenuItem *gitDiff = [fileMenu addItemWithTitle:@"Git Diff"
+    NSMenuItem *gitDiff = [fileMenu addItemWithTitle:@"Git 차이"
         action:@selector(showGitDiff:) keyEquivalent:@""];
-    NSMenuItem *gitStage = [fileMenu addItemWithTitle:@"Git Stage All"
+    NSMenuItem *gitStage = [fileMenu addItemWithTitle:@"모든 Git 변경사항 스테이지"
         action:@selector(stageAllGitChanges:) keyEquivalent:@""];
-    NSMenuItem *gitUnstage = [fileMenu addItemWithTitle:@"Git Unstage All"
+    NSMenuItem *gitUnstage = [fileMenu addItemWithTitle:@"모든 Git 변경사항 언스테이지"
         action:@selector(unstageAllGitChanges:) keyEquivalent:@""];
     [gitStatus setTarget:workspace]; [gitDiff setTarget:workspace];
     [gitStage setTarget:workspace]; [gitUnstage setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent"
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"최근 파일"
         action:nil keyEquivalent:@""];
-    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];
+    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"최근 파일"];
     [recentItem setSubmenu:recentMenu];
     [fileMenu addItem:recentItem];
     [workspace setRecentMenu:recentMenu];
@@ -3244,43 +3329,43 @@ static void axyne_install_menu(NSApplication *application,
             action:nil keyEquivalent:@""];
         NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
         if ([title hasPrefix:@"편집"]) {
-            [submenu addItemWithTitle:@"Undo" action:@selector(undo:)
+            [submenu addItemWithTitle:@"실행 취소" action:@selector(undo:)
                          keyEquivalent:@"z"];
-            NSMenuItem *redo = [submenu addItemWithTitle:@"Redo"
+            NSMenuItem *redo = [submenu addItemWithTitle:@"다시 실행"
                 action:@selector(redo:) keyEquivalent:@"Z"];
             [redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
                                           NSEventModifierFlagShift];
             [submenu addItem:[NSMenuItem separatorItem]];
-            [submenu addItemWithTitle:@"Cut" action:@selector(cut:)
+            [submenu addItemWithTitle:@"잘라내기" action:@selector(cut:)
                          keyEquivalent:@"x"];
-            [submenu addItemWithTitle:@"Copy" action:@selector(copy:)
+            [submenu addItemWithTitle:@"복사" action:@selector(copy:)
                          keyEquivalent:@"c"];
-            [submenu addItemWithTitle:@"Paste" action:@selector(paste:)
+            [submenu addItemWithTitle:@"붙여넣기" action:@selector(paste:)
                          keyEquivalent:@"v"];
-            [submenu addItemWithTitle:@"Select All" action:@selector(selectAll:)
+            [submenu addItemWithTitle:@"전체 선택" action:@selector(selectAll:)
                          keyEquivalent:@"a"];
         } else if ([title hasPrefix:@"빌드"]) {
-            NSMenuItem *build = [submenu addItemWithTitle:@"Build Active Document"
+            NSMenuItem *build = [submenu addItemWithTitle:@"활성 문서 빌드"
                 action:@selector(buildDocument:) keyEquivalent:@"b"];
-            NSMenuItem *run = [submenu addItemWithTitle:@"Run Active Document"
+            NSMenuItem *run = [submenu addItemWithTitle:@"활성 문서 실행"
                 action:@selector(runDocument:) keyEquivalent:@"r"];
-            NSMenuItem *configure = [submenu addItemWithTitle:@"Configure Build/Run Runner…"
+            NSMenuItem *configure = [submenu addItemWithTitle:@"빌드/실행 Runner 설정…"
                 action:@selector(configureRunnerAction:) keyEquivalent:@""];
             [build setTarget:workspace]; [run setTarget:workspace];
             [configure setTarget:workspace];
         } else if ([title hasPrefix:@"디버그"]) {
-            NSMenuItem *start = [submenu addItemWithTitle:@"Start Debugger"
+            NSMenuItem *start = [submenu addItemWithTitle:@"디버거 시작"
                 action:@selector(startDebugger:) keyEquivalent:@"F5"];
-            NSMenuItem *pause = [submenu addItemWithTitle:@"Pause"
+            NSMenuItem *pause = [submenu addItemWithTitle:@"일시 정지"
                 action:@selector(debugCommand:) keyEquivalent:@"F6"];
-            NSMenuItem *resume = [submenu addItemWithTitle:@"Continue"
+            NSMenuItem *resume = [submenu addItemWithTitle:@"계속"
                 action:@selector(debugCommand:) keyEquivalent:@""];
             [resume setTag:0]; [resume setTarget:workspace];
-            NSMenuItem *next = [submenu addItemWithTitle:@"Step Over"
+            NSMenuItem *next = [submenu addItemWithTitle:@"다음 단계"
                 action:@selector(debugCommand:) keyEquivalent:@"F10"];
             [start setTarget:workspace]; [pause setTarget:workspace];
             [next setTarget:workspace]; [pause setTag:1]; [next setTag:2];
-            NSMenuItem *toggle = [submenu addItemWithTitle:@"Toggle Breakpoint"
+            NSMenuItem *toggle = [submenu addItemWithTitle:@"중단점 전환"
                 action:@selector(toggleBreakpoint:) keyEquivalent:@"F9"];
             [toggle setTarget:workspace];
         } else if ([title hasPrefix:@"보기"]) {
@@ -3291,9 +3376,9 @@ static void axyne_install_menu(NSApplication *application,
                 [panelItem setTag:i]; [panelItem setTarget:workspace];
             }
         } else if ([title hasPrefix:@"도구"]) {
-            NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: Go to Definition"
+            NSMenuItem *definition = [submenu addItemWithTitle:@"LSP: 정의로 이동"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
-            NSMenuItem *references = [submenu addItemWithTitle:@"LSP: Find References"
+            NSMenuItem *references = [submenu addItemWithTitle:@"LSP: 참조 찾기"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"r"];
             [definition setTarget:workspace]; [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
             [references setTarget:workspace]; [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
@@ -3304,6 +3389,8 @@ static void axyne_install_menu(NSApplication *application,
         [mainMenu addItem:item];
         [item release];
     }
+    for (NSMenuItem *item in [mainMenu itemArray])
+        if ([item submenu] != nil) axyne_style_popup_menu([item submenu]);
     [application setMainMenu:mainMenu];
     [mainMenu release];
     [appMenu release];
