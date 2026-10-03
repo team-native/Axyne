@@ -6,6 +6,7 @@
 #include "axyne/ui_design.h"
 #include "axyne/preferences.h"
 #include "axyne/document.h"
+#include "axyne/palette_controller.h"
 
 @interface NSView (AxyneWorkspaceLayoutTest)
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
@@ -16,6 +17,9 @@
 - (NSRect)tabFrameAtIndex:(size_t)index;
 - (NSRect)menuBarItemRect:(NSUInteger)index;
 - (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
+- (void)openPaletteWithInput:(NSString *)input;
+- (void)paletteSyncInput;
+- (void)paletteDismiss;
 @end
 
 static id field(id view, const char *name)
@@ -212,6 +216,40 @@ int main(void)
         CHECK_ROW(NSMakePoint(80, top - 1), NSNotFound);
         CHECK_ROW(NSMakePoint(80, bottom), NSNotFound);
         CHECK_ROW(NSMakePoint(80, 842 - AXYNE_UI_STATUS), NSNotFound);
+
+        /* The command palette replaces the toolbar search field while open. */
+        fprintf(stderr, "Checking command palette\n");
+        {
+            AxynePaletteController *palette = value_field(view, "_palette");
+            CHECK(palette != NULL && !palette->active);
+            [view openPaletteWithInput:@""];
+            [view layoutSubtreeIfNeeded];
+            CHECK(palette->active && palette->mode == AXYNE_PALETTE_MODE_FILE);
+            NSTextField *paletteField = field(view, "_paletteField");
+            CHECK(paletteField != nil && [paletteField delegate] == (id)view);
+            CHECK([field(view, "_searchButton") isHidden]);
+            NSRect box = [field(view, "_searchButton") frame];
+            CHECK(NSMinX([paletteField frame]) > NSMinX(box));
+            CHECK(NSMaxX([paletteField frame]) < NSMaxX(box));
+            CHECK(NSMinY([paletteField frame]) >= AXYNE_UI_MENU &&
+                  NSMaxY([paletteField frame]) <= AXYNE_UI_MENU + AXYNE_UI_TOOLBAR);
+            /* the workspace walk is incremental; finish it for the check */
+            while (axyne_palette_ctl_walk_step(palette, 100000, NULL)) {}
+            CHECK(palette->path_count == 40);
+            [paletteField setStringValue:@"file07"];
+            [view paletteSyncInput];
+            CHECK(palette->mode == AXYNE_PALETTE_MODE_FILE && palette->list.count == 1);
+            [paletteField setStringValue:@">save"];
+            [view paletteSyncInput];
+            CHECK(palette->mode == AXYNE_PALETTE_MODE_COMMAND && palette->list.count > 0);
+            [paletteField setStringValue:@":7"];
+            [view paletteSyncInput];
+            CHECK(palette->mode == AXYNE_PALETTE_MODE_LINE && palette->line_valid);
+            [view paletteDismiss];
+            CHECK(!palette->active && field(view, "_paletteField") == nil);
+            [view layoutSubtreeIfNeeded];
+            CHECK(![field(view, "_searchButton") isHidden]);
+        }
 
         /* A reload after external deletions clamps the old scroll position. */
         NSInteger *firstRow = value_field(view, "_explorerFirstRow");
