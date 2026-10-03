@@ -232,6 +232,118 @@ AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *path,
     return AXYNE_STATUS_OK;
 }
 
+static AxyneStatus axyne_document_load(const char *path, AxyneDocument *doc,
+                               AxyneError *error)
+{
+    char *contents = NULL;
+    size_t length = 0;
+    AxyneStatus status = axyne_fs_read_file(path, &contents, &length, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    memset(doc, 0, sizeof(*doc));
+    doc->path = axyne_copy(path, strlen(path));
+    doc->title = axyne_title(path);
+    doc->contents = contents;
+    doc->length = length;
+    if (doc->path == NULL || doc->title == NULL) {
+        axyne_document_dispose(doc);
+        return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                          "Unable to allocate document metadata");
+    }
+    return AXYNE_STATUS_OK;
+}
+
+void axyne_document_dispose(AxyneDocument *document)
+{
+    if (document == NULL) return;
+    free(document->path);
+    free(document->title);
+    free(document->contents);
+    document->path = NULL;
+    document->title = NULL;
+    document->contents = NULL;
+    document->length = 0;
+}
+
+size_t axyne_documents_preview_index(const AxyneDocumentSet *set)
+{
+    if (set == NULL) return (size_t)-1;
+    for (size_t i = 0; i < set->count; ++i)
+        if (set->documents[i].preview) return i;
+    return (size_t)-1;
+}
+
+void axyne_documents_promote(AxyneDocumentSet *set, size_t index)
+{
+    if (set == NULL || index >= set->count) return;
+    set->documents[index].preview = 0;
+}
+
+AxyneStatus axyne_documents_open_preview(AxyneDocumentSet *set,
+                                         const char *path, size_t *index,
+                                         AxyneDocument *evicted, int *replaced,
+                                         AxyneError *error)
+{
+    if (replaced != NULL) *replaced = 0;
+    if (evicted != NULL) memset(evicted, 0, sizeof(*evicted));
+    if (set == NULL || path == NULL || path[0] == '\0')
+        return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                          "A non-empty file path is required");
+    for (size_t i = 0; i < set->count; ++i) {
+        if (set->documents[i].path != NULL &&
+            strcmp(set->documents[i].path, path) == 0) {
+            set->active_index = i;
+            if (index != NULL) *index = i;
+            (void)axyne_recent_add(set, path);
+            axyne_success(error);
+            return AXYNE_STATUS_OK;
+        }
+    }
+    AxyneDocument doc;
+    AxyneStatus status = axyne_document_load(path, &doc, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    doc.preview = 1;
+    size_t old = axyne_documents_preview_index(set);
+    if (old != (size_t)-1 && set->documents[old].is_dirty) {
+        /* Defensive: a modified document is never a preview. */
+        set->documents[old].preview = 0;
+        old = (size_t)-1;
+    }
+    if (old == (size_t)-1) {
+        status = axyne_append(set, &doc, index, error);
+        if (status != AXYNE_STATUS_OK) {
+            axyne_document_dispose(&doc);
+            return status;
+        }
+    } else {
+        AxyneDocument previous = set->documents[old];
+        set->documents[old] = doc;
+        set->active_index = old;
+        if (index != NULL) *index = old;
+        if (replaced != NULL && evicted != NULL) {
+            *evicted = previous;
+            *replaced = 1;
+        } else {
+            axyne_document_dispose(&previous);
+        }
+        axyne_success(error);
+    }
+    (void)axyne_recent_add(set, path);
+    return AXYNE_STATUS_OK;
+}
+
+void axyne_documents_revert_preview_open(AxyneDocumentSet *set, size_t index,
+                                         AxyneDocument *evicted, int replaced)
+{
+    if (set == NULL || index >= set->count) return;
+    if (replaced && evicted != NULL) {
+        axyne_document_dispose(&set->documents[index]);
+        set->documents[index] = *evicted;
+        memset(evicted, 0, sizeof(*evicted));
+    } else {
+        (void)axyne_documents_close(set, index, NULL);
+    }
+}
+
 AxyneStatus axyne_documents_set_contents(AxyneDocumentSet *set, size_t index,
                                          const char *contents, size_t length,
                                          AxyneError *error)
@@ -247,6 +359,7 @@ AxyneStatus axyne_documents_set_contents(AxyneDocumentSet *set, size_t index,
     doc->contents = copy;
     doc->length = length;
     doc->is_dirty = 1;
+    doc->preview = 0;
     axyne_success(error);
     return AXYNE_STATUS_OK;
 }
@@ -258,6 +371,7 @@ AxyneStatus axyne_documents_mark_dirty(AxyneDocumentSet *set, size_t index,
         return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
                           "Invalid document index");
     set->documents[index].is_dirty = 1;
+    set->documents[index].preview = 0;
     axyne_success(error);
     return AXYNE_STATUS_OK;
 }
@@ -297,6 +411,7 @@ AxyneStatus axyne_documents_save_as(AxyneDocumentSet *set, size_t index,
     doc->path = new_path; doc->title = new_title;
     doc->is_untitled = 0;
     doc->is_dirty = 0;
+    doc->preview = 0;
     (void)axyne_recent_add(set, path);
     axyne_success(error);
     return AXYNE_STATUS_OK;
@@ -316,9 +431,11 @@ AxyneStatus axyne_documents_save(AxyneDocumentSet *set, size_t index,
                                              doc->length, error);
     if (status == AXYNE_STATUS_OK) {
         doc->is_dirty = 0;
+        doc->preview = 0;
         (void)axyne_recent_add(set, doc->path);
     } else {
         doc->is_dirty = 1;
+        doc->preview = 0;
     }
     return status;
 }
