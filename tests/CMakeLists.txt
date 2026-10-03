@@ -123,3 +123,17 @@ if(APPLE)
     add_test(NAME axyne-workspace-layout COMMAND $<TARGET_FILE:axyne_workspace_layout_tests>)
     set_tests_properties(axyne-workspace-layout PROPERTIES TIMEOUT 60)
 endif()
+
+# Pure-C table/mapping tests; independent of the native UI adapters.
+add_executable(axyne_syntax_tests
+    test_syntax.c
+    "${PROJECT_SOURCE_DIR}/src/features/ui/syntax.c"
+)
+target_include_directories(axyne_syntax_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(axyne_syntax_tests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(axyne_syntax_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME axyne-syntax COMMAND $<TARGET_FILE:axyne_syntax_tests>)
+set_tests_properties(axyne-syntax PROPERTIES TIMEOUT 30)
