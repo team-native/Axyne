@@ -80,8 +80,18 @@ int axyne_test_documents_search(const char *root)
                          NULL);
         AXYNE_TEST_CHECK(strstr(results.items[result_index].path, "binary.dat") ==
                          NULL);
-        AXYNE_TEST_CHECK(strstr(results.items[result_index].path, ".git") ==
-                         NULL);
+        /* Only the part below the fixture root counts: the root itself
+         * lives in an arbitrary checkout path. */
+        {
+            const char *below_root = results.items[result_index].path;
+            size_t root_length = strlen(root);
+            if (strncmp(below_root, root, root_length) == 0)
+                below_root += root_length;
+            if (strstr(below_root, ".git") != NULL)
+                fprintf(stderr, "FAIL search listed repository metadata: %s\n",
+                        results.items[result_index].path);
+            AXYNE_TEST_CHECK(strstr(below_root, ".git") == NULL);
+        }
     }
     axyne_search_results_destroy(&results);
 
@@ -100,13 +110,21 @@ int axyne_test_documents_search(const char *root)
                       AXYNE_STATUS_OK);
     AXYNE_TEST_CHECK(explorer.count >= 1 && explorer.nodes[0].depth == 0);
     /* The root row shows the folder name, not the full path. */
+    if (strchr(explorer.nodes[0].name, '/') != NULL ||
+        strchr(explorer.nodes[0].name, '\\') != NULL ||
+        strstr(root, explorer.nodes[0].name) == NULL)
+        fprintf(stderr, "FAIL root row name \"%s\" for root \"%s\"\n",
+                explorer.nodes[0].name, root);
     AXYNE_TEST_CHECK(strchr(explorer.nodes[0].name, '/') == NULL &&
                      strchr(explorer.nodes[0].name, '\\') == NULL &&
                      strstr(root, explorer.nodes[0].name) != NULL);
-    AXYNE_TEST_CHECK(strcmp(explorer.nodes[0].path, root) == 0);
+    AXYNE_TEST_STREQ(explorer.nodes[0].path, root);
     AXYNE_TEST_CHECK(!axyne_explorer_is_dimmed(&explorer.nodes[0]));
     for (node_index = 0; node_index < explorer.count; ++node_index) {
         AxyneExplorerNode *node = &explorer.nodes[node_index];
+        if (strcmp(node->name, ".git") == 0)
+            fprintf(stderr, "FAIL explorer row %zu lists %s\n", node_index,
+                    node->path);
         AXYNE_TEST_CHECK(strcmp(node->name, ".git") != 0);
         if (strcmp(node->name, "build") == 0) {
             saw_build = 1;
@@ -116,6 +134,9 @@ int axyne_test_documents_search(const char *root)
             AXYNE_TEST_CHECK(!axyne_explorer_is_dimmed(node));
         }
     }
+    if (!saw_build || !saw_nested)
+        fprintf(stderr, "FAIL explorer rows: count=%zu saw_build=%d "
+                "saw_nested=%d\n", explorer.count, saw_build, saw_nested);
     AXYNE_TEST_CHECK(saw_build && saw_nested);
     AXYNE_TEST_CHECK(!axyne_explorer_is_dimmed(NULL));
     axyne_explorer_destroy(&explorer);
