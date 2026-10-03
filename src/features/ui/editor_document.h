@@ -5,8 +5,11 @@
 #include "axyne/document.h"
 #include "Scintilla.h"
 
+#ifndef AXYNE_EDITOR_MESSAGE_DEFINED
+#define AXYNE_EDITOR_MESSAGE_DEFINED
 typedef intptr_t (*AxyneEditorMessage)(void *editor, unsigned int message,
                                       uintptr_t w_param, intptr_t l_param);
+#endif
 
 /* Each tab owns a reference independently of the editor control. In
  * particular, do not borrow the control's initial document: switching away
