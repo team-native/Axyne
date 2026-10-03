@@ -127,6 +127,12 @@ static int contains_folded(const char *text, const char *query)
     return 0;
 }
 
+static int is_metadata_directory(const AxyneFileEntry *entry)
+{
+    return entry != NULL && entry->kind == AXYNE_FILE_KIND_DIRECTORY &&
+        strcmp(entry->name, ".git") == 0;
+}
+
 typedef struct SearchWalk {
     const char *query;
     int match_case;
@@ -142,6 +148,7 @@ static void walk(const char *directory, SearchWalk *ctx)
     if (axyne_fs_list_directory(directory, &list, NULL) != AXYNE_STATUS_OK) return;
     for (size_t i = 0; i < list.count && !ctx->failed; ++i) {
         AxyneFileEntry *entry = &list.entries[i];
+        if (is_metadata_directory(entry)) continue;
         if (entry->kind == AXYNE_FILE_KIND_DIRECTORY) { walk(entry->path, ctx); continue; }
         if (ctx->paths != NULL) {
             if (contains_folded(entry->name, ctx->query)) {

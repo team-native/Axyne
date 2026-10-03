@@ -57,16 +57,16 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
         (ext != NULL && axyne_ui_suffix_equal(ext, ".cmake")))) {
         badge.label = "CM"; badge.color = 0xa3c98a;
     } else if (ext != NULL) {
-        if (axyne_ui_ends_with(name, ".h.in") || axyne_ui_suffix_equal(ext, ".h")) {
+        if (axyne_ui_ends_with(name, ".h.in") || axyne_ui_ends_with(name, ".hpp.in") ||
+            axyne_ui_suffix_equal(ext, ".h") || axyne_ui_suffix_equal(ext, ".hpp")) {
             badge.label = "H"; badge.color = 0xc79ad9;
         } else if (axyne_ui_ends_with(name, ".c.in") || axyne_ui_suffix_equal(ext, ".c")) {
             badge.label = "C"; badge.color = 0x7db5e3;
         } else if (axyne_ui_ends_with(name, ".cpp.in") || axyne_ui_suffix_equal(ext, ".cpp") ||
                    axyne_ui_suffix_equal(ext, ".cc")) {
             badge.label = "C++"; badge.color = 0x7db5e3;
-        } else if (axyne_ui_suffix_equal(ext, ".hpp")) {
-            badge.label = "H"; badge.color = 0xc79ad9;
-        } else if (axyne_ui_suffix_equal(ext, ".m") || axyne_ui_suffix_equal(ext, ".mm")) {
+        } else if (axyne_ui_ends_with(name, ".m.in") || axyne_ui_ends_with(name, ".mm.in") ||
+                   axyne_ui_suffix_equal(ext, ".m") || axyne_ui_suffix_equal(ext, ".mm")) {
             badge.label = "OC"; badge.color = 0x738ed9;
         } else if (axyne_ui_suffix_equal(ext, ".json")) {
             badge.label = "{}"; badge.color = 0xd9b36c;
@@ -85,7 +85,9 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
             badge.label = "MD"; badge.color = 0xc4c8ce;
         } else if (axyne_ui_suffix_equal(ext, ".png") || axyne_ui_suffix_equal(ext, ".jpg") ||
                    axyne_ui_suffix_equal(ext, ".jpeg") || axyne_ui_suffix_equal(ext, ".gif") ||
-                   axyne_ui_suffix_equal(ext, ".svg")) {
+                   axyne_ui_suffix_equal(ext, ".svg") || axyne_ui_suffix_equal(ext, ".tif") ||
+                   axyne_ui_suffix_equal(ext, ".tiff") || axyne_ui_suffix_equal(ext, ".bmp") ||
+                   axyne_ui_suffix_equal(ext, ".webp") || axyne_ui_suffix_equal(ext, ".ico")) {
             badge.label = "IMG"; badge.color = 0xd98e73;
         } else if (axyne_ui_suffix_equal(ext, ".pdf")) {
             badge.label = "PDF"; badge.color = 0xd98e73;

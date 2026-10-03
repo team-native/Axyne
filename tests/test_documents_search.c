@@ -8,6 +8,7 @@
 int axyne_test_documents_search(const char *root)
 {
     char alpha[512], beta_directory[512], beta[512], binary[512];
+    char git_directory[512], git_file[512];
     char saved[512];
     AxyneDocumentSet documents = {0};
     AxyneSearchResults results = {0};
@@ -31,6 +32,12 @@ int axyne_test_documents_search(const char *root)
                                      "saved.txt"));
     AXYNE_TEST_CHECK(axyne_test_write(alpha, "first needle\nsecond NEEDLE\n"));
     AXYNE_TEST_CHECK(axyne_test_write(beta, "nested needle\n"));
+    AXYNE_TEST_CHECK(axyne_test_path(git_directory, sizeof(git_directory), root,
+                                     ".git"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(git_directory));
+    AXYNE_TEST_CHECK(axyne_test_path(git_file, sizeof(git_file), git_directory,
+                                     "config"));
+    AXYNE_TEST_CHECK(axyne_test_write(git_file, "needle\n"));
     AXYNE_TEST_CHECK(axyne_fs_write_file(binary, "needle\0hidden", 13, NULL) ==
                      AXYNE_STATUS_OK);
 
@@ -61,6 +68,8 @@ int axyne_test_documents_search(const char *root)
                          strstr(results.items[result_index].preview, "NEEDLE") !=
                          NULL);
         AXYNE_TEST_CHECK(strstr(results.items[result_index].path, "binary.dat") ==
+                         NULL);
+        AXYNE_TEST_CHECK(strstr(results.items[result_index].path, "/.git/") ==
                          NULL);
     }
     axyne_search_results_destroy(&results);
