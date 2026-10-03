@@ -8,6 +8,7 @@
 /* Figma 7J8SYhLpybJgpxD3qFqL5u / 6:399. Coordinates are logical pixels;
  * each native adapter owns its OS title bar and menu. */
 enum {
+    AXYNE_UI_MENU = 26,
     AXYNE_UI_SIDEBAR = 248,
     AXYNE_UI_TOOLBAR = 38,
     AXYNE_UI_TABS = 34,
@@ -19,6 +20,40 @@ enum {
     AXYNE_UI_INDENT = 12,
     AXYNE_UI_BADGE_WIDTH = 20
 };
+
+/* In-window menu bar (Figma 24:14189 menu frames; design spec 29:857 gives
+ * the 26px height). Items are padded AXYNE_UI_MENU_PAD either side, sit
+ * AXYNE_UI_MENU_GAP apart and start AXYNE_UI_MENU_INSET from the left edge;
+ * both native adapters lay out and hit-test with these numbers. */
+enum {
+    AXYNE_UI_MENU_INSET = 8,
+    AXYNE_UI_MENU_GAP = 2,
+    AXYNE_UI_MENU_PAD = 9,
+    AXYNE_UI_MENU_ITEM_RADIUS = 3,
+    AXYNE_UI_MENU_COUNT = 7
+};
+
+/* Top-level menu titles in bar order, UTF-8. The mnemonic is the letter in
+ * the trailing "(X)" of the label; popup contents stay per platform because
+ * their actions are routed differently (NSMenu selectors, WM_COMMAND ids). */
+typedef struct AxyneMenuTitle {
+    const char *label;
+    char mnemonic;
+} AxyneMenuTitle;
+
+static inline const AxyneMenuTitle *axyne_ui_menu_title(size_t index)
+{
+    static const AxyneMenuTitle titles[AXYNE_UI_MENU_COUNT] = {
+        { "\xed\x8c\x8c\xec\x9d\xbc(F)", 'F' },
+        { "\xed\x8e\xb8\xec\xa7\x91(E)", 'E' },
+        { "\xeb\xb3\xb4\xea\xb8\xb0(V)", 'V' },
+        { "\xeb\xb9\x8c\xeb\x93\x9c(B)", 'B' },
+        { "\xeb\x94\x94\xeb\xb2\x84\xea\xb7\xb8(D)", 'D' },
+        { "\xeb\x8f\x84\xea\xb5\xac(T)", 'T' },
+        { "\xeb\x8f\x84\xec\x9b\x80\xeb\xa7\x90(H)", 'H' }
+    };
+    return index < AXYNE_UI_MENU_COUNT ? &titles[index] : NULL;
+}
 
 /* File-type chip: a rounded rectangle filled with the badge colour at
  * AXYNE_UI_BADGE_ALPHA_PERCENT, no border, and a bold label centred both
