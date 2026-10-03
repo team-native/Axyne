@@ -1,8 +1,12 @@
 if(WIN32)
-    add_library(axyne_ui STATIC "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_windows.c")
+    add_library(axyne_ui STATIC
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/syntax.c")
     target_link_libraries(axyne_ui PRIVATE user32 gdi32 comdlg32 shell32 ole32)
 elseif(APPLE)
-    add_library(axyne_ui STATIC "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_macos.m")
+    add_library(axyne_ui STATIC
+        "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_macos.m"
+        "${CMAKE_CURRENT_LIST_DIR}/syntax.c")
     target_link_libraries(axyne_ui PRIVATE "-framework AppKit")
 endif()
 
