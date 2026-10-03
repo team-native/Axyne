@@ -2251,11 +2251,13 @@ static intptr_t axyne_windows_action_message(void *editor, unsigned int message,
 }
 
 /* Editor commands apply to the source editor only: not without a document
- * and not while the terminal input owns the keyboard. */
+ * and not while a terminal text control (input or output) owns the keyboard,
+ * matching the macOS rule that any other text responder keeps the shortcut. */
 static int axyne_editor_actionable(AxyneWindowState *state)
 {
+    HWND focus = GetFocus();
     return state->editor != NULL && axyne_active(state) != NULL &&
-           GetFocus() != state->terminal_input;
+           focus != state->terminal_input && focus != state->terminal_output;
 }
 
 static int axyne_preferences_file_exists(const AxyneWindowState *state)
