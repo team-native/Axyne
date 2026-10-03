@@ -171,9 +171,11 @@ int main(void)
         for (int i = 0; i < 12; ++i)
             CHECK(axyne_documents_new(documents, NULL, NULL) == AXYNE_STATUS_OK);
         [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
-        CHECK(NSMinX([view tabFrameAtIndex:0]) < AXYNE_UI_SIDEBAR);
+        /* Index 0 is the hidden startup buffer; the first shown tab is 1. */
+        CHECK(NSIsEmptyRect([view tabFrameAtIndex:0]));
+        CHECK(NSMinX([view tabFrameAtIndex:1]) < AXYNE_UI_SIDEBAR);
         [view scrollTabsBy:-100000];
-        CHECK(NSMinX([view tabFrameAtIndex:0]) == AXYNE_UI_SIDEBAR);
+        CHECK(NSMinX([view tabFrameAtIndex:1]) == AXYNE_UI_SIDEBAR);
         [view scrollTabsBy:100000];
         CHECK(NSMaxX([view tabFrameAtIndex:documents->count - 1]) <= 800);
         [view release];

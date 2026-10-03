@@ -160,6 +160,17 @@ typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
 }
 @end
 
+/* Tab to activate when `closing` goes away: the next shown tab, else the
+ * previous shown one, else any neighbour (only hidden buffers remain). */
+static size_t axyne_macos_successor_index(const AxyneDocumentSet *set, size_t closing)
+{
+    for (size_t next = closing + 1; next < set->count; ++next)
+        if (!axyne_document_tab_hidden(&set->documents[next])) return next;
+    for (size_t previous = closing; previous > 0; --previous)
+        if (!axyne_document_tab_hidden(&set->documents[previous - 1])) return previous - 1;
+    return closing + 1 < set->count ? closing + 1 : closing - 1;
+}
+
 static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 {
     return [NSColor colorWithCalibratedRed:red / 255.0
@@ -924,8 +935,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     BOOL terminalActive = _terminalProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     if (action == @selector(saveDocument:) ||
-        action == @selector(saveDocumentAs:) ||
-        action == @selector(closeDocument:)) return hasDocument;
+        action == @selector(saveDocumentAs:))
+        return hasDocument;
+    if (action == @selector(closeDocument:))
+        return hasDocument && !axyne_document_tab_hidden(document);
     if (action == @selector(buildDocument:) ||
         action == @selector(runDocument:))
         return hasDocument && !terminalActive && !debuggerActive;
@@ -2394,12 +2407,16 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
 {
     if (index >= _documents.count) return;
     if (![self captureEditor]) return;
+    /* A hidden placeholder has no tab to close; closing it would only swap
+     * one empty buffer for another or yank the user to another document. */
+    if (axyne_document_tab_hidden(&_documents.documents[index])) return;
     if (![self confirmCloseDocumentAtIndex:index]) return;
     /* Prepare the replacement before dropping the last tab. Allocation or
      * native initialization failure must leave the current document open. */
     if (_documents.count == 1) {
         size_t replacement;
-        if (axyne_documents_new(&_documents, &replacement, NULL) != AXYNE_STATUS_OK)
+        if (axyne_documents_new_placeholder(&_documents, &replacement, NULL) !=
+            AXYNE_STATUS_OK)
             return;
         if (![self loadActiveDocument]) {
             (void)axyne_documents_close(&_documents, replacement, NULL);
@@ -2407,7 +2424,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
             return;
         }
     } else if (_documents.active_index == index) {
-        size_t successor = index + 1 < _documents.count ? index + 1 : index - 1;
+        size_t successor = axyne_macos_successor_index(&_documents, index);
         if (![self selectDocumentAtIndex:successor]) return;
     }
     AxyneDocument *doc = &_documents.documents[index];
@@ -2620,6 +2637,7 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
     if (point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.x >= [self sidebarWidth]) {
         for (size_t index = 0; index < _documents.count; ++index) {
+            if (axyne_document_tab_hidden(&_documents.documents[index])) continue;
             NSRect tab = [self tabFrameAtIndex:index];
             if (!NSPointInRect(point, tab)) continue;
             if (![self captureEditor]) return;
@@ -3575,6 +3593,8 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     NSFont *font = [NSFont systemFontOfSize:12];
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
+        /* An untouched empty Untitled buffer has no tab and takes no width. */
+        if (axyne_document_tab_hidden(doc)) continue;
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         CGFloat nameWidth = [title sizeWithAttributes:@{NSFontAttributeName:font}].width;
         /* 14 padding, badge, 8 gap, name, 8 gap, close glyph, 14 padding. */
@@ -3588,8 +3608,14 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
 
 - (void)scrollTabsBy:(CGFloat)delta
 {
-    if (_documents.count == 0) { _tabScroll = 0; return; }
-    NSRect last = [self tabFrameAtIndex:_documents.count - 1];
+    NSRect last = NSZeroRect;
+    for (size_t i = _documents.count; i > 0; --i) {
+        if (!axyne_document_tab_hidden(&_documents.documents[i - 1])) {
+            last = [self tabFrameAtIndex:i - 1];
+            break;
+        }
+    }
+    if (NSIsEmptyRect(last)) { _tabScroll = 0; return; }
     CGFloat maximum = MAX(0, NSMaxX(last) + _tabScroll - NSWidth([self bounds]));
     _tabScroll = MIN(maximum, MAX(0, _tabScroll + delta));
     /* Redraw only: layout reveals the active tab and would undo manual scroll. */
@@ -3649,7 +3675,8 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
             [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
         [button setNeedsDisplay:YES];
     }
-    if (_documents.count != 0) {
+    if (_documents.count != 0 && _documents.active_index < _documents.count &&
+        !axyne_document_tab_hidden(&_documents.documents[_documents.active_index])) {
         NSRect active = [self tabFrameAtIndex:_documents.active_index];
         if (NSMaxX(active) > width) _tabScroll += NSMaxX(active) - width;
         else if (NSMinX(active) < [self sidebarWidth])
@@ -3792,6 +3819,7 @@ static CGFloat axyne_macos_tab_badge_width(const char *title)
     NSRectClip(NSMakeRect([self sidebarWidth], AXYNE_CONTENT_TOP, MAX(0, width - [self sidebarWidth]), AXYNE_TABS));
     for (size_t i = 0; i < _documents.count; ++i) {
         AxyneDocument *doc = &_documents.documents[i];
+        if (axyne_document_tab_hidden(doc)) continue;
         NSRect frame = [self tabFrameAtIndex:i];
         if (NSMaxX(frame) <= [self sidebarWidth] || NSMinX(frame) >= width) continue;
         BOOL active = i == _documents.active_index;
