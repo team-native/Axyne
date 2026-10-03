@@ -140,7 +140,16 @@ static NSColor *axyne_preference_color(uint32_t value);
         if ((modifiers & NSEventModifierFlagShift) != 0) [shortcut appendString:@"⇧"];
         if ((modifiers & NSEventModifierFlagOption) != 0) [shortcut appendString:@"⌥"];
         if ((modifiers & NSEventModifierFlagControl) != 0) [shortcut appendString:@"⌃"];
-        [shortcut appendString:[key uppercaseString]];
+        unichar keyCode = [key characterAtIndex:0];
+        NSString *keyLabel = nil;
+        switch (keyCode) {
+            case NSF5FunctionKey: keyLabel = @"F5"; break;
+            case NSF6FunctionKey: keyLabel = @"F6"; break;
+            case NSF9FunctionKey: keyLabel = @"F9"; break;
+            case NSF10FunctionKey: keyLabel = @"F10"; break;
+            default: keyLabel = [key uppercaseString]; break;
+        }
+        [shortcut appendString:keyLabel];
         NSDictionary *shortcutAttributes = @{
             NSFontAttributeName:[NSFont systemFontOfSize:11],
             NSForegroundColorAttributeName:axyne_preference_color(0x8b919b)
@@ -190,11 +199,18 @@ static void axyne_style_popup_menu(NSMenu *menu)
     [menu setDelegate:delegate];
     [menu setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
     [menu setAutoenablesItems:YES];
-    for (NSMenuItem *item in [menu itemArray]) {
+    NSArray *items = [[menu itemArray] copy];
+    for (NSUInteger index = 0; index < [items count]; ++index) {
+        NSMenuItem *item = [items objectAtIndex:index];
         if ([item isSeparatorItem]) {
+            NSMenuItem *replacement = [[[NSMenuItem alloc] initWithTitle:@""
+                action:nil keyEquivalent:@""] autorelease];
             AxyneMenuSeparatorView *separator = [[[AxyneMenuSeparatorView alloc]
                 initWithFrame:NSMakeRect(0, 0, 280, 8)] autorelease];
-            [item setView:separator];
+            [replacement setEnabled:NO];
+            [replacement setView:separator];
+            [menu removeItemAtIndex:index];
+            [menu insertItem:replacement atIndex:index];
             continue;
         }
         if ([item submenu] != nil) axyne_style_popup_menu([item submenu]);
@@ -202,6 +218,7 @@ static void axyne_style_popup_menu(NSMenu *menu)
             initWithMenuItem:item] autorelease];
         [item setView:view];
     }
+    [items release];
 }
 
 static NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
@@ -3410,6 +3427,10 @@ static void axyne_install_menu(NSApplication *application,
                 action:@selector(toggleBreakpoint:)
                 keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSF9FunctionKey]];
             [toggle setTarget:workspace];
+            [start setKeyEquivalentModifierMask:0];
+            [pause setKeyEquivalentModifierMask:0];
+            [next setKeyEquivalentModifierMask:0];
+            [toggle setKeyEquivalentModifierMask:0];
         } else if ([title hasPrefix:@"보기"]) {
             NSArray *panels = @[@"출력", @"문제", @"터미널"];
             for (NSInteger i = 0; i < (NSInteger)[panels count]; ++i) {
