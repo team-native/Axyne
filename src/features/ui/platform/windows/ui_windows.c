@@ -4868,7 +4868,8 @@ static void axyne_palette_run_command(HWND window, AxyneWindowState *state,
     if ((id == AXYNE_PALETTE_COMMAND_BUILD || id == AXYNE_PALETTE_COMMAND_RUN) &&
         !axyne_toolbar_enabled(state, message)) return;
     if (id >= AXYNE_PALETTE_COMMAND_GIT_STATUS && id <= AXYNE_PALETTE_COMMAND_GIT_UNSTAGE_ALL &&
-        (state->explorer.root == NULL || state->git_process != NULL)) {
+        (state->explorer.root == NULL || state->git_process != NULL ||
+         state->git_batch_busy)) {
         MessageBoxW(window, state->explorer.root == NULL
             ? L"Open a workspace folder before using Git commands."
             : L"A Git command is already running.", L"Axyne - Git",
