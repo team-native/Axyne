@@ -86,7 +86,44 @@ int axyne_explorer_is_expanded(const AxyneExplorer *explorer,
                                const char *utf8_path)
 {
     if (explorer == NULL || utf8_path == NULL) return 0;
+    if (explorer->root != NULL && strcmp(explorer->root, utf8_path) == 0)
+        return 1;
     return axyne_explorer_path_is_expanded(explorer, utf8_path);
+}
+
+int axyne_explorer_is_root_node(const AxyneExplorerNode *node)
+{
+    return node != NULL && node->depth == 0;
+}
+
+size_t axyne_explorer_pinned_ancestors(const AxyneExplorer *explorer,
+                                       size_t first_row, size_t max,
+                                       size_t *out)
+{
+    size_t chain[64];
+    size_t found = 0, total = 0, depth, i, keep;
+    if (explorer == NULL || out == NULL || max == 0 ||
+        first_row >= explorer->count || first_row == 0) return 0;
+    depth = explorer->nodes[first_row].depth;
+    /* Ancestors are the nearest preceding rows of strictly smaller depth.
+       Only the nearest `max` are kept, so a bounded buffer is enough. */
+    for (i = first_row; i > 0 && depth > 0; --i) {
+        const AxyneExplorerNode *candidate = &explorer->nodes[i - 1];
+        if (candidate->depth < depth) {
+            depth = candidate->depth;
+            ++total;
+            if (found < sizeof(chain) / sizeof(chain[0])) chain[found++] = i - 1;
+        }
+    }
+    keep = total < max ? total : max;
+    if (keep > found) keep = found;
+    for (i = 0; i < keep; ++i) out[i] = chain[keep - 1 - i];
+    return keep;
+}
+
+size_t axyne_explorer_scroll_target(size_t index)
+{
+    return index > AXYNE_EXPLORER_MAX_PINNED ? index - AXYNE_EXPLORER_MAX_PINNED : 0;
 }
 
 int axyne_explorer_is_safe_child_name(const char *utf8_name)
@@ -598,7 +635,8 @@ AxyneStatus axyne_explorer_toggle(AxyneExplorer *explorer, size_t index,
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
     node = &explorer->nodes[index];
-    if (node->kind != AXYNE_FILE_KIND_DIRECTORY) {
+    if (node->kind != AXYNE_FILE_KIND_DIRECTORY ||
+        axyne_explorer_is_root_node(node)) {
         axyne_explorer_ok(error);
         return AXYNE_STATUS_OK;
     }
