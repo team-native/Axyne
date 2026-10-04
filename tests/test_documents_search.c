@@ -11,6 +11,7 @@ int axyne_test_documents_search(const char *root)
     char alpha[512], beta_directory[512], beta[512], binary[512];
     char git_directory[512], git_file[512];
     char saved[512], build_directory[512], nested_git[512];
+    char root_store[512], nested_store[512];
     AxyneExplorer explorer = {0};
     size_t node_index = 0;
     int saw_build = 0, saw_nested = 0;
@@ -49,6 +50,13 @@ int axyne_test_documents_search(const char *root)
     AXYNE_TEST_CHECK(axyne_test_path(nested_git, sizeof(nested_git),
                                      beta_directory, ".git"));
     AXYNE_TEST_CHECK(axyne_test_write(nested_git, "gitdir: elsewhere needle\n"));
+    /* Finder bookkeeping files are hidden at any depth. */
+    AXYNE_TEST_CHECK(axyne_test_path(root_store, sizeof(root_store), root,
+                                     ".DS_Store"));
+    AXYNE_TEST_CHECK(axyne_test_write(root_store, "needle store\n"));
+    AXYNE_TEST_CHECK(axyne_test_path(nested_store, sizeof(nested_store),
+                                     beta_directory, ".DS_Store"));
+    AXYNE_TEST_CHECK(axyne_test_write(nested_store, "needle store\n"));
     AXYNE_TEST_CHECK(axyne_fs_write_file(binary, "needle\0hidden", 13, NULL) ==
                      AXYNE_STATUS_OK);
 
@@ -87,6 +95,7 @@ int axyne_test_documents_search(const char *root)
             size_t root_length = strlen(root);
             if (strncmp(below_root, root, root_length) == 0)
                 below_root += root_length;
+            AXYNE_TEST_CHECK(strstr(below_root, ".DS_Store") == NULL);
             if (strstr(below_root, ".git") != NULL)
                 fprintf(stderr, "FAIL search listed repository metadata: %s\n",
                         results.items[result_index].path);
@@ -101,6 +110,11 @@ int axyne_test_documents_search(const char *root)
     axyne_search_paths_destroy(paths, path_count);
 
     AXYNE_TEST_CHECK(axyne_explorer_is_hidden_name(".git"));
+    AXYNE_TEST_CHECK(axyne_explorer_is_hidden_name(".DS_Store"));
+    AXYNE_TEST_CHECK(!axyne_explorer_is_hidden_name(".ds_store") &&
+                     !axyne_explorer_is_hidden_name("DS_Store") &&
+                     !axyne_explorer_is_hidden_name(".DS_Store.bak") &&
+                     !axyne_explorer_is_hidden_name("Thumbs.db"));
     AXYNE_TEST_CHECK(!axyne_explorer_is_hidden_name(".gitignore") &&
                      !axyne_explorer_is_hidden_name("git") &&
                      !axyne_explorer_is_hidden_name(NULL));
@@ -126,6 +140,7 @@ int axyne_test_documents_search(const char *root)
             fprintf(stderr, "FAIL explorer row %zu lists %s\n", node_index,
                     node->path);
         AXYNE_TEST_CHECK(strcmp(node->name, ".git") != 0);
+        AXYNE_TEST_CHECK(strcmp(node->name, ".DS_Store") != 0);
         if (strcmp(node->name, "build") == 0) {
             saw_build = 1;
             AXYNE_TEST_CHECK(axyne_explorer_is_dimmed(node));
@@ -139,7 +154,60 @@ int axyne_test_documents_search(const char *root)
                 "saw_nested=%d\n", explorer.count, saw_build, saw_nested);
     AXYNE_TEST_CHECK(saw_build && saw_nested);
     AXYNE_TEST_CHECK(!axyne_explorer_is_dimmed(NULL));
+
+    /* The root row is a header: always expanded, toggling it is a no-op. */
+    {
+        size_t before = explorer.count;
+        AXYNE_TEST_CHECK(axyne_explorer_is_root_node(&explorer.nodes[0]) &&
+                         !axyne_explorer_is_root_node(&explorer.nodes[1]) &&
+                         !axyne_explorer_is_root_node(NULL));
+        AXYNE_TEST_CHECK(axyne_explorer_is_expanded(&explorer, root));
+        AXYNE_TEST_STATUS(axyne_explorer_toggle(&explorer, 0, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(explorer.count == before &&
+                         axyne_explorer_is_expanded(&explorer, root) &&
+                         explorer.expanded_count == 0);
+    }
     axyne_explorer_destroy(&explorer);
+
+    /* Sticky ancestors over a hand-built tree:
+     * 0 root / 1 a / 2 b / 3 c / 4 d.txt / 5 e.txt (c) / 6 f (b) /
+     * 7 g.txt (f) / 8 h.txt (a) / 9 z.txt (root) */
+    {
+        static const size_t depths[10] = {0, 1, 2, 3, 4, 4, 3, 4, 2, 1};
+        AxyneExplorerNode nodes[10];
+        AxyneExplorer tree = {0};
+        size_t pinned[AXYNE_EXPLORER_MAX_PINNED], count, i;
+        for (i = 0; i < 10; ++i) {
+            nodes[i].name = "n"; nodes[i].path = "p";
+            nodes[i].kind = AXYNE_FILE_KIND_DIRECTORY;
+            nodes[i].depth = depths[i];
+        }
+        tree.nodes = nodes; tree.count = 10;
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 0, 3, pinned) == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 1, 3, pinned) == 1 &&
+                         pinned[0] == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 5, 3, pinned) == 3 &&
+                         pinned[0] == 1 && pinned[1] == 2 && pinned[2] == 3);
+        /* Deeper than the limit keeps the nearest ancestors. */
+        count = axyne_explorer_pinned_ancestors(&tree, 5, 2, pinned);
+        AXYNE_TEST_CHECK(count == 2 && pinned[0] == 2 && pinned[1] == 3);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 4, 3, pinned) == 3 &&
+                         pinned[0] == 1 && pinned[2] == 3);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 7, 3, pinned) == 3 &&
+                         pinned[0] == 1 && pinned[1] == 2 && pinned[2] == 6);
+        /* A sibling branch does not leak: 8 is a child of a (1), not of c/f. */
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 8, 3, pinned) == 2 &&
+                         pinned[0] == 0 && pinned[1] == 1);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 9, 3, pinned) == 1 &&
+                         pinned[0] == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 10, 3, pinned) == 0 &&
+                         axyne_explorer_pinned_ancestors(NULL, 1, 3, pinned) == 0 &&
+                         axyne_explorer_pinned_ancestors(&tree, 5, 0, pinned) == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_scroll_target(2) == 0 &&
+                         axyne_explorer_scroll_target(3) == 0 &&
+                         axyne_explorer_scroll_target(10) == 7);
+    }
 
     AXYNE_TEST_STATUS(axyne_documents_initialize(&documents, &error),
                       AXYNE_STATUS_OK);
