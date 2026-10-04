@@ -5416,6 +5416,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
         [self setNeedsDisplay:YES];
         break;
     case AXYNE_PALETTE_COMMAND_CLEAR_OUTPUT: [self clearOutput:nil]; break;
+    case AXYNE_PALETTE_COMMAND_CONFIGURE_RUNNER: [self configureRunnerAction:nil]; break;
     case AXYNE_PALETTE_COMMAND_NONE:
     case AXYNE_PALETTE_COMMAND_QUICK_FILE:
     case AXYNE_PALETTE_COMMAND_GO_TO_LINE:
@@ -5661,7 +5662,7 @@ static void axyne_install_menu(NSApplication *application,
                 action:@selector(buildDocument:) keyEquivalent:@"b"];
             NSMenuItem *run = [submenu addItemWithTitle:@"실행"
                 action:@selector(runDocument:) keyEquivalent:@"r"];
-            NSMenuItem *configure = [submenu addItemWithTitle:@"실행 구성…"
+            NSMenuItem *configure = [submenu addItemWithTitle:@"Runner 설정…"
                 action:@selector(configureRunnerAction:) keyEquivalent:@""];
             [build setTarget:workspace]; [run setTarget:workspace];
             [configure setTarget:workspace];
