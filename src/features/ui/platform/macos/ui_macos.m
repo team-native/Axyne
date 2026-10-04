@@ -1752,20 +1752,19 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [item setState:entries[i].checked ? NSControlStateValueOn : NSControlStateValueOff];
         [menu addItem:item];
     }
-    /* Anchor the menu's top-left corner under the button's bottom-left corner
-     * in screen coordinates, so the flipped/unflipped view difference cannot
-     * shift it. The chevron points up while the menu is open. */
+    /* Anchor the popup's top-left corner under the button's bottom-left
+     * corner in screen coordinates, so the flipped/unflipped view difference
+     * cannot shift it. The chevron points up while the popup is open; the
+     * popup's close callback flips it back. */
     NSRect inWindow = [button convertRect:[button bounds] toView:nil];
     NSRect onScreen = [[button window] convertRectToScreen:inWindow];
-    _buildMenuOpen = YES;
-    [self updateChromeTitles];
-    [button display];
-    [menu popUpMenuPositioningItem:nil
-        atLocation:NSMakePoint(NSMinX(onScreen), NSMinY(onScreen) - 2)
-        inView:nil];
-    _buildMenuOpen = NO;
-    [self updateChromeTitles];
-    [button setNeedsDisplay:YES];
+    [self closePopupMenu];
+    if ([self showPopupMenu:menu belowScreenRect:onScreen gap:AXYNE_POPUP_ANCHOR_GAP
+            selectFirst:NO]) {
+        _buildMenuOpen = YES;
+        [self updateChromeTitles];
+        [button display];
+    }
 }
 
 - (void)pickBuildTarget:(id)sender
