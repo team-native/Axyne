@@ -46,8 +46,10 @@ static char *axyne_explorer_strdup(const char *text)
 int axyne_explorer_is_hidden_name(const char *name)
 {
     /* Repository metadata belongs to the workspace, not the source tree.
-       ".git" is a directory in a clone and a file in a linked worktree. */
-    return name != NULL && strcmp(name, ".git") == 0;
+       ".git" is a directory in a clone and a file in a linked worktree.
+       ".DS_Store" is Finder bookkeeping and never user content. */
+    return name != NULL &&
+        (strcmp(name, ".git") == 0 || strcmp(name, ".DS_Store") == 0);
 }
 
 int axyne_explorer_is_dimmed(const AxyneExplorerNode *node)

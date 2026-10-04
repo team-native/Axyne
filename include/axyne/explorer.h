@@ -41,7 +41,7 @@ int axyne_explorer_is_expanded(const AxyneExplorer *explorer,
                                const char *utf8_path);
 /* Returns non-zero only for one safe, relative child name. */
 int axyne_explorer_is_safe_child_name(const char *utf8_name);
-/* Non-zero for entries the explorer and project search never list (.git). */
+/* Non-zero for entries the explorer and project search never list (.git, .DS_Store). */
 int axyne_explorer_is_hidden_name(const char *utf8_name);
 /* Non-zero for nodes drawn dimmed (a build/ folder below the root). */
 int axyne_explorer_is_dimmed(const AxyneExplorerNode *node);
