@@ -163,3 +163,25 @@ Branch `feature/editor-empty-state`. Shared rules: `axyne_documents_empty_state`
 | Explorer `.DS_Store` | Hidden in the Explorer by the separate `feature/explorer-polish` branch; not part of this one | USER | CONFIRMED |
 
 Units: shared binary detection and empty-state model with tests; shared guide rows with tests; macOS adapter; Windows adapter; this record.
+
+## Languages and build target
+
+Branch `feature/language-runners-core`. Shared rules (no UI): `include/axyne/language.h` (registry and `axyne_language_resolve_runner`), `include/axyne/build_target.h` (configuration, architecture, toolchain label, flag mapping), appended kinds in `include/axyne/runtime.h`; covered by `axyne-languages` and `axyne-build-target`. Runtimes are never bundled: discovery stays lazy and explicit (`axyne_runtime_discover`, two-second probe unchanged); the resolver only reads its result.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Language list | Python, TypeScript, JavaScript, Go, Rust, Slint, Kotlin, Java, Swift, plus the existing C and C++ | USER | CONFIRMED |
+| Runtime detection | Per language, detect presence and path only (`python3`/`python`, `node`, `tsc`, `go`, `cargo`/`rustc`, `slint-viewer`, `kotlinc`, `java`/`javac`, `swiftc`/`swift`, C/C++ compilers). Nothing is installed or bundled; a missing runtime yields a message such as `Go 런타임을 찾을 수 없습니다 (go)` | USER | CONFIRMED |
+| Build target dropdown | Configuration (Debug, Release) plus Architecture, with the architecture list limited by OS: Windows x64, x86, arm64; macOS arm64, x86_64. Default is Debug plus the host architecture | USER | CONFIRMED |
+| Toolchain label | Taken from the detected compiler executable: cl MSVC, clang clang, gcc/cc gcc, go Go, cargo/rustc Rust, kotlinc Kotlin, javac javac, swiftc Swift, python Python, node Node.js. Label form `Debug · x64 (MSVC)`, or `Debug · arm64` when the name is empty | USER | CONFIRMED |
+| Extension mapping | py; js mjs cjs jsx; ts tsx mts; go; rs; slint; kt kts; java; swift; c; cpp cc cxx (case-insensitive; `h` is not mapped) | ASSUMED | ASSUMED |
+| Command templates | Argv vectors with `{file} {dir} {out} {name}`, no shell, working directory is the file's directory. Interpreters run the file; C, C++, Swift, rustc and Kotlin build to `{out}` (`<dir>/<name>`, `.exe` on Windows) then run it; `go run`; Rust uses cargo only when `Cargo.toml` sits next to the file and cargo is found, otherwise rustc; Java is `javac -d {dir}` then `java -cp {dir} {name}` (no package support); Swift falls back to the `swift` interpreter when `swiftc` is missing | ASSUMED | ASSUMED |
+| TypeScript | `tsc` compile (ES2020, commonjs, `--skipLibCheck`) then `node` on the emitted `.js` (`.mjs` for `.mts`); no `npx tsx`. `tsx` and `jsx` files are mapped but need JSX configuration the template does not provide | ASSUMED | ASSUMED |
+| Kotlin | `.kt`: `kotlinc -include-runtime -d {out}.jar` then `java -jar`; `.kts`: `kotlinc -script`. No separate `kotlin` launcher kind | ASSUMED | ASSUMED |
+| Architecture applicability | Applies to C, C++, Go, Rust, Swift. Java has configuration only; Python, JavaScript, TypeScript, Slint, Kotlin have neither, so the UI hides the groups it reports as not applicable (`axyne_language_build_target_support`) | ASSUMED | ASSUMED |
+| Flag mapping | gcc/clang `-g -O0` / `-O2`, macOS `-arch arm64\|x86_64`, elsewhere `-m64`/`-m32`; MSVC `/Zi /Od` / `/O2`, architecture recorded only; Go `GOOS`/`GOARCH` env and `-gcflags=all=-N -l` in Debug; Rust `--release` and `--target <triple>`; Swift `-Onone -g` / `-O` and macOS `-target <arch>-apple-macosx`; javac `-g` / `-g:none` | ASSUMED | ASSUMED |
+| Manual runner | The globally configured runner (`_actionRunner`) still overrides: when it has an executable the plan has no build step, the run step is copied verbatim (no placeholder substitution) and the language is not consulted | USER (existing behaviour) / ASSUMED (no substitution) | CONFIRMED / ASSUMED |
+
+Known gaps: a Windows `tsc.cmd` or `kotlinc.bat` is started as a plain executable in build/run steps (only the version probe goes through `cmd.exe`), a non-host architecture may build but not run, `kotlinc` can exceed the two-second probe on a cold JVM start, and none of the new runtime kinds was exercised against real installed toolchains.
+
+Units: runtime kinds; build target model with tests; language registry and resolver with tests; this record.
