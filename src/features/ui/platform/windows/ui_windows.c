@@ -4064,6 +4064,28 @@ static wchar_t *axyne_target_label(AxyneWindowState *state)
 
 enum { AXYNE_TOOLBAR_BUTTONS = 9, AXYNE_TOOLBAR_SEARCH_WIDTH = 340 };
 
+/* Build-target chevron: the same vector shape in both states (text glyphs of
+ * different fonts differed in size). 8px wide, 4px high, round caps. */
+#define AXYNE_CHEVRON_W 8
+static void axyne_draw_chevron(HDC dc, int left, int cy, COLORREF color, int up)
+{
+    LOGBRUSH brush;
+    HPEN pen, old_pen;
+    POINT pts[3];
+    int tip = up ? -2 : 2;
+    brush.lbStyle = BS_SOLID; brush.lbColor = color; brush.lbHatch = 0;
+    pen = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
+                       1, &brush, 0, NULL);
+    if (pen == NULL) return;
+    pts[0].x = left;                    pts[0].y = cy - tip;
+    pts[1].x = left + AXYNE_CHEVRON_W / 2; pts[1].y = cy + tip;
+    pts[2].x = left + AXYNE_CHEVRON_W;  pts[2].y = cy - tip;
+    old_pen = (HPEN)SelectObject(dc, pen);
+    Polyline(dc, pts, 3);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+}
+
 /* Figma toolbar (38px): 8px inset, three 28px file tools, 4px, undo/redo,
  * 4px, then run chips separated by 8px. The search field is right aligned
  * and disappears when it would collide with the chips. Painting and click
@@ -4087,7 +4109,7 @@ static void axyne_toolbar_layout(AxyneWindowState *state, int width,
     x = 162;
     rects[5].left = x;
     rects[5].right = x + 10 + axyne_measure_text(state->font_small, L"▷") + 6 +
-        runner_width + 6 + axyne_measure_text(state->font_tiny, L"⌄") + 10;
+        runner_width + 6 + AXYNE_CHEVRON_W + 10;
     /* On a narrow toolbar the selector shrinks (its label clips) so Build
      * and Run stay in view. */
     target_limit = 14 + axyne_measure_text(state->font_small, L"빌드  Ctrl+B") + 14 + 8 +
@@ -5540,7 +5562,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         {
             RECT rect = rects[5];
             RECT part = {rect.left + 10, rect.top, rect.right, rect.bottom};
-            int arrow = axyne_measure_text(state->font_tiny, L"⌄");
+            int arrow = AXYNE_CHEVRON_W;
             axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 6,
                              AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
             axyne_text_rect(dc, state->font_small, AXYNE_TEXT, part, L"▷", DT_LEFT);
@@ -5548,10 +5570,9 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             part.right = rect.right - 10 - arrow - 6;
             axyne_text_rect(dc, state->font_small, AXYNE_MUTED, part,
                             runner != NULL ? runner : L"Debug", DT_LEFT);
-            part.left = rect.right - 10 - arrow;
-            part.right = rect.right - 10;
-            axyne_text_rect(dc, state->font_tiny, AXYNE_MUTED, part,
-                            state->build_menu_open ? L"⌃" : L"⌄", DT_LEFT);
+            axyne_draw_chevron(dc, rect.right - 10 - arrow,
+                               (rect.top + rect.bottom) / 2, AXYNE_MUTED,
+                               state->build_menu_open);
         }
         {
             COLORREF color = axyne_toolbar_enabled(state, AXYNE_CMD_BUILD)
