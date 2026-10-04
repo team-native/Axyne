@@ -228,10 +228,18 @@ static wchar_t *quote_arg(const wchar_t *arg)
     return quoted;
 }
 
-static int append_command(wchar_t **command, size_t *used, size_t *capacity,
-                          const wchar_t *argument)
+static int is_command_processor(const wchar_t *path)
 {
-    wchar_t *quoted = quote_arg(argument);
+    const wchar_t *base = path, *cursor;
+    for (cursor = path; *cursor != L'\0'; ++cursor)
+        if (*cursor == L'\\' || *cursor == L'/') base = cursor + 1;
+    return _wcsicmp(base, L"cmd.exe") == 0;
+}
+
+static int append_command(wchar_t **command, size_t *used, size_t *capacity,
+                          const wchar_t *argument, int raw)
+{
+    wchar_t *quoted = raw ? _wcsdup(argument) : quote_arg(argument);
     size_t quoted_length, need, next, bytes;
     wchar_t *grown;
     if (quoted == NULL) return 0;
@@ -368,10 +376,14 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     if (exe == NULL || (spec->working_directory != NULL && cwd == NULL)) {
         result = axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Process paths must be valid UTF-8"); goto done;
     }
-    if (!append_command(&command, &used, &capacity, exe)) goto oom;
+    if (!append_command(&command, &used, &capacity, exe, 0)) goto oom;
     for (i = 0; i < spec->argument_count; ++i) {
         wchar_t *arg = to_wide(spec->arguments[i]);
-        int ok = arg != NULL && append_command(&command, &used, &capacity, arg);
+        /* The command string after "cmd.exe ... /c" is already in cmd.exe
+         * syntax (""script" "arg""); backslash-escaping it would break it. */
+        int raw = i > 0 && is_command_processor(exe) &&
+                  _stricmp(spec->arguments[i - 1], "/c") == 0;
+        int ok = arg != NULL && append_command(&command, &used, &capacity, arg, raw);
         free(arg);
         if (!ok) { result = axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid process argument"); goto done; }
     }
