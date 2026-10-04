@@ -114,3 +114,17 @@ Feature: an editor-style preview mode for files opened from the Explorer. Shared
 - Document model and tests: `preview` flag, open/replace/revert/promote helpers, `tests/test_preview_tabs.c`.
 - macOS adapter: Explorer single click, `openPath:asPreview:`, italic title measurement and drawing.
 - Windows adapter: Explorer single click, `axyne_open_document_ex`, italic font creation, measurement and drawing.
+
+## Editor scrollbars
+
+Reference: Figma `7J8SYhLpybJgpxD3qFqL5u`, main window `6:399`, editor `6:470`. The design contains no scrollbar node: code lines simply run past the 917px code area, so no visible track is drawn. Both platforms therefore keep the scrollers unobtrusive and themed.
+
+Root causes (macOS screenshot): the Scintilla Cocoa view used the system's legacy scrollers, which draw an opaque light track under the aqua appearance and place the horizontal track right of the line-number ruler; and Scintilla's default scroll width of 2000 kept the horizontal bar permanently scrollable.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Scroll width | `SCI_SETSCROLLWIDTH 1` plus `SCI_SETSCROLLWIDTHTRACKING 1`, re-applied with every preferences apply (which also runs after each document load) so the width shrinks per document; the horizontal bar appears only when a line is wider than the view | IMPLEMENTATION | CONFIRMED |
+| macOS scroller style | Overlay scrollers, autohiding, so no opaque track and no blank corner beside the ruler; applied even when the system setting is "always show scroll bars" | DELEGATED | ASSUMED |
+| macOS appearance | `NSAppearanceNameDarkAqua` on the Scintilla view and its scroll view when `editor_background` luminance is below 128, else Aqua; light knob on dark editors, dark knob on light; guarded by `respondsToSelector:` (10.14+) | DELEGATED | ASSUMED |
+| Windows scrollbars | `SetWindowTheme` with `DarkMode_Explorer` (dark editor background) or `Explorer`, loaded lazily from uxtheme; ignored on systems without it | DELEGATED | ASSUMED |
+| Theme source | Editor background of the active theme, not the system appearance, so a dark theme under a light system keeps dark scrollers | DELEGATED | ASSUMED |
