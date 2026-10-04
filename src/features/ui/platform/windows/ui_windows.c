@@ -197,9 +197,10 @@ typedef struct AxyneWindowState {
  * layout, paint and hit-test computation shares these two sizes. */
 static int axyne_sidebar_size(const AxyneWindowState *state)
 {
-    return axyne_layout_clamp_sidebar(
-        state->sidebar_size > 0 ? state->sidebar_size : AXYNE_UI_SIDEBAR,
-        state->client_width);
+    int width = state->sidebar_size > 0 ? state->sidebar_size : AXYNE_UI_SIDEBAR;
+    /* Before the first layout the client size is unknown: keep the default. */
+    if (state->client_width <= 0) return width;
+    return axyne_layout_clamp_sidebar(width, state->client_width);
 }
 
 static int axyne_sidebar_width(const AxyneWindowState *state)
@@ -209,10 +210,11 @@ static int axyne_sidebar_width(const AxyneWindowState *state)
 
 static int axyne_panel_height(const AxyneWindowState *state)
 {
+    int height = state->panel_size > 0 ? state->panel_size : AXYNE_UI_PANEL;
     if (state->panel_hidden) return 0;
-    return axyne_layout_clamp_panel(
-        state->panel_size > 0 ? state->panel_size : AXYNE_UI_PANEL,
-        state->client_height, AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
+    if (state->client_height <= 0) return height;
+    return axyne_layout_clamp_panel(height, state->client_height,
+        AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
 }
 
 /* The two user-draggable borders: 1 = explorer/editor, 2 = bottom panel top,
