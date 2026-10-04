@@ -33,6 +33,7 @@
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
 #include "../../preferences_window.h"
+#include "../../app_dialogs.h"
 
 enum {
     AXYNE_TOP_MENU = AXYNE_UI_MENU,
@@ -1630,174 +1631,99 @@ static char *axyne_edit_utf8(HWND edit)
     return utf8;
 }
 
-static void axyne_runner_copy_wide(const char *value, wchar_t *buffer,
-                                   size_t capacity)
+/* "a\nb\nc" for the dialog; NULL on allocation failure. */
+static char *axyne_runner_join_lines(char **values, size_t count)
 {
-    wchar_t *wide;
-    if (buffer == NULL || capacity == 0) return;
-    buffer[0] = L'\0';
-    if (value == NULL) return;
-    wide = axyne_wide(value);
-    if (wide != NULL && wcslen(wide) < capacity)
-        (void)wcscpy_s(buffer, capacity, wide);
-    free(wide);
-}
-
-static void axyne_runner_copy_lines_wide(char **values, size_t count,
-                                         wchar_t *buffer, size_t capacity)
-{
-    size_t i, used = 0;
-    if (buffer == NULL || capacity == 0) return;
-    buffer[0] = L'\0';
+    size_t i, length = 1;
+    char *text, *cursor;
+    for (i = 0; i < count; ++i) length += strlen(values[i]) + 1;
+    text = (char *)malloc(length);
+    if (text == NULL) return NULL;
+    cursor = text;
     for (i = 0; i < count; ++i) {
-        wchar_t *wide = axyne_wide(values[i]);
-        size_t length;
-        if (wide == NULL) continue;
-        length = wcslen(wide);
-        if (used != 0 && used + 1 < capacity) buffer[used++] = L'\r';
-        if (used != 0 && used + 1 < capacity) buffer[used++] = L'\n';
-        if (used + length >= capacity) {
-            free(wide);
-            break;
-        }
-        memcpy(buffer + used, wide, (length + 1) * sizeof(*wide));
-        used += length;
-        free(wide);
+        size_t n = strlen(values[i]);
+        if (i != 0) *cursor++ = '\n';
+        memcpy(cursor, values[i], n);
+        cursor += n;
     }
+    *cursor = '\0';
+    return text;
 }
 
+/* Validates and stores the dialog's values in the runner configuration; on
+ * failure writes the Korean reason into `message`. */
+static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues *values,
+                                    char *message, size_t capacity)
+{
+    AxyneRunnerConfig *config = (AxyneRunnerConfig *)context;
+    char *executable = _strdup(values->executable != NULL ? values->executable : "");
+    char *arguments = _strdup(values->arguments != NULL ? values->arguments : "");
+    char *working_directory = _strdup(
+        values->working_directory != NULL ? values->working_directory : "");
+    char *environment = _strdup(values->environment != NULL ? values->environment : "");
+    char **argument_values = NULL;
+    char **environment_values = NULL;
+    size_t argument_count = 0;
+    size_t environment_count = 0;
+    AxyneRunnerSpec spec = {0};
+    AxyneError error = {0};
+    int accepted = 0;
+    message[0] = '\0';
+    if (executable == NULL || arguments == NULL || working_directory == NULL ||
+        environment == NULL ||
+        !axyne_runner_split_lines(arguments, &argument_values, &argument_count) ||
+        !axyne_runner_split_lines(environment, &environment_values, &environment_count)) {
+        (void)snprintf(message, capacity,
+                       "Runner 설정이 올바르지 않습니다. 설정을 읽지 못했습니다.");
+    } else if (executable[0] == '\0') {
+        (void)snprintf(message, capacity,
+                       "Runner 설정이 올바르지 않습니다. 실행 파일을 입력하세요.");
+    } else {
+        AxyneStatus status;
+        spec.executable = executable;
+        spec.arguments = (const char *const *)argument_values;
+        spec.argument_count = argument_count;
+        spec.working_directory = working_directory[0] != '\0' ? working_directory : NULL;
+        spec.environment = (const char *const *)environment_values;
+        spec.environment_count = environment_count;
+        status = axyne_runner_configure(config, &spec, &error);
+        if (status == AXYNE_STATUS_OK)
+            accepted = 1;
+        else
+            (void)snprintf(message, capacity, "Runner 설정이 올바르지 않습니다. %s",
+                           status == AXYNE_STATUS_INVALID_ARGUMENT
+                               ? "환경 변수는 NAME=VALUE 형식이어야 하며 이름이 겹칠 수 없습니다."
+                               : "설정을 적용하지 못했습니다.");
+    }
+    free(executable);
+    free(arguments);
+    free(working_directory);
+    free(environment);
+    axyne_runner_values_free(argument_values, argument_count);
+    axyne_runner_values_free(environment_values, environment_count);
+    return accepted;
+}
+
+/* Build > Runner 설정: the preferences-style dialog (app_dialogs.h). */
 static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
 {
-    enum {
-        AXYNE_RUNNER_EXECUTABLE_EDIT = 1001,
-        AXYNE_RUNNER_ARGUMENTS_EDIT = 1002,
-        AXYNE_RUNNER_WORKING_DIRECTORY_EDIT = 1003,
-        AXYNE_RUNNER_ENVIRONMENT_EDIT = 1004
-    };
-    wchar_t executable[32768] = L"";
-    wchar_t arguments[32768] = L"";
-    wchar_t working_directory[32768] = L"";
-    wchar_t environment[32768] = L"";
-    HWND dialog;
-    HWND executable_edit;
-    HWND arguments_edit;
-    HWND working_directory_edit;
-    HWND environment_edit;
-    int accepted = 0;
+    char *arguments, *environment;
+    AxyneRunnerDialogValues initial;
+    AxyneRunnerDialogHooks hooks;
+    int accepted;
     if (config == NULL) return 0;
-    axyne_runner_copy_wide(config->executable, executable,
-                           sizeof(executable) / sizeof(*executable));
-    axyne_runner_copy_lines_wide(config->arguments, config->argument_count,
-                                 arguments, sizeof(arguments) / sizeof(*arguments));
-    axyne_runner_copy_wide(config->working_directory, working_directory,
-                           sizeof(working_directory) / sizeof(*working_directory));
-    axyne_runner_copy_lines_wide(config->environment, config->environment_count,
-                                 environment, sizeof(environment) / sizeof(*environment));
-    dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
-        L"#32770", L"Configure Build/Run Runner",
-        WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
-        640, 380, owner, NULL, GetModuleHandleW(NULL), NULL);
-    if (dialog == NULL) return 0;
-    CreateWindowW(L"STATIC", L"Executable", WS_CHILD | WS_VISIBLE,
-        12, 12, 120, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
-    executable_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", executable,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        140, 10, 470, 24, dialog, (HMENU)AXYNE_RUNNER_EXECUTABLE_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"STATIC", L"Arguments (one per line)", WS_CHILD | WS_VISIBLE,
-        12, 45, 180, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
-    arguments_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", arguments,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-        WS_VSCROLL, 12, 66, 598, 78, dialog, (HMENU)AXYNE_RUNNER_ARGUMENTS_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"STATIC", L"Working directory (optional)", WS_CHILD | WS_VISIBLE,
-        12, 155, 200, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
-    working_directory_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
-        working_directory, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        12, 176, 598, 24, dialog, (HMENU)AXYNE_RUNNER_WORKING_DIRECTORY_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"STATIC", L"Environment overrides (NAME=VALUE per line)",
-        WS_CHILD | WS_VISIBLE, 12, 211, 320, 20, dialog, NULL,
-        GetModuleHandleW(NULL), NULL);
-    environment_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", environment,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-        WS_VSCROLL, 12, 232, 598, 78, dialog,
-        (HMENU)AXYNE_RUNNER_ENVIRONMENT_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-        BS_DEFPUSHBUTTON, 440, 325, 78, 28, dialog, (HMENU)IDOK,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        528, 325, 82, 28, dialog, (HMENU)IDCANCEL,
-        GetModuleHandleW(NULL), NULL);
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-    SetFocus(executable_edit);
-    while (IsWindow(dialog)) {
-        MSG message;
-        int result = GetMessageW(&message, NULL, 0, 0);
-        if (result <= 0) break;
-        if (message.message == WM_COMMAND &&
-            (LOWORD(message.wParam) == IDOK ||
-             LOWORD(message.wParam) == IDCANCEL)) {
-            if (LOWORD(message.wParam) == IDCANCEL) {
-                DestroyWindow(dialog);
-                break;
-            }
-            {
-                char *executable_utf8 = axyne_edit_utf8(executable_edit);
-                char *arguments_utf8 = axyne_edit_utf8(arguments_edit);
-                char *working_directory_utf8 = axyne_edit_utf8(working_directory_edit);
-                char *environment_utf8 = axyne_edit_utf8(environment_edit);
-                char **argument_values = NULL;
-                char **environment_values = NULL;
-                size_t argument_count = 0;
-                size_t environment_count = 0;
-                AxyneRunnerSpec spec = {0};
-                AxyneError error;
-                AxyneStatus status = AXYNE_STATUS_OK;
-                if (executable_utf8 == NULL || executable_utf8[0] == '\0' ||
-                    arguments_utf8 == NULL || working_directory_utf8 == NULL ||
-                    environment_utf8 == NULL ||
-                    !axyne_runner_split_lines(arguments_utf8, &argument_values,
-                                              &argument_count) ||
-                    !axyne_runner_split_lines(environment_utf8, &environment_values,
-                                              &environment_count)) {
-                    status = AXYNE_STATUS_OUT_OF_MEMORY;
-                    (void)snprintf(error.message, sizeof(error.message),
-                                   "Unable to read runner configuration.");
-                } else {
-                    spec.executable = executable_utf8;
-                    spec.arguments = (const char *const *)argument_values;
-                    spec.argument_count = argument_count;
-                    spec.working_directory = working_directory_utf8[0] != '\0'
-                        ? working_directory_utf8 : NULL;
-                    spec.environment = (const char *const *)environment_values;
-                    spec.environment_count = environment_count;
-                    status = axyne_runner_configure(config, &spec, &error);
-                }
-                free(executable_utf8);
-                free(arguments_utf8);
-                free(working_directory_utf8);
-                free(environment_utf8);
-                axyne_runner_values_free(argument_values, argument_count);
-                axyne_runner_values_free(environment_values, environment_count);
-                if (status == AXYNE_STATUS_OK) {
-                    accepted = 1;
-                    DestroyWindow(dialog);
-                    break;
-                }
-                MessageBoxA(dialog, error.message[0] != '\0' ? error.message :
-                            "Invalid runner configuration.",
-                            "Axyne - Runner", MB_OK | MB_ICONERROR);
-            }
-        } else if (!IsDialogMessageW(dialog, &message)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
+    arguments = axyne_runner_join_lines(config->arguments, config->argument_count);
+    environment = axyne_runner_join_lines(config->environment, config->environment_count);
+    initial.executable = config->executable != NULL ? config->executable : "";
+    initial.arguments = arguments != NULL ? arguments : "";
+    initial.working_directory = config->working_directory != NULL
+        ? config->working_directory : "";
+    initial.environment = environment != NULL ? environment : "";
+    hooks.context = config;
+    hooks.save = axyne_runner_dialog_save;
+    accepted = axyne_runner_dialog_show(owner, &initial, &hooks);
+    free(arguments);
+    free(environment);
     return accepted;
 }
 
