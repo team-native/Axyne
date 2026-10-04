@@ -145,6 +145,32 @@ static const AxyneSyntaxLanguage languages[] = {
         "Array Dictionary Set Optional Void Any",
         NULL, "nil true false" },
       STYLES(cpp_styles) },
+    { "kotlin", "cpp",
+      { "as break by catch class companion constructor continue crossinline "
+        "data do dynamic else enum external fun get final finally for if "
+        "import in infix init inline inner interface internal is lateinit "
+        "noinline object open operator out override package private "
+        "protected public reified return sealed set super suspend tailrec "
+        "this throw try typealias val value var vararg when where while "
+        "abstract annotation const expect actual",
+        "Int Long Short Byte Float Double Boolean Char String Unit Any "
+        "Nothing Number Array List MutableList Map MutableMap Set "
+        "MutableSet Pair Triple Sequence IntArray",
+        NULL, "null true false" },
+      STYLES(cpp_styles) },
+    { "slint", "cpp",
+      { "import export from component inherits global struct enum property "
+        "callback function pure public private protected in out in-out "
+        "animate states transitions for if else when return root parent "
+        "self this init changed forward-focus as",
+        "int float string bool length color brush image duration angle "
+        "percent physical-length relative-font-size easing "
+        "Window Dialog Rectangle Text Image TouchArea Button CheckBox "
+        "LineEdit TextInput Flickable VerticalLayout HorizontalLayout "
+        "GridLayout FocusScope Path PopupWindow Rectangle ComboBox Slider "
+        "Switch ScrollView ListView StandardButton",
+        NULL, "true false" },
+      STYLES(cpp_styles) },
     { "go", "cpp",
       { "break case chan const continue default defer else fallthrough for "
         "func go goto if import interface map package range return select "
@@ -228,6 +254,7 @@ static const ExtensionMap extensions[] = {
     { "js", "javascript" }, { "jsx", "javascript" }, { "mjs", "javascript" },
     { "cjs", "javascript" },
     { "ts", "typescript" }, { "tsx", "typescript" }, { "mts", "typescript" },
+    { "kt", "kotlin" }, { "kts", "kotlin" }, { "slint", "slint" },
     { "swift", "swift" }, { "go", "go" }, { "rs", "rust" },
     { "py", "python" }, { "pyw", "python" },
     { "json", "json" }, { "jsonc", "json" },
