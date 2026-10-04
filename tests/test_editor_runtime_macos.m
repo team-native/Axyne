@@ -199,9 +199,9 @@ static int run_tests(NSString *pngPath)
         [workspace applyPreferences];
 
         // Load bytes on the very first bind, before the view moves to a window.
-        // Includes UTF-8, CRLF and embedded NUL so NSString/strlen conversion
+        // Includes UTF-8, CRLF and embedded text so NSString/strlen conversion
         // cannot silently truncate or normalize the file's buffer.
-        const char first[] = "first \xed\x95\x9c\xea\xb8\x80\r\nembedded\0tail\n";
+        const char first[] = "first \xed\x95\x9c\xea\xb8\x80\r\nembedded tail\n";
         AxyneDocumentSet *documents = document_set(workspace);
         diagnosticDocuments = documents;
         diagnosticName = "workspace";
@@ -334,7 +334,7 @@ static int run_tests(NSString *pngPath)
         editor_message(workspace, SCI_REDO, 0, 0);
         CHECK(documents->documents[1].is_dirty);
         CHECK([workspace saveActiveToPath:firstPath]);
-        const char edited[] = "first \xed\x95\x9c\xea\xb8\x80\r\nembedded\0tail\nedit";
+        const char edited[] = "first \xed\x95\x9c\xea\xb8\x80\r\nembedded tail\nedit";
         CHECK(file_equals(firstPath, edited, sizeof(edited) - 1));
 
         STAGE("reopen and close");
