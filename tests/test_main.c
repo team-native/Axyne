@@ -25,6 +25,7 @@ int axyne_test_languages(const char *root);
 int axyne_test_build_selector(const char *root);
 int axyne_test_layout_metrics(const char *root);
 int axyne_test_shortcut_chips(const char *root);
+int axyne_test_popup_menu(const char *root);
 
 static unsigned long axyne_test_process_id(void)
 {
@@ -45,7 +46,7 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "exit-with") == 0)
         return atoi(argv[2]);
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|preview-tabs|palette-problems|palette-controller|problems-feed|outline|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips> <fixture-root> [source-root]\n", argv[0]);
+        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|preview-tabs|palette-problems|palette-controller|problems-feed|outline|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
     }
     written = snprintf(root, sizeof(root), "%s-%lu", argv[2],
@@ -88,6 +89,8 @@ int main(int argc, char **argv)
         return axyne_test_layout_metrics(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "shortcut-chips") == 0)
         return axyne_test_shortcut_chips(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (strcmp(argv[1], "popup-menu") == 0)
+        return axyne_test_popup_menu(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     fprintf(stderr, "unknown test case: %s\n", argv[1]);
     return EXIT_FAILURE;
 }
