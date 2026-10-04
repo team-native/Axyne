@@ -755,6 +755,9 @@ static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
     AxyneRuntimeList _runtimes;
     BOOL _runtimesDiscovered;
     BOOL _runtimeDiscoveryScheduled;
+    /* Plan whose run step starts when its build step exits with 0. */
+    AxyneLanguagePlan _pendingPlan;
+    BOOL _pendingRun;
     AxyneDebugger _debugger;
     AxyneProcess *_terminalProcess;
     AxyneProcess *_gitProcess;
@@ -1035,6 +1038,10 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)discoverRuntimes;
 - (void)scheduleRuntimeDiscovery;
 - (NSString *)buildTargetLabel;
+- (void)clearPendingRun;
+- (BOOL)startStep:(const AxyneLanguageStep *)step plan:(const AxyneLanguagePlan *)plan
+           action:(int)action clearOutput:(BOOL)clear;
+- (void)startAction:(BOOL)run;
 - (void)performExplorerOperation:(AxyneFileKind)kind;
 - (NSString *)askForText:(NSString *)title label:(NSString *)label;
 - (void)startTerminal:(id)sender;
@@ -1704,6 +1711,14 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (axyne_build_selector_apply(&_buildTarget,
             (AxyneBuildSelectorGroup)(tag / 1000), (int)(tag % 1000)))
         [self refreshActionControls];
+}
+
+- (void)clearPendingRun
+{
+    if (!_pendingRun) return;
+    axyne_language_plan_free(&_pendingPlan);
+    memset(&_pendingPlan, 0, sizeof(_pendingPlan));
+    _pendingRun = NO;
 }
 - (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
 - (void)selectPanel:(id)sender
@@ -4197,6 +4212,18 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     [_debugContinue setEnabled:NO];
     [_debugNext setEnabled:NO];
     [_debugBreakpoint setEnabled:NO];
+    if (_pendingRun) {
+        if (exitCode == 0 && _terminalProcess == NULL) {
+            /* The build succeeded: start the run step of the same plan. */
+            AxyneLanguagePlan plan = _pendingPlan;
+            memset(&_pendingPlan, 0, sizeof(_pendingPlan));
+            _pendingRun = NO;
+            (void)[self startStep:&plan.run plan:&plan action:2 clearOutput:NO];
+            axyne_language_plan_free(&plan);
+        } else {
+            [self clearPendingRun];
+        }
+    }
     [self refreshActionControls];
     [self setNeedsDisplay:YES];
 }
@@ -4424,23 +4451,60 @@ else [_terminalInput setStringValue:@""];
     return accepted;
 }
 
+- (BOOL)startStep:(const AxyneLanguageStep *)step plan:(const AxyneLanguagePlan *)plan
+           action:(int)action clearOutput:(BOOL)clear
+{
+    AxyneProcessSpec processSpec;
+    AxyneError error;
+    memset(&processSpec, 0, sizeof(processSpec));
+    processSpec.executable = step->executable;
+    processSpec.arguments = (const char *const *)step->arguments;
+    processSpec.argument_count = step->argument_count;
+    processSpec.working_directory = plan->working_directory;
+    processSpec.environment = (const char *const *)step->environment;
+    processSpec.environment_count = step->environment_count;
+    processSpec.on_output = axyne_macos_terminal_output;
+    processSpec.on_exit = axyne_macos_terminal_exit;
+    processSpec.user_data = self;
+    if (axyne_process_start(&processSpec, &_terminalProcess, &error) != AXYNE_STATUS_OK) {
+        _lastExitFailed = NO;
+        _hasExitStatus = NO;
+        [self terminalAppend:error.message length:strlen(error.message)
+                       stream:AXYNE_PROCESS_STDERR];
+        [self setNeedsDisplay:YES];
+        return NO;
+    }
+    const char *header = action == 2 ? "[run]\n" : "[build]\n";
+    if (clear) [_terminalOutput setString:[NSString stringWithUTF8String:header]];
+    else [self terminalAppend:header length:strlen(header) stream:AXYNE_PROCESS_STDOUT];
+    _activeAction = action;
+    _lastExitFailed = NO;
+    [_terminalStart setEnabled:NO];
+    [_terminalStop setEnabled:YES];
+    [self refreshActionControls];
+    [self setNeedsDisplay:YES];
+    return YES;
+}
+
+/* Build and Run resolve the active file's language, the build target and the
+ * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
+ * it. Run executes the build step first when the plan has one. */
 - (void)startAction:(BOOL)run
 {
     AxyneDocument *doc = [self activeDocument];
-    AxyneProcessSpec processSpec;
-    AxyneError error;
+    AxyneLanguagePlan plan;
+    char message[256];
     AxyneStatus status;
     if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
-        const char *message = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
-        [self terminalAppend:message length:strlen(message)
-                       stream:AXYNE_PROCESS_STDERR];
+        const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
+        [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
         return;
     }
     if (![self captureEditor]) return;
     if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty) {
         if (![self saveActive]) {
-            const char *message = "Save the active document before building or running.\n";
-            [self terminalAppend:message length:strlen(message)
+            const char *unsaved = "Save the active document before building or running.\n";
+            [self terminalAppend:unsaved length:strlen(unsaved)
                            stream:AXYNE_PROCESS_STDERR];
             return;
         }
@@ -4448,32 +4512,40 @@ else [_terminalInput setStringValue:@""];
         if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty)
             return;
     }
-    if (_actionRunner.executable == NULL) {
-        const char *message = "Configure the Build/Run Runner before building or running.\n";
-        [self terminalAppend:message length:strlen(message)
-                       stream:AXYNE_PROCESS_STDERR];
+    [self discoverRuntimes];
+    [self clearPendingRun];
+    memset(&plan, 0, sizeof(plan));
+    status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &_runtimes, &_buildTarget,
+        doc->path, _actionRunner.executable != NULL ? &_actionRunner : NULL,
+        &plan, message, sizeof(message));
+    if (status != AXYNE_STATUS_OK) {
+        /* Missing runtime or unknown language: the resolver's text goes to the
+         * output panel; there is no modal. */
+        const char *text = message[0] != '\0' ? message : "Build or run could not be started.";
+        NSString *line = [NSString stringWithFormat:@"%s\n", text];
+        const char *bytes = [line UTF8String];
+        [self terminalAppend:bytes length:strlen(bytes) stream:AXYNE_PROCESS_STDERR];
+        axyne_language_plan_free(&plan);
         return;
     }
-    status = axyne_runner_process_spec(&_actionRunner,
-            axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
-            &processSpec, &error);
-    if (status == AXYNE_STATUS_OK)
-        status = axyne_process_start(&processSpec, &_terminalProcess, &error);
-    if (status != AXYNE_STATUS_OK) {
-        _lastExitFailed = NO;
-        _hasExitStatus = NO;
-        [self terminalAppend:error.message length:strlen(error.message)
-                       stream:AXYNE_PROCESS_STDERR];
-        [self setNeedsDisplay:YES];
-    } else {
-        [_terminalOutput setString:(run ? @"[run]\n" : @"[build]\n")];
-        _activeAction = run ? 2 : 1;
-        _lastExitFailed = NO;
-        [_terminalStart setEnabled:NO];
-        [_terminalStop setEnabled:YES];
-        [self refreshActionControls];
-        [self setNeedsDisplay:YES];
+    if (!run && !plan.has_build && !plan.overridden) {
+        const char *none = "[build] 이 언어에는 빌드 단계가 없습니다.\n";
+        [_terminalOutput setString:@""];
+        [self terminalAppend:none length:strlen(none) stream:AXYNE_PROCESS_STDOUT];
+        axyne_language_plan_free(&plan);
+        return;
     }
+    /* Build: the build step (a manual runner has none and runs as before).
+     * Run: the build step first when there is one, then the run step. */
+    BOOL chain = run && plan.has_build;
+    const AxyneLanguageStep *first = plan.has_build && (!run || chain) ? &plan.build : &plan.run;
+    int action = (run && !chain) ? 2 : 1;
+    if ([self startStep:first plan:&plan action:action clearOutput:YES] && chain) {
+        _pendingPlan = plan; /* the pending run step owns the strings now */
+        _pendingRun = YES;
+        return;
+    }
+    axyne_language_plan_free(&plan);
 }
 
 - (void)buildDocument:(id)sender
@@ -4946,6 +5018,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     }
     axyne_runner_destroy(&_terminalRunner);
     axyne_runner_destroy(&_actionRunner);
+    [self clearPendingRun];
     axyne_runtime_free(&_runtimes);
     if (_watcher != NULL) {
         axyne_watcher_stop(_watcher);
