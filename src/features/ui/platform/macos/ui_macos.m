@@ -97,14 +97,18 @@ typedef struct AxyneMacGitBatch AxyneMacGitBatch;
 @property(nonatomic, retain) NSAttributedString *richTitle;
 @property(nonatomic, retain) NSAttributedString *trailingTitle;
 @property(nonatomic) CGFloat cornerRadius;
+@property(nonatomic) NSInteger chevronState; /* 0 none, 1 down, 2 up */
 @property(nonatomic) CGFloat contentInset;
 @property(nonatomic) BOOL leadingAligned;
 @end
 
 @implementation AxyneChromeButton
+/* Vector chevron (identical geometry for down/up) drawn at the right edge. */
+static const CGFloat kAxyneChevronWidth = 8, kAxyneChevronHeight = 4.5;
 @synthesize fillColor = _fillColor, labelColor = _labelColor;
 @synthesize strokeColor = _strokeColor, richTitle = _richTitle;
 @synthesize trailingTitle = _trailingTitle, cornerRadius = _cornerRadius;
+@synthesize chevronState = _chevronState;
 @synthesize contentInset = _contentInset, leadingAligned = _leadingAligned;
 - (instancetype)initWithFrame:(NSRect)frame
 {
@@ -119,7 +123,8 @@ typedef struct AxyneMacGitBatch AxyneMacGitBatch;
     CGFloat x = _leadingAligned ? _contentInset :
         MAX(_contentInset, (NSWidth(bounds) - size.width) / 2);
     CGFloat available = NSWidth(bounds) - x - _contentInset -
-        (trailing.width > 0 ? trailing.width + 8 : 0);
+        (trailing.width > 0 ? trailing.width + 8 : 0) -
+        (_chevronState != 0 ? kAxyneChevronWidth + 8 : 0);
     [NSGraphicsContext saveGraphicsState];
     if (![self isEnabled])
         CGContextSetAlpha([[NSGraphicsContext currentContext] CGContext], 0.45);
@@ -132,6 +137,27 @@ typedef struct AxyneMacGitBatch AxyneMacGitBatch;
         [_trailingTitle drawAtPoint:NSMakePoint(
             NSWidth(bounds) - _contentInset - trailing.width,
             (NSHeight(bounds) - trailing.height) / 2)];
+    if (_chevronState != 0) {
+        /* AppKit default (non-flipped) coordinates: y grows upwards, so the
+         * arms of a down chevron sit above its tip. */
+        NSColor *color = _labelColor != nil ? _labelColor : [NSColor labelColor];
+        CGFloat left = NSWidth(bounds) - _contentInset - kAxyneChevronWidth;
+        CGFloat mid = NSHeight(bounds) / 2;
+        CGFloat arm = _chevronState == 1 ? mid + kAxyneChevronHeight / 2
+                                         : mid - kAxyneChevronHeight / 2;
+        CGFloat tip = _chevronState == 1 ? mid - kAxyneChevronHeight / 2
+                                         : mid + kAxyneChevronHeight / 2;
+        if ([self isFlipped]) { CGFloat t = arm; arm = tip; tip = t; }
+        NSBezierPath *path = [NSBezierPath bezierPath];
+        [path moveToPoint:NSMakePoint(left, arm)];
+        [path lineToPoint:NSMakePoint(left + kAxyneChevronWidth / 2, tip)];
+        [path lineToPoint:NSMakePoint(left + kAxyneChevronWidth, arm)];
+        [path setLineWidth:1.3];
+        [path setLineCapStyle:NSLineCapStyleRound];
+        [path setLineJoinStyle:NSLineJoinStyleRound];
+        [color setStroke];
+        [path stroke];
+    }
     [NSGraphicsContext restoreGraphicsState];
 }
 - (void)drawRect:(NSRect)dirtyRect
@@ -1549,8 +1575,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         @[@"▷  ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted]])];
     /* Figma 6:399: the chevron sits at the right edge of the chip (10px inset),
      * not right after the label. */
-    [target setTrailingTitle:axyne_macos_segments(@[
-        @[_buildMenuOpen ? @"⌃" : @"⌄", [NSFont systemFontOfSize:10], muted]])];
+    [target setLabelColor:muted];
+    [target setChevronState:_buildMenuOpen ? 2 : 1];
     [run setContentInset:14];
     [run setRichTitle:axyne_macos_segments(@[
         @[@"▷  ", small, onAccent],
@@ -5117,9 +5143,9 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     /* Figma frame 6:399: the selector hugs "Debug · x64 (MSVC)" (about 190px).
      * On a narrow toolbar it shrinks (the title truncates) so Build and Run
      * stay in view. */
+    /* Chevron reserve: 8px glyph + 8px gap (same as drawRichTitleInBounds). */
     CGFloat targetWidth = MIN(240, MAX(150, ceil([[(AxyneChromeButton *)_targetButton
-        richTitle] size].width) + ceil([[(AxyneChromeButton *)_targetButton
-        trailingTitle] size].width) + 30));
+        richTitle] size].width) + 8 + 8 + 30));
     targetWidth = MIN(targetWidth, MAX(96, width - x - 8 - 96 - 94 - 8));
     [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, targetWidth, 26)]; x += targetWidth + 8;
     [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
