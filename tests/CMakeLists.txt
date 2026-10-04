@@ -10,6 +10,8 @@ add_executable(axyne_tests
     test_palette_controller.c
     test_problems_feed.c
     test_outline.c
+    test_binary_files.c
+    test_empty_state.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -78,10 +80,19 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/problems-feed"
 )
 add_test(
+    NAME axyne-binary-files
+    COMMAND $<TARGET_FILE:axyne_tests> binary-files
+            "${AXYNE_TEST_FIXTURE_DIR}/binary-files"
+)
+add_test(
+    NAME axyne-empty-state
+    COMMAND $<TARGET_FILE:axyne_tests> empty-state
+            "${AXYNE_TEST_FIXTURE_DIR}/empty-state"
+)
+add_test(
     NAME axyne-outline
     COMMAND $<TARGET_FILE:axyne_tests> outline
             "${AXYNE_TEST_FIXTURE_DIR}/outline"
->>>>>>> d689c4c (feat: add explorer outline model with geometry and caret helpers)
 )
 set_tests_properties(
     axyne-git-repair
@@ -94,6 +105,8 @@ set_tests_properties(
     axyne-palette-controller
     axyne-problems-feed
     axyne-outline
+    axyne-binary-files
+    axyne-empty-state
     PROPERTIES TIMEOUT 60
 )
 

@@ -192,6 +192,77 @@ size_t axyne_documents_visible_count(const AxyneDocumentSet *set)
     return visible;
 }
 
+int axyne_documents_empty_state(const AxyneDocumentSet *set)
+{
+    if (set == NULL || set->count == 0 || set->active_index >= set->count)
+        return 1;
+    return axyne_document_tab_hidden(&set->documents[set->active_index]);
+}
+
+int axyne_bytes_look_binary(const void *data, size_t length, int truncated)
+{
+    const unsigned char *p = (const unsigned char *)data;
+    size_t i = 0;
+    if (p == NULL) return 0;
+    for (size_t k = 0; k < length; ++k)
+        if (p[k] == 0) return 1;
+    while (i < length) {
+        unsigned char c = p[i];
+        size_t need;
+        unsigned long cp;
+        if (c < 0x80) { ++i; continue; }
+        if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1fu; }
+        else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0x0fu; }
+        else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x07u; }
+        else return 1;
+        for (size_t k = 1; k <= need; ++k) {
+            if (i + k >= length) {
+                /* Cut off by the sniff window: fine if the prefix so far is
+                 * still a plausible sequence (continuations checked below). */
+                if (truncated) return 0;
+                return 1;
+            }
+            if ((p[i + k] & 0xc0u) != 0x80u) return 1;
+            cp = (cp << 6) | (unsigned long)(p[i + k] & 0x3fu);
+        }
+        if ((need == 1 && cp < 0x80) || (need == 2 && cp < 0x800) ||
+            (need == 3 && cp < 0x10000) || (cp >= 0xd800 && cp <= 0xdfff) ||
+            cp > 0x10ffff) return 1;
+        i += need + 1;
+    }
+    return 0;
+}
+
+AxyneStatus axyne_document_file_is_binary(const char *path, int *is_binary,
+                                          AxyneError *error)
+{
+    char *head = NULL;
+    size_t length = 0;
+    int truncated = 0;
+    if (path == NULL || path[0] == '\0' || is_binary == NULL)
+        return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                          "A non-empty file path is required");
+    *is_binary = 0;
+    AxyneStatus status = axyne_fs_read_head(path, AXYNE_BINARY_SNIFF_BYTES,
+                                            &head, &length, &truncated, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    *is_binary = axyne_bytes_look_binary(head, length, truncated);
+    axyne_fs_free(head);
+    axyne_success(error);
+    return AXYNE_STATUS_OK;
+}
+
+static AxyneStatus axyne_reject_binary(const char *path, AxyneError *error)
+{
+    int binary = 0;
+    AxyneStatus status = axyne_document_file_is_binary(path, &binary, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    if (binary)
+        return axyne_fail(error, AXYNE_STATUS_BINARY,
+                          "Binary files cannot be opened as text");
+    return AXYNE_STATUS_OK;
+}
+
 AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *path,
                                  size_t *index, AxyneError *error)
 {
@@ -208,9 +279,11 @@ AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *path,
             return AXYNE_STATUS_OK;
         }
     }
+    AxyneStatus status = axyne_reject_binary(path, error);
+    if (status != AXYNE_STATUS_OK) return status;
     char *contents = NULL;
     size_t length = 0;
-    AxyneStatus status = axyne_fs_read_file(path, &contents, &length, error);
+    status = axyne_fs_read_file(path, &contents, &length, error);
     if (status != AXYNE_STATUS_OK) return status;
     AxyneDocument doc = {0};
     doc.path = axyne_copy(path, strlen(path));
@@ -299,7 +372,9 @@ AxyneStatus axyne_documents_open_preview(AxyneDocumentSet *set,
         }
     }
     AxyneDocument doc;
-    AxyneStatus status = axyne_document_load(path, &doc, error);
+    AxyneStatus status = axyne_reject_binary(path, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    status = axyne_document_load(path, &doc, error);
     if (status != AXYNE_STATUS_OK) return status;
     doc.preview = 1;
     size_t old = axyne_documents_preview_index(set);

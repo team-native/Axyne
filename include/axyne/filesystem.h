@@ -33,6 +33,14 @@ typedef struct AxyneDirectoryList {
  * axyne_fs_free. */
 AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
                                size_t *length, AxyneError *error);
+/* Reads at most max_bytes from the start of the file without touching the
+ * rest (no size query, no whole-file allocation). *length is the number of
+ * bytes returned (<= max_bytes) and *truncated is 1 when the file continues
+ * beyond them. The buffer has a trailing NUL; release it with axyne_fs_free.
+ * truncated may be NULL. */
+AxyneStatus axyne_fs_read_head(const char *utf8_path, size_t max_bytes,
+                               char **contents, size_t *length, int *truncated,
+                               AxyneError *error);
 /* Atomically replaces the destination with exactly length bytes, or creates
  * it if absent. A failed write preserves the previous destination. Concurrent
  * successful writes to the same existing file are last-writer-wins. On POSIX,
