@@ -16,6 +16,7 @@ add_executable(axyne_tests
     test_languages.c
     test_build_selector.c
     test_layout_metrics.c
+    test_shortcut_chips.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -100,6 +101,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/empty-state"
 )
 add_test(
+    NAME axyne-shortcut-chips
+    COMMAND $<TARGET_FILE:axyne_tests> shortcut-chips
+            "${AXYNE_TEST_FIXTURE_DIR}/shortcut-chips"
+)
+add_test(
     NAME axyne-outline
     COMMAND $<TARGET_FILE:axyne_tests> outline
             "${AXYNE_TEST_FIXTURE_DIR}/outline"
@@ -136,6 +142,7 @@ set_tests_properties(
     axyne-binary-files
     axyne-empty-state
     axyne-layout-metrics
+    axyne-shortcut-chips
     PROPERTIES TIMEOUT 60
 )
 
