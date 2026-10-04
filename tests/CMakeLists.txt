@@ -14,6 +14,7 @@ add_executable(axyne_tests
     test_empty_state.c
     test_build_target.c
     test_languages.c
+    test_build_selector.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -103,6 +104,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/build-target"
 )
 add_test(
+    NAME axyne-build-selector
+    COMMAND $<TARGET_FILE:axyne_tests> build-selector
+            "${AXYNE_TEST_FIXTURE_DIR}/build-selector"
+)
+add_test(
     NAME axyne-languages
     COMMAND $<TARGET_FILE:axyne_tests> languages
             "${AXYNE_TEST_FIXTURE_DIR}/languages"
@@ -110,6 +116,7 @@ add_test(
 set_tests_properties(
     axyne-build-target
     axyne-languages
+    axyne-build-selector
     axyne-git-repair
     axyne-preview-tabs
     axyne-documents-search

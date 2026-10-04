@@ -322,6 +322,10 @@ static int test_commands(void)
     CHECK(list.items[0].payload == AXYNE_PALETTE_COMMAND_RUN);
     CHECK_STR(list.items[0].detail, "F5");
     axyne_palette_list_destroy(&list);
+    /* The Runner settings row is reachable but never outranks Run. */
+    CHECK(axyne_palette_build_commands("runner", 0, &list, NULL) == AXYNE_STATUS_OK);
+    CHECK(list.count >= 1 && list.items[0].payload == AXYNE_PALETTE_COMMAND_CONFIGURE_RUNNER);
+    axyne_palette_list_destroy(&list);
     CHECK(axyne_palette_build_commands("run", 1, &list, NULL) == AXYNE_STATUS_OK);
     CHECK_STR(list.items[0].detail, "\xE2\x8C\x98" "R");
     axyne_palette_list_destroy(&list);

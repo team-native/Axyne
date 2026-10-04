@@ -281,7 +281,9 @@ static const AxynePaletteCommand command_table[] = {
     { AXYNE_PALETTE_COMMAND_PANEL_TERMINAL, "터미널 패널 선택", "terminal panel show",
       { 0, NULL, 0, NULL } },
     { AXYNE_PALETTE_COMMAND_CLEAR_OUTPUT, "출력 지우기", "clear output",
-      { 0, NULL, 0, NULL } }
+      { 0, NULL, 0, NULL } },
+    { AXYNE_PALETTE_COMMAND_CONFIGURE_RUNNER, "실행 구성 (Runner 설정)",
+      "runner configure settings build run command", { 0, NULL, 0, NULL } }
 };
 
 #undef PRIMARY
