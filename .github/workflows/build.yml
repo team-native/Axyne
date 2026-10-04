@@ -39,7 +39,7 @@ jobs:
       - name: Build Windows
         if: runner.os == 'Windows'
         shell: bash
-        run: cmake --build build --config Release --parallel 2>&1 | tee build-win.log; r=${PIPESTATUS[0]}; if [ $r -ne 0 ]; then (grep -iE 'error|fatal|failed' build-win.log; tail -15 build-win.log) | head -40 | sed -e 's/%/%25/g' -e 's/\r//g' | while IFS= read -r l; do echo "::warning::$l"; done; fi; exit $r
+        run: set +e; cmake --build build --config Release --parallel 2>&1 | tee build-win.log; r=${PIPESTATUS[0]}; if [ $r -ne 0 ]; then (grep -iE 'error|fatal|failed' build-win.log; tail -15 build-win.log) | head -40 | sed -e 's/%/%25/g' -e 's/\r//g' | while IFS= read -r l; do echo "::warning::$l"; done; fi; exit $r
 
       - name: Build macOS
         if: runner.os == 'macOS'
