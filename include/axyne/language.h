@@ -88,6 +88,9 @@ typedef struct AxyneLanguagePlan {
  *   language       AXYNE_LANGUAGE_NONE derives it from the path.
  *   runtimes       result of axyne_runtime_discover (borrowed, may be NULL,
  *                  which counts as nothing installed).
+ *   file_path      absolute path of the source file. A relative path with a
+ *                  directory part ("src/a.c") is rejected with
+ *                  INVALID_ARGUMENT; a bare file name resolves against ".".
  *   target         build target (may be NULL: default for the host).
  *   manual_runner  the user's configured global runner (may be NULL). When it
  *                  has an executable it overrides everything: no build step,
@@ -129,6 +132,20 @@ AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
                                           AxyneLanguagePlan *plan,
                                           char *message, size_t message_size);
 void axyne_language_plan_free(AxyneLanguagePlan *plan);
+
+/* True for an executable path ending in .cmd or .bat (case-insensitive). */
+int axyne_language_is_command_script(const char *executable);
+
+/* When `windows` is non-zero and the step's executable is a .cmd/.bat script,
+ * rewrites the step to run it through `command_processor` (the full path of
+ * cmd.exe): arguments "/d" "/s" "/c" and one command string
+ * ""script" "arg1" "arg2"" (the process layer passes that argument to
+ * cmd.exe unescaped). Returns INVALID_ARGUMENT, leaving the step unchanged,
+ * when the script or an argument contains '"', '%' or a line break. Other
+ * steps and non-Windows platforms are left untouched. Exposed for tests. */
+AxyneStatus axyne_language_step_wrap_command_script(AxyneLanguageStep *step,
+                                                    const char *command_processor,
+                                                    int windows);
 
 /* Projects a step onto the existing runner contract. Strings are borrowed
  * from the plan. */

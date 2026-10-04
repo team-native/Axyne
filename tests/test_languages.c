@@ -1,5 +1,6 @@
 #include "test_support.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "axyne/language.h"
@@ -488,9 +489,97 @@ static int projection_checks(void)
     return 1;
 }
 
+static int command_script_checks(void)
+{
+    static const char *const cmd = "C:\\Windows\\System32\\cmd.exe";
+    AxyneLanguagePlan plan;
+    AxyneLanguageStep step;
+    Fake fake;
+    AxyneBuildTarget target = mac_arm_debug();
+    char message[256];
+    AxyneStatus status;
+    size_t i;
+
+    AXYNE_TEST_CHECK(axyne_language_is_command_script("C:\\n\\tsc.cmd"));
+    AXYNE_TEST_CHECK(axyne_language_is_command_script("kotlinc.BAT"));
+    AXYNE_TEST_CHECK(axyne_language_is_command_script("x.Cmd"));
+    AXYNE_TEST_CHECK(!axyne_language_is_command_script("tsc.cmd.exe"));
+    AXYNE_TEST_CHECK(!axyne_language_is_command_script("tsc"));
+    AXYNE_TEST_CHECK(!axyne_language_is_command_script(NULL));
+
+    /* Non-Windows platform flag: untouched even for a .cmd. */
+    fake_make(&fake, NULL, 0);
+    fake.items[2].executable = (char *)"C:\\Program Files\\nodejs\\tsc.cmd";
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_TYPESCRIPT, &fake, &target, "/p/a.ts", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(strcmp(plan.build.executable, "C:\\Program Files\\nodejs\\tsc.cmd") == 0);
+    AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&plan.build, cmd, 0), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(strcmp(plan.build.executable, "C:\\Program Files\\nodejs\\tsc.cmd") == 0);
+    AXYNE_TEST_CHECK(strcmp(plan.build.arguments[0], "--target") == 0);
+
+    /* Windows flag: wrapped, path with spaces, args stay inert quoted. */
+    {
+        size_t before = plan.build.argument_count;
+        char expected[1024] = "\"\"C:\\Program Files\\nodejs\\tsc.cmd\"";
+        for (i = 0; i < before; ++i) {
+            strcat(expected, " \""); strcat(expected, plan.build.arguments[i]); strcat(expected, "\"");
+        }
+        strcat(expected, "\"");
+        AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&plan.build, cmd, 1), AXYNE_STATUS_OK);
+        AXYNE_TEST_STREQ(plan.build.executable, cmd);
+        AXYNE_TEST_EQ_INT(plan.build.argument_count, 4);
+        AXYNE_TEST_STREQ(plan.build.arguments[0], "/d");
+        AXYNE_TEST_STREQ(plan.build.arguments[1], "/s");
+        AXYNE_TEST_STREQ(plan.build.arguments[2], "/c");
+        AXYNE_TEST_STREQ(plan.build.arguments[3], expected);
+        /* The run step (node) is not a script and is not wrapped. */
+        AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&plan.run, cmd, 1), AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(strcmp(plan.run.executable, cmd) != 0);
+    }
+    axyne_language_plan_free(&plan);
+
+    /* Metacharacters inside quotes stay arguments; '"' and '%' are refused. */
+    memset(&step, 0, sizeof(step));
+    step.executable = strdup("D:\\k\\kotlinc.bat");
+    step.arguments = (char **)calloc(2, sizeof(char *));
+    step.arguments[0] = strdup("a & b | c ^ d");
+    step.argument_count = 1;
+    AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&step, cmd, 1), AXYNE_STATUS_OK);
+    AXYNE_TEST_STREQ(step.arguments[3], "\"\"D:\\k\\kotlinc.bat\" \"a & b | c ^ d\"\"");
+    free(step.executable); for (i = 0; i < step.argument_count; ++i) free(step.arguments[i]); free(step.arguments);
+
+    memset(&step, 0, sizeof(step));
+    step.executable = strdup("D:\\k\\kotlinc.bat");
+    step.arguments = (char **)calloc(2, sizeof(char *));
+    step.arguments[0] = strdup("x\" & calc & \"");
+    step.argument_count = 1;
+    AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&step, cmd, 1), AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STREQ(step.executable, "D:\\k\\kotlinc.bat");
+    AXYNE_TEST_EQ_INT(step.argument_count, 1);
+    free(step.arguments[0]); step.arguments[0] = strdup("%PATH%");
+    AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&step, cmd, 1), AXYNE_STATUS_INVALID_ARGUMENT);
+    free(step.executable); free(step.arguments[0]); free(step.arguments);
+    status = axyne_language_step_wrap_command_script(NULL, cmd, 1);
+    AXYNE_TEST_STATUS(status, AXYNE_STATUS_INVALID_ARGUMENT);
+
+    /* Relative paths with a directory part are rejected; bare names are not. */
+    fake_make(&fake, NULL, 0);
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_PYTHON, &fake, &target, "src/a.py", &plan, message, sizeof(message)), AXYNE_STATUS_INVALID_ARGUMENT);
+    axyne_language_plan_free(&plan);
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_PYTHON, &fake, &target, "./a.py", &plan, message, sizeof(message)), AXYNE_STATUS_INVALID_ARGUMENT);
+    axyne_language_plan_free(&plan);
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_PYTHON, &fake, &target, "a.py", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    axyne_language_plan_free(&plan);
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_PYTHON, &fake, &target, "C:\\p\\a.py", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    axyne_language_plan_free(&plan);
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_PYTHON, &fake, &target, "C:/p/a.py", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    axyne_language_plan_free(&plan);
+    return 1;
+}
+
 int axyne_test_languages(const char *root)
 {
     (void)axyne_test_make_directory;
     return registry_checks() && scripting_checks() && compiled_checks(root) &&
-           jvm_swift_checks() && missing_and_override_checks() && projection_checks();
+           jvm_swift_checks() && missing_and_override_checks() && projection_checks() &&
+           command_script_checks();
 }
