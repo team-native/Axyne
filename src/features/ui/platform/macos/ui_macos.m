@@ -21,6 +21,8 @@
 #include "axyne/git.h"
 #include "axyne/lsp.h"
 #include "axyne/palette_controller.h"
+#include "axyne/language.h"
+#include "axyne/build_selector.h"
 #include "axyne/ui_design.h"
 #include "axyne/syntax.h"
 #include "Scintilla.h"
@@ -747,6 +749,12 @@ static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
     BOOL _loadingEditor;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
+    /* Build target selector. Lives in memory for the session; runtimes are
+     * discovered lazily (first editor file, click or build), never at startup. */
+    AxyneBuildTarget _buildTarget;
+    AxyneRuntimeList _runtimes;
+    BOOL _runtimesDiscovered;
+    BOOL _runtimeDiscoveryScheduled;
     AxyneDebugger _debugger;
     AxyneProcess *_terminalProcess;
     AxyneProcess *_gitProcess;
@@ -1022,6 +1030,11 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)clearOutput:(id)sender;
 - (void)quickFile:(id)sender;
 - (void)configureRunnerAction:(id)sender;
+- (void)showBuildTargetMenu:(id)sender;
+- (void)pickBuildTarget:(id)sender;
+- (void)discoverRuntimes;
+- (void)scheduleRuntimeDiscovery;
+- (NSString *)buildTargetLabel;
 - (void)performExplorerOperation:(AxyneFileKind)kind;
 - (NSString *)askForText:(NSString *)title label:(NSString *)label;
 - (void)startTerminal:(id)sender;
@@ -1324,6 +1337,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (self != nil) {
         _activeMenuIndex = -1;
         _hoverMenuIndex = -1;
+        _buildTarget = axyne_build_target_default();
         axyne_palette_ctl_init(&_palette, 1, axyne_macos_palette_document, self);
         if (axyne_explorer_initialize(&_explorer, NULL) != AXYNE_STATUS_OK ||
             axyne_documents_initialize(&_documents, NULL) != AXYNE_STATUS_OK) {
@@ -1391,7 +1405,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         _emptyGuideDirty = YES;
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
-        _targetButton = axyne_macos_toolbar_button(@"Runner 설정", self, @selector(configureRunnerAction:));
+        _targetButton = axyne_macos_toolbar_button(@"Debug", self, @selector(showBuildTargetMenu:));
         _searchButton = axyne_macos_toolbar_button(@"파일 이동", self, @selector(quickFile:));
         _buildButton = axyne_macos_toolbar_button(@"빌드  ⌘B", self, @selector(buildDocument:));
         _runButton = axyne_macos_toolbar_button(@"실행  F5", self, @selector(runDocument:));
@@ -1454,6 +1468,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [_undoButton setToolTip:@"실행 취소 (⌘Z)"];
         [_redoButton setToolTip:@"다시 실행 (⇧⌘Z)"];
         [_searchButton setToolTip:@"파일 이동 (⌘P)"];
+        [_targetButton setToolTip:@"빌드 대상 선택"];
         [self applyPreferences];
         [self refreshActionControls];
     }
@@ -1475,7 +1490,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     NSFont *small = [NSFont systemFontOfSize:11];
     [target setLeadingAligned:YES]; [target setContentInset:10];
     [target setRichTitle:axyne_macos_segments(@[
-        @[@"▷  ", small, text], @[[target title], small, muted],
+        @[@"▷  ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted],
         @[@"  ⌄", [NSFont systemFontOfSize:10], muted]])];
     [run setContentInset:14];
     [run setRichTitle:axyne_macos_segments(@[
@@ -1583,9 +1598,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [_saveButton setEnabled:document != NULL];
     [_undoButton setEnabled:document != NULL];
     [_redoButton setEnabled:document != NULL];
-    NSString *target = _actionRunner.executable == NULL ? @"Runner 설정" :
-        [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
-    [_targetButton setTitle:target];
+    [_targetButton setTitle:[self buildTargetLabel]];
+    if (document != NULL && document->path != NULL) [self scheduleRuntimeDiscovery];
     [self updateChromeTitles];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
@@ -1593,6 +1607,104 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (void)quickFile:(id)sender { (void)sender; [self openPaletteWithInput:@""]; }
 - (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
+
+/* ---- build target selector ------------------------------------------------ */
+
+- (AxyneLanguageId)activeLanguage
+{
+    AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
+    if (document == NULL || document->path == NULL) return AXYNE_LANGUAGE_NONE;
+    return axyne_language_for_path(document->path);
+}
+
+/* "Debug · arm64 (clang)"; without the parentheses until discovery ran. */
+- (NSString *)buildTargetLabel
+{
+    AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
+    char label[96];
+    if (axyne_build_selector_label([self activeLanguage],
+            _runtimesDiscovered ? &_runtimes : NULL, &_buildTarget,
+            document != NULL ? document->path : NULL,
+            label, sizeof(label)) != AXYNE_STATUS_OK)
+        (void)snprintf(label, sizeof(label), "%s",
+                       axyne_configuration_name(_buildTarget.configuration));
+    NSString *text = [NSString stringWithUTF8String:label];
+    return text != nil ? text : @"Debug";
+}
+
+/* Runs PATH discovery and the version probes (two seconds each at most) once
+ * per session, on the main thread. Callers: the first click on the selector,
+ * the first build or run, and the deferred first-editor-file trigger. */
+- (void)discoverRuntimes
+{
+    AxyneError error;
+    if (_runtimesDiscovered) return;
+    _runtimesDiscovered = YES;
+    memset(&_runtimes, 0, sizeof(_runtimes));
+    if (axyne_runtime_discover(&_runtimes, &error) != AXYNE_STATUS_OK)
+        axyne_runtime_free(&_runtimes);
+    [self refreshActionControls];
+}
+
+/* The first active editor file asks for discovery, but only after the current
+ * event so the window paints first. */
+- (void)scheduleRuntimeDiscovery
+{
+    if (_runtimesDiscovered || _runtimeDiscoveryScheduled) return;
+    _runtimeDiscoveryScheduled = YES;
+    [self retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self discoverRuntimes];
+        [self release];
+    });
+}
+
+- (void)showBuildTargetMenu:(id)sender
+{
+    NSButton *button = [sender isKindOfClass:[NSButton class]] ? (NSButton *)sender : _targetButton;
+    AxyneBuildSelectorEntry entries[AXYNE_BUILD_SELECTOR_MAX_ENTRIES];
+    [self discoverRuntimes];
+    size_t count = axyne_build_selector_entries([self activeLanguage], &_buildTarget, entries);
+    NSMenu *menu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
+    [menu setAutoenablesItems:NO];
+    if (count == 0) {
+        NSMenuItem *none = [[[NSMenuItem alloc] initWithTitle:@"이 언어는 빌드 설정이 없습니다"
+            action:NULL keyEquivalent:@""] autorelease];
+        [none setEnabled:NO];
+        [menu addItem:none];
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (i == 0 || entries[i].group != entries[i - 1].group) {
+            if (i != 0) [menu addItem:[NSMenuItem separatorItem]];
+            NSString *groupTitle = [NSString stringWithUTF8String:
+                axyne_build_selector_group_title(entries[i].group)];
+            NSMenuItem *header = [[[NSMenuItem alloc]
+                initWithTitle:groupTitle != nil ? groupTitle : @""
+                action:NULL keyEquivalent:@""] autorelease];
+            [header setEnabled:NO];
+            [menu addItem:header];
+        }
+        NSString *title = [NSString stringWithUTF8String:entries[i].title];
+        NSMenuItem *item = [[[NSMenuItem alloc] initWithTitle:title != nil ? title : @""
+            action:@selector(pickBuildTarget:) keyEquivalent:@""] autorelease];
+        [item setTarget:self];
+        [item setEnabled:YES];
+        [item setTag:(NSInteger)entries[i].group * 1000 + entries[i].value];
+        [item setState:entries[i].checked ? NSControlStateValueOn : NSControlStateValueOff];
+        [menu addItem:item];
+    }
+    [menu popUpMenuPositioningItem:nil
+        atLocation:NSMakePoint(0, [button isFlipped] ? NSHeight([button bounds]) + 2 : -2)
+        inView:button];
+}
+
+- (void)pickBuildTarget:(id)sender
+{
+    NSInteger tag = [sender tag];
+    if (axyne_build_selector_apply(&_buildTarget,
+            (AxyneBuildSelectorGroup)(tag / 1000), (int)(tag % 1000)))
+        [self refreshActionControls];
+}
 - (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
 - (void)selectPanel:(id)sender
 {
@@ -1913,7 +2025,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [button setFont:[NSFont systemFontOfSize:14]];
     NSColor *control = axyne_preference_color(axyne_macos_reference_surfaces(&_preferences.theme)
         ? 0x24262b : _preferences.theme.toolbar);
-    [(AxyneChromeButton *)_targetButton setFillColor:control];
+    [(AxyneChromeButton *)_targetButton setFillColor:axyne_macos_reference_surfaces(&_preferences.theme)
+        ? axyne_preference_color(0x25272d) : control];
+    [(AxyneChromeButton *)_targetButton setCornerRadius:6];
     [(AxyneChromeButton *)_buildButton setFillColor:control];
     [(AxyneChromeButton *)_buildButton setLabelColor:axyne_preference_color(_preferences.theme.text)];
     [(AxyneChromeButton *)_runButton setFillColor:axyne_preference_color(_preferences.theme.accent)];
@@ -4485,8 +4599,12 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         if (++icon == 3) x += 2;
     }
     x += 2;
-    CGFloat targetWidth = MIN(220, MAX(96, ceil([[(AxyneChromeButton *)_targetButton
+    /* Figma frame 6:399: the selector hugs "Debug · x64 (MSVC)" (about 190px).
+     * On a narrow toolbar it shrinks (the title truncates) so Build and Run
+     * stay in view. */
+    CGFloat targetWidth = MIN(240, MAX(150, ceil([[(AxyneChromeButton *)_targetButton
         richTitle] size].width) + 20));
+    targetWidth = MIN(targetWidth, MAX(96, width - x - 8 - 96 - 94 - 8));
     [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, targetWidth, 26)]; x += targetWidth + 8;
     [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
     [_runButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 86, 26)]; x += 94;
@@ -4828,6 +4946,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     }
     axyne_runner_destroy(&_terminalRunner);
     axyne_runner_destroy(&_actionRunner);
+    axyne_runtime_free(&_runtimes);
     if (_watcher != NULL) {
         axyne_watcher_stop(_watcher);
         axyne_watcher_release(_watcher);
