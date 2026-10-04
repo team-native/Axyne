@@ -51,7 +51,7 @@ jobs:
       - name: Run CTest on macOS
         if: runner.os == 'macOS'
         shell: bash
-        run: set +e; ctest --test-dir build --output-on-failure 2>&1 | tee mac-ctest.log; r=${PIPESTATUS[0]}; if [ $r -ne 0 ]; then grep -E 'FAIL|Expected|stage:|Assert|Exception|rror' mac-ctest.log | head -30 | sed -e 's/%/%25/g' | while IFS= read -r l; do echo "::warning::$l"; done; fi; exit $r
+        run: set +e; ctest --test-dir build --output-on-failure 2>&1 | tee mac-ctest.log; r=${PIPESTATUS[0]}; if [ $r -ne 0 ]; then grep -E 'FAIL|Assert|Exception|Segmentation|rror:' mac-ctest.log | head -8 | sed -e 's/%/%25/g' | while IFS= read -r l; do echo "::warning::$l"; done; fi; exit $r
 
       - name: Annotate failed tests
         if: failure()
