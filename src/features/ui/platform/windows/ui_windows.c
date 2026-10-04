@@ -3911,26 +3911,24 @@ static void axyne_menu_draw(AxyneWindowState *state, const DRAWITEMSTRUCT *draw)
 
 static const UINT AXYNE_TOOLBAR_COMMANDS[] = {
     AXYNE_CMD_NEW, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE, AXYNE_CMD_UNDO,
-    AXYNE_CMD_REDO, AXYNE_CMD_CONFIGURE_RUNNER, AXYNE_CMD_BUILD,
+    AXYNE_CMD_REDO, AXYNE_CMD_BUILD_TARGET, AXYNE_CMD_BUILD,
     AXYNE_CMD_RUN, AXYNE_CMD_QUICK_FILE
 };
 
-/* Run-target label: the configured runner's file name, or a prompt. The
- * caller owns the returned string. */
-static wchar_t *axyne_runner_label(const AxyneWindowState *state)
+/* Build-target label, "Debug · x64 (MSVC)", for the active file's language;
+ * no parentheses until runtime discovery has run. The caller owns the string. */
+static wchar_t *axyne_target_label(AxyneWindowState *state)
 {
-    const char *name;
-    const char *slash;
-    const char *backslash;
-    wchar_t *label;
-    if (state->action_runner.executable == NULL) return axyne_wide("실행 구성");
-    name = state->action_runner.executable;
-    slash = strrchr(name, '/');
-    backslash = strrchr(name, '\\');
-    if (slash != NULL) name = slash + 1;
-    if (backslash != NULL && backslash + 1 > name) name = backslash + 1;
-    label = axyne_wide(name);
-    return label != NULL ? label : axyne_wide("실행 구성");
+    AxyneDocument *doc = axyne_active_visible(state);
+    char label[96];
+    wchar_t *wide;
+    if (axyne_build_selector_label(axyne_active_language(state),
+            state->runtimes_discovered ? &state->runtimes : NULL, &state->build_target,
+            doc != NULL ? doc->path : NULL, label, sizeof(label)) != AXYNE_STATUS_OK)
+        (void)snprintf(label, sizeof(label), "%s",
+                       axyne_configuration_name(state->build_target.configuration));
+    wide = axyne_wide(label);
+    return wide != NULL ? wide : axyne_wide("Debug");
 }
 
 enum { AXYNE_TOOLBAR_BUTTONS = 9, AXYNE_TOOLBAR_SEARCH_WIDTH = 340 };
@@ -3943,11 +3941,12 @@ static void axyne_toolbar_layout(AxyneWindowState *state, int width,
                                  RECT rects[AXYNE_TOOLBAR_BUTTONS])
 {
     static const int icon_lefts[] = {8, 38, 68, 100, 130};
-    wchar_t *runner = axyne_runner_label(state);
+    wchar_t *runner = axyne_target_label(state);
     int runner_width = runner != NULL ? axyne_measure_text(state->font_small, runner) : 0;
     int x;
+    int target_limit;
     size_t i;
-    if (runner_width > 160) runner_width = 160;
+    if (runner_width > 220) runner_width = 220;
     for (i = 0; i < 5; ++i) {
         rects[i].left = icon_lefts[i];
         rects[i].right = icon_lefts[i] + 28;
@@ -3958,6 +3957,15 @@ static void axyne_toolbar_layout(AxyneWindowState *state, int width,
     rects[5].left = x;
     rects[5].right = x + 10 + axyne_measure_text(state->font_small, L"▷") + 6 +
         runner_width + 6 + axyne_measure_text(state->font_tiny, L"⌄") + 10;
+    /* On a narrow toolbar the selector shrinks (its label clips) so Build
+     * and Run stay in view. */
+    target_limit = 14 + axyne_measure_text(state->font_small, L"빌드  Ctrl+B") + 14 + 8 +
+        14 + axyne_measure_text(state->font_small, L"▷") + 6 +
+        axyne_measure_text(state->font_bold, L"실행  F5") + 14 + 8;
+    target_limit = width - 8 - target_limit - rects[5].left;
+    if (target_limit < 96) target_limit = 96;
+    if (rects[5].right - rects[5].left > target_limit)
+        rects[5].right = rects[5].left + target_limit;
     x = rects[5].right + 8;
     rects[6].left = x;
     rects[6].right = x + 14 + axyne_measure_text(state->font_small, L"빌드  Ctrl+B") + 14;
@@ -3988,6 +3996,57 @@ static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
         return axyne_active_visible(state) != NULL && state->terminal_process == NULL &&
             !axyne_debugger_is_active(&state->debugger);
     return 1;
+}
+
+/* Build-target dropdown: Configuration and Architecture groups with the
+ * current entries checked; the shared model decides which groups exist for
+ * the active file's language. A pick updates the toolbar label at once. */
+static void axyne_build_target_popup(HWND window, AxyneWindowState *state)
+{
+    AxyneBuildSelectorEntry entries[AXYNE_BUILD_SELECTOR_MAX_ENTRIES];
+    AxyneMenuItem *pool = NULL;
+    HMENU menu;
+    RECT rects[AXYNE_TOOLBAR_BUTTONS];
+    RECT client;
+    POINT point;
+    size_t count;
+    size_t i;
+    int picked;
+    axyne_discover_runtimes(window, state);
+    count = axyne_build_selector_entries(axyne_active_language(state),
+                                         &state->build_target, entries);
+    menu = axyne_menu_create();
+    if (menu == NULL) return;
+    if (count == 0)
+        axyne_menu_add(menu, &pool, 0, L"이 언어는 빌드 설정이 없습니다", NULL, MF_GRAYED);
+    for (i = 0; i < count; ++i) {
+        wchar_t *title;
+        if (i == 0 || entries[i].group != entries[i - 1].group) {
+            wchar_t *group = axyne_wide(axyne_build_selector_group_title(entries[i].group));
+            if (i != 0) axyne_menu_separator(menu, &pool);
+            axyne_menu_add(menu, &pool, 0, group != NULL ? group : L"", NULL, MF_GRAYED);
+            free(group);
+        }
+        title = axyne_wide(entries[i].title);
+        axyne_menu_add(menu, &pool,
+                       (UINT)(1 + (int)entries[i].group * 100 + entries[i].value),
+                       title != NULL ? title : L"", NULL,
+                       MF_ENABLED | (entries[i].checked ? MF_CHECKED : 0));
+        free(title);
+    }
+    axyne_menu_seal(menu);
+    GetClientRect(window, &client);
+    axyne_toolbar_layout(state, client.right, rects);
+    point.x = rects[5].left;
+    point.y = rects[5].bottom + 2;
+    ClientToScreen(window, &point);
+    picked = (int)TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON |
+                                 TPM_RETURNCMD, point.x, point.y, 0, window, NULL);
+    DestroyMenu(menu);
+    axyne_menu_pool_free(pool);
+    if (picked > 0 && axyne_build_selector_apply(&state->build_target,
+            (AxyneBuildSelectorGroup)((picked - 1) / 100), (picked - 1) % 100))
+        InvalidateRect(window, NULL, FALSE);
 }
 
 /* Figma tabs hug their content: 14px padding, badge, 8px gap, name, 8px gap,
@@ -5327,7 +5386,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     {
         static const wchar_t *const icons[] = {L"▱", L"▰", L"▣", L"↶", L"↷"};
         RECT rects[AXYNE_TOOLBAR_BUTTONS];
-        wchar_t *runner = axyne_runner_label(state);
+        wchar_t *runner = axyne_target_label(state);
         size_t i;
         axyne_toolbar_layout(state, width, rects);
         for (i = 0; i < 5; ++i) {
@@ -5340,13 +5399,13 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             RECT rect = rects[5];
             RECT part = {rect.left + 10, rect.top, rect.right, rect.bottom};
             int arrow = axyne_measure_text(state->font_tiny, L"⌄");
-            axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 3,
+            axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 6,
                              AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
             axyne_text_rect(dc, state->font_small, AXYNE_TEXT, part, L"▷", DT_LEFT);
             part.left += axyne_measure_text(state->font_small, L"▷") + 6;
             part.right = rect.right - 10 - arrow - 6;
             axyne_text_rect(dc, state->font_small, AXYNE_MUTED, part,
-                            runner != NULL ? runner : L"실행 구성", DT_LEFT);
+                            runner != NULL ? runner : L"Debug", DT_LEFT);
             part.left = rect.right - 10 - arrow;
             part.right = rect.right - 10;
             axyne_text_rect(dc, state->font_tiny, AXYNE_MUTED, part, L"⌄", DT_LEFT);
@@ -5817,6 +5876,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 L"About Axyne", MB_OK | MB_ICONINFORMATION);
         else if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
         else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
+        else if (command == AXYNE_CMD_BUILD_TARGET) axyne_build_target_popup(window, state);
         else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
             (void)axyne_configure_runner(window, &state->action_runner);
             InvalidateRect(window, NULL, FALSE);
