@@ -50,12 +50,14 @@ jobs:
 
       - name: Run CTest on macOS
         if: runner.os == 'macOS'
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        run: ctest --test-dir build --output-on-failure 2>&1 | tee build/first-run.log; exit ${PIPESTATUS[0]}
 
       - name: Annotate failed tests
         if: failure()
         shell: bash
         run: |
+          if [ -f build/first-run.log ]; then grep -v '^ *[0-9]*/[0-9]* Test.*Passed' build/first-run.log | head -120 | sed -e 's/%/%25/g' | while IFS= read -r line; do echo "::error::FIRST $line"; done; fi
           # Re-run only the failed tests and surface their output as check
           # annotations, so failures are readable without downloading logs.
           config=""
