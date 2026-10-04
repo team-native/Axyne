@@ -2659,58 +2659,62 @@ static void axyne_toggle_fullscreen(HWND window, AxyneWindowState *state)
     }
 }
 
-static void axyne_append_shortcut_line(wchar_t *text, size_t capacity,
-                                       const wchar_t *keys, const wchar_t *label)
+/* Appends a row whose chips are `keys` (UTF-8, "Ctrl+Shift+S"). */
+static void axyne_shortcut_row(AxyneShortcutRow *rows, size_t *count,
+                               const char *label, const char *keys)
 {
-    wchar_t line[160];
-    (void)swprintf_s(line, 160, L"  %-16ls %ls\r\n", keys, label);
-    wcscat_s(text, capacity, line);
+    rows[*count].label = label;
+    rows[*count].keys = keys;
+    ++*count;
 }
 
 /* Lists the shortcuts implemented here plus the effective Preferences
  * bindings (which can differ from the defaults shown in the menus). */
 static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
 {
-    static const wchar_t *const fixed[][2] = {
-        {L"Ctrl+G", L"줄로 이동"}, {L"Ctrl+/", L"줄 주석 토글"},
-        {L"Ctrl+D", L"줄 복제"}, {L"Alt+Up / Alt+Down", L"줄 위/아래로 이동"},
-        {L"Tab / Shift+Tab", L"들여쓰기 / 내어쓰기"},
-        {L"Ctrl+Shift+O", L"폴더 열기"},
-        {L"Ctrl+Shift+E", L"탐색기"}, {L"Ctrl+J", L"하단 패널"},
-        {L"Ctrl+Shift+U", L"출력"}, {L"Ctrl+Shift+M", L"문제"},
-        {L"Ctrl+`", L"터미널"}, {L"Ctrl+=  Ctrl+-  Ctrl+0", L"확대 / 축소 / 기본 크기"},
-        {L"Alt+Z", L"자동 줄 바꿈"}, {L"F11", L"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)"},
-        {L"Shift+F11", L"프로시저 나가기"}, {L"Shift+F5", L"디버깅 중지"},
-        {L"Ctrl+Shift+F9", L"모든 중단점 삭제"}
+    static const AxyneShortcutRow fixed[] = {
+        {"줄로 이동", "Ctrl+G"}, {"줄 주석 토글", "Ctrl+/"},
+        {"줄 복제", "Ctrl+D"}, {"줄 위로 이동", "Alt+Up"},
+        {"줄 아래로 이동", "Alt+Down"}, {"들여쓰기", "Tab"},
+        {"내어쓰기", "Shift+Tab"}, {"폴더 열기", "Ctrl+Shift+O"},
+        {"탐색기", "Ctrl+Shift+E"}, {"하단 패널", "Ctrl+J"},
+        {"출력", "Ctrl+Shift+U"}, {"문제", "Ctrl+Shift+M"},
+        {"터미널", "Ctrl+`"}, {"확대", "Ctrl+="}, {"축소", "Ctrl+-"},
+        {"기본 크기", "Ctrl+0"}, {"자동 줄 바꿈", "Alt+Z"},
+        {"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)", "F11"},
+        {"프로시저 나가기", "Shift+F11"}, {"디버깅 중지", "Shift+F5"},
+        {"모든 중단점 삭제", "Ctrl+Shift+F9"}
     };
-    wchar_t text[4096];
+    AxyneShortcutRow bindings[AXYNE_ACTION_COUNT];
+    char keys[AXYNE_ACTION_COUNT][64];
+    size_t binding_rows = 0;
+    AxyneShortcutSection sections[2];
     size_t i;
-    text[0] = L'\0';
-    for (i = 0; i < sizeof(fixed) / sizeof(fixed[0]); ++i)
-        axyne_append_shortcut_line(text, 4096, fixed[i][0], fixed[i][1]);
-    wcscat_s(text, 4096, L"\r\nPreferences\r\n");
-    for (i = 0; i < state->preferences.binding_count; ++i) {
+    for (i = 0; i < state->preferences.binding_count && binding_rows < AXYNE_ACTION_COUNT; ++i) {
         const AxyneKeyBinding *binding = &state->preferences.bindings[i];
-        wchar_t keys[64] = L"";
-        wchar_t key[AXYNE_PREFERENCE_KEY_MAX];
-        wchar_t *action;
-        size_t k;
+        char *text = keys[binding_rows];
+        size_t k, used = 0;
         if (!binding->enabled || binding->key[0] == '\0') continue;
+        text[0] = '\0';
         if ((binding->modifiers & (AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_COMMAND)) != 0)
-            wcscat_s(keys, 64, L"Ctrl+");
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0) wcscat_s(keys, 64, L"Alt+");
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0) wcscat_s(keys, 64, L"Shift+");
-        for (k = 0; binding->key[k] != '\0' && k + 1 < AXYNE_PREFERENCE_KEY_MAX; ++k)
-            key[k] = (wchar_t)toupper((unsigned char)binding->key[k]);
-        key[k] = L'\0';
-        wcscat_s(keys, 64, key);
-        action = axyne_wide(axyne_preferences_action_name(binding->action));
-        if (action != NULL) {
-            axyne_append_shortcut_line(text, 4096, keys, action);
-            free(action);
-        }
+            used += (size_t)snprintf(text + used, 64 - used, "Ctrl+");
+        if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0)
+            used += (size_t)snprintf(text + used, 64 - used, "Alt+");
+        if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0)
+            used += (size_t)snprintf(text + used, 64 - used, "Shift+");
+        for (k = 0; binding->key[k] != '\0' && used + 1 < 64; ++k)
+            text[used++] = (char)toupper((unsigned char)binding->key[k]);
+        text[used] = '\0';
+        axyne_shortcut_row(bindings, &binding_rows,
+                           axyne_dialogs_action_title((int)binding->action), text);
     }
-    MessageBoxW(window, text, L"Keyboard Shortcuts", MB_OK | MB_ICONINFORMATION);
+    sections[0].title = "단축키";
+    sections[0].rows = fixed;
+    sections[0].row_count = sizeof(fixed) / sizeof(fixed[0]);
+    sections[1].title = "환경 설정 키 바인딩";
+    sections[1].rows = bindings;
+    sections[1].row_count = binding_rows;
+    axyne_shortcuts_dialog_show(window, sections, 2);
 }
 
 static int axyne_action_command(HWND window, AxyneWindowState *state, UINT command)
