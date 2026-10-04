@@ -5,6 +5,7 @@ add_executable(axyne_tests
     test_runner_git_lsp.c
     test_process_stability.c
     test_git_repair.c
+    test_git_actions.c
     test_preview_tabs.c
     test_palette_problems.c
     test_palette_controller.c
@@ -65,6 +66,11 @@ add_test(
     NAME axyne-git-repair
     COMMAND $<TARGET_FILE:axyne_tests> git-repair
             "${AXYNE_TEST_FIXTURE_DIR}/git-repair"
+)
+add_test(
+    NAME axyne-git-actions
+    COMMAND $<TARGET_FILE:axyne_tests> git-actions
+            "${AXYNE_TEST_FIXTURE_DIR}/git-actions"
 )
 add_test(
     NAME axyne-preview-tabs
@@ -136,6 +142,7 @@ set_tests_properties(
     axyne-languages
     axyne-build-selector
     axyne-git-repair
+    axyne-git-actions
     axyne-preview-tabs
     axyne-documents-search
     axyne-settings-preferences

@@ -33,6 +33,31 @@ AxyneStatus axyne_git_stage_all(const char *utf8_workspace,
                                 AxyneGitResult *result, AxyneError *error);
 AxyneStatus axyne_git_unstage_all(const char *utf8_workspace,
                                   AxyneGitResult *result, AxyneError *error);
+/* Commit, push and pull run several Git steps and block until they finish,
+ * so interactive callers use a worker thread. On success and on a Git failure
+ * alike, result->output is a ready-to-display report: for each step a
+ * "$ git <args>" header, its output (stderr lines prefixed "[stderr] "),
+ * "[exit N]" on failure, and a Korean hint for common failures. result->
+ * exit_code is the last step's exit code. A Git failure returns
+ * AXYNE_STATUS_IO_ERROR (the report is still filled); other statuses mean the
+ * operation could not start. Never prompts: GIT_TERMINAL_PROMPT=0 and
+ * GCM_INTERACTIVE=never are set for every step.
+ *
+ * axyne_git_commit rejects an empty or whitespace-only message with
+ * AXYNE_STATUS_INVALID_ARGUMENT before running Git. The message (UTF-8,
+ * CRLF normalised to LF) is passed through a temporary file with
+ * "git commit -F", never on a command line, and no trailer is added. When
+ * stage_all is nonzero "git add --all" runs first. axyne_git_push runs
+ * "git push", or "git push -u origin <branch>" when the branch has no
+ * upstream and an "origin" remote exists. axyne_git_pull runs
+ * "git pull --ff-only". */
+AxyneStatus axyne_git_commit(const char *utf8_workspace,
+                             const char *utf8_message, int stage_all,
+                             AxyneGitResult *result, AxyneError *error);
+AxyneStatus axyne_git_push(const char *utf8_workspace, AxyneGitResult *result,
+                           AxyneError *error);
+AxyneStatus axyne_git_pull(const char *utf8_workspace, AxyneGitResult *result,
+                           AxyneError *error);
 void axyne_git_result_free(AxyneGitResult *result);
 
 /* Resolves the Git executable to pass as AxyneProcessSpec.executable. On
