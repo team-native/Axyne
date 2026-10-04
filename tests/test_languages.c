@@ -248,6 +248,15 @@ static int compiled_checks(const char *root)
     AXYNE_TEST_CHECK(strcmp(plan.toolchain_name, "gcc") == 0);
     axyne_language_plan_free(&plan);
 
+    /* Files directly under a root keep the root as directory (no "C:" drive-cwd,
+     * no doubled separator). */
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_C, &fake, &target, "/a.c", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(strcmp(plan.working_directory, "/") == 0 && strcmp(plan.output_path, "/a" EXE) == 0);
+    axyne_language_plan_free(&plan);
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_C, &fake, &target, "C:\\a.c", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(strcmp(plan.working_directory, "C:\\") == 0 && strcmp(plan.output_path, "C:\\a" EXE) == 0);
+    axyne_language_plan_free(&plan);
+
     /* Rust: rustc for a lone file, cargo when Cargo.toml is next to it. */
     AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_RUST, &fake, &target, "/nonexistent-axyne/x.rs", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
     AXYNE_TEST_CHECK(STEP_IS(plan.build, "/usr/bin/rustc",
