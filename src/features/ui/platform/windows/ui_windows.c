@@ -141,6 +141,7 @@ typedef struct AxyneWindowState {
     AxyneBuildTarget build_target;
     AxyneRuntimeList runtimes;
     int runtimes_discovered;
+    int build_menu_open; /* chevron points up while the popup is open */
     int runtime_discovery_posted;
     AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
     int pending_run;
@@ -4075,8 +4076,13 @@ static void axyne_build_target_popup(HWND window, AxyneWindowState *state)
     point.x = rects[5].left;
     point.y = rects[5].bottom + 2;
     ClientToScreen(window, &point);
+    state->build_menu_open = 1;
+    InvalidateRect(window, NULL, FALSE);
+    UpdateWindow(window);
     picked = (int)TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON |
                                  TPM_RETURNCMD, point.x, point.y, 0, window, NULL);
+    state->build_menu_open = 0;
+    InvalidateRect(window, NULL, FALSE);
     DestroyMenu(menu);
     axyne_menu_pool_free(pool);
     if (picked > 0 && axyne_build_selector_apply(&state->build_target,
@@ -5448,7 +5454,8 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                             runner != NULL ? runner : L"Debug", DT_LEFT);
             part.left = rect.right - 10 - arrow;
             part.right = rect.right - 10;
-            axyne_text_rect(dc, state->font_tiny, AXYNE_MUTED, part, L"⌄", DT_LEFT);
+            axyne_text_rect(dc, state->font_tiny, AXYNE_MUTED, part,
+                            state->build_menu_open ? L"⌃" : L"⌄", DT_LEFT);
         }
         {
             COLORREF color = axyne_toolbar_enabled(state, AXYNE_CMD_BUILD)
