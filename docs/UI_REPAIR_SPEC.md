@@ -226,3 +226,24 @@ Units: shared selector model with tests; palette command; macOS selector; macOS 
 Known gaps: the macOS and Windows UI were not run interactively; Windows was compile-checked with zig cc and macOS reviewed by eye.
 
 Units: shared layout metrics with tests; macOS splitters; Windows splitters; this record.
+
+## Dialogs
+
+Runner 설정 (Build menu) and 키보드 단축키 (Help menu) were NSAlert / MessageBox dialogs with accessory views. Both are now modal windows built from the preferences window's chrome (`src/features/ui/app_dialogs.h`, implemented next to the preferences window on each platform).
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Defect | Runner 설정 labels sat under or behind their fields (hard-coded y in a 460x280 alert accessory); the shortcuts list was a monospaced text dump with a ragged key column | USER (confirmed, screenshots) | CONFIRMED |
+| Design language | Both dialogs follow the preferences window instead of the OS alert: borderless dark panel (`AXYNE_PW_COLOR_*`), title strip with close button, field boxes, push buttons, footer. No NSAlert / MessageBox | USER | CONFIRMED |
+| Runner layout | 520 px wide, 16 px padding, 12 px gaps, captions above fields in the order 실행 파일, 인자 (한 줄에 하나), 작업 디렉터리 (선택), 환경 변수 (NAME=VALUE, 한 줄에 하나), helper note, footer with 취소 / 저장 (accent, default). Multi-line areas are 72 px, monospaced 11 pt | ASSUMED (sizes, wording) | ASSUMED |
+| Runner save | Same semantics as before (`axyne_runner_configure`, empty executable rejected); on a rejected configuration the dialog stays open and shows the Korean reason (`Runner 설정이 올바르지 않습니다. ...`) in the footer instead of a second alert; editing clears it | ASSUMED (stays open, inline) | ASSUMED |
+| Browse button | `찾아보기…` next to the executable field opens the OS file picker | ASSUMED | ASSUMED |
+| Keys | Esc and the close button cancel, Return in a single-line field saves (Return in a multi-line area types a newline), Tab follows top to bottom | ASSUMED | ASSUMED |
+| Shortcuts content | Same data source as before: macOS lists the menu items that carry a shortcut grouped by top-level menu plus the enabled Preferences bindings; Windows lists the fixed shortcuts plus the enabled Preferences bindings. Windows rows that combined two chords ("Alt+Up / Alt+Down", "Tab / Shift+Tab", "Ctrl+=  Ctrl+-  Ctrl+0") became one row per chord; Preferences actions use the Korean names of the Preferences window | USER (content) / ASSUMED (row split, Korean names) | CONFIRMED / ASSUMED |
+| Shortcuts layout | 560x520, section headings (11 pt, dim), 28 px rows with the label on the left and one chip per key right-aligned, hairline between rows, scrollable with an overlay scroller / thin thumb, 닫기 button. Chips use the empty-state guide look (`#1f2126` fill, `#2a2d33` border, 20 px high) | ASSUMED | ASSUMED |
+| Chip splitting | `include/axyne/shortcut_chips.h` splits "⇧⌘S" and "Ctrl+Shift+S" into chip tokens (pure C, `axyne-shortcut-chips`) | IMPLEMENTATION | CONFIRMED |
+| Not changed | Other NSAlert / MessageBox prompts (About, text prompts, find and replace, go to line, errors) keep their current form | USER (scope) | CONFIRMED |
+
+Known gaps: the macOS panels were reviewed by eye only (the sources cannot be compiled off a Mac); the Windows dialogs were compile-checked with zig cc and not run; the Windows runner areas keep a native (dark themed) scroll bar.
+
+Units: shared shortcut chip helper with tests; macOS Runner 설정; macOS keyboard shortcuts; Windows Runner 설정 and dialog frame; Windows keyboard shortcuts; this record.

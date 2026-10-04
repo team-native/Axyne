@@ -6,6 +6,8 @@
 
 #include "axyne/preferences.h"
 #include "../../preferences_window.h"
+#include "../../app_dialogs.h"
+#include "axyne/shortcut_chips.h"
 
 /* Figma preferences window (7J8SYhLpybJgpxD3qFqL5u / 24:13953) in AppKit.
  * Manual retain/release, like the rest of the macOS UI. All drawing views are
@@ -1009,4 +1011,734 @@ int axyne_preferences_window_show(void *native_owner, int workspace,
     result = [controller runOverOwner:(NSWindow *)native_owner];
     [controller release];
     return result == AXYNE_PW_RESULT_OPEN_FILE;
+}
+
+/* ------------------------------------------------------------------ */
+/* App dialogs (Runner settings, keyboard shortcuts)                   */
+/* ------------------------------------------------------------------ */
+
+/* Small modal panels in the preferences window's chrome: borderless dark
+ * panel, drag/close title strip, 30px field boxes, push buttons and a footer.
+ * They reuse the classes above; each dialog object owns its panel (+1) and
+ * releases it exactly once in dealloc. Coordinates are top-down (all the
+ * drawing views are flipped). */
+
+@protocol AxyneDlgActions <NSObject>
+- (void)cancel:(id)sender;
+@end
+
+@interface AxyneDlgPanel : NSPanel {
+    id<AxyneDlgActions> _dialog; /* not retained */
+}
+@property(nonatomic, assign) id<AxyneDlgActions> dialog;
+@end
+
+@implementation AxyneDlgPanel
+@synthesize dialog = _dialog;
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+- (void)cancelOperation:(id)sender { [_dialog cancel:sender]; }
+/* Esc while a button or the list has focus never reaches cancelOperation:
+ * through the key bindings; close the dialog from here. */
+- (void)keyDown:(NSEvent *)event
+{
+    if ([event keyCode] == 53) { [_dialog cancel:nil]; return; }
+    [super keyDown:event];
+}
+@end
+
+static NSString *axyne_dlg_string(const char *utf8)
+{
+    NSString *text = utf8 != NULL ? [NSString stringWithUTF8String:utf8] : nil;
+    return text != nil ? text : @"";
+}
+
+static AxynePWButton *axyne_dlg_button(AxynePWKind kind, NSString *title, NSRect frame,
+                                       id target, SEL action)
+{
+    AxynePWButton *button = [[[AxynePWButton alloc] initWithFrame:frame] autorelease];
+    [button setButtonType:NSButtonTypeMomentaryChange];
+    [button setBordered:NO];
+    [button setTitle:title != nil ? title : @""];
+    [button setTarget:target];
+    [button setAction:action];
+    [button setKind:kind];
+    [button setFocusRingType:NSFocusRingTypeExterior];
+    if (title != nil) [button setAccessibilityLabel:title];
+    return button;
+}
+
+static NSTextField *axyne_dlg_label(NSString *text, uint32_t rgb, CGFloat size, BOOL semibold)
+{
+    NSTextField *label = [NSTextField labelWithString:text];
+    [label setFont:axyne_pw_font(size, semibold)];
+    [label setTextColor:axyne_pw_color(rgb)];
+    [label sizeToFit];
+    return label;
+}
+
+/* Creates the panel (+1, caller releases) with its content view and title
+ * strip with the close button wired to `dialog`'s cancel:. */
+static AxyneDlgPanel *axyne_dlg_panel(NSString *title, CGFloat width, CGFloat height,
+                                      id<AxyneDlgActions> dialog, AxynePWBox **rootOut)
+{
+    NSRect frame = NSMakeRect(0, 0, width, height);
+    AxyneDlgPanel *panel = [[AxyneDlgPanel alloc] initWithContentRect:frame
+        styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+    AxynePWBox *root = [[[AxynePWBox alloc] initWithFrame:frame] autorelease];
+    AxynePWTitleStrip *strip = [[[AxynePWTitleStrip alloc] initWithFrame:
+        NSMakeRect(0, 0, width, AXYNE_PW_TITLE_HEIGHT)] autorelease];
+    AxynePWButton *close;
+    [panel setDialog:dialog];
+    [panel setReleasedWhenClosed:NO];
+    [panel setHasShadow:YES];
+    [panel setTitle:title];
+    [panel setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+    [panel setBackgroundColor:axyne_pw_color(AXYNE_PW_COLOR_CONTENT)];
+    [root setFill:axyne_pw_color(AXYNE_PW_COLOR_CONTENT)];
+    [panel setContentView:root];
+    [strip setFill:axyne_pw_color(AXYNE_PW_COLOR_CHROME)];
+    [strip setTitle:title];
+    [strip setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+    [root addSubview:strip];
+    close = axyne_dlg_button(AxynePWKindClose, nil,
+        NSMakeRect(width - 12 - 14 - 7, 4, 28, 28), dialog, @selector(cancel:));
+    [close setAccessibilityLabel:@"닫기"];
+    [close setAutoresizingMask:NSViewMinXMargin];
+    [strip addSubview:close];
+    *rootOut = root;
+    return panel;
+}
+
+/* Footer strip with the hairline on top; buttons are added by the caller. */
+static AxynePWBox *axyne_dlg_footer(AxynePWBox *root, CGFloat width, CGFloat height)
+{
+    AxynePWBox *footer = [[[AxynePWBox alloc] initWithFrame:NSMakeRect(0,
+        height - AXYNE_DLG_FOOTER_HEIGHT, width, AXYNE_DLG_FOOTER_HEIGHT)] autorelease];
+    AxynePWBox *line = [[[AxynePWBox alloc] initWithFrame:NSMakeRect(0, 0, width, 1)] autorelease];
+    [footer setFill:axyne_pw_color(AXYNE_PW_COLOR_CHROME)];
+    [footer setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+    [line setFill:axyne_pw_color(AXYNE_PW_COLOR_CHROME_LINE)];
+    [line setAutoresizingMask:NSViewWidthSizable];
+    [footer addSubview:line];
+    [root addSubview:footer];
+    return footer;
+}
+
+static NSInteger axyne_dlg_run(NSPanel *panel, NSWindow *owner, NSSize size, NSResponder *focus)
+{
+    NSInteger result;
+    if (owner != nil) {
+        NSRect o = [owner frame];
+        [panel setFrameOrigin:NSMakePoint(NSMidX(o) - size.width / 2.0,
+                                          NSMidY(o) - size.height / 2.0)];
+    } else {
+        [panel center];
+    }
+    [panel makeKeyAndOrderFront:nil];
+    if (focus != nil) [panel makeFirstResponder:focus];
+    result = [NSApp runModalForWindow:panel];
+    [panel orderOut:nil];
+    if (owner != nil) [owner makeKeyAndOrderFront:nil];
+    return result;
+}
+
+/* ---- Runner settings ---- */
+
+/* Multi-line text area that reports focus to its bordered box and lets Tab
+ * move between controls instead of typing a tab. */
+@interface AxyneDlgTextView : NSTextView {
+    AxynePWBox *_box; /* not retained: the box owns the scroll view that owns us */
+}
+@property(nonatomic, assign) AxynePWBox *box;
+@end
+
+@implementation AxyneDlgTextView
+@synthesize box = _box;
+- (BOOL)becomeFirstResponder
+{
+    BOOL accepted = [super becomeFirstResponder];
+    if (accepted) [_box setFocused:YES];
+    return accepted;
+}
+- (BOOL)resignFirstResponder
+{
+    BOOL accepted = [super resignFirstResponder];
+    if (accepted) [_box setFocused:NO];
+    return accepted;
+}
+/* The panel's default (Save) button owns Return as a key equivalent, which is
+ * tried before keyDown:; while this area has focus Return must type a newline. */
+- (BOOL)performKeyEquivalent:(NSEvent *)event
+{
+    NSEventModifierFlags flags = [event modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if ([event type] == NSEventTypeKeyDown && [[self window] firstResponder] == self &&
+        ([event keyCode] == 36 || [event keyCode] == 76) &&
+        (flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+                  NSEventModifierFlagOption)) == 0) {
+        [self insertNewline:nil];
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
+- (void)insertTab:(id)sender { (void)sender; [[self window] selectNextKeyView:self]; }
+- (void)insertBacktab:(id)sender { (void)sender; [[self window] selectPreviousKeyView:self]; }
+@end
+
+/* A 30px bordered single-line field (the preferences "입력 필드"). */
+static NSTextField *axyne_dlg_field(NSView *parent, NSRect frame, NSString *text,
+                                    NSString *placeholder, NSString *label, id delegate)
+{
+    AxynePWBox *box = [[[AxynePWBox alloc] initWithFrame:frame] autorelease];
+    AxynePWTextField *field = [[[AxynePWTextField alloc] initWithFrame:
+        NSMakeRect(10, 7, frame.size.width - 20, 16)] autorelease];
+    NSAttributedString *hint = [[[NSAttributedString alloc] initWithString:placeholder
+        attributes:axyne_pw_attributes(axyne_pw_font(11, NO),
+                                       [axyne_pw_color(AXYNE_PW_COLOR_MUTED)
+                                           colorWithAlphaComponent:0.6], NO)] autorelease];
+    [box setFill:axyne_pw_color(AXYNE_PW_COLOR_FIELD)];
+    [box setStroke:axyne_pw_color(AXYNE_PW_COLOR_BORDER)];
+    [box setRadius:3];
+    [box setAutoresizingMask:NSViewWidthSizable];
+    [field setBordered:NO];
+    [field setDrawsBackground:NO];
+    [field setFocusRingType:NSFocusRingTypeNone];
+    [field setFont:axyne_pw_font(11, NO)];
+    [field setTextColor:axyne_pw_color(AXYNE_PW_COLOR_TEXT)];
+    [field setStringValue:text];
+    [field setPlaceholderAttributedString:hint];
+    [field setDelegate:delegate];
+    [field setAutoresizingMask:NSViewWidthSizable];
+    [[field cell] setScrollable:YES];
+    [[field cell] setUsesSingleLineMode:YES];
+    [field setAccessibilityLabel:label];
+    [box addSubview:field];
+    [parent addSubview:box];
+    return field;
+}
+
+/* A bordered multi-line monospaced text area inside a field box. */
+static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
+                                  NSString *label, id delegate)
+{
+    AxynePWBox *box = [[[AxynePWBox alloc] initWithFrame:frame] autorelease];
+    NSRect inner = NSInsetRect(NSMakeRect(0, 0, frame.size.width, frame.size.height), 1, 1);
+    NSScrollView *scroll = [[[NSScrollView alloc] initWithFrame:inner] autorelease];
+    AxyneDlgTextView *view = [[[AxyneDlgTextView alloc] initWithFrame:
+        NSMakeRect(0, 0, inner.size.width, inner.size.height)] autorelease];
+    [box setFill:axyne_pw_color(AXYNE_PW_COLOR_FIELD)];
+    [box setStroke:axyne_pw_color(AXYNE_PW_COLOR_BORDER)];
+    [box setRadius:3];
+    [box setAutoresizingMask:NSViewWidthSizable];
+    [view setBox:box];
+    [view setDelegate:delegate];
+    [view setMinSize:NSMakeSize(0, inner.size.height)];
+    [view setMaxSize:NSMakeSize(10000000, 10000000)];
+    [view setVerticallyResizable:YES];
+    [view setHorizontallyResizable:NO];
+    [view setAutoresizingMask:NSViewWidthSizable];
+    [[view textContainer] setContainerSize:NSMakeSize(inner.size.width, 10000000)];
+    [[view textContainer] setWidthTracksTextView:YES];
+    [view setTextContainerInset:NSMakeSize(4, 6)];
+    [view setRichText:NO];
+    [view setImportsGraphics:NO];
+    [view setAllowsUndo:YES];
+    [view setDrawsBackground:NO];
+    [view setAutomaticQuoteSubstitutionEnabled:NO];
+    [view setAutomaticDashSubstitutionEnabled:NO];
+    [view setAutomaticTextReplacementEnabled:NO];
+    [view setAutomaticSpellingCorrectionEnabled:NO];
+    [view setAutomaticLinkDetectionEnabled:NO];
+    [view setAutomaticDataDetectionEnabled:NO];
+    [view setContinuousSpellCheckingEnabled:NO];
+    [view setGrammarCheckingEnabled:NO];
+    [view setString:text];
+    [view setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
+    [view setTextColor:axyne_pw_color(AXYNE_PW_COLOR_TEXT)];
+    [view setInsertionPointColor:axyne_pw_color(AXYNE_PW_COLOR_TEXT)];
+    [view setAccessibilityLabel:label];
+    [scroll setBorderType:NSNoBorder];
+    [scroll setDrawsBackground:NO];
+    [scroll setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+    [scroll setScrollerStyle:NSScrollerStyleOverlay];
+    [scroll setScrollerKnobStyle:NSScrollerKnobStyleLight];
+    [scroll setHasVerticalScroller:YES];
+    [scroll setHasHorizontalScroller:NO];
+    [scroll setAutohidesScrollers:YES];
+    [scroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [scroll setDocumentView:view];
+    [box addSubview:scroll];
+    [parent addSubview:box];
+    return view;
+}
+
+@interface AxyneRunnerDialog : NSObject <NSTextFieldDelegate, NSTextViewDelegate, AxyneDlgActions> {
+    AxyneDlgPanel *_panel;
+    AxyneRunnerDialogHooks _hooks;
+    NSTextField *_executable, *_workingDirectory, *_error; /* owned by the panel's views */
+    NSTextView *_arguments, *_environment;
+    AxynePWButton *_browse, *_cancelButton, *_saveButton;
+}
+- (id)initWithValues:(const AxyneRunnerDialogValues *)values hooks:(const AxyneRunnerDialogHooks *)hooks;
+- (NSInteger)runOverOwner:(NSWindow *)owner;
+@end
+
+@implementation AxyneRunnerDialog
+
+- (id)initWithValues:(const AxyneRunnerDialogValues *)values hooks:(const AxyneRunnerDialogHooks *)hooks
+{
+    CGFloat width = AXYNE_DLG_RUNNER_WIDTH, height = AXYNE_DLG_RUNNER_HEIGHT;
+    CGFloat inner = width - 2 * AXYNE_DLG_PAD;
+    CGFloat y = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD;
+    CGFloat buttonY = (AXYNE_DLG_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2.0;
+    CGFloat saveX = width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH;
+    CGFloat cancelX = saveX - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
+    AxynePWBox *root, *footer;
+    NSTextField *caption;
+    self = [super init];
+    if (self == nil) return nil;
+    _hooks = *hooks;
+    _panel = axyne_dlg_panel(@"Runner 설정", width, height, self, &root);
+
+    caption = axyne_dlg_label(@"실행 파일", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+    _executable = axyne_dlg_field(root, NSMakeRect(AXYNE_DLG_PAD, y + AXYNE_DLG_LABEL_BLOCK,
+        inner - AXYNE_DLG_BROWSE_WIDTH - 8, AXYNE_PW_FIELD_HEIGHT),
+        axyne_dlg_string(values->executable), @"예: /usr/bin/python3", @"실행 파일", self);
+    _browse = axyne_dlg_button(AxynePWKindSmall, @"찾아보기…",
+        NSMakeRect(AXYNE_DLG_PAD + inner - AXYNE_DLG_BROWSE_WIDTH, y + AXYNE_DLG_LABEL_BLOCK,
+                   AXYNE_DLG_BROWSE_WIDTH, AXYNE_PW_FIELD_HEIGHT), self, @selector(browse:));
+    [_browse setAutoresizingMask:NSViewMinXMargin];
+    [root addSubview:_browse];
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
+
+    caption = axyne_dlg_label(@"인자 (한 줄에 하나)", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+    _arguments = axyne_dlg_area(root, NSMakeRect(AXYNE_DLG_PAD, y + AXYNE_DLG_LABEL_BLOCK,
+        inner, AXYNE_DLG_AREA_HEIGHT), axyne_dlg_string(values->arguments), @"인자", self);
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_DLG_AREA_HEIGHT + AXYNE_DLG_GAP;
+
+    caption = axyne_dlg_label(@"작업 디렉터리 (선택)", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+    _workingDirectory = axyne_dlg_field(root, NSMakeRect(AXYNE_DLG_PAD, y + AXYNE_DLG_LABEL_BLOCK,
+        inner, AXYNE_PW_FIELD_HEIGHT), axyne_dlg_string(values->working_directory),
+        @"비워 두면 프로젝트 폴더", @"작업 디렉터리", self);
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
+
+    caption = axyne_dlg_label(@"환경 변수 (NAME=VALUE, 한 줄에 하나)", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+    _environment = axyne_dlg_area(root, NSMakeRect(AXYNE_DLG_PAD, y + AXYNE_DLG_LABEL_BLOCK,
+        inner, AXYNE_DLG_AREA_HEIGHT), axyne_dlg_string(values->environment), @"환경 변수", self);
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_DLG_AREA_HEIGHT + AXYNE_DLG_NOTE_GAP;
+
+    caption = axyne_dlg_label(@"인자는 셸 없이 실행 파일에 그대로 전달됩니다.", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+
+    footer = axyne_dlg_footer(root, width, height);
+    _error = axyne_dlg_label(@" ", AXYNE_DLG_COLOR_ERROR, 11, NO);
+    [_error setFrame:NSMakeRect(AXYNE_DLG_PAD, floor((AXYNE_DLG_FOOTER_HEIGHT - 14) / 2.0),
+        cancelX - AXYNE_DLG_PAD - 12, 14)];
+    [_error setStringValue:@""];
+    [_error setLineBreakMode:NSLineBreakByTruncatingTail];
+    [_error setAutoresizingMask:NSViewWidthSizable];
+    [footer addSubview:_error];
+    _cancelButton = axyne_dlg_button(AxynePWKindPush, @"취소",
+        NSMakeRect(cancelX, buttonY, AXYNE_PW_BUTTON_WIDTH, AXYNE_PW_BUTTON_HEIGHT),
+        self, @selector(cancel:));
+    _saveButton = axyne_dlg_button(AxynePWKindAccent, @"저장",
+        NSMakeRect(saveX, buttonY, AXYNE_PW_BUTTON_WIDTH, AXYNE_PW_BUTTON_HEIGHT),
+        self, @selector(save:));
+    [_cancelButton setAutoresizingMask:NSViewMinXMargin];
+    [_saveButton setAutoresizingMask:NSViewMinXMargin];
+    [_saveButton setKeyEquivalent:@"\r"];
+    [footer addSubview:_cancelButton];
+    [footer addSubview:_saveButton];
+
+    /* Tab order: top to bottom, then the footer buttons, then around. */
+    [_executable setNextKeyView:_browse];
+    [_browse setNextKeyView:_arguments];
+    [_arguments setNextKeyView:_workingDirectory];
+    [_workingDirectory setNextKeyView:_environment];
+    [_environment setNextKeyView:_cancelButton];
+    [_cancelButton setNextKeyView:_saveButton];
+    [_saveButton setNextKeyView:_executable];
+    [_panel setInitialFirstResponder:_executable];
+    return self;
+}
+
+- (void)dealloc
+{
+    /* Nothing may message this object once it is gone. */
+    [_executable setDelegate:nil];
+    [_workingDirectory setDelegate:nil];
+    [_arguments setDelegate:nil];
+    [_environment setDelegate:nil];
+    [_panel setDialog:nil];
+    [_panel close];
+    [_panel release];
+    [super dealloc];
+}
+
+- (NSInteger)runOverOwner:(NSWindow *)owner
+{
+    return axyne_dlg_run(_panel, owner,
+        NSMakeSize(AXYNE_DLG_RUNNER_WIDTH, AXYNE_DLG_RUNNER_HEIGHT), _executable);
+}
+
+- (void)finish:(NSInteger)code { [NSApp stopModalWithCode:code]; }
+
+- (void)cancel:(id)sender { (void)sender; [self finish:0]; }
+
+- (void)showError:(NSString *)message
+{
+    [_error setStringValue:message];
+    [_error setToolTip:[message length] != 0 ? message : nil];
+}
+
+- (void)save:(id)sender
+{
+    AxyneRunnerDialogValues values;
+    char error[256] = {0};
+    const char *utf8;
+    (void)sender;
+    [_panel makeFirstResponder:nil]; /* commit the field editor */
+    utf8 = [[_executable stringValue] UTF8String];        values.executable = utf8 != NULL ? utf8 : "";
+    utf8 = [[_arguments string] UTF8String];              values.arguments = utf8 != NULL ? utf8 : "";
+    utf8 = [[_workingDirectory stringValue] UTF8String];  values.working_directory = utf8 != NULL ? utf8 : "";
+    utf8 = [[_environment string] UTF8String];            values.environment = utf8 != NULL ? utf8 : "";
+    if (_hooks.save != NULL && _hooks.save(_hooks.context, &values, error, sizeof(error))) {
+        [self finish:1];
+        return;
+    }
+    [self showError:error[0] != '\0' ? axyne_dlg_string(error)
+                                     : @"Runner 설정이 올바르지 않습니다."];
+    if ([[_executable stringValue] length] == 0) [_panel makeFirstResponder:_executable];
+}
+
+- (void)browse:(id)sender
+{
+    NSOpenPanel *open = [NSOpenPanel openPanel];
+    NSString *current = [[_executable stringValue] stringByExpandingTildeInPath];
+    (void)sender;
+    [open setTitle:@"실행 파일 선택"];
+    [open setPrompt:@"선택"];
+    [open setCanChooseFiles:YES];
+    [open setCanChooseDirectories:NO];
+    [open setAllowsMultipleSelection:NO];
+    if ([current hasPrefix:@"/"])
+        [open setDirectoryURL:[NSURL fileURLWithPath:[current stringByDeletingLastPathComponent]
+                                         isDirectory:YES]];
+    if ([open runModal] == NSModalResponseOK && [[open URLs] count] > 0) {
+        [_executable setStringValue:[[[open URLs] objectAtIndex:0] path]];
+        [self showError:@""];
+    }
+    [_panel makeKeyAndOrderFront:nil];
+    [_panel makeFirstResponder:_executable];
+}
+
+/* A change clears the previous error. */
+- (void)controlTextDidChange:(NSNotification *)notification
+{
+    (void)notification;
+    [self showError:@""];
+}
+
+- (void)textDidChange:(NSNotification *)notification
+{
+    (void)notification;
+    [self showError:@""];
+}
+
+/* Return in a single-line field saves; Esc cancels. The multi-line areas keep
+ * Return for new lines. */
+- (BOOL)textView:(NSTextView *)textView doCommandBySelector:(SEL)selector
+{
+    (void)textView;
+    if (selector == @selector(cancelOperation:)) { [self cancel:nil]; return YES; }
+    return NO;
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView
+    doCommandBySelector:(SEL)selector
+{
+    (void)control; (void)textView;
+    if (selector == @selector(insertNewline:)) { [self save:nil]; return YES; }
+    if (selector == @selector(cancelOperation:)) { [self cancel:nil]; return YES; }
+    return NO;
+}
+
+@end
+
+int axyne_runner_dialog_show(void *native_owner, const AxyneRunnerDialogValues *initial,
+                             const AxyneRunnerDialogHooks *hooks)
+{
+    AxyneRunnerDialog *dialog;
+    NSInteger result;
+    if (initial == NULL || hooks == NULL || hooks->save == NULL) return 0;
+    dialog = [[AxyneRunnerDialog alloc] initWithValues:initial hooks:hooks];
+    if (dialog == nil) return 0;
+    result = [dialog runOverOwner:(NSWindow *)native_owner];
+    [dialog release];
+    return result == 1;
+}
+
+/* ---- Keyboard shortcuts ---- */
+
+const char *axyne_dialogs_action_title(int action)
+{
+    return [axyne_pw_action_title((AxynePreferenceAction)action) UTF8String];
+}
+
+/* The scrolling list: section headings, label-left rows and one chip per key,
+ * right-aligned in a column. A single flipped view draws everything so rows
+ * and chips line up exactly; the scroll view around it owns scrolling. */
+@interface AxyneShortcutList : NSView {
+    NSMutableArray *_items; /* NSDictionary: heading (NSString) or label + chips (NSArray) */
+    CGFloat _contentHeight;
+    NSString *_summary;
+}
+- (id)initWithSections:(const AxyneShortcutSection *)sections count:(size_t)count width:(CGFloat)width;
+@end
+
+@implementation AxyneShortcutList
+
+- (id)initWithSections:(const AxyneShortcutSection *)sections count:(size_t)count width:(CGFloat)width
+{
+    NSMutableString *summary = [NSMutableString string];
+    CGFloat y = 8;
+    self = [super initWithFrame:NSMakeRect(0, 0, width, 0)];
+    if (self == nil) return nil;
+    _items = [[NSMutableArray alloc] init];
+    for (size_t i = 0; i < count; ++i) {
+        if (sections[i].row_count == 0) continue;
+        if (i != 0 && [_items count] != 0) y += AXYNE_DLG_SHORTCUT_SECTION_GAP;
+        [_items addObject:@{@"y": @(y), @"heading": axyne_dlg_string(sections[i].title)}];
+        [summary appendFormat:@"%@\n", axyne_dlg_string(sections[i].title)];
+        y += AXYNE_DLG_SHORTCUT_HEADING;
+        for (size_t row = 0; row < sections[i].row_count; ++row) {
+            const AxyneShortcutRow *source = &sections[i].rows[row];
+            AxyneShortcutChips split;
+            NSMutableArray *chips = [NSMutableArray array];
+            (void)axyne_shortcut_chips(source->keys, &split);
+            for (size_t chip = 0; chip < split.count; ++chip)
+                [chips addObject:axyne_dlg_string(split.chips[chip])];
+            [_items addObject:@{@"y": @(y), @"label": axyne_dlg_string(source->label),
+                                @"chips": chips, @"last": @(row + 1 == sections[i].row_count)}];
+            [summary appendFormat:@"%@ %@\n", axyne_dlg_string(source->label),
+                axyne_dlg_string(source->keys)];
+            y += AXYNE_DLG_SHORTCUT_ROW;
+        }
+    }
+    _contentHeight = y + 12;
+    _summary = [summary copy];
+    [self setFrameSize:NSMakeSize(width, _contentHeight)];
+    [self setAccessibilityElement:YES];
+    [self setAccessibilityRole:NSAccessibilityStaticTextRole];
+    [self setAccessibilityLabel:@"키보드 단축키 목록"];
+    [self setAccessibilityValue:_summary];
+    return self;
+}
+
+- (void)dealloc
+{
+    [_items release];
+    [_summary release];
+    [super dealloc];
+}
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (NSFocusRingType)focusRingType { return NSFocusRingTypeNone; }
+- (void)mouseDown:(NSEvent *)event { (void)event; [[self window] makeFirstResponder:self]; }
+
+static CGFloat axyne_dlg_chip_width(NSString *key, NSDictionary *attributes)
+{
+    return MAX((CGFloat)AXYNE_DLG_CHIP_HEIGHT,
+               ceil([key sizeWithAttributes:attributes].width) + 2 * AXYNE_DLG_CHIP_PADDING);
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    NSRect bounds = [self bounds];
+    NSMutableParagraphStyle *truncate = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    NSDictionary *headingAttributes, *labelAttributes, *keyAttributes;
+    CGFloat left = AXYNE_PW_CONTENT_LEFT;
+    CGFloat right = NSWidth(bounds) - AXYNE_PW_CONTENT_LEFT;
+    [truncate setLineBreakMode:NSLineBreakByTruncatingTail];
+    headingAttributes = axyne_pw_attributes(axyne_pw_font(11, YES),
+                                            axyne_pw_color(AXYNE_PW_COLOR_MUTED), NO);
+    labelAttributes = @{NSFontAttributeName: axyne_pw_font(13, NO),
+        NSForegroundColorAttributeName: axyne_pw_color(AXYNE_PW_COLOR_TEXT),
+        NSParagraphStyleAttributeName: truncate};
+    keyAttributes = axyne_pw_attributes(axyne_pw_font(12, NO),
+                                        axyne_pw_color(AXYNE_DLG_COLOR_CHIP_TEXT), NO);
+    [axyne_pw_color(AXYNE_PW_COLOR_CONTENT) setFill];
+    NSRectFill(bounds);
+    for (NSDictionary *item in _items) {
+        CGFloat y = [[item objectForKey:@"y"] doubleValue];
+        NSString *heading = [item objectForKey:@"heading"];
+        NSString *label = [item objectForKey:@"label"];
+        NSArray *chips;
+        CGFloat rowHeight = heading != nil ? AXYNE_DLG_SHORTCUT_HEADING : AXYNE_DLG_SHORTCUT_ROW;
+        CGFloat x, chipsWidth = 0, textHeight;
+        if (y + rowHeight < NSMinY(dirtyRect) || y > NSMaxY(dirtyRect)) continue;
+        if (heading != nil) {
+            textHeight = ceil([heading sizeWithAttributes:headingAttributes].height);
+            [heading drawAtPoint:NSMakePoint(left, y + floor((rowHeight - textHeight) / 2))
+                  withAttributes:headingAttributes];
+            continue;
+        }
+        chips = [item objectForKey:@"chips"];
+        for (NSString *key in chips)
+            chipsWidth += axyne_dlg_chip_width(key, keyAttributes) + AXYNE_DLG_CHIP_GAP;
+        if (chipsWidth > 0) chipsWidth -= AXYNE_DLG_CHIP_GAP;
+        textHeight = ceil([label sizeWithAttributes:labelAttributes].height);
+        [label drawInRect:NSMakeRect(left, y + floor((rowHeight - textHeight) / 2),
+            MAX(0, right - chipsWidth - 12 - left), textHeight) withAttributes:labelAttributes];
+        x = right - chipsWidth;
+        for (NSString *key in chips) {
+            CGFloat width = axyne_dlg_chip_width(key, keyAttributes);
+            NSSize extent = [key sizeWithAttributes:keyAttributes];
+            NSRect chip = NSMakeRect(x, y + floor((rowHeight - AXYNE_DLG_CHIP_HEIGHT) / 2),
+                                     width, AXYNE_DLG_CHIP_HEIGHT);
+            NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(chip, 0.5, 0.5)
+                                                                  xRadius:4 yRadius:4];
+            [axyne_pw_color(AXYNE_DLG_COLOR_CHIP_FILL) setFill];
+            [shape fill];
+            [axyne_pw_color(AXYNE_DLG_COLOR_CHIP_STROKE) setStroke];
+            [shape setLineWidth:1];
+            [shape stroke];
+            [key drawAtPoint:NSMakePoint(NSMinX(chip) + floor((width - extent.width) / 2),
+                    NSMinY(chip) + floor((AXYNE_DLG_CHIP_HEIGHT - extent.height) / 2))
+                withAttributes:keyAttributes];
+            x += width + AXYNE_DLG_CHIP_GAP;
+        }
+        if (![[item objectForKey:@"last"] boolValue]) {
+            [axyne_pw_color(AXYNE_PW_COLOR_CHROME_LINE) setFill];
+            NSRectFill(NSMakeRect(left, y + rowHeight - 1, right - left, 1));
+        }
+    }
+}
+
+/* Arrow keys, Page Up/Down, Space, Home and End scroll the list. */
+- (void)keyDown:(NSEvent *)event
+{
+    NSScrollView *scroll = [self enclosingScrollView];
+    NSClipView *clip = [scroll contentView];
+    NSString *characters = [event charactersIgnoringModifiers];
+    NSRect visible;
+    CGFloat y, page, maximum;
+    unichar key;
+    if (scroll == nil || [characters length] == 0) { [super keyDown:event]; return; }
+    visible = [clip documentVisibleRect];
+    page = MAX(AXYNE_DLG_SHORTCUT_ROW, NSHeight(visible) - AXYNE_DLG_SHORTCUT_ROW);
+    maximum = MAX(0, _contentHeight - NSHeight(visible));
+    y = NSMinY(visible);
+    key = [characters characterAtIndex:0];
+    switch (key) {
+    case NSUpArrowFunctionKey: y -= AXYNE_DLG_SHORTCUT_ROW; break;
+    case NSDownArrowFunctionKey: y += AXYNE_DLG_SHORTCUT_ROW; break;
+    case NSPageUpFunctionKey: y -= page; break;
+    case NSPageDownFunctionKey: y += page; break;
+    case ' ': y += ([event modifierFlags] & NSEventModifierFlagShift) != 0 ? -page : page; break;
+    case NSHomeFunctionKey: y = 0; break;
+    case NSEndFunctionKey: y = maximum; break;
+    default: [super keyDown:event]; return;
+    }
+    y = MIN(MAX(y, 0), maximum);
+    [clip scrollToPoint:NSMakePoint(0, y)];
+    [scroll reflectScrolledClipView:clip];
+}
+
+@end
+
+@interface AxyneShortcutsDialog : NSObject <AxyneDlgActions> {
+    AxyneDlgPanel *_panel;
+    AxyneShortcutList *_list; /* owned by the panel's views */
+}
+- (id)initWithSections:(const AxyneShortcutSection *)sections count:(size_t)count;
+- (NSInteger)runOverOwner:(NSWindow *)owner;
+@end
+
+@implementation AxyneShortcutsDialog
+
+- (id)initWithSections:(const AxyneShortcutSection *)sections count:(size_t)count
+{
+    CGFloat width = AXYNE_DLG_SHORTCUTS_WIDTH, height = AXYNE_DLG_SHORTCUTS_HEIGHT;
+    CGFloat listHeight = height - AXYNE_PW_TITLE_HEIGHT - AXYNE_DLG_FOOTER_HEIGHT;
+    CGFloat buttonY = (AXYNE_DLG_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2.0;
+    AxynePWBox *root, *footer;
+    NSScrollView *scroll;
+    AxynePWButton *close;
+    self = [super init];
+    if (self == nil) return nil;
+    _panel = axyne_dlg_panel(@"키보드 단축키", width, height, self, &root);
+    _list = [[[AxyneShortcutList alloc] initWithSections:sections count:count
+                                                   width:width] autorelease];
+    scroll = [[[NSScrollView alloc] initWithFrame:
+        NSMakeRect(0, AXYNE_PW_TITLE_HEIGHT, width, listHeight)] autorelease];
+    [scroll setBorderType:NSNoBorder];
+    [scroll setDrawsBackground:YES];
+    [scroll setBackgroundColor:axyne_pw_color(AXYNE_PW_COLOR_CONTENT)];
+    [scroll setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+    [scroll setScrollerStyle:NSScrollerStyleOverlay];
+    [scroll setScrollerKnobStyle:NSScrollerKnobStyleLight];
+    [scroll setHasVerticalScroller:YES];
+    [scroll setHasHorizontalScroller:NO];
+    [scroll setAutohidesScrollers:YES];
+    [scroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [_list setAutoresizingMask:NSViewWidthSizable];
+    [scroll setDocumentView:_list];
+    [root addSubview:scroll];
+    footer = axyne_dlg_footer(root, width, height);
+    close = axyne_dlg_button(AxynePWKindAccent, @"닫기",
+        NSMakeRect(width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH, buttonY,
+                   AXYNE_PW_BUTTON_WIDTH, AXYNE_PW_BUTTON_HEIGHT), self, @selector(cancel:));
+    [close setAutoresizingMask:NSViewMinXMargin];
+    [close setKeyEquivalent:@"\r"];
+    [footer addSubview:close];
+    [_list setNextKeyView:close];
+    [close setNextKeyView:_list];
+    [_panel setInitialFirstResponder:_list];
+    return self;
+}
+
+- (void)dealloc
+{
+    [_panel setDialog:nil];
+    [_panel close];
+    [_panel release];
+    [super dealloc];
+}
+
+- (NSInteger)runOverOwner:(NSWindow *)owner
+{
+    return axyne_dlg_run(_panel, owner,
+        NSMakeSize(AXYNE_DLG_SHORTCUTS_WIDTH, AXYNE_DLG_SHORTCUTS_HEIGHT), _list);
+}
+
+- (void)cancel:(id)sender
+{
+    (void)sender;
+    [NSApp stopModalWithCode:0];
+}
+
+@end
+
+void axyne_shortcuts_dialog_show(void *native_owner, const AxyneShortcutSection *sections,
+                                 size_t section_count)
+{
+    AxyneShortcutsDialog *dialog;
+    if (sections == NULL) return;
+    dialog = [[AxyneShortcutsDialog alloc] initWithSections:sections count:section_count];
+    if (dialog == nil) return;
+    (void)[dialog runOverOwner:(NSWindow *)native_owner];
+    [dialog release];
 }
