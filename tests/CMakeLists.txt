@@ -15,6 +15,7 @@ add_executable(axyne_tests
     test_build_target.c
     test_languages.c
     test_build_selector.c
+    test_layout_metrics.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -89,6 +90,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/binary-files"
 )
 add_test(
+    NAME axyne-layout-metrics
+    COMMAND $<TARGET_FILE:axyne_tests> layout-metrics
+            "${AXYNE_TEST_FIXTURE_DIR}/layout-metrics"
+)
+add_test(
     NAME axyne-empty-state
     COMMAND $<TARGET_FILE:axyne_tests> empty-state
             "${AXYNE_TEST_FIXTURE_DIR}/empty-state"
@@ -129,6 +135,7 @@ set_tests_properties(
     axyne-outline
     axyne-binary-files
     axyne-empty-state
+    axyne-layout-metrics
     PROPERTIES TIMEOUT 60
 )
 
