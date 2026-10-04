@@ -761,6 +761,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneRuntimeList _runtimes;
     BOOL _runtimesDiscovered;
     BOOL _runtimeDiscoveryScheduled;
+    BOOL _buildMenuOpen; /* chevron points up while the popup is open */
     AxyneDiscoveryBox *_discoveryBox;
     /* Plan whose run step starts when its build step exits with 0. */
     AxyneLanguagePlan _pendingPlan;
@@ -1515,7 +1516,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [target setLeadingAligned:YES]; [target setContentInset:10];
     [target setRichTitle:axyne_macos_segments(@[
         @[@"▷  ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted],
-        @[@"  ⌄", [NSFont systemFontOfSize:10], muted]])];
+        @[_buildMenuOpen ? @"  ⌃" : @"  ⌄", [NSFont systemFontOfSize:10], muted]])];
     [run setContentInset:14];
     [run setRichTitle:axyne_macos_segments(@[
         @[@"▷  ", small, onAccent],
@@ -1724,9 +1725,20 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [item setState:entries[i].checked ? NSControlStateValueOn : NSControlStateValueOff];
         [menu addItem:item];
     }
+    /* Anchor the menu's top-left corner under the button's bottom-left corner
+     * in screen coordinates, so the flipped/unflipped view difference cannot
+     * shift it. The chevron points up while the menu is open. */
+    NSRect inWindow = [button convertRect:[button bounds] toView:nil];
+    NSRect onScreen = [[button window] convertRectToScreen:inWindow];
+    _buildMenuOpen = YES;
+    [self updateChromeTitles];
+    [button display];
     [menu popUpMenuPositioningItem:nil
-        atLocation:NSMakePoint(0, [button isFlipped] ? NSHeight([button bounds]) + 2 : -2)
-        inView:button];
+        atLocation:NSMakePoint(NSMinX(onScreen), NSMinY(onScreen) - 2)
+        inView:nil];
+    _buildMenuOpen = NO;
+    [self updateChromeTitles];
+    [button setNeedsDisplay:YES];
 }
 
 - (void)pickBuildTarget:(id)sender
