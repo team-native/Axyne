@@ -319,11 +319,25 @@ static int test_commands(void)
     axyne_palette_list_destroy(&list);
 
     CHECK(axyne_palette_build_commands("run", 0, &list, NULL) == AXYNE_STATUS_OK);
-    CHECK(list.items[0].payload == AXYNE_PALETTE_COMMAND_RUN);
-    CHECK_STR(list.items[0].detail, "F5");
+    /* "Runner 설정" matches "run" as a title prefix and ranks first; the Run
+     * command is still listed with its shortcut. */
+    CHECK(list.items[0].payload == AXYNE_PALETTE_COMMAND_CONFIGURE_RUNNER);
+    {
+        size_t run_row = list.count;
+        for (size_t row = 0; row < list.count; ++row)
+            if (list.items[row].payload == AXYNE_PALETTE_COMMAND_RUN) run_row = row;
+        CHECK(run_row < list.count);
+        CHECK_STR(list.items[run_row].detail, "F5");
+    }
     axyne_palette_list_destroy(&list);
     CHECK(axyne_palette_build_commands("run", 1, &list, NULL) == AXYNE_STATUS_OK);
-    CHECK_STR(list.items[0].detail, "\xE2\x8C\x98" "R");
+    {
+        size_t run_row = list.count;
+        for (size_t row = 0; row < list.count; ++row)
+            if (list.items[row].payload == AXYNE_PALETTE_COMMAND_RUN) run_row = row;
+        CHECK(run_row < list.count);
+        CHECK_STR(list.items[run_row].detail, "\xE2\x8C\x98" "R");
+    }
     axyne_palette_list_destroy(&list);
 
     CHECK(axyne_palette_build_commands("debug", 0, &list, NULL) == AXYNE_STATUS_OK);
