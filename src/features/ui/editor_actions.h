@@ -32,7 +32,7 @@ static inline const char *axyne_editor_comment_token(const char *path)
     size_t i;
     static const char *const slashes[] = {
         "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "m", "mm", "js", "jsx",
-        "mjs", "ts", "tsx", "java", "cs", "go", "rs", "swift", "kt", NULL };
+        "mjs", "ts", "tsx", "java", "cs", "go", "rs", "swift", "kt", "kts", "slint", NULL };
     static const char *const hashes[] = {
         "py", "sh", "bash", "zsh", "rb", "pl", "ps1", "toml", "yml", "yaml",
         "cmake", "mk", NULL };
