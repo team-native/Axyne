@@ -57,6 +57,30 @@ AxyneStatus axyne_documents_new_placeholder(AxyneDocumentSet *set,
  * it (dirty), saving it (no longer untitled) or New (tab_requested) reveals it. */
 int axyne_document_tab_hidden(const AxyneDocument *document);
 size_t axyne_documents_visible_count(const AxyneDocumentSet *set);
+/* True when the editor must show the shortcut guide instead of a text
+ * buffer: no document is active, or the active one is the hidden placeholder
+ * (see axyne_document_tab_hidden). The placeholder keeps existing for model
+ * reasons but is never shown as an editable buffer. Opening a file or New
+ * makes the active document visible, closing the last visible tab makes the
+ * placeholder active again. */
+int axyne_documents_empty_state(const AxyneDocumentSet *set);
+
+/* Number of leading bytes inspected to decide whether a file is binary. */
+#define AXYNE_BINARY_SNIFF_BYTES 8000
+/* Heuristic for the head of a file. Binary when the bytes contain a NUL or
+ * are not well-formed UTF-8 (overlongs, surrogates, > U+10FFFF and stray
+ * continuation bytes included). When `truncated` is non-zero the buffer is
+ * only a prefix of a longer file, so a multi-byte sequence cut off at its
+ * very end is tolerated. An empty buffer is text. */
+int axyne_bytes_look_binary(const void *data, size_t length, int truncated);
+/* Sniffs only the first AXYNE_BINARY_SNIFF_BYTES of the file (the rest is
+ * never read). Returns AXYNE_STATUS_OK and sets *is_binary, or the read error
+ * (not found, permission, ...). Paths are UTF-8 on every platform. */
+AxyneStatus axyne_document_file_is_binary(const char *utf8_path,
+                                          int *is_binary, AxyneError *error);
+/* Opening (here and in _open_preview) refuses a file that looks binary with
+ * AXYNE_STATUS_BINARY before reading it; the set is left unchanged. A path
+ * that is already open is only activated, as before. */
 AxyneStatus axyne_documents_open(AxyneDocumentSet *set, const char *utf8_path,
                                  size_t *index, AxyneError *error);
 /* Explorer-click open. An already-open path is only activated (its preview
