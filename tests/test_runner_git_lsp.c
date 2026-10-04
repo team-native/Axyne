@@ -196,6 +196,21 @@ int axyne_test_runner_git_lsp(const char *root, const char *source_root)
     AXYNE_TEST_CHECK(strcmp(runner.executable, "echo") == 0 &&
                      strcmp(runner.arguments[0], "--flag") == 0 &&
                      strcmp(runner.environment[0], "Axyne_Test=one") == 0);
+    /* Appended runtime kinds are accepted; one past the last is rejected. */
+    {
+        AxyneRunnerConfig kinds;
+        AxyneRunnerSpec kind_spec = runner_spec;
+        AXYNE_TEST_STATUS(axyne_runner_initialize(&kinds, &error), AXYNE_STATUS_OK);
+        kind_spec.runtime_kind = AXYNE_RUNTIME_SWIFT;
+        AXYNE_TEST_STATUS(axyne_runner_configure(&kinds, &kind_spec, &error),
+                          AXYNE_STATUS_OK);
+        axyne_runner_destroy(&kinds);
+        AXYNE_TEST_STATUS(axyne_runner_initialize(&kinds, &error), AXYNE_STATUS_OK);
+        kind_spec.runtime_kind = AXYNE_RUNTIME_KIND_COUNT;
+        AXYNE_TEST_STATUS(axyne_runner_configure(&kinds, &kind_spec, &error),
+                          AXYNE_STATUS_INVALID_ARGUMENT);
+        axyne_runner_destroy(&kinds);
+    }
     AXYNE_TEST_STATUS(axyne_runner_process_spec(&runner, NULL, NULL, NULL,
                                                 &process_spec, &error),
                       AXYNE_STATUS_OK);

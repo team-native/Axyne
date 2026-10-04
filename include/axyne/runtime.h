@@ -16,7 +16,16 @@ typedef enum AxyneRuntimeKind {
     AXYNE_RUNTIME_C,
     AXYNE_RUNTIME_CPP,
     AXYNE_RUNTIME_JAVA,
-    AXYNE_RUNTIME_JAVAC
+    AXYNE_RUNTIME_JAVAC,
+    /* Appended kinds; the values above never change. */
+    AXYNE_RUNTIME_GO,
+    AXYNE_RUNTIME_RUST_CARGO,
+    AXYNE_RUNTIME_RUSTC,
+    AXYNE_RUNTIME_SLINT,
+    AXYNE_RUNTIME_KOTLINC,
+    AXYNE_RUNTIME_SWIFTC,
+    AXYNE_RUNTIME_SWIFT,
+    AXYNE_RUNTIME_KIND_COUNT /* not a kind; keep last */
 } AxyneRuntimeKind;
 
 typedef struct AxyneRuntime {
@@ -38,7 +47,10 @@ typedef struct AxyneRuntimeList {
  * than two seconds. Discovery continues after cleanup completes.
  * No runtime is installed or bundled. At most one available executable is
  * returned per kind; TypeScript uses the external tsc command, and Java and
- * javac are reported separately. Initialize the output list by passing an
+ * javac, cargo and rustc, swift and swiftc are reported separately. Go uses
+ * `go version`, Slint the external `slint-viewer`, Kotlin the external
+ * `kotlinc` (a slow JVM start can exceed the two-second probe and then
+ * counts as not installed). Initialize the output list by passing an
  * empty list, then release it with axyne_runtime_free. */
 AxyneStatus axyne_runtime_discover(AxyneRuntimeList *runtimes,
                                   AxyneError *error);

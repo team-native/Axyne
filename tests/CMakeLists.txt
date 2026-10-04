@@ -12,6 +12,8 @@ add_executable(axyne_tests
     test_outline.c
     test_binary_files.c
     test_empty_state.c
+    test_build_target.c
+    test_languages.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -25,6 +27,7 @@ if(MSVC)
     # The palette and problems tests contain UTF-8 Korean literals.
     set_source_files_properties(test_palette_problems.c test_palette_controller.c
         PROPERTIES COMPILE_OPTIONS "/utf-8")
+    set_source_files_properties(test_languages.c PROPERTIES COMPILE_OPTIONS "/utf-8")
 else()
     target_compile_options(axyne_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -94,7 +97,19 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> outline
             "${AXYNE_TEST_FIXTURE_DIR}/outline"
 )
+add_test(
+    NAME axyne-build-target
+    COMMAND $<TARGET_FILE:axyne_tests> build-target
+            "${AXYNE_TEST_FIXTURE_DIR}/build-target"
+)
+add_test(
+    NAME axyne-languages
+    COMMAND $<TARGET_FILE:axyne_tests> languages
+            "${AXYNE_TEST_FIXTURE_DIR}/languages"
+)
 set_tests_properties(
+    axyne-build-target
+    axyne-languages
     axyne-git-repair
     axyne-preview-tabs
     axyne-documents-search
