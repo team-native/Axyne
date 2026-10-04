@@ -1511,8 +1511,11 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     NSFont *small = [NSFont systemFontOfSize:11];
     [target setLeadingAligned:YES]; [target setContentInset:10];
     [target setRichTitle:axyne_macos_segments(@[
-        @[@"▷  ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted],
-        @[_buildMenuOpen ? @"  ⌃" : @"  ⌄", [NSFont systemFontOfSize:10], muted]])];
+        @[@"▷  ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted]])];
+    /* Figma 6:399: the chevron sits at the right edge of the chip (10px inset),
+     * not right after the label. */
+    [target setTrailingTitle:axyne_macos_segments(@[
+        @[_buildMenuOpen ? @"⌃" : @"⌄", [NSFont systemFontOfSize:10], muted]])];
     [run setContentInset:14];
     [run setRichTitle:axyne_macos_segments(@[
         @[@"▷  ", small, onAccent],
@@ -4856,7 +4859,8 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
      * On a narrow toolbar it shrinks (the title truncates) so Build and Run
      * stay in view. */
     CGFloat targetWidth = MIN(240, MAX(150, ceil([[(AxyneChromeButton *)_targetButton
-        richTitle] size].width) + 20));
+        richTitle] size].width) + ceil([[(AxyneChromeButton *)_targetButton
+        trailingTitle] size].width) + 30));
     targetWidth = MIN(targetWidth, MAX(96, width - x - 8 - 96 - 94 - 8));
     [_targetButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, targetWidth, 26)]; x += targetWidth + 8;
     [_buildButton setFrame:NSMakeRect(x, AXYNE_MENU + 6, 88, 26)]; x += 96;
