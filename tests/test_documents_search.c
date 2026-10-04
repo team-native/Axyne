@@ -11,6 +11,7 @@ int axyne_test_documents_search(const char *root)
     char alpha[512], beta_directory[512], beta[512], binary[512];
     char git_directory[512], git_file[512];
     char saved[512], build_directory[512], nested_git[512];
+    char root_store[512], nested_store[512];
     AxyneExplorer explorer = {0};
     size_t node_index = 0;
     int saw_build = 0, saw_nested = 0;
@@ -49,6 +50,13 @@ int axyne_test_documents_search(const char *root)
     AXYNE_TEST_CHECK(axyne_test_path(nested_git, sizeof(nested_git),
                                      beta_directory, ".git"));
     AXYNE_TEST_CHECK(axyne_test_write(nested_git, "gitdir: elsewhere needle\n"));
+    /* Finder bookkeeping files are hidden at any depth. */
+    AXYNE_TEST_CHECK(axyne_test_path(root_store, sizeof(root_store), root,
+                                     ".DS_Store"));
+    AXYNE_TEST_CHECK(axyne_test_write(root_store, "needle store\n"));
+    AXYNE_TEST_CHECK(axyne_test_path(nested_store, sizeof(nested_store),
+                                     beta_directory, ".DS_Store"));
+    AXYNE_TEST_CHECK(axyne_test_write(nested_store, "needle store\n"));
     AXYNE_TEST_CHECK(axyne_fs_write_file(binary, "needle\0hidden", 13, NULL) ==
                      AXYNE_STATUS_OK);
 
@@ -87,6 +95,7 @@ int axyne_test_documents_search(const char *root)
             size_t root_length = strlen(root);
             if (strncmp(below_root, root, root_length) == 0)
                 below_root += root_length;
+            AXYNE_TEST_CHECK(strstr(below_root, ".DS_Store") == NULL);
             if (strstr(below_root, ".git") != NULL)
                 fprintf(stderr, "FAIL search listed repository metadata: %s\n",
                         results.items[result_index].path);
@@ -101,6 +110,11 @@ int axyne_test_documents_search(const char *root)
     axyne_search_paths_destroy(paths, path_count);
 
     AXYNE_TEST_CHECK(axyne_explorer_is_hidden_name(".git"));
+    AXYNE_TEST_CHECK(axyne_explorer_is_hidden_name(".DS_Store"));
+    AXYNE_TEST_CHECK(!axyne_explorer_is_hidden_name(".ds_store") &&
+                     !axyne_explorer_is_hidden_name("DS_Store") &&
+                     !axyne_explorer_is_hidden_name(".DS_Store.bak") &&
+                     !axyne_explorer_is_hidden_name("Thumbs.db"));
     AXYNE_TEST_CHECK(!axyne_explorer_is_hidden_name(".gitignore") &&
                      !axyne_explorer_is_hidden_name("git") &&
                      !axyne_explorer_is_hidden_name(NULL));
@@ -126,6 +140,7 @@ int axyne_test_documents_search(const char *root)
             fprintf(stderr, "FAIL explorer row %zu lists %s\n", node_index,
                     node->path);
         AXYNE_TEST_CHECK(strcmp(node->name, ".git") != 0);
+        AXYNE_TEST_CHECK(strcmp(node->name, ".DS_Store") != 0);
         if (strcmp(node->name, "build") == 0) {
             saw_build = 1;
             AXYNE_TEST_CHECK(axyne_explorer_is_dimmed(node));
