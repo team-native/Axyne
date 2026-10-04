@@ -1038,6 +1038,13 @@ int axyne_preferences_window_show(void *native_owner, int workspace,
 - (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)canBecomeMainWindow { return NO; }
 - (void)cancelOperation:(id)sender { [_dialog cancel:sender]; }
+/* Esc while a button or the list has focus never reaches cancelOperation:
+ * through the key bindings; close the dialog from here. */
+- (void)keyDown:(NSEvent *)event
+{
+    if ([event keyCode] == 53) { [_dialog cancel:nil]; return; }
+    [super keyDown:event];
+}
 @end
 
 static NSString *axyne_dlg_string(const char *utf8)
@@ -1159,6 +1166,20 @@ static NSInteger axyne_dlg_run(NSPanel *panel, NSWindow *owner, NSSize size, NSR
     BOOL accepted = [super resignFirstResponder];
     if (accepted) [_box setFocused:NO];
     return accepted;
+}
+/* The panel's default (Save) button owns Return as a key equivalent, which is
+ * tried before keyDown:; while this area has focus Return must type a newline. */
+- (BOOL)performKeyEquivalent:(NSEvent *)event
+{
+    NSEventModifierFlags flags = [event modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if ([event type] == NSEventTypeKeyDown && [[self window] firstResponder] == self &&
+        ([event keyCode] == 36 || [event keyCode] == 76) &&
+        (flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+                  NSEventModifierFlagOption)) == 0) {
+        [self insertNewline:nil];
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
 }
 - (void)insertTab:(id)sender { (void)sender; [[self window] selectNextKeyView:self]; }
 - (void)insertBacktab:(id)sender { (void)sender; [[self window] selectPreviousKeyView:self]; }
