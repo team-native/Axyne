@@ -26,6 +26,8 @@
 #include "axyne/git.h"
 #include "axyne/lsp.h"
 #include "axyne/palette_controller.h"
+#include "axyne/language.h"
+#include "axyne/build_selector.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
@@ -133,6 +135,14 @@ typedef struct AxyneWindowState {
     int empty_shown; /* shortcut guide replaces the editor (no open document) */
     AxyneRunnerConfig terminal_runner;
     AxyneRunnerConfig action_runner;
+    /* Build target selector. Kept in memory for the session; runtimes are
+     * discovered lazily (first editor file, click or build), never at startup. */
+    AxyneBuildTarget build_target;
+    AxyneRuntimeList runtimes;
+    int runtimes_discovered;
+    int runtime_discovery_posted;
+    AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
+    int pending_run;
     AxyneDebugger debugger;
     AxyneProcess *terminal_process;
     AxyneProcess *git_process;
@@ -221,7 +231,7 @@ enum { AXYNE_CMD_GOTO_LINE = 1200, AXYNE_CMD_SELECT_LINE,
        AXYNE_CMD_DEBUG_STOP, AXYNE_CMD_DEBUG_STEP_INTO,
        AXYNE_CMD_DEBUG_STEP_OUT, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS,
        AXYNE_CMD_OPEN_PREFERENCES_FILE, AXYNE_CMD_SHORTCUTS,
-       AXYNE_CMD_REPORT_ISSUE };
+       AXYNE_CMD_REPORT_ISSUE, AXYNE_CMD_BUILD_TARGET };
 
 enum { AXYNE_CMD_EXIT = 1090 };
 
@@ -229,7 +239,8 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
        AXYNE_WM_TERMINAL_EXIT = WM_APP + 23,
        AXYNE_WM_GIT_COMPLETE = WM_APP + 24,
-       AXYNE_WM_LSP_STATUS = WM_APP + 25 };
+       AXYNE_WM_LSP_STATUS = WM_APP + 25,
+       AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -960,6 +971,12 @@ static void axyne_refresh_action_controls(AxyneWindowState *state)
     EnableWindow(state->debug_step_over, debugger_active && saved_document);
     EnableWindow(state->debug_breakpoint,
                  saved_document);
+    /* The first active editor file asks for runtime discovery, deferred past
+     * the current message so the window paints first. */
+    if (document != NULL && document->path != NULL && !state->runtimes_discovered &&
+        !state->runtime_discovery_posted && state->terminal_output != NULL &&
+        PostMessageW(GetParent(state->terminal_output), AXYNE_WM_DISCOVER_RUNTIMES, 0, 0))
+        state->runtime_discovery_posted = 1;
 }
 
 static void axyne_terminal_output(AxyneProcess *process,
@@ -1748,11 +1765,111 @@ static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
     return accepted;
 }
 
+static AxyneLanguageId axyne_active_language(AxyneWindowState *state)
+{
+    AxyneDocument *doc = axyne_active_visible(state);
+    if (doc == NULL || doc->path == NULL) return AXYNE_LANGUAGE_NONE;
+    return axyne_language_for_path(doc->path);
+}
+
+/* Runs PATH discovery and the version probes (two seconds each at most) once
+ * per session, on the UI thread. Callers: the first click on the selector,
+ * the first build or run, and the deferred first-editor-file message. */
+static void axyne_discover_runtimes(HWND window, AxyneWindowState *state)
+{
+    AxyneError error;
+    if (state->runtimes_discovered) return;
+    state->runtimes_discovered = 1;
+    memset(&state->runtimes, 0, sizeof(state->runtimes));
+    if (axyne_runtime_discover(&state->runtimes, &error) != AXYNE_STATUS_OK)
+        axyne_runtime_free(&state->runtimes);
+    if (window != NULL) InvalidateRect(window, NULL, FALSE);
+}
+
+static void axyne_clear_pending_run(AxyneWindowState *state)
+{
+    if (!state->pending_run) return;
+    axyne_language_plan_free(&state->pending_plan);
+    memset(&state->pending_plan, 0, sizeof(state->pending_plan));
+    state->pending_run = 0;
+}
+
+/* The output control is ANSI: convert resolver text (UTF-8, Korean) to the
+ * active code page instead of showing raw UTF-8 bytes. */
+static void axyne_terminal_append_utf8(HWND output, const char *utf8,
+                                       AxyneProcessStream stream)
+{
+    int wide_length;
+    int ansi_length;
+    wchar_t *wide;
+    char *ansi;
+    if (utf8 == NULL) return;
+    wide_length = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (wide_length <= 1) return;
+    wide = (wchar_t *)malloc((size_t)wide_length * sizeof(*wide));
+    if (wide == NULL) return;
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, wide_length) == 0) {
+        free(wide); return;
+    }
+    ansi_length = WideCharToMultiByte(CP_ACP, 0, wide, -1, NULL, 0, NULL, NULL);
+    ansi = ansi_length > 1 ? (char *)malloc((size_t)ansi_length) : NULL;
+    if (ansi != NULL &&
+        WideCharToMultiByte(CP_ACP, 0, wide, -1, ansi, ansi_length, NULL, NULL) != 0)
+        axyne_terminal_append(output, ansi, strlen(ansi), stream);
+    free(ansi);
+    free(wide);
+}
+
+static int axyne_start_step(HWND window, AxyneWindowState *state,
+                            const AxyneLanguageStep *step,
+                            const AxyneLanguagePlan *plan, int action, int clear)
+{
+    AxyneProcessSpec process_spec;
+    AxyneError error;
+    const char *header = action == 2 ? "[run]\r\n" : "[build]\r\n";
+    memset(&process_spec, 0, sizeof(process_spec));
+    process_spec.executable = step->executable;
+    process_spec.arguments = (const char *const *)step->arguments;
+    process_spec.argument_count = step->argument_count;
+    process_spec.working_directory = plan->working_directory;
+    process_spec.environment = (const char *const *)step->environment;
+    process_spec.environment_count = step->environment_count;
+    process_spec.on_output = axyne_terminal_output;
+    process_spec.on_exit = axyne_terminal_exit;
+    process_spec.user_data = state;
+    if (axyne_process_start(&process_spec, &state->terminal_process, &error) !=
+        AXYNE_STATUS_OK) {
+        const char *message = error.message[0] != '\0' ? error.message :
+            "Build or run could not be started.\n";
+        state->last_exit_failed = 0;
+        state->has_exit_status = 0;
+        axyne_terminal_append(state->terminal_output, message, strlen(message),
+                              AXYNE_PROCESS_STDERR);
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
+    }
+    if (clear) SetWindowTextA(state->terminal_output, header);
+    else axyne_terminal_append(state->terminal_output, header, strlen(header),
+                               AXYNE_PROCESS_STDOUT);
+    state->active_action = action;
+    state->last_exit_failed = 0;
+    EnableWindow(state->terminal_start, FALSE);
+    EnableWindow(state->terminal_stop, TRUE);
+    axyne_refresh_action_controls(state);
+    return 1;
+}
+
+/* Build and Run resolve the active file's language, the build target and the
+ * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
+ * it. Run executes the build step first when the plan has one. */
 static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
 {
     AxyneDocument *doc = axyne_active_visible(state);
-    AxyneProcessSpec process_spec;
-    AxyneError error;
+    AxyneLanguagePlan plan;
+    const AxyneLanguageStep *first;
+    char message[256];
+    int chain;
+    int action;
     AxyneStatus status;
     if (doc == NULL) return;
     state->terminal_panel_selected = 0;
@@ -1760,16 +1877,16 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     axyne_layout(window, state);
     if (state->terminal_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
-        const char *message = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
-        axyne_terminal_append(state->terminal_output, message, strlen(message),
+        const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
+        axyne_terminal_append(state->terminal_output, busy, strlen(busy),
                               AXYNE_PROCESS_STDERR);
         return;
     }
     if (!axyne_capture_editor(state)) return;
     if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty) {
         if (!axyne_save_active(window, state)) {
-            const char *message = "Save the active document before building or running.\n";
-            axyne_terminal_append(state->terminal_output, message, strlen(message),
+            const char *unsaved = "Save the active document before building or running.\n";
+            axyne_terminal_append(state->terminal_output, unsaved, strlen(unsaved),
                                   AXYNE_PROCESS_STDERR);
             return;
         }
@@ -1777,34 +1894,41 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
         if (doc == NULL || doc->is_untitled || doc->path == NULL || doc->is_dirty)
             return;
     }
-    if (state->action_runner.executable == NULL) {
-        const char *message = "Configure the Build/Run Runner before building or running.\n";
-        axyne_terminal_append(state->terminal_output, message, strlen(message),
-                              AXYNE_PROCESS_STDERR);
+    axyne_discover_runtimes(window, state);
+    axyne_clear_pending_run(state);
+    memset(&plan, 0, sizeof(plan));
+    status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &state->runtimes,
+        &state->build_target, doc->path,
+        state->action_runner.executable != NULL ? &state->action_runner : NULL,
+        &plan, message, sizeof(message));
+    if (status != AXYNE_STATUS_OK) {
+        /* Missing runtime or unknown language: the resolver's text goes to the
+         * output panel; there is no modal. */
+        char line[300];
+        (void)snprintf(line, sizeof(line), "%s\r\n",
+                       message[0] != '\0' ? message : "Build or run could not be started.");
+        axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDERR);
+        axyne_language_plan_free(&plan);
         return;
     }
-    status = axyne_runner_process_spec(&state->action_runner,
-            axyne_terminal_output, axyne_terminal_exit, state,
-            &process_spec, &error);
-    if (status == AXYNE_STATUS_OK)
-        status = axyne_process_start(&process_spec, &state->terminal_process, &error);
-    if (status != AXYNE_STATUS_OK) {
-        state->last_exit_failed = 0;
-        state->has_exit_status = 0;
-        const char *message = error.message[0] != '\0' ? error.message :
-            "Build or run could not be started.\n";
-        axyne_terminal_append(state->terminal_output, message, strlen(message),
-                              AXYNE_PROCESS_STDERR);
-        InvalidateRect(window, NULL, FALSE);
-    } else {
-        SetWindowTextA(state->terminal_output, run ? "[run]\r\n" : "[build]\r\n");
-        state->active_action = run ? 2 : 1;
-        state->last_exit_failed = 0;
-        EnableWindow(state->terminal_start, FALSE);
-        EnableWindow(state->terminal_stop, TRUE);
-        axyne_refresh_action_controls(state);
+    if (!run && !plan.has_build && !plan.overridden) {
+        const char *none = "[build] 이 언어에는 빌드 단계가 없습니다.\r\n";
+        SetWindowTextA(state->terminal_output, "");
+        axyne_terminal_append_utf8(state->terminal_output, none, AXYNE_PROCESS_STDOUT);
+        axyne_language_plan_free(&plan);
+        return;
     }
-    (void)window;
+    /* Build: the build step (a manual runner has none and runs as before).
+     * Run: the build step first when there is one, then the run step. */
+    chain = run && plan.has_build;
+    first = plan.has_build && (!run || chain) ? &plan.build : &plan.run;
+    action = (run && !chain) ? 2 : 1;
+    if (axyne_start_step(window, state, first, &plan, action, 1) && chain) {
+        state->pending_plan = plan; /* the pending run step owns the strings now */
+        state->pending_run = 1;
+        return;
+    }
+    axyne_language_plan_free(&plan);
 }
 
 static int axyne_prompt(HWND owner, const wchar_t *title, const wchar_t *label,
@@ -5394,6 +5518,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state = (AxyneWindowState *)GetWindowLongPtrW(window, GWLP_USERDATA);
         HINSTANCE instance = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
         axyne_palette_ctl_init(&state->palette, 0, axyne_palette_document, state);
+        state->build_target = axyne_build_target_default();
         state->ui_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -5893,10 +6018,26 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_continue, FALSE);
         EnableWindow(state->debug_step_over, FALSE);
         EnableWindow(state->debug_breakpoint, FALSE);
+        if (state->pending_run) {
+            if (state->last_exit_code == 0 && state->terminal_process == NULL) {
+                /* The build succeeded: start the run step of the same plan. */
+                AxyneLanguagePlan plan = state->pending_plan;
+                memset(&state->pending_plan, 0, sizeof(state->pending_plan));
+                state->pending_run = 0;
+                (void)axyne_start_step(window, state, &plan.run, &plan, 2, 0);
+                axyne_language_plan_free(&plan);
+            } else {
+                axyne_clear_pending_run(state);
+            }
+        }
         axyne_refresh_action_controls(state);
         InvalidateRect(window, NULL, FALSE);
         return 0;
     }
+    case AXYNE_WM_DISCOVER_RUNTIMES:
+        state->runtime_discovery_posted = 0;
+        axyne_discover_runtimes(window, state);
+        return 0;
     case AXYNE_WM_GIT_COMPLETE:
         if (state->git_run == (AxyneGitUiRun *)l_param)
             axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
@@ -6031,6 +6172,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_palette_destroy_ui(state);
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
+            axyne_clear_pending_run(state);
+            axyne_runtime_free(&state->runtimes);
             if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL) {
                 DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
                 AXYNE_EDIT_BACKGROUND_BRUSH = NULL;
