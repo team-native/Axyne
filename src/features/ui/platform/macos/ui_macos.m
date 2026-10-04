@@ -882,6 +882,9 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)showWorkspaceMessage:(NSString *)message;
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
 - (NSInteger)explorerNodeAtPoint:(NSPoint)point;
+- (BOOL)explorerPinnedAtPoint:(NSPoint)point;
+- (NSUInteger)explorerPinnedRows:(size_t *)out;
+- (NSInteger)explorerVisibleRows;
 - (NSRect)tabFrameAtIndex:(size_t)index;
 - (void)selectPanel:(id)sender;
 - (void)clearOutput:(id)sender;
@@ -2312,16 +2315,57 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return YES;
 }
 
-- (NSInteger)explorerNodeAtPoint:(NSPoint)point
+/* Rows that fit below the "탐색기" header. */
+- (NSInteger)explorerVisibleRows
+{
+    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    return MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
+}
+
+/* Sticky folder rows: node indices (outermost first, room for
+ * AXYNE_EXPLORER_MAX_PINNED) of the ancestors of the first visible row. They
+ * cover the top rows of the list. At least one list row always stays free. */
+- (NSUInteger)explorerPinnedRows:(size_t *)out
+{
+    NSInteger limit = MIN((NSInteger)AXYNE_EXPLORER_MAX_PINNED,
+                          [self explorerVisibleRows] - 1);
+    if (_explorer.root == NULL || _explorer.count == 0 || limit <= 0) return 0;
+    return (NSUInteger)axyne_explorer_pinned_ancestors(&_explorer,
+        (size_t)MAX(0, _explorerFirstRow), (size_t)limit, out);
+}
+
+/* Slot (0-based row position from the list top) under the point, or -1. */
+- (NSInteger)explorerSlotAtPoint:(NSPoint)point
 {
     const CGFloat explorerTop = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
-    NSInteger row;
+    NSInteger slot;
     if (_explorer.root == NULL || point.x < 0 || point.x >= [self sidebarWidth] ||
-        point.y < explorerTop || point.y >= bottom) return NSNotFound;
-    row = (NSInteger)((point.y - explorerTop) / AXYNE_UI_ROW) + _explorerFirstRow;
-    if (explorerTop + (row - _explorerFirstRow + 1) * AXYNE_UI_ROW > bottom)
-        return NSNotFound;
+        point.y < explorerTop || point.y >= bottom) return -1;
+    slot = (NSInteger)((point.y - explorerTop) / AXYNE_UI_ROW);
+    if (explorerTop + (slot + 1) * AXYNE_UI_ROW > bottom) return -1;
+    return slot;
+}
+
+- (BOOL)explorerPinnedAtPoint:(NSPoint)point
+{
+    size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
+    NSInteger slot = [self explorerSlotAtPoint:point];
+    return slot >= 0 && (NSUInteger)slot < [self explorerPinnedRows:pinned];
+}
+
+- (NSInteger)explorerNodeAtPoint:(NSPoint)point
+{
+    size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
+    NSInteger slot = [self explorerSlotAtPoint:point];
+    NSInteger row;
+    if (slot < 0) return NSNotFound;
+    /* A pinned row stands for its real node, so selection, rename, delete
+     * and the context menu act on that folder. */
+    if ((NSUInteger)slot < [self explorerPinnedRows:pinned])
+        return (NSInteger)pinned[slot];
+    row = slot + _explorerFirstRow;
     return row >= 0 && (size_t)row < _explorer.count ? row : NSNotFound;
 }
 
@@ -3209,7 +3253,20 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
             _explorerSelection = row;
             _hasExplorerSelection = YES;
             AxyneExplorerNode *node = &_explorer.nodes[(size_t)row];
-            if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+            if ([self explorerPinnedAtPoint:point]) {
+                /* A pinned ancestor selects its folder and scrolls the list
+                 * to it; it neither toggles nor opens anything. */
+                NSInteger maximum = MAX(0, (NSInteger)_explorer.count -
+                    [self explorerVisibleRows]);
+                _explorerFirstRow = MIN(maximum,
+                    (NSInteger)axyne_explorer_scroll_target((size_t)row));
+                [self setNeedsDisplay:YES];
+                return;
+            }
+            if (axyne_explorer_is_root_node(node)) {
+                /* The root is a header: always expanded, click only selects. */
+                [self setNeedsDisplay:YES];
+            } else if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
                 /* Only the first click of a double-click toggles, so the
                  * second click does not collapse the folder again. */
                 if ([event clickCount] == 1 &&
@@ -4229,6 +4286,40 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [self layoutPalette];
 }
 
+/* Shortens `label` with a tail ellipsis so it is at most `width` points wide
+ * in the given font. Cuts only at composed-character boundaries. */
+- (NSString *)label:(NSString *)label fittingWidth:(CGFloat)width
+               size:(CGFloat)size family:(NSString *)family
+{
+    NSFont *font = [NSFont fontWithName:family size:size];
+    NSDictionary *attributes;
+    NSUInteger low = 0, high, length = [label length];
+    if (font == nil) font = [NSFont systemFontOfSize:size];
+    attributes = @{NSFontAttributeName: font};
+    if ([label sizeWithAttributes:attributes].width <= width) return label;
+    /* Largest prefix length whose prefix + "…" fits. */
+    high = length;
+    while (low < high) {
+        NSUInteger middle = (low + high + 1) / 2;
+        NSRange range = [label rangeOfComposedCharacterSequencesForRange:
+            NSMakeRange(0, middle)];
+        NSString *candidate = [[label substringWithRange:range]
+            stringByAppendingString:@"…"];
+        if (NSMaxRange(range) <= middle &&
+            [candidate sizeWithAttributes:attributes].width <= width) low = middle;
+        else high = middle - 1;
+    }
+    {
+        NSRange range = [label rangeOfComposedCharacterSequencesForRange:
+            NSMakeRange(0, low)];
+        NSString *prefix = [label substringWithRange:range];
+        while ([prefix length] > 0 && [[NSCharacterSet whitespaceCharacterSet]
+               characterIsMember:[prefix characterAtIndex:[prefix length] - 1]])
+            prefix = [prefix substringToIndex:[prefix length] - 1];
+        return [prefix stringByAppendingString:@"…"];
+    }
+}
+
 - (void)drawLabel:(NSString *)label at:(NSPoint)point
              size:(CGFloat)size color:(NSColor *)color family:(NSString *)family
 {
@@ -4239,6 +4330,43 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         NSForegroundColorAttributeName: color
     };
     [label drawAtPoint:point withAttributes:attributes];
+}
+
+/* One explorer row at `y` (top of the row). Used for list rows and for the
+ * pinned ancestors, which are drawn over the list. */
+- (void)drawExplorerNodeAtIndex:(size_t)i y:(CGFloat)explorerY light:(BOOL)light
+    reference:(BOOL)reference text:(NSColor *)text muted:(NSColor *)muted
+{
+    AxyneExplorerNode *node = &_explorer.nodes[i];
+    BOOL selectedRow = _hasExplorerSelection && _explorerSelection == (NSInteger)i;
+    BOOL isRoot = axyne_explorer_is_root_node(node);
+    if (selectedRow) {
+        [axyne_preference_color(reference ? 0x2f343c : _preferences.theme.border) setFill];
+        NSRectFill(NSMakeRect(0, explorerY, [self sidebarWidth] - 1, AXYNE_UI_ROW));
+    }
+    CGFloat x = 8 + node->depth * AXYNE_UI_INDENT;
+    CGFloat nameX;
+    if (isRoot) {
+        /* Header-like row: no chevron, always expanded. */
+        nameX = 12;
+    } else if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+        [self drawLabel:axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›"
+            at:NSMakePoint(x, explorerY + 4) size:11 color:muted family:@"SF Pro Text"];
+        nameX = x + 16;
+    } else {
+        [self drawFileBadge:node->name inRect:NSMakeRect(x, explorerY + 4, 20, 14) tab:NO];
+        nameX = x + 26;
+    }
+    NSString *name = [NSString stringWithUTF8String:node->name];
+    if (name == nil) name = @"(invalid name)";
+    /* Reserve the same 12pt right padding as Windows; never reach the
+     * sidebar edge (the 1pt border sits at sidebarWidth - 1). */
+    name = [self label:name fittingWidth:MAX(0, [self sidebarWidth] - 12 - nameX)
+                  size:12 family:@"SF Pro Text"];
+    [self drawLabel:name at:NSMakePoint(nameX, explorerY + 3) size:12
+        color:selectedRow ? text : (axyne_explorer_is_dimmed(node) ? muted :
+            axyne_preference_color(light ? 0x24272d : 0xc4c8ce))
+        family:@"SF Pro Text"];
 }
 
 - (void)drawFileBadge:(const char *)name inRect:(NSRect)rect tab:(BOOL)tab
@@ -4396,30 +4524,26 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
             [self drawLabel:@"폴더 열기…" at:NSMakePoint(16, explorerY + 3)
                 size:12 color:text family:@"SF Pro Text"];
         } else {
+            size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
+            NSUInteger pinnedCount = [self explorerPinnedRows:pinned];
+            CGFloat listTop = explorerY;
             for (size_t i = (size_t)_explorerFirstRow; i < _explorer.count &&
-                explorerY + AXYNE_UI_ROW <= bottomTop; ++i, explorerY += AXYNE_UI_ROW) {
-                AxyneExplorerNode *node = &_explorer.nodes[i];
-                BOOL selectedRow = _hasExplorerSelection && _explorerSelection == (NSInteger)i;
-                if (selectedRow) {
-                    [axyne_preference_color(reference ? 0x2f343c : _preferences.theme.border) setFill];
-                    NSRectFill(NSMakeRect(0, explorerY, [self sidebarWidth], AXYNE_UI_ROW));
-                }
-                CGFloat x = 8 + node->depth * AXYNE_UI_INDENT;
-                CGFloat nameX;
-                if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
-                    [self drawLabel:axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›"
-                        at:NSMakePoint(x, explorerY + 4) size:11 color:muted family:@"SF Pro Text"];
-                    nameX = x + 16;
-                } else {
-                    [self drawFileBadge:node->name inRect:NSMakeRect(x, explorerY + 4, 20, 14) tab:NO];
-                    nameX = x + 26;
-                }
-                NSString *name = [NSString stringWithUTF8String:node->name];
-                [self drawLabel:name != nil ? name : @"(invalid name)"
-                    at:NSMakePoint(nameX, explorerY + 3) size:12
-                    color:selectedRow ? text : (axyne_explorer_is_dimmed(node) ? muted :
-                        axyne_preference_color(light ? 0x24272d : 0xc4c8ce))
-                    family:@"SF Pro Text"];
+                explorerY + AXYNE_UI_ROW <= bottomTop; ++i, explorerY += AXYNE_UI_ROW)
+                [self drawExplorerNodeAtIndex:i y:explorerY light:light
+                    reference:reference text:text muted:muted];
+            /* Sticky ancestors: opaque sidebar background over the first rows
+             * with a hairline under the last one. */
+            if (pinnedCount > 0) {
+                CGFloat pinnedBottom = listTop + pinnedCount * AXYNE_UI_ROW;
+                [panel setFill];
+                NSRectFill(NSMakeRect(0, listTop, [self sidebarWidth] - 1,
+                                      pinnedCount * AXYNE_UI_ROW));
+                for (NSUInteger p = 0; p < pinnedCount; ++p)
+                    [self drawExplorerNodeAtIndex:pinned[p]
+                        y:listTop + p * AXYNE_UI_ROW light:light
+                        reference:reference text:text muted:muted];
+                [border setFill];
+                NSRectFill(NSMakeRect(0, pinnedBottom - 1, [self sidebarWidth] - 1, 1));
             }
         }
         [NSGraphicsContext restoreGraphicsState];

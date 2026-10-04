@@ -128,3 +128,18 @@ Root causes (macOS screenshot): the Scintilla Cocoa view used the system's legac
 | macOS appearance | `NSAppearanceNameDarkAqua` on the Scintilla view and its scroll view when `editor_background` luminance is below 128, else Aqua; light knob on dark editors, dark knob on light; guarded by `respondsToSelector:` (10.14+) | DELEGATED | ASSUMED |
 | Windows scrollbars | `SetWindowTheme` with `DarkMode_Explorer` (dark editor background) or `Explorer`, loaded lazily from uxtheme; ignored on systems without it | DELEGATED | ASSUMED |
 | Theme source | Editor background of the active theme, not the system appearance, so a dark theme under a light system keeps dark scrollers | DELEGATED | ASSUMED |
+
+## Explorer polish
+
+Branch `feature/explorer-polish`. Shared rules live in `src/features/workspace/explorer.c` (`axyne_explorer_is_hidden_name`, `axyne_explorer_is_root_node`, `axyne_explorer_pinned_ancestors`, `axyne_explorer_scroll_target`) and are covered by `axyne-documents-search`; both native adapters only draw and hit-test.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Finder metadata | An entry named exactly `.DS_Store` is never listed in the explorer and is skipped by project file and text search, at any depth, through the same rule as `.git`. `Thumbs.db` and other names stay visible | USER | CONFIRMED |
+| Long names | A name that does not fit is cut with a tail ellipsis inside the row's label width. macOS measures with the row font and draws `…`, Windows keeps `DT_END_ELLIPSIS`. The label ends 12px before the sidebar edge, so nothing is drawn under the 1px border/splitter. No hover tooltip | USER (report) / IMPLEMENTATION | CONFIRMED |
+| One behaviour for the root | The root row is always expanded and not collapsible: no chevron, a click only selects it (toggle is a no-op, `axyne_explorer_is_expanded` reports the root path as expanded). It stays a header-like row showing the folder name; the context menu New File / New Folder at the root is unchanged, Rename/Delete stay refused for it | USER (request) / ASSUMED (always expanded, not collapsible) | CONFIRMED / ASSUMED |
+| Sticky folders | While scrolled, the ancestor folders of the first visible row are pinned at the top of the list (outermost first, each at its own indent, 22px rows, at most 3; deeper chains keep the nearest ancestors; the root counts as an ancestor). Drawn over the list with the sidebar panel colour and a 1px bottom border in the theme border colour. At least one list row always stays free, so very short explorers pin fewer rows | ASSUMED (delegated by user) | ASSUMED |
+| Sticky interaction | A pinned row maps to its real node, so selection highlight, right-click menu, rename and delete act on that folder. Clicking one selects it and scrolls the list so the folder sits `AXYNE_EXPLORER_MAX_PINNED` rows below the top (never under the pinned rows); it does not toggle. The rows covered by the pinned rows are always reachable by scrolling less | ASSUMED | ASSUMED |
+| Scroll model | Unchanged: the scroll position is still a first-row index and the maximum is `count - visible rows`; the pinned rows are derived from it, so wheel scrolling, clamping after reload and reset on workspace change need no extra state | IMPLEMENTATION | CONFIRMED |
+
+Units: `.DS_Store` rule with tests; root rule and sticky helper with tests; macOS adapter; Windows adapter; this record.
