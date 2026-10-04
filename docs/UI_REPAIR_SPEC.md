@@ -268,3 +268,25 @@ The lists that drop from the in-window menu bar (파일 ... 도움말), the buil
 Known gaps: the macOS popup was reviewed by eye only (the sources cannot be compiled off a Mac); press-drag-release from the bar item onto a row is not supported (click the item, then click the row); rows have no icons.
 
 Units: shared popup layout helper with tests; macOS popup panel and view; menu bar dropdowns; build-target popup; explorer context menu; this record.
+## Git commit/push/pull
+
+The Git entries could only inspect and stage. Git 커밋…, Git 푸시 and Git 풀 now run from the same menu group (macOS File menu; Windows Tools menu, where that platform already keeps its Git entries). Core: `axyne_git_commit`, `axyne_git_push`, `axyne_git_pull` in `include/axyne/git.h`, covered by `axyne-git-actions` against real temporary repositories.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Capability | A commit with a message you write, and push, are available from the menu (no terminal needed) | USER | CONFIRMED |
+| Placement | After the existing Git entries and a separator: Git 커밋…, Git 푸시, Git 풀. No shortcuts. Same gating as the other Git entries (workspace required, no Git operation running). Command palette entries are not added (the palette table, command ids and both adapters would all change) | ASSUMED | ASSUMED |
+| Commit dialog | Modal dialog in the preferences chrome (`axyne_git_commit_dialog_show`, `app_dialogs.h`): title "Git 커밋", monospaced 12 pt multi-line message with the placeholder "커밋 메시지" (first line is the subject), checkbox "커밋 전에 모든 변경 사항 스테이지", buttons 취소 / 커밋 | USER (title, fields) | CONFIRMED |
+| Dialog keys | 커밋 is disabled while the message is empty or whitespace; Esc cancels; Return types a newline; Cmd+Return (macOS) / Ctrl+Return (Windows) commits | ASSUMED | ASSUMED |
+| Stage-all checkbox | Default on: runs `git add --all` first. Off: commits only what is already staged | ASSUMED | ASSUMED |
+| Message transport | Written to a private temporary file and passed as `git commit --cleanup=whitespace -F <file>`, then deleted: no shell, no command-line quoting, UTF-8 stays intact on Windows. CRLF becomes LF; `#` lines are kept; an empty message is rejected before Git runs | ASSUMED | ASSUMED |
+| No trailers | No Co-authored-by or other trailer is ever added; the message is exactly what was typed | USER (rule) | CONFIRMED |
+| Push | `git push`; when the branch has no upstream and a remote named `origin` exists, `git push -u origin <branch>`. No `origin` gives a Korean error; a detached HEAD gives a Korean error. No confirmation dialog; force push is never used | ASSUMED | ASSUMED |
+| Pull | `git pull --ff-only`: it never creates a merge commit or rebases; diverged history fails with a Korean hint | ASSUMED | ASSUMED |
+| Non-interactive | Every step runs with `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and `LC_MESSAGES=C`, so a missing credential fails instead of waiting for input. SSH prompts that bypass Git (passphrase or host-key questions) are not suppressed | ASSUMED | ASSUMED |
+| Reporting | Output panel, same report layout as the other Git commands: a `$ git <args>` header for each step (the commit header shows `-F <message>`, not the temp path), stderr lines prefixed `[stderr]`, `[exit N]` on failure, then a Korean hint for common failures (nothing to commit, missing user.name/user.email, authentication, rejected push, diverged pull, no upstream) followed by Git's own text | ASSUMED | ASSUMED |
+| Threading | The multi-step operation blocks, so it runs on a worker thread and posts the finished report to the UI thread; the Git entries stay disabled until it returns | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the macOS dialog and menu code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run; the real-repository tests run on POSIX only.
+
+Units: shared Git commit/push/pull core with tests; commit message dialog (macOS, Windows); File menu actions (macOS, Windows); this record.

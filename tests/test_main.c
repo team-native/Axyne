@@ -13,6 +13,7 @@ int axyne_test_settings_preferences(const char *root);
 int axyne_test_runner_git_lsp(const char *root, const char *source_root);
 int axyne_test_process_stability(const char *root);
 int axyne_test_git_repair(const char *root);
+int axyne_test_git_actions(const char *root);
 int axyne_test_preview_tabs(const char *root);
 int axyne_test_palette_problems(const char *root);
 int axyne_test_palette_controller(const char *root);
@@ -46,7 +47,7 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "exit-with") == 0)
         return atoi(argv[2]);
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|preview-tabs|palette-problems|palette-controller|problems-feed|outline|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu> <fixture-root> [source-root]\n", argv[0]);
+        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|git-actions|preview-tabs|palette-problems|palette-controller|problems-feed|outline|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
     }
     written = snprintf(root, sizeof(root), "%s-%lu", argv[2],
@@ -65,6 +66,8 @@ int main(int argc, char **argv)
         return axyne_test_process_stability(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "git-repair") == 0)
         return axyne_test_git_repair(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (strcmp(argv[1], "git-actions") == 0)
+        return axyne_test_git_actions(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "preview-tabs") == 0)
         return axyne_test_preview_tabs(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "palette-problems") == 0)

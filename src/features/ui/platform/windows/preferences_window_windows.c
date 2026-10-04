@@ -1020,9 +1020,9 @@ cleanup:
 
 enum {
     DLG_ID_EXE = 301, DLG_ID_BROWSE, DLG_ID_ARGS, DLG_ID_WD, DLG_ID_ENV,
-    DLG_ID_CLOSE
+    DLG_ID_CLOSE, DLG_ID_MSG, DLG_ID_STAGE
 };
-enum { DLG_RUNNER = 0, DLG_SHORTCUTS = 1 };
+enum { DLG_RUNNER = 0, DLG_SHORTCUTS = 1, DLG_COMMIT = 2 };
 
 typedef struct DlgItem {
     int y;                 /* content-space top */
@@ -1043,6 +1043,12 @@ typedef struct DlgState {
     AxyneRunnerDialogHooks hooks;
     const AxyneRunnerDialogValues *initial;
     wchar_t error[256];
+    /* git commit */
+    HWND msg, stage;
+    WNDPROC msg_original;  /* the EDIT's own procedure, wrapped to draw the hint */
+    int stage_on;
+    char *message_out;     /* malloc'd UTF-8 handed to the caller on commit */
+    HFONT font_mono12;
     /* shortcuts */
     DlgItem *items;
     size_t item_count;
@@ -1177,6 +1183,59 @@ static void dlg_paint_runner(DlgState *d, HDC dc)
         pw_text(dc, f->font11, pw_rgb(AXYNE_DLG_COLOR_ERROR), d->error, AXYNE_DLG_PAD,
                 d->height - AXYNE_DLG_FOOTER_HEIGHT + (AXYNE_DLG_FOOTER_HEIGHT - 14) / 2,
                 cancel_left - AXYNE_DLG_PAD - 12, 14, DT_LEFT | DT_END_ELLIPSIS);
+}
+
+static int dlg_commit_message_top(void)
+{
+    return AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD;
+}
+
+static void dlg_paint_commit(DlgState *d, HDC dc)
+{
+    int inner = d->width - 2 * AXYNE_DLG_PAD;
+    pw_fill(dc, 0, 0, d->width, d->height, pw_rgb(AXYNE_PW_COLOR_CONTENT));
+    dlg_paint_chrome(d, dc, L"Git 커밋");
+    dlg_frame(dc, AXYNE_DLG_PAD, dlg_commit_message_top(), inner,
+              AXYNE_DLG_COMMIT_AREA_HEIGHT, d->msg);
+}
+
+/* True when the message has a character that is not white space. */
+static int dlg_message_has_text(HWND edit)
+{
+    int length = GetWindowTextLengthW(edit);
+    wchar_t *wide;
+    int i, found = 0;
+    if (length <= 0) return 0;
+    wide = (wchar_t *)calloc((size_t)length + 1, sizeof(*wide));
+    if (wide == NULL) return 0;
+    GetWindowTextW(edit, wide, length + 1);
+    for (i = 0; i < length && !found; ++i)
+        if (!iswspace(wide[i])) found = 1;
+    free(wide);
+    return found;
+}
+
+/* The message EDIT with a "커밋 메시지" hint drawn over it while it is empty
+ * (multi-line EDITs have no cue banner). Everything else is the EDIT's own. */
+static LRESULT CALLBACK dlg_message_proc(HWND edit, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    DlgState *d = (DlgState *)GetWindowLongPtrW(edit, GWLP_USERDATA);
+    LRESULT result;
+    if (d == NULL || d->msg_original == NULL)
+        return DefWindowProcW(edit, message, wparam, lparam);
+    result = CallWindowProcW(d->msg_original, edit, message, wparam, lparam);
+    if (message == WM_PAINT && GetWindowTextLengthW(edit) == 0) {
+        HDC dc = GetDC(edit);
+        if (dc != NULL) {
+            RECT client;
+            GetClientRect(edit, &client);
+            pw_text(dc, d->font_mono12,
+                    pw_blend(pw_rgb(AXYNE_PW_COLOR_MUTED), pw_rgb(AXYNE_PW_COLOR_FIELD), 60),
+                    L"커밋 메시지", 2, 0, client.right - 2, 18, DT_LEFT | DT_VCENTER);
+            ReleaseDC(edit, dc);
+        }
+    }
+    return result;
 }
 
 /* ---- shortcuts list ---- */
@@ -1351,8 +1410,12 @@ static void dlg_draw_item(DlgState *d, const DRAWITEMSTRUCT *di)
     switch ((int)di->CtlID) {
     case DLG_ID_CLOSE: dlg_close_glyph(d, di); break;
     case DLG_ID_BROWSE: pw_draw_push(d->fonts, di, 0, 1, content, L"찾아보기…"); break;
+    case DLG_ID_STAGE:
+        pw_draw_checkbox(d->fonts, di, 0, d->stage_on, L"커밋 전에 모든 변경 사항 스테이지");
+        break;
     case IDOK:
-        pw_draw_push(d->fonts, di, 1, 0, chrome, d->kind == DLG_RUNNER ? L"저장" : L"닫기");
+        pw_draw_push(d->fonts, di, 1, 0, chrome,
+                     d->kind == DLG_RUNNER ? L"저장" : (d->kind == DLG_COMMIT ? L"커밋" : L"닫기"));
         break;
     case IDCANCEL: pw_draw_push(d->fonts, di, 0, 0, chrome, L"취소"); break;
     default: break;
@@ -1441,15 +1504,42 @@ static void dlg_runner_save(DlgState *d)
     InvalidateRect(d->window, NULL, FALSE);
 }
 
+/* 커밋: hands the message to the caller; ignored while it is only blank. */
+static void dlg_commit_accept(DlgState *d)
+{
+    char *text;
+    if (!dlg_message_has_text(d->msg)) return;
+    text = dlg_edit_utf8(d->msg);
+    if (text == NULL) return;
+    free(d->message_out);
+    d->message_out = text;
+    d->result = 1;
+    d->done = 1;
+}
+
 static void dlg_command(DlgState *d, int id, int code)
 {
     if (id == IDCANCEL || id == DLG_ID_CLOSE || (id == IDOK && d->kind == DLG_SHORTCUTS)) {
         d->result = 0;
         d->done = 1;
+    } else if (id == IDOK && d->kind == DLG_COMMIT) {
+        dlg_commit_accept(d);
     } else if (id == IDOK) {
         dlg_runner_save(d);
     } else if (id == DLG_ID_BROWSE) {
         dlg_browse(d);
+    } else if (d->kind == DLG_COMMIT && id == DLG_ID_STAGE) {
+        d->stage_on = !d->stage_on;
+        InvalidateRect(d->stage, NULL, FALSE);
+    } else if (d->kind == DLG_COMMIT && id == DLG_ID_MSG) {
+        if (code == EN_CHANGE) {
+            EnableWindow(GetDlgItem(d->window, IDOK), dlg_message_has_text(d->msg));
+            /* Redraw the whole area so the hint appears and disappears cleanly. */
+            InvalidateRect(d->msg, NULL, TRUE);
+            InvalidateRect(d->window, NULL, FALSE);
+        } else if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            InvalidateRect(d->window, NULL, FALSE);
+        }
     } else if (d->kind == DLG_RUNNER && id >= DLG_ID_EXE && id <= DLG_ID_ENV) {
         if (code == EN_CHANGE) d->error[0] = L'\0';
         if (code == EN_CHANGE || code == EN_SETFOCUS || code == EN_KILLFOCUS)
@@ -1477,6 +1567,7 @@ static LRESULT CALLBACK dlg_proc(HWND window, UINT message, WPARAM wparam, LPARA
             HBITMAP bitmap = CreateCompatibleBitmap(dc, d->width, d->height);
             HGDIOBJ old = SelectObject(memory, bitmap);
             if (d->kind == DLG_RUNNER) dlg_paint_runner(d, memory);
+            else if (d->kind == DLG_COMMIT) dlg_paint_commit(d, memory);
             else dlg_paint_shortcuts(d, memory);
             BitBlt(dc, 0, 0, d->width, d->height, memory, 0, 0, SRCCOPY);
             SelectObject(memory, old);
@@ -1554,8 +1645,18 @@ static int dlg_key(DlgState *d, const MSG *msg)
         return 1;
     }
     if (msg->wParam == VK_RETURN) {
+        if (d->kind == DLG_COMMIT) {
+            /* Ctrl+Return commits from anywhere; plain Return types a newline
+             * in the message and activates a focused button elsewhere. */
+            if (GetKeyState(VK_CONTROL) < 0) {
+                dlg_command(d, IDOK, BN_CLICKED);
+                return 1;
+            }
+            if (id == DLG_ID_MSG) return 0;
+        }
         if (id == DLG_ID_ARGS || id == DLG_ID_ENV) return 0;
-        if ((id == IDOK || id == IDCANCEL || id == DLG_ID_BROWSE || id == DLG_ID_CLOSE) &&
+        if ((id == IDOK || id == IDCANCEL || id == DLG_ID_BROWSE || id == DLG_ID_CLOSE ||
+             id == DLG_ID_STAGE) &&
             IsWindowEnabled(focus))
             SendMessageW(focus, BM_CLICK, 0, 0);
         else
@@ -1612,6 +1713,7 @@ static DlgState *dlg_create(int kind, int width, int height, void *native_owner)
     f->field_brush = CreateSolidBrush(pw_rgb(AXYNE_PW_COLOR_FIELD));
     d->font13 = pw_make_font(13, FW_NORMAL, L"Segoe UI", 0);
     d->font11_bold = pw_make_font(11, FW_SEMIBOLD, L"Segoe UI", 0);
+    d->font_mono12 = pw_make_font(12, FW_NORMAL, L"Consolas", 1);
     return d;
 }
 
@@ -1622,6 +1724,7 @@ static void dlg_destroy(DlgState *d)
     DeleteObject(f->font12_bold); DeleteObject(f->font16_bold); DeleteObject(f->font_mono);
     DeleteObject(f->field_brush);
     DeleteObject(d->font13); DeleteObject(d->font11_bold);
+    DeleteObject(d->font_mono12);
     dlg_free_items(d);
     free(f);
     free(d);
@@ -1652,6 +1755,7 @@ static int dlg_show(DlgState *d, const wchar_t *title, void (*build)(DlgState *)
     ShowWindow(d->window, SW_SHOW);
     UpdateWindow(d->window);
     if (d->kind == DLG_RUNNER) SetFocus(d->exe);
+    else if (d->kind == DLG_COMMIT) SetFocus(d->msg);
     else SetFocus(GetDlgItem(d->window, IDOK));
     while (!d->done && GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_MOUSEWHEEL && d->kind == DLG_SHORTCUTS) {
@@ -1715,6 +1819,54 @@ int axyne_runner_dialog_show(void *native_owner, const AxyneRunnerDialogValues *
     saved = shown && d->result == 1;
     dlg_destroy(d);
     return saved;
+}
+
+static void dlg_build_commit(DlgState *d)
+{
+    int inner = d->width - 2 * AXYNE_DLG_PAD;
+    int message_y = dlg_commit_message_top();
+    int stage_y = message_y + AXYNE_DLG_COMMIT_AREA_HEIGHT + AXYNE_DLG_GAP;
+    int button_y = d->height - AXYNE_DLG_FOOTER_HEIGHT +
+                   (AXYNE_DLG_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2;
+    int commit_x = d->width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH;
+    int cancel_x = commit_x - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
+    HWND commit;
+    /* Creation order is the Tab order. */
+    d->msg = dlg_area(d, DLG_ID_MSG, AXYNE_DLG_PAD, message_y, inner,
+                      AXYNE_DLG_COMMIT_AREA_HEIGHT, "");
+    SendMessageW(d->msg, WM_SETFONT, (WPARAM)d->font_mono12, TRUE);
+    SetWindowLongPtrW(d->msg, GWLP_USERDATA, (LONG_PTR)d);
+    d->msg_original = (WNDPROC)(uintptr_t)SetWindowLongPtrW(d->msg, GWLP_WNDPROC,
+                                                            (LONG_PTR)dlg_message_proc);
+    d->stage = dlg_button(d, DLG_ID_STAGE, AXYNE_DLG_PAD, stage_y, inner,
+                          AXYNE_DLG_COMMIT_CHECK_HEIGHT, L"커밋 전에 모든 변경 사항 스테이지");
+    (void)dlg_button(d, IDCANCEL, cancel_x, button_y, AXYNE_PW_BUTTON_WIDTH,
+                     AXYNE_PW_BUTTON_HEIGHT, L"취소");
+    commit = dlg_button(d, IDOK, commit_x, button_y, AXYNE_PW_BUTTON_WIDTH,
+                        AXYNE_PW_BUTTON_HEIGHT, L"커밋");
+    EnableWindow(commit, FALSE); /* until there is a message */
+    (void)dlg_button(d, DLG_ID_CLOSE, d->width - 12 - 14 - 7, 4, 28, 28, L"닫기");
+}
+
+int axyne_git_commit_dialog_show(void *native_owner, char **message, int *stage_all)
+{
+    DlgState *d;
+    int shown, accepted;
+    if (message == NULL) return 0;
+    *message = NULL;
+    d = dlg_create(DLG_COMMIT, AXYNE_DLG_COMMIT_WIDTH, AXYNE_DLG_COMMIT_HEIGHT, native_owner);
+    if (d == NULL) return 0;
+    d->stage_on = 1;
+    shown = dlg_show(d, L"Git 커밋", dlg_build_commit);
+    accepted = shown && d->result == 1 && d->message_out != NULL;
+    if (accepted) {
+        *message = d->message_out;
+        d->message_out = NULL;
+        if (stage_all != NULL) *stage_all = d->stage_on ? 1 : 0;
+    }
+    free(d->message_out);
+    dlg_destroy(d);
+    return accepted;
 }
 
 static void dlg_build_shortcuts(DlgState *d)

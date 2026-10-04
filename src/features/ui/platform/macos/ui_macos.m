@@ -86,6 +86,7 @@ typedef struct AxyneMacPreferencesContext {
 } AxyneMacPreferencesContext;
 typedef struct AxyneMacGitRun AxyneMacGitRun;
 typedef struct AxyneMacGitCompletion AxyneMacGitCompletion;
+typedef struct AxyneMacGitBatch AxyneMacGitBatch;
 
 /* Native buttons keep AppKit's actions and accessibility while drawing the
  * flat, precisely centered Figma toolbar rather than an OS bezel. */
@@ -774,6 +775,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneProcess *_terminalProcess;
     AxyneProcess *_gitProcess;
     AxyneMacGitRun *_gitRun;
+    /* A commit, push or pull is running on a worker thread. */
+    BOOL _gitBatchBusy;
     NSTextView *_terminalOutput;
     NSTextField *_terminalInput;
     NSButton *_terminalStart;
@@ -1121,6 +1124,10 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)showGitDiff:(id)sender;
 - (void)stageAllGitChanges:(id)sender;
 - (void)unstageAllGitChanges:(id)sender;
+- (void)commitGitChanges:(id)sender;
+- (void)pushGitChanges:(id)sender;
+- (void)pullGitChanges:(id)sender;
+- (void)completeGitBatch:(AxyneMacGitBatch *)batch;
 - (void)completeGitOperation:(AxyneMacGitCompletion *)completion
                          run:(AxyneMacGitRun *)run;
 - (void)selectOutputPanel;
@@ -1825,8 +1832,11 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (action == @selector(showGitStatus:) ||
         action == @selector(showGitDiff:) ||
         action == @selector(stageAllGitChanges:) ||
-        action == @selector(unstageAllGitChanges:))
-        return _explorer.root != NULL && _gitProcess == NULL;
+        action == @selector(unstageAllGitChanges:) ||
+        action == @selector(commitGitChanges:) ||
+        action == @selector(pushGitChanges:) ||
+        action == @selector(pullGitChanges:))
+        return _explorer.root != NULL && _gitProcess == NULL && !_gitBatchBusy;
     if (action == @selector(navigateLspReferences:)) return savedDocument;
     if (action == @selector(findInDocument:) ||
         action == @selector(replaceInDocument:))
@@ -4205,7 +4215,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         [self showWorkspaceMessage:@"Open a workspace folder before using Git."];
         return;
     }
-    if (_gitProcess != NULL) {
+    if (_gitProcess != NULL || _gitBatchBusy) {
         [self showWorkspaceMessage:@"A Git operation is already running."];
         return;
     }
@@ -4345,6 +4355,159 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     [self startGitOperationWithEmptyMessage:"All changes unstaged."
                                   arguments:arguments
                                      count:sizeof(arguments) / sizeof(arguments[0])];
+}
+
+/* Commit, push and pull run several Git steps (stage then commit; upstream
+ * probe then push) through the blocking core functions, so they run on a
+ * worker thread and hand the finished report to the main thread. The batch
+ * owns a retain on the view until -completeGitBatch: runs, which keeps the
+ * view alive however the workspace changes meanwhile. */
+struct AxyneMacGitBatch {
+    AxyneWorkspaceView *view;
+    char *workspace;
+    char *message;   /* commit only */
+    int kind;        /* 0 commit, 1 push, 2 pull */
+    int stage_all;
+    char *report;    /* malloc'd by the worker; never NULL after it ran */
+};
+
+static void axyne_macos_git_batch_free(AxyneMacGitBatch *batch)
+{
+    if (batch == NULL) return;
+    free(batch->workspace);
+    free(batch->message);
+    free(batch->report);
+    free(batch);
+}
+
+static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
+{
+    AxyneGitResult result;
+    AxyneError error;
+    AxyneStatus status;
+    memset(&result, 0, sizeof(result));
+    memset(&error, 0, sizeof(error));
+    if (batch->kind == 0)
+        status = axyne_git_commit(batch->workspace, batch->message,
+                                  batch->stage_all, &result, &error);
+    else if (batch->kind == 1)
+        status = axyne_git_push(batch->workspace, &result, &error);
+    else
+        status = axyne_git_pull(batch->workspace, &result, &error);
+    if (result.output != NULL) {
+        batch->report = result.output; /* ownership moves to the batch */
+        result.output = NULL;
+    } else {
+        /* The operation could not start (Git missing, bad request, memory). */
+        const char *text = status != AXYNE_STATUS_OK && error.message[0] != '\0'
+            ? error.message : "Unable to run the Git operation.";
+        size_t size = strlen(text) + 2;
+        batch->report = (char *)malloc(size);
+        if (batch->report != NULL) (void)snprintf(batch->report, size, "%s\n", text);
+    }
+}
+
+/* Takes ownership of `message` (malloc'd UTF-8, commit only; may be NULL). */
+- (void)startGitBatch:(int)kind message:(char *)message stageAll:(int)stageAll
+{
+    static const char *const commitArguments[] = { "commit" };
+    static const char *const pushArguments[] = { "push" };
+    static const char *const pullArguments[] = { "pull", "--ff-only" };
+    const char *const *arguments = kind == 0 ? commitArguments
+        : (kind == 1 ? pushArguments : pullArguments);
+    size_t argumentCount = kind == 2 ? 2 : 1;
+    AxyneMacGitBatch *batch;
+    if (_explorer.root == NULL) {
+        free(message);
+        [self showWorkspaceMessage:@"Open a workspace folder before using Git."];
+        return;
+    }
+    if (_gitProcess != NULL || _gitBatchBusy) {
+        free(message);
+        [self showWorkspaceMessage:@"A Git operation is already running."];
+        return;
+    }
+    batch = (AxyneMacGitBatch *)calloc(1, sizeof(*batch));
+    if (batch != NULL) batch->workspace = strdup(_explorer.root);
+    if (batch == NULL || batch->workspace == NULL) {
+        free(message);
+        axyne_macos_git_batch_free(batch);
+        [self showWorkspaceMessage:@"Unable to allocate Git operation."];
+        return;
+    }
+    batch->message = message;
+    batch->kind = kind;
+    batch->stage_all = stageAll;
+    batch->view = [self retain];
+    _gitBatchBusy = YES;
+    /* Output and Problems share the same area; show the operation at once. */
+    [self selectOutputPanel];
+    [_terminalOutput setString:@""];
+    {
+        AxyneGitCapture pending;
+        char *header;
+        axyne_git_capture_init(&pending, 0);
+        header = axyne_git_format_report(arguments, argumentCount, &pending, 0,
+                                         "Running...");
+        if (header != NULL) {
+            [self terminalAppend:header length:strlen(header)
+                          stream:AXYNE_PROCESS_STDOUT];
+            axyne_git_string_free(header);
+        }
+    }
+    [self setNeedsDisplay:YES];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        axyne_macos_git_batch_run(batch);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [batch->view completeGitBatch:batch];
+        });
+    });
+}
+
+/* Main thread: shows the report, re-enables the Git menu items and drops the
+ * batch's retain on the view. */
+- (void)completeGitBatch:(AxyneMacGitBatch *)batch
+{
+    const char *text = batch->report != NULL
+        ? batch->report : "Unable to allocate Git output.\n";
+    /* The Problems or Terminal panel may have been selected while Git ran. */
+    [self selectOutputPanel];
+    [_terminalOutput setString:@""];
+    [self terminalAppend:text length:strlen(text) stream:AXYNE_PROCESS_STDOUT];
+    [_terminalOutput scrollRangeToVisible:NSMakeRange(0, 0)];
+    _gitBatchBusy = NO;
+    axyne_macos_git_batch_free(batch);
+    [self setNeedsDisplay:YES];
+    [self release];
+}
+
+- (void)commitGitChanges:(id)sender
+{
+    char *message = NULL;
+    int stageAll = 1;
+    (void)sender;
+    if (_explorer.root == NULL) {
+        [self showWorkspaceMessage:@"Open a workspace folder before using Git."];
+        return;
+    }
+    if (_gitProcess != NULL || _gitBatchBusy) {
+        [self showWorkspaceMessage:@"A Git operation is already running."];
+        return;
+    }
+    if (!axyne_git_commit_dialog_show([self window], &message, &stageAll)) return;
+    [self startGitBatch:0 message:message stageAll:stageAll];
+}
+
+- (void)pushGitChanges:(id)sender
+{
+    (void)sender;
+    [self startGitBatch:1 message:NULL stageAll:0];
+}
+
+- (void)pullGitChanges:(id)sender
+{
+    (void)sender;
+    [self startGitBatch:2 message:NULL stageAll:0];
 }
 
 - (void)findOrReplace:(BOOL)replace
@@ -5669,7 +5832,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 - (void)paletteRunCommand:(AxynePaletteCommandId)command
 {
     AxyneDocument *document = [self activeDocument];
-    BOOL gitReady = _explorer.root != NULL && _gitProcess == NULL;
+    BOOL gitReady = _explorer.root != NULL && _gitProcess == NULL && !_gitBatchBusy;
     switch (command) {
     case AXYNE_PALETTE_COMMAND_NEW_FILE: [self newDocument:nil]; break;
     case AXYNE_PALETTE_COMMAND_OPEN_FILE: [self openDocument:nil]; break;
@@ -5885,6 +6048,15 @@ static void axyne_install_menu(NSApplication *application,
         action:@selector(unstageAllGitChanges:) keyEquivalent:@""];
     [gitStatus setTarget:workspace]; [gitDiff setTarget:workspace];
     [gitStage setTarget:workspace]; [gitUnstage setTarget:workspace];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *gitCommit = [fileMenu addItemWithTitle:@"Git 커밋…"
+        action:@selector(commitGitChanges:) keyEquivalent:@""];
+    NSMenuItem *gitPush = [fileMenu addItemWithTitle:@"Git 푸시"
+        action:@selector(pushGitChanges:) keyEquivalent:@""];
+    NSMenuItem *gitPull = [fileMenu addItemWithTitle:@"Git 풀"
+        action:@selector(pullGitChanges:) keyEquivalent:@""];
+    [gitCommit setTarget:workspace]; [gitPush setTarget:workspace];
+    [gitPull setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"최근 항목"
         action:nil keyEquivalent:@""];

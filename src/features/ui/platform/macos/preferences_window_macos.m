@@ -1149,12 +1149,38 @@ static NSInteger axyne_dlg_run(NSPanel *panel, NSWindow *owner, NSSize size, NSR
  * move between controls instead of typing a tab. */
 @interface AxyneDlgTextView : NSTextView {
     AxynePWBox *_box; /* not retained: the box owns the scroll view that owns us */
+    NSString *_placeholder; /* drawn while the text is empty; nil for none */
 }
 @property(nonatomic, assign) AxynePWBox *box;
+@property(nonatomic, copy) NSString *placeholder;
 @end
 
 @implementation AxyneDlgTextView
-@synthesize box = _box;
+@synthesize box = _box, placeholder = _placeholder;
+- (void)dealloc
+{
+    [_placeholder release];
+    [super dealloc];
+}
+- (void)drawRect:(NSRect)rect
+{
+    [super drawRect:rect];
+    if ([_placeholder length] != 0 && [[self string] length] == 0) {
+        NSSize inset = [self textContainerInset];
+        CGFloat padding = [[self textContainer] lineFragmentPadding];
+        NSFont *font = [self font] != nil ? [self font]
+            : [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+        [_placeholder drawAtPoint:NSMakePoint(inset.width + padding, inset.height)
+                   withAttributes:axyne_pw_attributes(font,
+            [axyne_pw_color(AXYNE_PW_COLOR_MUTED) colorWithAlphaComponent:0.6], NO)];
+    }
+}
+- (void)didChangeText
+{
+    [super didChangeText];
+    /* The placeholder appears and disappears with the first/last character. */
+    if ([_placeholder length] != 0) [self setNeedsDisplay:YES];
+}
 - (BOOL)becomeFirstResponder
 {
     BOOL accepted = [super becomeFirstResponder];
@@ -1485,6 +1511,149 @@ int axyne_runner_dialog_show(void *native_owner, const AxyneRunnerDialogValues *
     result = [dialog runOverOwner:(NSWindow *)native_owner];
     [dialog release];
     return result == 1;
+}
+
+/* ---- Git commit ---- */
+
+@interface AxyneGitCommitDialog : NSObject <NSTextViewDelegate, AxyneDlgActions> {
+    AxyneDlgPanel *_panel;
+    NSTextView *_message;   /* owned by the panel's views */
+    AxynePWButton *_stage, *_cancelButton, *_commitButton;
+}
+- (id)init;
+- (NSInteger)runOverOwner:(NSWindow *)owner;
+- (NSString *)messageText;
+- (BOOL)stageAll;
+@end
+
+@implementation AxyneGitCommitDialog
+
+- (id)init
+{
+    CGFloat width = AXYNE_DLG_COMMIT_WIDTH, height = AXYNE_DLG_COMMIT_HEIGHT;
+    CGFloat inner = width - 2 * AXYNE_DLG_PAD;
+    CGFloat y = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD;
+    CGFloat buttonY = (AXYNE_DLG_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2.0;
+    CGFloat commitX = width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH;
+    CGFloat cancelX = commitX - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
+    AxynePWBox *root, *footer;
+    self = [super init];
+    if (self == nil) return nil;
+    _panel = axyne_dlg_panel(@"Git 커밋", width, height, self, &root);
+
+    _message = axyne_dlg_area(root, NSMakeRect(AXYNE_DLG_PAD, y, inner,
+        AXYNE_DLG_COMMIT_AREA_HEIGHT), @"", @"커밋 메시지", self);
+    [_message setFont:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular]];
+    [(AxyneDlgTextView *)_message setPlaceholder:@"커밋 메시지"];
+    y += AXYNE_DLG_COMMIT_AREA_HEIGHT + AXYNE_DLG_GAP;
+
+    _stage = axyne_dlg_button(AxynePWKindCheck, @"커밋 전에 모든 변경 사항 스테이지",
+        NSMakeRect(AXYNE_DLG_PAD, y, inner, AXYNE_DLG_COMMIT_CHECK_HEIGHT),
+        self, @selector(toggleStage:));
+    [_stage setAccessibilityRole:NSAccessibilityCheckBoxRole];
+    [_stage setOn:YES];
+    [root addSubview:_stage];
+
+    footer = axyne_dlg_footer(root, width, height);
+    _cancelButton = axyne_dlg_button(AxynePWKindPush, @"취소",
+        NSMakeRect(cancelX, buttonY, AXYNE_PW_BUTTON_WIDTH, AXYNE_PW_BUTTON_HEIGHT),
+        self, @selector(cancel:));
+    _commitButton = axyne_dlg_button(AxynePWKindAccent, @"커밋",
+        NSMakeRect(commitX, buttonY, AXYNE_PW_BUTTON_WIDTH, AXYNE_PW_BUTTON_HEIGHT),
+        self, @selector(commit:));
+    [_cancelButton setAutoresizingMask:NSViewMinXMargin];
+    [_commitButton setAutoresizingMask:NSViewMinXMargin];
+    /* Plain Return types a newline in the message; Command+Return commits
+     * (the button only fires while it is enabled). */
+    [_commitButton setKeyEquivalent:@"\r"];
+    [_commitButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+    [_commitButton setEnabled:NO];
+    [footer addSubview:_cancelButton];
+    [footer addSubview:_commitButton];
+
+    [_message setNextKeyView:_stage];
+    [_stage setNextKeyView:_cancelButton];
+    [_cancelButton setNextKeyView:_commitButton];
+    [_commitButton setNextKeyView:_message];
+    [_panel setInitialFirstResponder:_message];
+    return self;
+}
+
+- (void)dealloc
+{
+    /* Nothing may message this object once it is gone. */
+    [_message setDelegate:nil];
+    [_panel setDialog:nil];
+    [_panel close];
+    [_panel release];
+    [super dealloc];
+}
+
+- (NSInteger)runOverOwner:(NSWindow *)owner
+{
+    return axyne_dlg_run(_panel, owner,
+        NSMakeSize(AXYNE_DLG_COMMIT_WIDTH, AXYNE_DLG_COMMIT_HEIGHT), _message);
+}
+
+- (NSString *)messageText { return [_message string]; }
+- (BOOL)stageAll { return [_stage on]; }
+
+- (BOOL)hasMessage
+{
+    NSString *trimmed = [[_message string] stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [trimmed length] != 0;
+}
+
+- (void)finish:(NSInteger)code { [NSApp stopModalWithCode:code]; }
+
+- (void)cancel:(id)sender { (void)sender; [self finish:0]; }
+
+- (void)commit:(id)sender
+{
+    (void)sender;
+    if (![self hasMessage]) return;
+    [self finish:1];
+}
+
+- (void)toggleStage:(id)sender
+{
+    (void)sender;
+    [_stage setOn:![_stage on]];
+}
+
+- (void)textDidChange:(NSNotification *)notification
+{
+    (void)notification;
+    [_commitButton setEnabled:[self hasMessage]];
+}
+
+/* Esc cancels; Return keeps typing newlines in the area. */
+- (BOOL)textView:(NSTextView *)textView doCommandBySelector:(SEL)selector
+{
+    (void)textView;
+    if (selector == @selector(cancelOperation:)) { [self cancel:nil]; return YES; }
+    return NO;
+}
+
+@end
+
+int axyne_git_commit_dialog_show(void *native_owner, char **message, int *stage_all)
+{
+    AxyneGitCommitDialog *dialog;
+    NSInteger result;
+    if (message == NULL) return 0;
+    *message = NULL;
+    dialog = [[AxyneGitCommitDialog alloc] init];
+    if (dialog == nil) return 0;
+    result = [dialog runOverOwner:(NSWindow *)native_owner];
+    if (result == 1) {
+        const char *utf8 = [[dialog messageText] UTF8String];
+        *message = strdup(utf8 != NULL ? utf8 : "");
+        if (stage_all != NULL) *stage_all = [dialog stageAll] ? 1 : 0;
+    }
+    [dialog release];
+    return result == 1 && *message != NULL;
 }
 
 /* ---- Keyboard shortcuts ---- */
