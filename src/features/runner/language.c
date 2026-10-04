@@ -6,6 +6,7 @@
 #include <string.h>
 
 #ifdef _WIN32
+#include <windows.h>
 #define LANGUAGE_SEPARATOR '\\'
 #define LANGUAGE_EXE_SUFFIX ".exe"
 #else
@@ -97,6 +98,15 @@ static const char *path_base(const char *path)
     for (cursor = path; *cursor != '\0'; ++cursor)
         if (*cursor == '/' || *cursor == '\\') base = cursor + 1;
     return base;
+}
+
+/* "/x", "\\x", "C:\\x", "C:/x" (a bare file name has no directory part and is
+ * handled separately). */
+static int path_is_absolute(const char *path)
+{
+    if (path[0] == '/' || path[0] == '\\') return 1;
+    return isalpha((unsigned char)path[0]) && path[1] == ':' &&
+           (path[2] == '/' || path[2] == '\\');
 }
 
 /* Last '.' of the base name, ignoring a leading dot ("." files have no ext). */
@@ -419,6 +429,100 @@ oom:
     return AXYNE_STATUS_OUT_OF_MEMORY;
 }
 
+static int ends_with_ignore_case(const char *text, const char *suffix)
+{
+    size_t length = strlen(text), suffix_length = strlen(suffix), i;
+    if (length < suffix_length) return 0;
+    for (i = 0; i < suffix_length; ++i)
+        if (tolower((unsigned char)text[length - suffix_length + i]) !=
+            tolower((unsigned char)suffix[i])) return 0;
+    return 1;
+}
+
+int axyne_language_is_command_script(const char *executable)
+{
+    return executable != NULL &&
+           (ends_with_ignore_case(executable, ".cmd") ||
+            ends_with_ignore_case(executable, ".bat"));
+}
+
+/* cmd.exe /s /c strips the first and last quote of the rest of the line, so
+ * the script and its arguments are one argument: ""script" "a" "b"" (the same
+ * convention as the runtime version probe). Quoted, so spaces and & | < > ^
+ * are inert; '"' and '%' (expanded even inside quotes) and line breaks cannot
+ * be neutralised and are refused. */
+AxyneStatus axyne_language_step_wrap_command_script(AxyneLanguageStep *step,
+                                                    const char *command_processor,
+                                                    int windows)
+{
+    size_t length, i, used = 0;
+    char *executable, *command, **arguments;
+    if (step == NULL || command_processor == NULL) return AXYNE_STATUS_INVALID_ARGUMENT;
+    if (!windows || !axyne_language_is_command_script(step->executable)) return AXYNE_STATUS_OK;
+    length = strlen(step->executable) + 5;
+    for (i = 0; i < step->argument_count; ++i) length += strlen(step->arguments[i]) + 3;
+    if (strpbrk(step->executable, "\"%\r\n") != NULL) return AXYNE_STATUS_INVALID_ARGUMENT;
+    for (i = 0; i < step->argument_count; ++i)
+        if (strpbrk(step->arguments[i], "\"%\r\n") != NULL) return AXYNE_STATUS_INVALID_ARGUMENT;
+    command = (char *)malloc(length);
+    executable = copy_string(command_processor);
+    arguments = (char **)calloc(4, sizeof(char *));
+    if (command == NULL || executable == NULL || arguments == NULL) goto oom;
+    command[used++] = '"';
+    command[used++] = '"';
+    memcpy(command + used, step->executable, strlen(step->executable));
+    used += strlen(step->executable);
+    command[used++] = '"';
+    for (i = 0; i < step->argument_count; ++i) {
+        size_t n = strlen(step->arguments[i]);
+        command[used++] = ' '; command[used++] = '"';
+        memcpy(command + used, step->arguments[i], n); used += n;
+        command[used++] = '"';
+    }
+    command[used++] = '"';
+    command[used] = '\0';
+    arguments[0] = copy_string("/d"); arguments[1] = copy_string("/s");
+    arguments[2] = copy_string("/c"); arguments[3] = command;
+    if (arguments[0] == NULL || arguments[1] == NULL || arguments[2] == NULL) goto oom;
+    free(step->executable);
+    for (i = 0; i < step->argument_count; ++i) free(step->arguments[i]);
+    free(step->arguments);
+    step->executable = executable;
+    step->arguments = arguments;
+    step->argument_count = 4;
+    return AXYNE_STATUS_OK;
+oom:
+    free(command); free(executable);
+    if (arguments != NULL) {
+        free(arguments[0]); free(arguments[1]); free(arguments[2]);
+        free(arguments);
+    }
+    return AXYNE_STATUS_OUT_OF_MEMORY;
+}
+
+#ifdef _WIN32
+/* Absolute path of the system cmd.exe (UTF-8); CreateProcessW needs a full
+ * application path. */
+static char *system_command_processor(void)
+{
+    wchar_t directory[MAX_PATH], path[MAX_PATH];
+    UINT length = GetSystemDirectoryW(directory, MAX_PATH);
+    int bytes;
+    char *utf8;
+    if (length == 0 || length + 10 >= MAX_PATH) return NULL;
+    memcpy(path, directory, ((size_t)length + 1) * sizeof(wchar_t));
+    memcpy(path + length, L"\\cmd.exe", 9 * sizeof(wchar_t));
+    bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, -1, NULL, 0, NULL, NULL);
+    if (bytes <= 0) return NULL;
+    utf8 = (char *)malloc((size_t)bytes);
+    if (utf8 != NULL && WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, -1,
+                                            utf8, bytes, NULL, NULL) <= 0) {
+        free(utf8); return NULL;
+    }
+    return utf8;
+}
+#endif
+
 AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
                                           const AxyneRuntimeList *runtimes,
                                           const AxyneBuildTarget *target,
@@ -449,6 +553,10 @@ AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
     /* Directory of the file (when a path is given). */
     if (file_path != NULL && file_path[0] != '\0') {
         base = path_base(file_path);
+        if (base != file_path && !path_is_absolute(file_path)) {
+            set_message(message, message_size, "file path must be absolute%s%s", "", "");
+            return AXYNE_STATUS_INVALID_ARGUMENT;
+        }
         base_offset = (size_t)(base - file_path);
         separator_at = NULL;
         for (cursor = file_path; cursor < base; ++cursor)
@@ -661,6 +769,25 @@ AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
         }
     }
     if (!ok) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; }
+#ifdef _WIN32
+    /* CreateProcessW cannot run .cmd/.bat (tsc.cmd, kotlinc.bat) directly. */
+    {
+        char *processor = NULL;
+        if (axyne_language_is_command_script(plan->build.executable) ||
+            axyne_language_is_command_script(plan->run.executable)) {
+            processor = system_command_processor();
+            if (processor == NULL) { status = AXYNE_STATUS_IO_ERROR; goto done; }
+            status = axyne_language_step_wrap_command_script(&plan->build, processor, 1);
+            if (status == AXYNE_STATUS_OK)
+                status = axyne_language_step_wrap_command_script(&plan->run, processor, 1);
+            free(processor);
+            if (status != AXYNE_STATUS_OK) {
+                set_message(message, message_size, "cannot run command script%s%s", "", "");
+                goto done;
+            }
+        }
+    }
+#endif
 
     plan->working_directory = copy_string(dir);
     if (plan->working_directory == NULL) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; }
