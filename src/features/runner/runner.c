@@ -115,7 +115,7 @@ AxyneStatus axyne_runner_configure(AxyneRunnerConfig *config,
         (spec->argument_count != 0 && spec->arguments == NULL) ||
         !runner_environment_valid(spec->environment, spec->environment_count) ||
         (spec->has_runtime && spec->runtime_kind < AXYNE_RUNTIME_PYTHON) ||
-        (spec->has_runtime && spec->runtime_kind > AXYNE_RUNTIME_JAVAC)) {
+        (spec->has_runtime && spec->runtime_kind >= AXYNE_RUNTIME_KIND_COUNT)) {
         runner_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                      "invalid runner configuration");
         return AXYNE_STATUS_INVALID_ARGUMENT;
