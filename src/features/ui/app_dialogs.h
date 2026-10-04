@@ -90,10 +90,8 @@ void axyne_shortcuts_dialog_show(void *native_owner,
                                  const AxyneShortcutSection *sections,
                                  size_t section_count);
 
-#ifdef __APPLE__
 /* Korean title of a Preferences action (AxynePreferenceAction), UTF-8. */
 const char *axyne_dialogs_action_title(int action);
-#endif
 
 #ifdef __cplusplus
 }

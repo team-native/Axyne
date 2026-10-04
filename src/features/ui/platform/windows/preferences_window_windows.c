@@ -7,8 +7,12 @@
 #include <string.h>
 #include <wchar.h>
 
+#include <commdlg.h>
+
 #include "axyne/preferences.h"
 #include "../../preferences_window.h"
+#include "../../app_dialogs.h"
+#include "axyne/shortcut_chips.h"
 
 /* Figma preferences window (7J8SYhLpybJgpxD3qFqL5u / 24:13953) as a Win32
  * modal popup. Static content (headings, field frames, group frames, key
@@ -1003,4 +1007,734 @@ cleanup:
     DeleteObject(st->field_brush);
     free(st);
     return result;
+}
+
+/* ------------------------------------------------------------------ */
+/* App dialogs (Runner settings, keyboard shortcuts)                   */
+/* ------------------------------------------------------------------ */
+
+/* Same chrome as the preferences window above: popup window with a drag/close
+ * title strip, painted field frames, owner-drawn push buttons and a footer.
+ * Layout metrics come from app_dialogs.h and match the macOS panels. The
+ * fonts live in a PwState so the preferences drawing helpers are reused. */
+
+enum {
+    DLG_ID_EXE = 301, DLG_ID_BROWSE, DLG_ID_ARGS, DLG_ID_WD, DLG_ID_ENV,
+    DLG_ID_CLOSE
+};
+enum { DLG_RUNNER = 0, DLG_SHORTCUTS = 1 };
+
+typedef struct DlgItem {
+    int y;                 /* content-space top */
+    int heading;           /* section heading row, else a shortcut row */
+    int last;              /* last row of its section (no separator) */
+    wchar_t *label;
+    wchar_t chips[AXYNE_SHORTCUT_CHIP_MAX][AXYNE_SHORTCUT_CHIP_TEXT];
+    int chip_count;
+} DlgItem;
+
+typedef struct DlgState {
+    PwState *fonts;        /* only the fonts and field_brush are used */
+    HWND window, owner;
+    int kind, width, height;
+    int done, result;
+    /* runner */
+    HWND exe, browse, args, wd, env;
+    AxyneRunnerDialogHooks hooks;
+    const AxyneRunnerDialogValues *initial;
+    wchar_t error[256];
+    /* shortcuts */
+    DlgItem *items;
+    size_t item_count;
+    int content_height, scroll, dragging, drag_origin, drag_scroll;
+    HFONT font13, font11_bold;
+} DlgState;
+
+static const wchar_t AXYNE_DLG_CLASS[] = L"AxyneDialogWindow";
+
+const char *axyne_dialogs_action_title(int action)
+{
+    static const char *const titles[AXYNE_ACTION_COUNT] = {
+        "새 파일", "열기", "저장", "닫기", "찾기", "바꾸기",
+        "작업 영역 검색", "빠른 파일 열기", "빌드", "실행", "환경 설정"
+    };
+    return action >= 0 && action < AXYNE_ACTION_COUNT ? titles[action] : "";
+}
+
+/* UTF-8 to UTF-16, expanding every bare LF to CRLF for EDIT controls. */
+static wchar_t *dlg_wide_crlf(const char *utf8)
+{
+    wchar_t *wide = pw_wide(utf8 != NULL ? utf8 : "");
+    wchar_t *out;
+    size_t i, j, extra = 0;
+    if (wide == NULL) return NULL;
+    for (i = 0; wide[i] != L'\0'; ++i)
+        if (wide[i] == L'\n' && (i == 0 || wide[i - 1] != L'\r')) ++extra;
+    out = (wchar_t *)malloc((i + extra + 1) * sizeof(*out));
+    if (out == NULL) { free(wide); return NULL; }
+    for (i = 0, j = 0; wide[i] != L'\0'; ++i) {
+        if (wide[i] == L'\n' && (i == 0 || wide[i - 1] != L'\r')) out[j++] = L'\r';
+        out[j++] = wide[i];
+    }
+    out[j] = L'\0';
+    free(wide);
+    return out;
+}
+
+static char *dlg_edit_utf8(HWND edit)
+{
+    int length = GetWindowTextLengthW(edit);
+    wchar_t *wide;
+    char *utf8;
+    int bytes;
+    if (length < 0) return NULL;
+    wide = (wchar_t *)calloc((size_t)length + 1, sizeof(*wide));
+    if (wide == NULL) return NULL;
+    GetWindowTextW(edit, wide, length + 1);
+    bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+    utf8 = bytes > 0 ? (char *)malloc((size_t)bytes) : NULL;
+    if (utf8 != NULL && WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, bytes, NULL, NULL) <= 0) {
+        free(utf8);
+        utf8 = NULL;
+    }
+    free(wide);
+    return utf8;
+}
+
+/* Dark scroll bar for an EDIT (Windows 10 1809+); older systems keep the
+ * default. uxtheme is loaded lazily, like the editor does. */
+static void dlg_dark_scrollbar(HWND window)
+{
+    typedef HRESULT (WINAPI *SetTheme)(HWND, LPCWSTR, LPCWSTR);
+    HMODULE module = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    SetTheme set_theme;
+    if (module == NULL) return;
+    set_theme = (SetTheme)(uintptr_t)GetProcAddress(module, "SetWindowTheme");
+    if (set_theme != NULL) (void)set_theme(window, L"DarkMode_Explorer", NULL);
+    FreeLibrary(module);
+}
+
+/* Rounded field frame; accent border while `edit` has focus. */
+static void dlg_frame(HDC dc, int x, int y, int w, int h, HWND edit)
+{
+    RECT rc;
+    HWND focus = GetFocus();
+    rc.left = x; rc.top = y; rc.right = x + w; rc.bottom = y + h;
+    pw_round(dc, &rc, 3, pw_rgb(AXYNE_PW_COLOR_FIELD),
+             pw_rgb(edit != NULL && focus == edit ? AXYNE_PW_COLOR_ACCENT
+                                                  : AXYNE_PW_COLOR_BORDER), 1);
+}
+
+/* Title strip, footer strip and their hairline; used by both dialogs. */
+static void dlg_paint_chrome(DlgState *d, HDC dc, const wchar_t *title)
+{
+    int footer_y = d->height - AXYNE_DLG_FOOTER_HEIGHT;
+    pw_fill(dc, 0, 0, d->width, AXYNE_PW_TITLE_HEIGHT, pw_rgb(AXYNE_PW_COLOR_CHROME));
+    pw_text(dc, d->fonts->font12, pw_rgb(AXYNE_PW_COLOR_MUTED), title, 10, 0, 300,
+            AXYNE_PW_TITLE_HEIGHT, DT_LEFT | DT_VCENTER);
+    pw_fill(dc, 0, footer_y, d->width, d->height, pw_rgb(AXYNE_PW_COLOR_CHROME));
+    pw_fill(dc, 0, footer_y, d->width, footer_y + 1, pw_rgb(AXYNE_PW_COLOR_CHROME_LINE));
+}
+
+/* Top of each runner block (caption row), shared by build and paint. */
+static void dlg_runner_rows(int *exe, int *args, int *wd, int *env, int *note)
+{
+    int y = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD;
+    *exe = y;
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
+    *args = y;
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_DLG_AREA_HEIGHT + AXYNE_DLG_GAP;
+    *wd = y;
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
+    *env = y;
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_DLG_AREA_HEIGHT + AXYNE_DLG_NOTE_GAP;
+    *note = y;
+}
+
+static void dlg_paint_runner(DlgState *d, HDC dc)
+{
+    PwState *f = d->fonts;
+    COLORREF muted = pw_rgb(AXYNE_PW_COLOR_MUTED);
+    int inner = d->width - 2 * AXYNE_DLG_PAD;
+    int exe_y, args_y, wd_y, env_y, note_y;
+    int button_left = d->width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH;
+    int cancel_left = button_left - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
+    dlg_runner_rows(&exe_y, &args_y, &wd_y, &env_y, &note_y);
+    pw_fill(dc, 0, 0, d->width, d->height, pw_rgb(AXYNE_PW_COLOR_CONTENT));
+    dlg_paint_chrome(d, dc, L"Runner 설정");
+    pw_text(dc, f->font11, muted, L"실행 파일", AXYNE_DLG_PAD, exe_y, 200, 14, DT_LEFT);
+    dlg_frame(dc, AXYNE_DLG_PAD, exe_y + AXYNE_DLG_LABEL_BLOCK,
+              inner - AXYNE_DLG_BROWSE_WIDTH - 8, AXYNE_PW_FIELD_HEIGHT, d->exe);
+    pw_text(dc, f->font11, muted, L"인자 (한 줄에 하나)", AXYNE_DLG_PAD, args_y, 300, 14, DT_LEFT);
+    dlg_frame(dc, AXYNE_DLG_PAD, args_y + AXYNE_DLG_LABEL_BLOCK, inner, AXYNE_DLG_AREA_HEIGHT, d->args);
+    pw_text(dc, f->font11, muted, L"작업 디렉터리 (선택)", AXYNE_DLG_PAD, wd_y, 300, 14, DT_LEFT);
+    dlg_frame(dc, AXYNE_DLG_PAD, wd_y + AXYNE_DLG_LABEL_BLOCK, inner, AXYNE_PW_FIELD_HEIGHT, d->wd);
+    pw_text(dc, f->font11, muted, L"환경 변수 (NAME=VALUE, 한 줄에 하나)", AXYNE_DLG_PAD, env_y, 400, 14, DT_LEFT);
+    dlg_frame(dc, AXYNE_DLG_PAD, env_y + AXYNE_DLG_LABEL_BLOCK, inner, AXYNE_DLG_AREA_HEIGHT, d->env);
+    pw_text(dc, f->font11, muted, L"인자는 셸 없이 실행 파일에 그대로 전달됩니다.", AXYNE_DLG_PAD,
+            note_y, inner, 14, DT_LEFT);
+    if (d->error[0] != L'\0')
+        pw_text(dc, f->font11, pw_rgb(AXYNE_DLG_COLOR_ERROR), d->error, AXYNE_DLG_PAD,
+                d->height - AXYNE_DLG_FOOTER_HEIGHT + (AXYNE_DLG_FOOTER_HEIGHT - 14) / 2,
+                cancel_left - AXYNE_DLG_PAD - 12, 14, DT_LEFT | DT_END_ELLIPSIS);
+}
+
+/* ---- shortcuts list ---- */
+
+static int dlg_list_top(void) { return AXYNE_PW_TITLE_HEIGHT; }
+static int dlg_list_height(const DlgState *d)
+{
+    return d->height - AXYNE_PW_TITLE_HEIGHT - AXYNE_DLG_FOOTER_HEIGHT;
+}
+static int dlg_max_scroll(const DlgState *d)
+{
+    int range = d->content_height - dlg_list_height(d);
+    return range > 0 ? range : 0;
+}
+
+static void dlg_set_scroll(DlgState *d, int value)
+{
+    int maximum = dlg_max_scroll(d);
+    if (value < 0) value = 0;
+    if (value > maximum) value = maximum;
+    if (value == d->scroll) return;
+    d->scroll = value;
+    InvalidateRect(d->window, NULL, FALSE);
+}
+
+static int dlg_chip_width(HDC dc, HFONT font, const wchar_t *key)
+{
+    SIZE size;
+    HGDIOBJ old = SelectObject(dc, font);
+    int width;
+    GetTextExtentPoint32W(dc, key, (int)wcslen(key), &size);
+    SelectObject(dc, old);
+    width = size.cx + 2 * AXYNE_DLG_CHIP_PADDING;
+    return width > AXYNE_DLG_CHIP_HEIGHT ? width : AXYNE_DLG_CHIP_HEIGHT;
+}
+
+static void dlg_paint_shortcuts(DlgState *d, HDC dc)
+{
+    PwState *f = d->fonts;
+    int left = AXYNE_PW_CONTENT_LEFT;
+    int right = d->width - AXYNE_PW_CONTENT_LEFT;
+    int top = dlg_list_top(), view = dlg_list_height(d);
+    size_t i;
+    int saved;
+    pw_fill(dc, 0, 0, d->width, d->height, pw_rgb(AXYNE_PW_COLOR_CONTENT));
+    saved = SaveDC(dc);
+    IntersectClipRect(dc, 0, top, d->width, top + view);
+    for (i = 0; i < d->item_count; ++i) {
+        const DlgItem *item = &d->items[i];
+        int y = top + item->y - d->scroll;
+        int row_height = item->heading ? AXYNE_DLG_SHORTCUT_HEADING : AXYNE_DLG_SHORTCUT_ROW;
+        int chips_width = 0, x, k;
+        if (y + row_height < top || y > top + view) continue;
+        if (item->heading) {
+            pw_text(dc, d->font11_bold, pw_rgb(AXYNE_PW_COLOR_MUTED), item->label, left, y,
+                    right - left, row_height, DT_LEFT | DT_VCENTER);
+            continue;
+        }
+        for (k = 0; k < item->chip_count; ++k)
+            chips_width += dlg_chip_width(dc, f->font12, item->chips[k]) + AXYNE_DLG_CHIP_GAP;
+        if (chips_width > 0) chips_width -= AXYNE_DLG_CHIP_GAP;
+        pw_text(dc, d->font13, pw_rgb(AXYNE_PW_COLOR_TEXT), item->label, left, y,
+                right - chips_width - 12 - left, row_height, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        x = right - chips_width;
+        for (k = 0; k < item->chip_count; ++k) {
+            int width = dlg_chip_width(dc, f->font12, item->chips[k]);
+            RECT chip;
+            chip.left = x; chip.top = y + (row_height - AXYNE_DLG_CHIP_HEIGHT) / 2;
+            chip.right = x + width; chip.bottom = chip.top + AXYNE_DLG_CHIP_HEIGHT;
+            pw_round(dc, &chip, 4, pw_rgb(AXYNE_DLG_COLOR_CHIP_FILL),
+                     pw_rgb(AXYNE_DLG_COLOR_CHIP_STROKE), 1);
+            pw_text(dc, f->font12, pw_rgb(AXYNE_DLG_COLOR_CHIP_TEXT), item->chips[k],
+                    chip.left, chip.top, width, AXYNE_DLG_CHIP_HEIGHT, DT_CENTER | DT_VCENTER);
+            x += width + AXYNE_DLG_CHIP_GAP;
+        }
+        if (!item->last)
+            pw_fill(dc, left, y + row_height - 1, right, y + row_height,
+                    pw_rgb(AXYNE_PW_COLOR_CHROME_LINE));
+    }
+    /* Thin scroll thumb, only when the list overflows. */
+    if (dlg_max_scroll(d) > 0) {
+        int thumb = view * view / d->content_height;
+        int travel, thumb_top;
+        RECT bar;
+        if (thumb < 24) thumb = 24;
+        travel = view - thumb;
+        thumb_top = top + (int)((long long)travel * d->scroll / dlg_max_scroll(d));
+        bar.left = d->width - 8; bar.right = d->width - 4;
+        bar.top = thumb_top; bar.bottom = thumb_top + thumb;
+        pw_round(dc, &bar, 2, pw_blend(pw_rgb(AXYNE_PW_COLOR_MUTED), pw_rgb(AXYNE_PW_COLOR_CONTENT), 40),
+                 pw_blend(pw_rgb(AXYNE_PW_COLOR_MUTED), pw_rgb(AXYNE_PW_COLOR_CONTENT), 40), 1);
+    }
+    RestoreDC(dc, saved);
+    dlg_paint_chrome(d, dc, L"키보드 단축키");
+}
+
+static void dlg_free_items(DlgState *d)
+{
+    size_t i;
+    for (i = 0; i < d->item_count; ++i) free(d->items[i].label);
+    free(d->items);
+    d->items = NULL;
+    d->item_count = 0;
+}
+
+static int dlg_build_items(DlgState *d, const AxyneShortcutSection *sections, size_t count)
+{
+    size_t total = 0, i, row, n = 0;
+    int y = 8;
+    for (i = 0; i < count; ++i)
+        if (sections[i].row_count != 0) total += sections[i].row_count + 1;
+    d->items = (DlgItem *)calloc(total != 0 ? total : 1, sizeof(DlgItem));
+    if (d->items == NULL) return 0;
+    for (i = 0; i < count; ++i) {
+        if (sections[i].row_count == 0) continue;
+        if (n != 0) y += AXYNE_DLG_SHORTCUT_SECTION_GAP;
+        d->items[n].y = y;
+        d->items[n].heading = 1;
+        d->items[n].label = pw_wide(sections[i].title != NULL ? sections[i].title : "");
+        ++n;
+        y += AXYNE_DLG_SHORTCUT_HEADING;
+        for (row = 0; row < sections[i].row_count; ++row) {
+            DlgItem *item = &d->items[n];
+            AxyneShortcutChips split;
+            size_t chip;
+            item->y = y;
+            item->last = row + 1 == sections[i].row_count;
+            item->label = pw_wide(sections[i].rows[row].label != NULL
+                                  ? sections[i].rows[row].label : "");
+            (void)axyne_shortcut_chips(sections[i].rows[row].keys, &split);
+            for (chip = 0; chip < split.count; ++chip) {
+                wchar_t *wide = pw_wide(split.chips[chip]);
+                if (wide == NULL) continue;
+                wcsncpy(item->chips[item->chip_count], wide, AXYNE_SHORTCUT_CHIP_TEXT - 1);
+                item->chips[item->chip_count][AXYNE_SHORTCUT_CHIP_TEXT - 1] = L'\0';
+                ++item->chip_count;
+                free(wide);
+            }
+            ++n;
+            y += AXYNE_DLG_SHORTCUT_ROW;
+        }
+    }
+    d->item_count = n;
+    d->content_height = y + 12;
+    for (i = 0; i < n; ++i)
+        if (d->items[i].label == NULL) d->items[i].label = pw_wide("");
+    return 1;
+}
+
+/* ---- common window code ---- */
+
+static void dlg_close_glyph(DlgState *d, const DRAWITEMSTRUCT *di)
+{
+    int width = di->rcItem.right - di->rcItem.left, height = di->rcItem.bottom - di->rcItem.top;
+    int cx = width / 2, cy = height / 2;
+    (void)d;
+    pw_fill(di->hDC, di->rcItem.left, di->rcItem.top, di->rcItem.right, di->rcItem.bottom,
+            pw_rgb(AXYNE_PW_COLOR_CHROME));
+    pw_line(di->hDC, pw_rgb(AXYNE_PW_COLOR_MUTED), 1, cx - 4, cy - 4, cx + 5, cy + 5, -1, 0);
+    pw_line(di->hDC, pw_rgb(AXYNE_PW_COLOR_MUTED), 1, cx + 4, cy - 4, cx - 5, cy + 5, -1, 0);
+    if (di->itemState & ODS_FOCUS) {
+        RECT focus = di->rcItem;
+        InflateRect(&focus, -3, -3);
+        DrawFocusRect(di->hDC, &focus);
+    }
+}
+
+static void dlg_draw_item(DlgState *d, const DRAWITEMSTRUCT *di)
+{
+    COLORREF content = pw_rgb(AXYNE_PW_COLOR_CONTENT);
+    COLORREF chrome = pw_rgb(AXYNE_PW_COLOR_CHROME);
+    switch ((int)di->CtlID) {
+    case DLG_ID_CLOSE: dlg_close_glyph(d, di); break;
+    case DLG_ID_BROWSE: pw_draw_push(d->fonts, di, 0, 1, content, L"찾아보기…"); break;
+    case IDOK:
+        pw_draw_push(d->fonts, di, 1, 0, chrome, d->kind == DLG_RUNNER ? L"저장" : L"닫기");
+        break;
+    case IDCANCEL: pw_draw_push(d->fonts, di, 0, 0, chrome, L"취소"); break;
+    default: break;
+    }
+}
+
+static HWND dlg_button(DlgState *d, int id, int x, int y, int w, int h, const wchar_t *text)
+{
+    return CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                           x, y, w, h, d->window, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
+}
+
+/* Single-line edit inside a painted frame at (x, y, w). */
+static HWND dlg_edit(DlgState *d, int id, int x, int y, int w, const char *text, HFONT font)
+{
+    wchar_t *wide = pw_wide(text != NULL ? text : "");
+    HWND edit = CreateWindowExW(0, L"EDIT", wide != NULL ? wide : L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x + 10, y + 7, w - 20, 16,
+        d->window, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
+    free(wide);
+    SendMessageW(edit, WM_SETFONT, (WPARAM)font, TRUE);
+    return edit;
+}
+
+/* Multi-line edit inside a painted frame at (x, y, w, h). */
+static HWND dlg_area(DlgState *d, int id, int x, int y, int w, int h, const char *text)
+{
+    wchar_t *wide = dlg_wide_crlf(text);
+    HWND edit = CreateWindowExW(0, L"EDIT", wide != NULL ? wide : L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL |
+        ES_WANTRETURN, x + 5, y + 6, w - 10, h - 12, d->window, (HMENU)(INT_PTR)id,
+        GetModuleHandleW(NULL), NULL);
+    free(wide);
+    SendMessageW(edit, WM_SETFONT, (WPARAM)d->fonts->font_mono, TRUE);
+    dlg_dark_scrollbar(edit);
+    return edit;
+}
+
+static void dlg_browse(DlgState *d)
+{
+    wchar_t path[MAX_PATH] = L"";
+    OPENFILENAMEW open;
+    GetWindowTextW(d->exe, path, MAX_PATH);
+    memset(&open, 0, sizeof(open));
+    open.lStructSize = sizeof(open);
+    open.hwndOwner = d->window;
+    open.lpstrFilter = L"실행 파일 (*.exe)\0*.exe\0모든 파일 (*.*)\0*.*\0";
+    open.lpstrFile = path;
+    open.nMaxFile = MAX_PATH;
+    open.lpstrTitle = L"실행 파일 선택";
+    open.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&open)) {
+        SetWindowTextW(d->exe, path);
+        d->error[0] = L'\0';
+        InvalidateRect(d->window, NULL, FALSE);
+    }
+    SetFocus(d->exe);
+}
+
+static void dlg_runner_save(DlgState *d)
+{
+    AxyneRunnerDialogValues values;
+    char error[256] = "";
+    char *exe = dlg_edit_utf8(d->exe), *args = dlg_edit_utf8(d->args);
+    char *wd = dlg_edit_utf8(d->wd), *env = dlg_edit_utf8(d->env);
+    int saved = 0;
+    values.executable = exe != NULL ? exe : "";
+    values.arguments = args != NULL ? args : "";
+    values.working_directory = wd != NULL ? wd : "";
+    values.environment = env != NULL ? env : "";
+    if (d->hooks.save != NULL)
+        saved = d->hooks.save(d->hooks.context, &values, error, sizeof(error));
+    free(exe); free(args); free(wd); free(env);
+    if (saved) {
+        d->result = 1;
+        d->done = 1;
+        return;
+    }
+    {
+        wchar_t *wide = pw_wide(error[0] != '\0' ? error : "Runner 설정이 올바르지 않습니다.");
+        wcsncpy(d->error, wide != NULL ? wide : L"", 255);
+        d->error[255] = L'\0';
+        free(wide);
+    }
+    if (GetWindowTextLengthW(d->exe) == 0) SetFocus(d->exe);
+    InvalidateRect(d->window, NULL, FALSE);
+}
+
+static void dlg_command(DlgState *d, int id, int code)
+{
+    if (id == IDCANCEL || id == DLG_ID_CLOSE || (id == IDOK && d->kind == DLG_SHORTCUTS)) {
+        d->result = 0;
+        d->done = 1;
+    } else if (id == IDOK) {
+        dlg_runner_save(d);
+    } else if (id == DLG_ID_BROWSE) {
+        dlg_browse(d);
+    } else if (d->kind == DLG_RUNNER && id >= DLG_ID_EXE && id <= DLG_ID_ENV) {
+        if (code == EN_CHANGE) d->error[0] = L'\0';
+        if (code == EN_CHANGE || code == EN_SETFOCUS || code == EN_KILLFOCUS)
+            InvalidateRect(d->window, NULL, FALSE);
+    }
+}
+
+static LRESULT CALLBACK dlg_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    DlgState *d = (DlgState *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    switch (message) {
+    case WM_NCCREATE: {
+        const CREATESTRUCTW *create = (const CREATESTRUCTW *)lparam;
+        SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)create->lpCreateParams);
+        ((DlgState *)create->lpCreateParams)->window = window;
+        return TRUE;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(window, &ps);
+        if (d != NULL) {
+            HDC memory = CreateCompatibleDC(dc);
+            HBITMAP bitmap = CreateCompatibleBitmap(dc, d->width, d->height);
+            HGDIOBJ old = SelectObject(memory, bitmap);
+            if (d->kind == DLG_RUNNER) dlg_paint_runner(d, memory);
+            else dlg_paint_shortcuts(d, memory);
+            BitBlt(dc, 0, 0, d->width, d->height, memory, 0, 0, SRCCOPY);
+            SelectObject(memory, old);
+            DeleteObject(bitmap);
+            DeleteDC(memory);
+        }
+        EndPaint(window, &ps);
+        return 0;
+    }
+    case WM_NCHITTEST: {
+        POINT point;
+        point.x = GET_X_LPARAM(lparam); point.y = GET_Y_LPARAM(lparam);
+        ScreenToClient(window, &point);
+        if (point.y >= 0 && point.y < AXYNE_PW_TITLE_HEIGHT) return HTCAPTION;
+        return HTCLIENT;
+    }
+    case WM_DRAWITEM:
+        if (d != NULL) { dlg_draw_item(d, (const DRAWITEMSTRUCT *)lparam); return TRUE; }
+        break;
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wparam;
+        SetTextColor(dc, pw_rgb(AXYNE_PW_COLOR_TEXT));
+        SetBkColor(dc, pw_rgb(AXYNE_PW_COLOR_FIELD));
+        return d != NULL ? (LRESULT)d->fonts->field_brush : 0;
+    }
+    case WM_COMMAND:
+        if (d != NULL) dlg_command(d, LOWORD(wparam), HIWORD(wparam));
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (d != NULL && d->kind == DLG_SHORTCUTS) {
+            dlg_set_scroll(d, d->scroll - GET_WHEEL_DELTA_WPARAM(wparam) * 56 / WHEEL_DELTA);
+            return 0;
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        if (d != NULL && d->kind == DLG_SHORTCUTS && dlg_max_scroll(d) > 0 &&
+            GET_X_LPARAM(lparam) >= d->width - 16 && GET_Y_LPARAM(lparam) >= dlg_list_top() &&
+            GET_Y_LPARAM(lparam) < dlg_list_top() + dlg_list_height(d)) {
+            d->dragging = 1;
+            SetCapture(window);
+            dlg_set_scroll(d, (int)((long long)(GET_Y_LPARAM(lparam) - dlg_list_top()) *
+                dlg_max_scroll(d) / dlg_list_height(d)));
+            return 0;
+        }
+        break;
+    case WM_MOUSEMOVE:
+        if (d != NULL && d->dragging) {
+            dlg_set_scroll(d, (int)((long long)(GET_Y_LPARAM(lparam) - dlg_list_top()) *
+                dlg_max_scroll(d) / dlg_list_height(d)));
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (d != NULL && d->dragging) { d->dragging = 0; ReleaseCapture(); return 0; }
+        break;
+    case WM_CLOSE:
+        if (d != NULL) { d->result = 0; d->done = 1; }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+/* Esc cancels; Return activates the focused button, otherwise the default
+ * (Save / Close) except inside a multi-line area, where it types a newline.
+ * The shortcuts list scrolls with the usual navigation keys. Returns
+ * non-zero when handled. */
+static int dlg_key(DlgState *d, const MSG *msg)
+{
+    HWND focus = GetFocus();
+    int id = focus != NULL ? GetDlgCtrlID(focus) : 0;
+    if (msg->wParam == VK_ESCAPE) {
+        d->result = 0; d->done = 1;
+        return 1;
+    }
+    if (msg->wParam == VK_RETURN) {
+        if (id == DLG_ID_ARGS || id == DLG_ID_ENV) return 0;
+        if ((id == IDOK || id == IDCANCEL || id == DLG_ID_BROWSE || id == DLG_ID_CLOSE) &&
+            IsWindowEnabled(focus))
+            SendMessageW(focus, BM_CLICK, 0, 0);
+        else
+            dlg_command(d, IDOK, BN_CLICKED);
+        return 1;
+    }
+    if (d->kind == DLG_SHORTCUTS) {
+        int page = dlg_list_height(d) - AXYNE_DLG_SHORTCUT_ROW;
+        switch (msg->wParam) {
+        case VK_UP: dlg_set_scroll(d, d->scroll - AXYNE_DLG_SHORTCUT_ROW); return 1;
+        case VK_DOWN: dlg_set_scroll(d, d->scroll + AXYNE_DLG_SHORTCUT_ROW); return 1;
+        case VK_PRIOR: dlg_set_scroll(d, d->scroll - page); return 1;
+        case VK_NEXT: dlg_set_scroll(d, d->scroll + page); return 1;
+        case VK_HOME: dlg_set_scroll(d, 0); return 1;
+        case VK_END: dlg_set_scroll(d, dlg_max_scroll(d)); return 1;
+        default: break;
+        }
+    }
+    return 0;
+}
+
+static void dlg_register(HINSTANCE instance)
+{
+    WNDCLASSEXW window_class;
+    memset(&window_class, 0, sizeof(window_class));
+    window_class.cbSize = sizeof(window_class);
+    if (GetClassInfoExW(instance, AXYNE_DLG_CLASS, &window_class)) return;
+    memset(&window_class, 0, sizeof(window_class));
+    window_class.cbSize = sizeof(window_class);
+    window_class.style = CS_DROPSHADOW;
+    window_class.lpfnWndProc = dlg_proc;
+    window_class.hInstance = instance;
+    window_class.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    window_class.lpszClassName = AXYNE_DLG_CLASS;
+    (void)RegisterClassExW(&window_class);
+}
+
+static DlgState *dlg_create(int kind, int width, int height, void *native_owner)
+{
+    DlgState *d = (DlgState *)calloc(1, sizeof(*d));
+    PwState *f = (PwState *)calloc(1, sizeof(*f));
+    if (d == NULL || f == NULL) { free(d); free(f); return NULL; }
+    d->fonts = f;
+    d->kind = kind;
+    d->width = width;
+    d->height = height;
+    d->owner = (HWND)native_owner;
+    f->font10 = pw_make_font(10, FW_NORMAL, L"Segoe UI", 0);
+    f->font11 = pw_make_font(11, FW_NORMAL, L"Segoe UI", 0);
+    f->font12 = pw_make_font(12, FW_NORMAL, L"Segoe UI", 0);
+    f->font12_bold = pw_make_font(12, FW_SEMIBOLD, L"Segoe UI", 0);
+    f->font16_bold = pw_make_font(16, FW_SEMIBOLD, L"Segoe UI", 0);
+    f->font_mono = pw_make_font(11, FW_NORMAL, L"Consolas", 1);
+    f->field_brush = CreateSolidBrush(pw_rgb(AXYNE_PW_COLOR_FIELD));
+    d->font13 = pw_make_font(13, FW_NORMAL, L"Segoe UI", 0);
+    d->font11_bold = pw_make_font(11, FW_SEMIBOLD, L"Segoe UI", 0);
+    return d;
+}
+
+static void dlg_destroy(DlgState *d)
+{
+    PwState *f = d->fonts;
+    DeleteObject(f->font10); DeleteObject(f->font11); DeleteObject(f->font12);
+    DeleteObject(f->font12_bold); DeleteObject(f->font16_bold); DeleteObject(f->font_mono);
+    DeleteObject(f->field_brush);
+    DeleteObject(d->font13); DeleteObject(d->font11_bold);
+    dlg_free_items(d);
+    free(f);
+    free(d);
+}
+
+/* Window creation, modal loop and teardown shared by both dialogs. Returns
+ * 0 when the window could not be created. `build` adds the child controls
+ * once the window exists. */
+static int dlg_show(DlgState *d, const wchar_t *title, void (*build)(DlgState *))
+{
+    HINSTANCE instance = GetModuleHandleW(NULL);
+    RECT bounds;
+    int x, y;
+    MSG msg;
+    dlg_register(instance);
+    if (d->owner != NULL && GetWindowRect(d->owner, &bounds)) {
+        x = (bounds.left + bounds.right - d->width) / 2;
+        y = (bounds.top + bounds.bottom - d->height) / 2;
+    } else {
+        x = (GetSystemMetrics(SM_CXSCREEN) - d->width) / 2;
+        y = (GetSystemMetrics(SM_CYSCREEN) - d->height) / 2;
+    }
+    d->window = CreateWindowExW(0, AXYNE_DLG_CLASS, title, WS_POPUP | WS_CLIPCHILDREN,
+                                x, y, d->width, d->height, d->owner, NULL, instance, d);
+    if (d->window == NULL) return 0;
+    build(d);
+    if (d->owner != NULL) EnableWindow(d->owner, FALSE);
+    ShowWindow(d->window, SW_SHOW);
+    UpdateWindow(d->window);
+    if (d->kind == DLG_RUNNER) SetFocus(d->exe);
+    else SetFocus(GetDlgItem(d->window, IDOK));
+    while (!d->done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_MOUSEWHEEL && d->kind == DLG_SHORTCUTS) {
+            dlg_set_scroll(d, d->scroll - GET_WHEEL_DELTA_WPARAM(msg.wParam) * 56 / WHEEL_DELTA);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN &&
+            (msg.hwnd == d->window || IsChild(d->window, msg.hwnd)) && dlg_key(d, &msg))
+            continue;
+        if (!IsDialogMessageW(d->window, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    if (d->owner != NULL) EnableWindow(d->owner, TRUE);
+    DestroyWindow(d->window);
+    if (d->owner != NULL) SetForegroundWindow(d->owner);
+    return 1;
+}
+
+static void dlg_build_runner(DlgState *d)
+{
+    int inner = d->width - 2 * AXYNE_DLG_PAD;
+    int exe_y, args_y, wd_y, env_y, note_y;
+    int button_y = d->height - AXYNE_DLG_FOOTER_HEIGHT +
+                   (AXYNE_DLG_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2;
+    int save_x = d->width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH;
+    int cancel_x = save_x - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
+    dlg_runner_rows(&exe_y, &args_y, &wd_y, &env_y, &note_y);
+    /* Creation order is the Tab order. */
+    d->exe = dlg_edit(d, DLG_ID_EXE, AXYNE_DLG_PAD, exe_y + AXYNE_DLG_LABEL_BLOCK,
+                      inner - AXYNE_DLG_BROWSE_WIDTH - 8, d->initial->executable, d->fonts->font11);
+    d->browse = dlg_button(d, DLG_ID_BROWSE, AXYNE_DLG_PAD + inner - AXYNE_DLG_BROWSE_WIDTH,
+                           exe_y + AXYNE_DLG_LABEL_BLOCK, AXYNE_DLG_BROWSE_WIDTH,
+                           AXYNE_PW_FIELD_HEIGHT, L"찾아보기…");
+    d->args = dlg_area(d, DLG_ID_ARGS, AXYNE_DLG_PAD, args_y + AXYNE_DLG_LABEL_BLOCK, inner,
+                       AXYNE_DLG_AREA_HEIGHT, d->initial->arguments);
+    d->wd = dlg_edit(d, DLG_ID_WD, AXYNE_DLG_PAD, wd_y + AXYNE_DLG_LABEL_BLOCK, inner,
+                     d->initial->working_directory, d->fonts->font11);
+    d->env = dlg_area(d, DLG_ID_ENV, AXYNE_DLG_PAD, env_y + AXYNE_DLG_LABEL_BLOCK, inner,
+                      AXYNE_DLG_AREA_HEIGHT, d->initial->environment);
+    (void)dlg_button(d, IDCANCEL, cancel_x, button_y, AXYNE_PW_BUTTON_WIDTH,
+                     AXYNE_PW_BUTTON_HEIGHT, L"취소");
+    (void)dlg_button(d, IDOK, save_x, button_y, AXYNE_PW_BUTTON_WIDTH,
+                     AXYNE_PW_BUTTON_HEIGHT, L"저장");
+    (void)dlg_button(d, DLG_ID_CLOSE, d->width - 12 - 14 - 7, 4, 28, 28, L"닫기");
+    (void)note_y;
+}
+
+int axyne_runner_dialog_show(void *native_owner, const AxyneRunnerDialogValues *initial,
+                             const AxyneRunnerDialogHooks *hooks)
+{
+    DlgState *d;
+    int shown, saved;
+    if (initial == NULL || hooks == NULL || hooks->save == NULL) return 0;
+    d = dlg_create(DLG_RUNNER, AXYNE_DLG_RUNNER_WIDTH, AXYNE_DLG_RUNNER_HEIGHT, native_owner);
+    if (d == NULL) return 0;
+    d->hooks = *hooks;
+    d->initial = initial;
+    shown = dlg_show(d, L"Runner 설정", dlg_build_runner);
+    saved = shown && d->result == 1;
+    dlg_destroy(d);
+    return saved;
+}
+
+static void dlg_build_shortcuts(DlgState *d)
+{
+    int button_y = d->height - AXYNE_DLG_FOOTER_HEIGHT +
+                   (AXYNE_DLG_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2;
+    (void)dlg_button(d, IDOK, d->width - AXYNE_DLG_PAD - AXYNE_PW_BUTTON_WIDTH, button_y,
+                     AXYNE_PW_BUTTON_WIDTH, AXYNE_PW_BUTTON_HEIGHT, L"닫기");
+    (void)dlg_button(d, DLG_ID_CLOSE, d->width - 12 - 14 - 7, 4, 28, 28, L"닫기");
+}
+
+void axyne_shortcuts_dialog_show(void *native_owner, const AxyneShortcutSection *sections,
+                                 size_t section_count)
+{
+    DlgState *d;
+    if (sections == NULL) return;
+    d = dlg_create(DLG_SHORTCUTS, AXYNE_DLG_SHORTCUTS_WIDTH, AXYNE_DLG_SHORTCUTS_HEIGHT,
+                   native_owner);
+    if (d == NULL) return;
+    if (dlg_build_items(d, sections, section_count))
+        (void)dlg_show(d, L"키보드 단축키", dlg_build_shortcuts);
+    dlg_destroy(d);
 }
