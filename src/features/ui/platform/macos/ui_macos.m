@@ -3350,7 +3350,8 @@ static NSString *axyne_macos_shortcut_text(NSString *key, NSEventModifierFlags f
     return text;
 }
 
-static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
+/* Appends @[title, shortcut] for every menu item that carries a shortcut. */
+static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableArray *out)
 {
     for (NSMenuItem *item in [menu itemArray]) {
         NSString *shortcut;
@@ -3359,54 +3360,71 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
         shortcut = axyne_macos_shortcut_text([item keyEquivalent],
             [item keyEquivalentModifierMask]);
         if (shortcut == nil) continue;
-        [out appendFormat:@"  %@  %@\n",
-            [[item title] stringByPaddingToLength:30 withString:@" " startingAtIndex:0],
-            shortcut];
+        [out addObject:@[[item title], shortcut]];
     }
+}
+
+/* Shows sections (@[title, rows]; row = @[label, shortcut]) in the keyboard
+ * shortcuts dialog. The C strings are borrowed from the arrays for the call. */
+static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *sections)
+{
+    size_t count = [sections count];
+    AxyneShortcutSection *converted = (AxyneShortcutSection *)calloc(
+        count != 0 ? count : 1, sizeof(*converted));
+    if (converted == NULL) return;
+    for (size_t i = 0; i < count; ++i) {
+        NSArray *section = [sections objectAtIndex:i];
+        NSArray *rows = [section objectAtIndex:1];
+        AxyneShortcutRow *convertedRows = (AxyneShortcutRow *)calloc(
+            [rows count] != 0 ? [rows count] : 1, sizeof(*convertedRows));
+        if (convertedRows == NULL) {
+            for (size_t j = 0; j < i; ++j) free((void *)converted[j].rows);
+            free(converted);
+            return;
+        }
+        for (NSUInteger row = 0; row < [rows count]; ++row) {
+            convertedRows[row].label = [[[rows objectAtIndex:row] objectAtIndex:0] UTF8String];
+            convertedRows[row].keys = [[[rows objectAtIndex:row] objectAtIndex:1] UTF8String];
+        }
+        converted[i].title = [[section objectAtIndex:0] UTF8String];
+        converted[i].rows = convertedRows;
+        converted[i].row_count = [rows count];
+    }
+    axyne_shortcuts_dialog_show(owner, converted, count);
+    for (size_t i = 0; i < count; ++i) free((void *)converted[i].rows);
+    free(converted);
 }
 
 /* Lists the shortcuts the menus actually carry, plus the effective
  * Preferences bindings (which may differ from the menu defaults). */
 - (void)showKeyboardShortcuts:(id)sender
 {
-    NSMutableString *text = [NSMutableString string];
-    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    NSScrollView *scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 460, 340)] autorelease];
-    NSTextView *view = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 460, 340)] autorelease];
+    NSMutableArray *sections = [NSMutableArray array];
+    NSMutableArray *bindings = [NSMutableArray array];
     (void)sender;
     for (NSMenuItem *top in [[NSApp mainMenu] itemArray]) {
-        NSMutableString *section = [NSMutableString string];
+        NSMutableArray *rows = [NSMutableArray array];
         if ([top submenu] == nil) continue;
-        axyne_macos_collect_shortcuts([top submenu], section);
-        if ([section length] != 0)
-            [text appendFormat:@"%@\n%@\n", [top title], section];
+        axyne_macos_collect_shortcuts([top submenu], rows);
+        if ([rows count] != 0) [sections addObject:@[[top title], rows]];
     }
-    [text appendString:@"Preferences bindings\n"];
     for (size_t i = 0; i < _preferences.binding_count; ++i) {
         const AxyneKeyBinding *binding = &_preferences.bindings[i];
         NSMutableString *keys = [NSMutableString string];
+        NSString *key;
+        NSString *title;
         if (!binding->enabled || binding->key[0] == '\0') continue;
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_CONTROL) != 0) [keys appendString:@"⌃"];
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0) [keys appendString:@"⌥"];
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0) [keys appendString:@"⇧"];
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_COMMAND) != 0) [keys appendString:@"⌘"];
-        [keys appendString:[[NSString stringWithUTF8String:binding->key] uppercaseString]];
-        [text appendFormat:@"  %@  %@\n",
-            [[NSString stringWithUTF8String:axyne_preferences_action_name(binding->action)]
-                stringByPaddingToLength:30 withString:@" " startingAtIndex:0], keys];
+        key = [NSString stringWithUTF8String:binding->key];
+        title = [NSString stringWithUTF8String:axyne_dialogs_action_title((int)binding->action)];
+        [keys appendString:key != nil ? [key uppercaseString] : @""];
+        [bindings addObject:@[title != nil ? title : @"", keys]];
     }
-    [view setEditable:NO];
-    [view setFont:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular]];
-    [view setString:text];
-    [view setVerticallyResizable:YES]; [view setHorizontallyResizable:NO];
-    [view setAutoresizingMask:NSViewWidthSizable];
-    [[view textContainer] setWidthTracksTextView:YES];
-    [scroll setDocumentView:view];
-    [scroll setHasVerticalScroller:YES];
-    [alert setMessageText:@"Keyboard Shortcuts"];
-    [alert setAccessoryView:scroll];
-    [alert addButtonWithTitle:@"Close"];
-    [alert runModal];
+    if ([bindings count] != 0) [sections addObject:@[@"환경 설정 키 바인딩", bindings]];
+    axyne_macos_show_shortcut_sections([self window], sections);
 }
 
 - (void)reportIssue:(id)sender
