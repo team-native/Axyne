@@ -2999,13 +2999,19 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (void)refreshSplitterTracking
 {
-    NSTrackingArea *sidebar = [self syncSplitterTracking:_sidebarSplitterTracking
-        rect:[self splitterRect:1]];
-    NSTrackingArea *panel = [self syncSplitterTracking:_panelSplitterTracking
-        rect:[self splitterRect:2]];
-    BOOL changed = sidebar != _sidebarSplitterTracking || panel != _panelSplitterTracking;
-    _sidebarSplitterTracking = sidebar;
-    _panelSplitterTracking = panel;
+    /* Compare rects, not pointers: a released area's address can be reused by
+     * the replacement, which would hide the change and leave stale cursor rects. */
+    NSRect sidebarRect = [self splitterRect:1];
+    NSRect panelRect = [self splitterRect:2];
+    BOOL changed = _sidebarSplitterTracking == nil ? !NSIsEmptyRect(sidebarRect)
+                       : !NSEqualRects([_sidebarSplitterTracking rect], sidebarRect);
+    if (_panelSplitterTracking == nil ? !NSIsEmptyRect(panelRect)
+            : !NSEqualRects([_panelSplitterTracking rect], panelRect))
+        changed = YES;
+    _sidebarSplitterTracking = [self syncSplitterTracking:_sidebarSplitterTracking
+        rect:sidebarRect];
+    _panelSplitterTracking = [self syncSplitterTracking:_panelSplitterTracking
+        rect:panelRect];
     if (changed) [[self window] invalidateCursorRectsForView:self];
 }
 
