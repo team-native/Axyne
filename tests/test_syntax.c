@@ -24,7 +24,7 @@ int main(void)
 {
     size_t i, k;
     static const char *ids[] = { "cpp", "java", "javascript", "typescript",
-        "swift", "go", "rust", "python", "json", "css", "html", "xml", "bash",
+        "swift", "kotlin", "slint", "go", "rust", "python", "json", "css", "html", "xml", "bash",
         "markdown", "cmake", "yaml", "text" };
 
     expect(NULL, "cpp", "cpp");
@@ -33,6 +33,9 @@ int main(void)
     expect("x.mm", "cpp", "cpp");
     expect("Main.java", "java", "cpp");
     expect("a.swift", "swift", "cpp");
+    expect("Main.kt", "kotlin", "cpp");
+    expect("build.gradle.KTS", "kotlin", "cpp");
+    expect("ui/app.slint", "slint", "cpp");
     expect("a.tsx", "typescript", "cpp");
     expect("a.jsx", "javascript", "cpp");
     expect("a.py", "python", "python");
@@ -82,6 +85,16 @@ int main(void)
             CHECK(l->styles[i].color == c[i]);
         }
         CHECK(l != NULL && l->keywords[0] != NULL && l->keywords[1] != NULL);
+    }
+    {
+        static const char *const kw[][2] = { { "kotlin", "suspend" },
+            { "slint", "in-out" } };
+        for (i = 0; i < 2; ++i) {
+            const AxyneSyntaxLanguage *l = axyne_syntax_by_id(kw[i][0]);
+            CHECK(l != NULL && l->keywords[0] != NULL &&
+                  strstr(l->keywords[0], kw[i][1]) != NULL);
+            CHECK(l != NULL && l->keywords[1] != NULL && l->keywords[3] != NULL);
+        }
     }
     CHECK(axyne_syntax_by_id("nope") == NULL);
     CHECK(axyne_syntax_by_id(NULL) == NULL);
