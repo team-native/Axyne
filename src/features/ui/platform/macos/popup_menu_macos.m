@@ -417,6 +417,7 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
         NSWindowCollectionBehaviorFullScreenAuxiliary];
     [_panel setContentView:_view];
     [_panel orderFrontRegardless];
+    [_panel displayIfNeeded]; /* the shadow follows the drawn rounded shape */
     [_panel invalidateShadow];
 }
 
@@ -500,7 +501,7 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     parentFrame = [_panel frame];
     size = [child->_view contentSize];
     visible = [AxynePopupMenu visibleFrameNearPoint:
-        NSMakePoint(NSMaxX(parentFrame), NSMidY(parentFrame)) window:nil];
+        NSMakePoint(NSMidX(parentFrame), NSMidY(parentFrame)) window:nil];
     placed = axyne_popup_place_side(axyne_popup_rect(parentFrame),
         NSMaxY(parentFrame) - [_view rowTop:row], size.width, size.height,
         axyne_popup_rect(visible), AXYNE_POPUP_SUBMENU_OVERLAP);
