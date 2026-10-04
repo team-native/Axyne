@@ -208,3 +208,21 @@ Units: runtime kinds; build target model with tests; language registry and resol
 Known gaps: the selector label is recomputed on every refresh and paint (Rust additionally stats `Cargo.toml`); the UI was only compile-checked for Windows (zig cc) and reviewed by eye for macOS; no run against real toolchains.
 
 Units: shared selector model with tests; palette command; macOS selector; macOS plan-based build and run; macOS Tools menu and palette entry; Windows plan-based build and run; Windows selector; Windows Tools menu and palette entry; this record.
+
+## Resizable layout
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Draggable boundaries | Both the explorer/editor border and the top border of the bottom panel can be grabbed with the mouse and dragged; the size follows the pointer live. Dragging the panel border up makes the panel taller | USER (request) | CONFIRMED |
+| Limits | Explorer 160 to min(600, half the window width); panel 80 to window height minus menu, toolbar, tabs, status and 120 for the editor. Pure integer math in `include/axyne/layout_metrics.h`, covered by `axyne-layout-metrics` | AGENT_PARAMETER | ASSUMED |
+| Window resize | The stored size is clamped against the current window on every read, so the editor never collapses; growing the window again restores the dragged size | ASSUMED | ASSUMED |
+| Defaults | `AXYNE_UI_SIDEBAR` 248 and `AXYNE_UI_PANEL` 230 stay the Figma defaults; with no drag every value and the 1px border drawing are unchanged. Double-click on a border resets that size to the default | ASSUMED (double-click) | ASSUMED |
+| Hidden regions | View > Explorer / Bottom Panel keep working and restore the last dragged size, not the default | ASSUMED | ASSUMED |
+| Cursor | Horizontal resize cursor on the explorer border, vertical resize cursor on the panel border; kept during the drag | ASSUMED | ASSUMED |
+| Grab zone | 6px: 4px inside the explorer, the 1px border and 1px of editor for the explorer border; 1px of editor, the border and 4px of panel for the panel border. Native child windows (Scintilla, terminal) receive their own clicks, so on Windows only the explorer/panel side is live; macOS claims the zone in `hitTest:`. The panel border wins at the corner. The editor's scrollbar is not covered | ASSUMED | ASSUMED |
+| Persistence | Session only: kept in the window state, not written to `preferences.json` (the preferences schema is not extended) | ASSUMED | ASSUMED |
+| Layout users | Tabs, explorer rows and sticky rows, panel controls, terminal views, status bar cells and every hit test read the dynamic size (`sidebarWidth` / `panelHeight`, `axyne_sidebar_width` / `axyne_panel_height`); the output and terminal heights derive from the panel height | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the macOS and Windows UI were not run interactively; Windows was compile-checked with zig cc and macOS reviewed by eye.
+
+Units: shared layout metrics with tests; macOS splitters; Windows splitters; this record.

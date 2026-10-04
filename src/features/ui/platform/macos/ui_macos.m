@@ -24,6 +24,7 @@
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
 #include "axyne/ui_design.h"
+#include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
@@ -791,6 +792,13 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSString *_lspStatus;
     BOOL _explorerHidden; /* View > Explorer; zero-initialised means visible */
     BOOL _panelHidden;    /* View > Bottom Panel */
+    CGFloat _sidebarSize; /* dragged explorer width; 0 = default, session only */
+    CGFloat _panelSize;   /* dragged bottom panel height; 0 = default */
+    NSInteger _splitterDrag; /* 0 none, 1 explorer border, 2 panel border */
+    CGFloat _splitterStart;     /* pointer coordinate when the drag began */
+    CGFloat _splitterStartSize; /* size when the drag began */
+    NSTrackingArea *_sidebarSplitterTracking;
+    NSTrackingArea *_panelSplitterTracking;
     AxynePaletteController _palette;
     AxynePaletteOverlay *_paletteOverlay;
     NSTextField *_paletteField;
@@ -989,6 +997,9 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)openHelp:(id)sender;
 - (CGFloat)sidebarWidth;
 - (CGFloat)panelHeight;
+- (NSInteger)splitterAtPoint:(NSPoint)point;
+- (NSRect)splitterRect:(NSInteger)which;
+- (void)refreshSplitterTracking;
 - (NSRect)menuBarItemRect:(NSUInteger)index;
 - (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
 - (void)openMenuBarMenu:(NSUInteger)index;
@@ -2915,8 +2926,150 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)replaceInDocument:(id)sender { (void)sender; [self findOrReplace:YES]; }
 - (void)searchWorkspace:(id)sender { (void)sender; [self searchFolder:NO]; }
 
-- (CGFloat)sidebarWidth { return _explorerHidden ? 0 : AXYNE_UI_SIDEBAR; }
-- (CGFloat)panelHeight { return _panelHidden ? 0 : AXYNE_UI_PANEL; }
+/* The explorer column and bottom panel are user-resizable. The stored sizes
+ * are the last dragged values (0 = Figma default); every read clamps them to
+ * the current window so a shrinking window never collapses the editor, and a
+ * hidden region restores its dragged size when shown again. */
+- (CGFloat)sidebarWidth
+{
+    if (_explorerHidden) return 0;
+    return axyne_layout_clamp_sidebar(
+        (int)(_sidebarSize > 0 ? _sidebarSize : AXYNE_UI_SIDEBAR),
+        (int)NSWidth([self bounds]));
+}
+
+- (CGFloat)panelHeight
+{
+    if (_panelHidden) return 0;
+    return axyne_layout_clamp_panel(
+        (int)(_panelSize > 0 ? _panelSize : AXYNE_UI_PANEL),
+        (int)NSHeight([self bounds]), AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
+}
+
+/* Splitter under `point` (view coordinates): 1 = explorer/editor border,
+ * 2 = bottom panel top border, 0 = none. The panel wins at the corner. */
+- (NSInteger)splitterAtPoint:(NSPoint)point
+{
+    NSRect bounds = [self bounds];
+    CGFloat panel = [self panelHeight];
+    CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - panel;
+    CGFloat contentTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
+    if (point.x < 0 || point.x >= NSWidth(bounds)) return 0;
+    if (axyne_layout_on_panel_splitter((int)floor(point.y), (int)bottomTop, (int)panel))
+        return 2;
+    if (point.y >= contentTop && point.y < NSHeight(bounds) - AXYNE_STATUS &&
+        axyne_layout_on_sidebar_splitter((int)floor(point.x), (int)[self sidebarWidth]))
+        return 1;
+    return 0;
+}
+
+- (NSRect)splitterRect:(NSInteger)which
+{
+    NSRect bounds = [self bounds];
+    if (which == 2) {
+        CGFloat panel = [self panelHeight];
+        if (panel <= 0) return NSZeroRect;
+        return NSMakeRect(0, NSHeight(bounds) - AXYNE_STATUS - panel - AXYNE_LAYOUT_GRAB_BEFORE_PANEL,
+            NSWidth(bounds), AXYNE_LAYOUT_GRAB_BEFORE_PANEL + AXYNE_LAYOUT_GRAB_AFTER_PANEL);
+    }
+    CGFloat sidebar = [self sidebarWidth];
+    if (sidebar <= 0) return NSZeroRect;
+    CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS;
+    return NSMakeRect(sidebar - 1 - AXYNE_LAYOUT_GRAB_BEFORE_SIDEBAR, top,
+        AXYNE_LAYOUT_GRAB_BEFORE_SIDEBAR + AXYNE_LAYOUT_GRAB_AFTER_SIDEBAR,
+        MAX(0, NSHeight(bounds) - AXYNE_STATUS - top));
+}
+
+/* Keeps one cursor-update tracking area per visible splitter; the rects move
+ * with the dragged sizes, so they are rebuilt only when they change. */
+- (NSTrackingArea *)syncSplitterTracking:(NSTrackingArea *)area rect:(NSRect)rect
+{
+    if (area != nil && NSEqualRects([area rect], rect)) return area;
+    if (area != nil) {
+        [self removeTrackingArea:area];
+        [area release];
+    }
+    if (NSIsEmptyRect(rect)) return nil;
+    area = [[NSTrackingArea alloc] initWithRect:rect
+        options:NSTrackingCursorUpdate | NSTrackingActiveInKeyWindow
+        owner:self userInfo:nil];
+    [self addTrackingArea:area];
+    return area;
+}
+
+- (void)refreshSplitterTracking
+{
+    /* Compare rects, not pointers: a released area's address can be reused by
+     * the replacement, which would hide the change and leave stale cursor rects. */
+    NSRect sidebarRect = [self splitterRect:1];
+    NSRect panelRect = [self splitterRect:2];
+    BOOL changed = _sidebarSplitterTracking == nil ? !NSIsEmptyRect(sidebarRect)
+                       : !NSEqualRects([_sidebarSplitterTracking rect], sidebarRect);
+    if (_panelSplitterTracking == nil ? !NSIsEmptyRect(panelRect)
+            : !NSEqualRects([_panelSplitterTracking rect], panelRect))
+        changed = YES;
+    _sidebarSplitterTracking = [self syncSplitterTracking:_sidebarSplitterTracking
+        rect:sidebarRect];
+    _panelSplitterTracking = [self syncSplitterTracking:_panelSplitterTracking
+        rect:panelRect];
+    if (changed) [[self window] invalidateCursorRectsForView:self];
+}
+
+- (void)resetCursorRects
+{
+    [super resetCursorRects];
+    NSRect sidebar = [self splitterRect:1];
+    NSRect panel = [self splitterRect:2];
+    if (!NSIsEmptyRect(sidebar))
+        [self addCursorRect:sidebar cursor:[NSCursor resizeLeftRightCursor]];
+    if (!NSIsEmptyRect(panel))
+        [self addCursorRect:panel cursor:[NSCursor resizeUpDownCursor]];
+}
+
+- (void)cursorUpdate:(NSEvent *)event
+{
+    NSInteger splitter = [self splitterAtPoint:
+        [self convertPoint:[event locationInWindow] fromView:nil]];
+    if (splitter == 1) [[NSCursor resizeLeftRightCursor] set];
+    else if (splitter == 2) [[NSCursor resizeUpDownCursor] set];
+    else [super cursorUpdate:event];
+}
+
+/* The splitter grab zones overlap the editor, panel buttons and terminal
+ * views; claim hits there so the drag reaches this view. Not while the
+ * command palette overlay is up. */
+- (NSView *)hitTest:(NSPoint)point
+{
+    if (_paletteOverlay == nil && [self superview] != nil &&
+        [self splitterAtPoint:[self convertPoint:point fromView:[self superview]]] != 0)
+        return self;
+    return [super hitTest:point];
+}
+
+- (void)mouseDragged:(NSEvent *)event
+{
+    if (_splitterDrag == 0) { [super mouseDragged:event]; return; }
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    if (_splitterDrag == 1) {
+        _sidebarSize = axyne_layout_drag_sidebar((int)_splitterStartSize,
+            (int)_splitterStart, (int)point.x, (int)NSWidth([self bounds]));
+        [[NSCursor resizeLeftRightCursor] set];
+    } else {
+        _panelSize = axyne_layout_drag_panel((int)_splitterStartSize,
+            (int)_splitterStart, (int)point.y, (int)NSHeight([self bounds]),
+            AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
+        [[NSCursor resizeUpDownCursor] set];
+    }
+    [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent *)event
+{
+    if (_splitterDrag == 0) { [super mouseUp:event]; return; }
+    _splitterDrag = 0;
+    [self refreshSplitterTracking];
+    [[self window] invalidateCursorRectsForView:self];
+}
 
 /* In-window menu bar (Figma menu frames). Items are laid out from the shared
  * metrics; painting, hit-testing and popup anchoring all use this one rect. */
@@ -2993,6 +3146,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                 NSTrackingActiveInKeyWindow
         owner:self userInfo:nil];
     [self addTrackingArea:_menuTracking];
+    [self refreshSplitterTracking];
 }
 
 - (void)mouseMoved:(NSEvent *)event
@@ -3599,6 +3753,19 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
     if (point.y < AXYNE_MENU) {
         NSInteger menuIndex = [self menuBarIndexAtPoint:point];
         if (menuIndex >= 0) [self openMenuBarMenu:(NSUInteger)menuIndex];
+        return;
+    }
+    NSInteger splitter = [self splitterAtPoint:point];
+    if (splitter != 0) {
+        if ([event clickCount] == 2) {
+            /* Double-click restores the default size. */
+            if (splitter == 1) _sidebarSize = 0; else _panelSize = 0;
+            [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
+            return;
+        }
+        _splitterDrag = splitter;
+        _splitterStart = splitter == 1 ? point.x : point.y;
+        _splitterStartSize = splitter == 1 ? [self sidebarWidth] : [self panelHeight];
         return;
     }
     if (point.y >= AXYNE_CONTENT_TOP && point.y < AXYNE_CONTENT_TOP + AXYNE_TABS &&
@@ -4660,7 +4827,8 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     BOOL terminal = _panelMode == 2;
     CGFloat inputTop = NSHeight(bounds) - AXYNE_STATUS - 28;
     [_terminalScroll setFrame:NSMakeRect([self sidebarWidth] + 16, bottomTop + 32,
-        MAX(0, width - [self sidebarWidth] - 24), terminal ? 164 : 198)];
+        MAX(0, width - [self sidebarWidth] - 24),
+        MAX(0, [self panelHeight] - 32 - (terminal ? 34 : 0)))];
     [_terminalScroll setHidden:_panelMode == 1];
     [_terminalInput setFrame:NSMakeRect([self sidebarWidth] + 16, inputTop,
         MAX(0, width - [self sidebarWidth] - 88), 22)];
@@ -4719,6 +4887,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         [_terminalSend setHidden:YES]; [_problemSummary setHidden:YES];
     }
     [self layoutPalette];
+    [self refreshSplitterTracking];
 }
 
 /* Shortens `label` with a tail ellipsis so it is at most `width` points wide
@@ -4891,7 +5060,8 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         [tabBackground setFill];
         NSRectFill(NSMakeRect([self sidebarWidth], bottomTop, width - [self sidebarWidth], 32));
         [axyne_preference_color(axyne_macos_output_background(&_preferences.theme)) setFill];
-        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop + 32, width - [self sidebarWidth], 198));
+        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop + 32, width - [self sidebarWidth],
+            MAX(0, [self panelHeight] - 32)));
     }
     [toolbar setFill]; NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
@@ -5041,6 +5211,10 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     axyne_explorer_destroy(&_explorer);
     if (_menuTracking != nil) [self removeTrackingArea:_menuTracking];
     [_menuTracking release];
+    if (_sidebarSplitterTracking != nil) [self removeTrackingArea:_sidebarSplitterTracking];
+    [_sidebarSplitterTracking release];
+    if (_panelSplitterTracking != nil) [self removeTrackingArea:_panelSplitterTracking];
+    [_panelSplitterTracking release];
     [_recentMenu release];
     if (_editorView != nil) {
         for (size_t i = 0; i < _documents.count; ++i) {

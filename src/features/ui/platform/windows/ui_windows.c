@@ -13,6 +13,7 @@
 
 #include "axyne/ui.h"
 #include "axyne/ui_design.h"
+#include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "axyne/document.h"
 #include "axyne/empty_state.h"
@@ -171,6 +172,13 @@ typedef struct AxyneWindowState {
     int menu_active; /* 1-based index of the menu bar item whose popup is open */
     int explorer_hidden; /* View > Explorer */
     int panel_hidden;    /* View > Bottom Panel */
+    int sidebar_size;    /* dragged explorer width; 0 = default, session only */
+    int panel_size;      /* dragged bottom panel height; 0 = default */
+    int client_width;    /* client size cached by axyne_layout and paint */
+    int client_height;
+    int splitter_drag;   /* 0 none, 1 explorer border, 2 panel border */
+    int splitter_start;  /* pointer coordinate when the drag began */
+    int splitter_start_size;
     int fullscreen;
     LONG_PTR saved_style;
     WINDOWPLACEMENT saved_placement;
@@ -187,14 +195,41 @@ typedef struct AxyneWindowState {
 
 /* The explorer column and bottom panel collapse to zero when hidden, so every
  * layout, paint and hit-test computation shares these two sizes. */
+static int axyne_sidebar_size(const AxyneWindowState *state)
+{
+    int width = state->sidebar_size > 0 ? state->sidebar_size : AXYNE_UI_SIDEBAR;
+    /* Before the first layout the client size is unknown: keep the default. */
+    if (state->client_width <= 0) return width;
+    return axyne_layout_clamp_sidebar(width, state->client_width);
+}
+
 static int axyne_sidebar_width(const AxyneWindowState *state)
 {
-    return state->explorer_hidden ? 0 : AXYNE_UI_SIDEBAR;
+    return state->explorer_hidden ? 0 : axyne_sidebar_size(state);
 }
 
 static int axyne_panel_height(const AxyneWindowState *state)
 {
-    return state->panel_hidden ? 0 : AXYNE_UI_PANEL;
+    int height = state->panel_size > 0 ? state->panel_size : AXYNE_UI_PANEL;
+    if (state->panel_hidden) return 0;
+    if (state->client_height <= 0) return height;
+    return axyne_layout_clamp_panel(height, state->client_height,
+        AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
+}
+
+/* The two user-draggable borders: 1 = explorer/editor, 2 = bottom panel top,
+ * 0 = none. The panel wins at the corner. The explorer, panel and menu sizes
+ * are the clamped, cached values, so hit-testing matches what is painted. */
+static int axyne_splitter_at(const AxyneWindowState *state, int x, int y)
+{
+    int status_top = state->client_height - AXYNE_STATUS;
+    int panel = axyne_panel_height(state);
+    if (x < 0 || x >= state->client_width) return 0;
+    if (axyne_layout_on_panel_splitter(y, status_top - panel, panel)) return 2;
+    if (y >= AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS && y < status_top &&
+        axyne_layout_on_sidebar_splitter(x, axyne_sidebar_width(state)))
+        return 1;
+    return 0;
 }
 
 typedef struct AxyneScNotificationPrefix {
@@ -5206,6 +5241,8 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
 {
     RECT client;
     GetClientRect(window, &client);
+    state->client_width = client.right;
+    state->client_height = client.bottom;
     int width = client.right;
     int height = client.bottom;
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
@@ -5337,6 +5374,8 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     HDC dc = BeginPaint(window, &paint);
     RECT client;
     GetClientRect(window, &client);
+    state->client_width = client.right;
+    state->client_height = client.bottom;
     int width = client.right;
     int height = client.bottom;
     int status_top = height - AXYNE_STATUS;
@@ -5529,14 +5568,14 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         } else {
             (void)swprintf_s(status, 96, L"준비");
         }
-        RECT rect = {12, status_top, AXYNE_UI_SIDEBAR - 8, height};
+        RECT rect = {12, status_top, axyne_sidebar_size(state) - 8, height};
         axyne_text_rect(dc, state->ui_font,
                    state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED, rect, status, DT_LEFT);
     }
     if (state->lsp_status[0] != '\0') {
         wchar_t *lsp_status = axyne_wide(state->lsp_status);
         if (lsp_status != NULL) {
-            RECT rect = {AXYNE_UI_SIDEBAR + 8, status_top, width - 250, height};
+            RECT rect = {axyne_sidebar_size(state) + 8, status_top, width - 250, height};
             axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, lsp_status, DT_LEFT);
             free(lsp_status);
         }
@@ -5615,6 +5654,44 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_SIZE:
         axyne_layout(window, state);
         return 0;
+    case WM_SETCURSOR:
+        if (state != NULL && LOWORD(l_param) == HTCLIENT &&
+            ((HWND)w_param == window || state->splitter_drag != 0)) {
+            POINT cursor = {0, 0};
+            int splitter = state->splitter_drag;
+            if (splitter == 0 && GetCursorPos(&cursor) && ScreenToClient(window, &cursor))
+                splitter = axyne_splitter_at(state, cursor.x, cursor.y);
+            if (splitter != 0) {
+                SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(splitter == 1 ? 32644 : 32645)));
+                return TRUE;
+            }
+        }
+        break;
+    case WM_MOUSEMOVE:
+        if (state != NULL && state->splitter_drag != 0) {
+            int x = GET_X_LPARAM(l_param);
+            int y = GET_Y_LPARAM(l_param);
+            if (state->splitter_drag == 1)
+                state->sidebar_size = axyne_layout_drag_sidebar(state->splitter_start_size,
+                    state->splitter_start, x, state->client_width);
+            else
+                state->panel_size = axyne_layout_drag_panel(state->splitter_start_size,
+                    state->splitter_start, y, state->client_height,
+                    AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
+            axyne_layout(window, state);
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (state != NULL && state->splitter_drag != 0) {
+            state->splitter_drag = 0;
+            if (GetCapture() == window) ReleaseCapture();
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if (state != NULL) state->splitter_drag = 0;
+        break;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *limits = (MINMAXINFO *)l_param;
         RECT minimum = {0, 0, AXYNE_MIN_CLIENT_WIDTH, 480};
@@ -5658,6 +5735,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         int x = GET_X_LPARAM(l_param);
         int y = GET_Y_LPARAM(l_param);
         RECT client;
+        int splitter = axyne_splitter_at(state, x, y);
+        if (splitter != 0) {
+            /* Double-click restores the default size. */
+            if (splitter == 1) state->sidebar_size = 0; else state->panel_size = 0;
+            axyne_layout(window, state);
+            return 0;
+        }
         GetClientRect(window, &client);
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
@@ -5680,6 +5764,17 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 return 0;
             }
             axyne_palette_close(window, state, 1);
+        }
+        {
+            int splitter = axyne_splitter_at(state, x, y);
+            if (splitter != 0) {
+                state->splitter_drag = splitter;
+                state->splitter_start = splitter == 1 ? x : y;
+                state->splitter_start_size = splitter == 1 ? axyne_sidebar_width(state)
+                                                           : axyne_panel_height(state);
+                SetCapture(window);
+                return 0;
+            }
         }
         {
             int index = axyne_menu_bar_hit(state, x, y);
