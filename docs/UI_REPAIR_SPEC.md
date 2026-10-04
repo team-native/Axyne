@@ -185,3 +185,25 @@ Branch `feature/language-runners-core`. Shared rules (no UI): `include/axyne/lan
 Known gaps: a Windows `tsc.cmd` or `kotlinc.bat` is started as a plain executable in build/run steps (only the version probe goes through `cmd.exe`), a non-host architecture may build but not run, `kotlinc` can exceed the two-second probe on a cold JVM start, and none of the new runtime kinds was exercised against real installed toolchains.
 
 Units: runtime kinds; build target model with tests; language registry and resolver with tests; this record.
+
+## Build target selector
+
+Branch `feature/build-target-selector`, stacked on `feature/language-runners-core`. Shared model: `include/axyne/build_selector.h` (menu entries, apply, label), covered by `axyne-build-selector`; the macOS (`showBuildTargetMenu:`) and Windows (`axyne_build_target_popup`) shells only draw it.
+
+| Decision | Value | Source | Status |
+|---|---|---|---|
+| Toolbar slot (Figma 6:399) | Play glyph, label like `Debug · x64 (MSVC)`, chevron, rounded box (#25272D, radius 6, text #8B919B); it is the build target selector, not "Runner 설정" | USER | CONFIRMED |
+| Dropdown | Popup menu (NSMenu on macOS, TrackPopupMenu on Windows) with a Configuration group (Debug, Release) and an Architecture group limited by OS; check mark on the current entry; a pick updates the label at once | USER | CONFIRMED |
+| Hidden groups | A group is hidden when `axyne_language_build_target_support` says it does not apply to the active file's language; when both are hidden the menu shows a disabled "이 언어는 빌드 설정이 없습니다" row. Untitled or unknown files show both groups | USER (hide) / ASSUMED (empty row, both groups for unknown) | CONFIRMED / ASSUMED |
+| Label | `axyne_build_target_label(target, toolchain_name)` with the toolchain of the runtime discovered for the active file's language; until discovery ran it is `Debug · <arch>` without parentheses; it follows the active tab | USER | CONFIRMED |
+| Lazy discovery | `axyne_runtime_discover` runs once per session on the UI thread (no worker exists), at the first selector click, the first build or run, or one event after the first editor file with a path becomes active; never at startup. A cold probe can block the UI for up to two seconds per missing runtime | USER (lazy) / ASSUMED (synchronous, trigger points) | CONFIRMED / ASSUMED |
+| Build and Run | Resolve with the active file path, current target, discovered runtimes and the manual runner (`_actionRunner` / `action_runner`) as override; Run executes the build step first and starts the run step only when the build exits with 0; a missing runtime prints the resolver message to the output panel (stderr), no modal | USER | CONFIRMED |
+| Build without a build step | Interpreted languages print `[build] 이 언어에는 빌드 단계가 없습니다.`; with a manual runner Build still runs it as before | ASSUMED | ASSUMED |
+| Runner 설정 | Removed from the toolbar; reachable from Tools (`Runner 설정…`) and the command palette (id 25, "Runner 설정"). In the palette the query "run" now ranks it above "실행" because the title matches as a prefix | USER (reachable) / ASSUMED (title, palette ranking) | CONFIRMED / ASSUMED |
+| Persistence | The selection is kept in memory for the session only (the preferences schema has no build-target field, so persisting it was not cheap) | ASSUMED | ASSUMED |
+| Layout | Selector width follows its label (150 to 240 px on macOS) and shrinks, truncating the label, so Build and Run stay visible on a narrow toolbar | ASSUMED | ASSUMED |
+| Debugger | Debugger gating and the Start Debugger rule are unchanged | USER | CONFIRMED |
+
+Known gaps: the selector label is recomputed on every refresh and paint (Rust additionally stats `Cargo.toml`); the UI was only compile-checked for Windows (zig cc) and reviewed by eye for macOS; no run against real toolchains.
+
+Units: shared selector model with tests; palette command; macOS selector; macOS plan-based build and run; macOS Tools menu and palette entry; Windows plan-based build and run; Windows selector; Windows Tools menu and palette entry; this record.
