@@ -95,6 +95,7 @@ static int axyne_test_git_actions_run(const char *root)
     }
     AXYNE_TEST_EQ_INT(setenv("GIT_CEILING_DIRECTORIES", canonical, 1), 0);
     AXYNE_TEST_EQ_INT(setenv("HOME", canonical, 1), 0);
+    AXYNE_TEST_EQ_INT(setenv("XDG_CONFIG_HOME", canonical, 1), 0);
     AXYNE_TEST_EQ_INT(setenv("GIT_CONFIG_NOSYSTEM", "1", 1), 0);
     AXYNE_TEST_EQ_INT(setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1), 0);
     AXYNE_TEST_EQ_INT(setenv("GIT_AUTHOR_NAME", "Axyne Test", 1), 0);
@@ -303,6 +304,20 @@ static int axyne_test_git_actions_run(const char *root)
     AXYNE_TEST_EQ_INT(status, AXYNE_STATUS_IO_ERROR);
     AXYNE_TEST_CONTAINS(result.output, "\xEC\x9B\x90\xEA\xB2\xA9\xEC\x97\x90");
     axyne_git_result_free(&result);
+
+    /* A branch name with slashes is published as-is with -u origin. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git -C '%s' checkout -q -b feature/git/actions", repo), 0);
+    AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), repo, "d.txt"));
+    AXYNE_TEST_CHECK(axyne_test_write(path, "slash\n"));
+    status = axyne_git_commit(repo, "slash branch", 1, &result, &error);
+    AXYNE_TEST_EQ_INT(status, AXYNE_STATUS_OK);
+    axyne_git_result_free(&result);
+    status = axyne_git_push(repo, &result, &error);
+    AXYNE_TEST_EQ_INT(status, AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(result.output, "$ git push -u origin feature/git/actions\n");
+    axyne_git_result_free(&result);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git -C '%s' rev-parse --abbrev-ref --symbolic-full-name @{u}", repo), 0);
+    AXYNE_TEST_STREQ(out, "origin/feature/git/actions");
 
     /* Detached HEAD has no branch to push. */
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git -C '%s' checkout -q --detach", repo), 0);
