@@ -262,7 +262,14 @@ static const Candidate candidates[] = {
     { AXYNE_RUNTIME_C, { "clang", "gcc", "cc", NULL }, "--version", 0 },
     { AXYNE_RUNTIME_CPP, { "clang++", "g++", "c++", NULL }, "--version", 0 },
     { AXYNE_RUNTIME_JAVA, { "java", NULL }, "--version", 0 },
-    { AXYNE_RUNTIME_JAVAC, { "javac", NULL }, "--version", 0 }
+    { AXYNE_RUNTIME_JAVAC, { "javac", NULL }, "--version", 0 },
+    { AXYNE_RUNTIME_GO, { "go", NULL }, "version", 0 },
+    { AXYNE_RUNTIME_RUST_CARGO, { "cargo", NULL }, "--version", 0 },
+    { AXYNE_RUNTIME_RUSTC, { "rustc", NULL }, "--version", 0 },
+    { AXYNE_RUNTIME_SLINT, { "slint-viewer", NULL }, "--version", 0 },
+    { AXYNE_RUNTIME_KOTLINC, { "kotlinc", "kotlinc.bat", NULL }, "-version", 0 },
+    { AXYNE_RUNTIME_SWIFTC, { "swiftc", NULL }, "--version", 0 },
+    { AXYNE_RUNTIME_SWIFT, { "swift", NULL }, "--version", 0 }
 };
 
 AxyneStatus axyne_runtime_discover(AxyneRuntimeList *runtimes, AxyneError *error)
@@ -284,7 +291,8 @@ AxyneStatus axyne_runtime_discover(AxyneRuntimeList *runtimes, AxyneError *error
             int script = 0;
             if (path == NULL) continue;
 #ifdef _WIN32
-            if (strstr(candidates[i].names[j], ".cmd") != NULL) script = 1;
+            if (strstr(candidates[i].names[j], ".cmd") != NULL ||
+                strstr(candidates[i].names[j], ".bat") != NULL) script = 1;
 #endif
             version = probe_version(path, candidates[i].version_argument, script);
             if (version == NULL) { free(path); continue; }
