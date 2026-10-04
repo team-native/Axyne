@@ -154,7 +154,60 @@ int axyne_test_documents_search(const char *root)
                 "saw_nested=%d\n", explorer.count, saw_build, saw_nested);
     AXYNE_TEST_CHECK(saw_build && saw_nested);
     AXYNE_TEST_CHECK(!axyne_explorer_is_dimmed(NULL));
+
+    /* The root row is a header: always expanded, toggling it is a no-op. */
+    {
+        size_t before = explorer.count;
+        AXYNE_TEST_CHECK(axyne_explorer_is_root_node(&explorer.nodes[0]) &&
+                         !axyne_explorer_is_root_node(&explorer.nodes[1]) &&
+                         !axyne_explorer_is_root_node(NULL));
+        AXYNE_TEST_CHECK(axyne_explorer_is_expanded(&explorer, root));
+        AXYNE_TEST_STATUS(axyne_explorer_toggle(&explorer, 0, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(explorer.count == before &&
+                         axyne_explorer_is_expanded(&explorer, root) &&
+                         explorer.expanded_count == 0);
+    }
     axyne_explorer_destroy(&explorer);
+
+    /* Sticky ancestors over a hand-built tree:
+     * 0 root / 1 a / 2 b / 3 c / 4 d.txt / 5 e.txt (c) / 6 f (b) /
+     * 7 g.txt (f) / 8 h.txt (a) / 9 z.txt (root) */
+    {
+        static const size_t depths[10] = {0, 1, 2, 3, 4, 4, 3, 4, 2, 1};
+        AxyneExplorerNode nodes[10];
+        AxyneExplorer tree = {0};
+        size_t pinned[AXYNE_EXPLORER_MAX_PINNED], count, i;
+        for (i = 0; i < 10; ++i) {
+            nodes[i].name = "n"; nodes[i].path = "p";
+            nodes[i].kind = AXYNE_FILE_KIND_DIRECTORY;
+            nodes[i].depth = depths[i];
+        }
+        tree.nodes = nodes; tree.count = 10;
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 0, 3, pinned) == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 1, 3, pinned) == 1 &&
+                         pinned[0] == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 5, 3, pinned) == 3 &&
+                         pinned[0] == 1 && pinned[1] == 2 && pinned[2] == 3);
+        /* Deeper than the limit keeps the nearest ancestors. */
+        count = axyne_explorer_pinned_ancestors(&tree, 5, 2, pinned);
+        AXYNE_TEST_CHECK(count == 2 && pinned[0] == 2 && pinned[1] == 3);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 4, 3, pinned) == 3 &&
+                         pinned[0] == 1 && pinned[2] == 3);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 7, 3, pinned) == 3 &&
+                         pinned[0] == 1 && pinned[1] == 2 && pinned[2] == 6);
+        /* A sibling branch does not leak: 8 is a child of a (1), not of c/f. */
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 8, 3, pinned) == 2 &&
+                         pinned[0] == 0 && pinned[1] == 1);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 9, 3, pinned) == 1 &&
+                         pinned[0] == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_pinned_ancestors(&tree, 10, 3, pinned) == 0 &&
+                         axyne_explorer_pinned_ancestors(NULL, 1, 3, pinned) == 0 &&
+                         axyne_explorer_pinned_ancestors(&tree, 5, 0, pinned) == 0);
+        AXYNE_TEST_CHECK(axyne_explorer_scroll_target(2) == 0 &&
+                         axyne_explorer_scroll_target(3) == 0 &&
+                         axyne_explorer_scroll_target(10) == 7);
+    }
 
     AXYNE_TEST_STATUS(axyne_documents_initialize(&documents, &error),
                       AXYNE_STATUS_OK);
