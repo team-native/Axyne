@@ -31,6 +31,7 @@
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
 #include "../../preferences_window.h"
+#include "../../app_dialogs.h"
 #include <unistd.h>
 
 @interface NSObject (AxyneScintillaMessages)
@@ -1069,6 +1070,8 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
                 stream:(AxyneProcessStream)stream;
 - (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode;
 - (BOOL)configureRunner;
+- (BOOL)applyRunnerValues:(const AxyneRunnerDialogValues *)values
+                    error:(char *)message capacity:(size_t)capacity;
 - (void)buildDocument:(id)sender;
 - (void)runDocument:(id)sender;
 - (void)startDebugger:(id)sender;
@@ -1330,13 +1333,6 @@ static NSString *axyne_macos_runner_lines(char **values, size_t count)
         [result appendString:value != nil ? value : @""];
     }
     return result;
-}
-
-static NSTextField *axyne_macos_label(NSString *text, CGFloat y)
-{
-    NSTextField *field = [NSTextField labelWithString:text];
-    [field setFrame:NSMakeRect(0, y, 460, 20)];
-    return field;
 }
 
 static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
@@ -3354,7 +3350,8 @@ static NSString *axyne_macos_shortcut_text(NSString *key, NSEventModifierFlags f
     return text;
 }
 
-static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
+/* Appends @[title, shortcut] for every menu item that carries a shortcut. */
+static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableArray *out)
 {
     for (NSMenuItem *item in [menu itemArray]) {
         NSString *shortcut;
@@ -3363,54 +3360,71 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
         shortcut = axyne_macos_shortcut_text([item keyEquivalent],
             [item keyEquivalentModifierMask]);
         if (shortcut == nil) continue;
-        [out appendFormat:@"  %@  %@\n",
-            [[item title] stringByPaddingToLength:30 withString:@" " startingAtIndex:0],
-            shortcut];
+        [out addObject:@[[item title], shortcut]];
     }
+}
+
+/* Shows sections (@[title, rows]; row = @[label, shortcut]) in the keyboard
+ * shortcuts dialog. The C strings are borrowed from the arrays for the call. */
+static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *sections)
+{
+    size_t count = [sections count];
+    AxyneShortcutSection *converted = (AxyneShortcutSection *)calloc(
+        count != 0 ? count : 1, sizeof(*converted));
+    if (converted == NULL) return;
+    for (size_t i = 0; i < count; ++i) {
+        NSArray *section = [sections objectAtIndex:i];
+        NSArray *rows = [section objectAtIndex:1];
+        AxyneShortcutRow *convertedRows = (AxyneShortcutRow *)calloc(
+            [rows count] != 0 ? [rows count] : 1, sizeof(*convertedRows));
+        if (convertedRows == NULL) {
+            for (size_t j = 0; j < i; ++j) free((void *)converted[j].rows);
+            free(converted);
+            return;
+        }
+        for (NSUInteger row = 0; row < [rows count]; ++row) {
+            convertedRows[row].label = [[[rows objectAtIndex:row] objectAtIndex:0] UTF8String];
+            convertedRows[row].keys = [[[rows objectAtIndex:row] objectAtIndex:1] UTF8String];
+        }
+        converted[i].title = [[section objectAtIndex:0] UTF8String];
+        converted[i].rows = convertedRows;
+        converted[i].row_count = [rows count];
+    }
+    axyne_shortcuts_dialog_show(owner, converted, count);
+    for (size_t i = 0; i < count; ++i) free((void *)converted[i].rows);
+    free(converted);
 }
 
 /* Lists the shortcuts the menus actually carry, plus the effective
  * Preferences bindings (which may differ from the menu defaults). */
 - (void)showKeyboardShortcuts:(id)sender
 {
-    NSMutableString *text = [NSMutableString string];
-    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    NSScrollView *scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 460, 340)] autorelease];
-    NSTextView *view = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 460, 340)] autorelease];
+    NSMutableArray *sections = [NSMutableArray array];
+    NSMutableArray *bindings = [NSMutableArray array];
     (void)sender;
     for (NSMenuItem *top in [[NSApp mainMenu] itemArray]) {
-        NSMutableString *section = [NSMutableString string];
+        NSMutableArray *rows = [NSMutableArray array];
         if ([top submenu] == nil) continue;
-        axyne_macos_collect_shortcuts([top submenu], section);
-        if ([section length] != 0)
-            [text appendFormat:@"%@\n%@\n", [top title], section];
+        axyne_macos_collect_shortcuts([top submenu], rows);
+        if ([rows count] != 0) [sections addObject:@[[top title], rows]];
     }
-    [text appendString:@"Preferences bindings\n"];
     for (size_t i = 0; i < _preferences.binding_count; ++i) {
         const AxyneKeyBinding *binding = &_preferences.bindings[i];
         NSMutableString *keys = [NSMutableString string];
+        NSString *key;
+        NSString *title;
         if (!binding->enabled || binding->key[0] == '\0') continue;
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_CONTROL) != 0) [keys appendString:@"⌃"];
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0) [keys appendString:@"⌥"];
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0) [keys appendString:@"⇧"];
         if ((binding->modifiers & AXYNE_KEY_MODIFIER_COMMAND) != 0) [keys appendString:@"⌘"];
-        [keys appendString:[[NSString stringWithUTF8String:binding->key] uppercaseString]];
-        [text appendFormat:@"  %@  %@\n",
-            [[NSString stringWithUTF8String:axyne_preferences_action_name(binding->action)]
-                stringByPaddingToLength:30 withString:@" " startingAtIndex:0], keys];
+        key = [NSString stringWithUTF8String:binding->key];
+        title = [NSString stringWithUTF8String:axyne_dialogs_action_title((int)binding->action)];
+        [keys appendString:key != nil ? [key uppercaseString] : @""];
+        [bindings addObject:@[title != nil ? title : @"", keys]];
     }
-    [view setEditable:NO];
-    [view setFont:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular]];
-    [view setString:text];
-    [view setVerticallyResizable:YES]; [view setHorizontallyResizable:NO];
-    [view setAutoresizingMask:NSViewWidthSizable];
-    [[view textContainer] setWidthTracksTextView:YES];
-    [scroll setDocumentView:view];
-    [scroll setHasVerticalScroller:YES];
-    [alert setMessageText:@"Keyboard Shortcuts"];
-    [alert setAccessoryView:scroll];
-    [alert addButtonWithTitle:@"Close"];
-    [alert runModal];
+    if ([bindings count] != 0) [sections addObject:@[@"환경 설정 키 바인딩", bindings]];
+    axyne_macos_show_shortcut_sections([self window], sections);
 }
 
 - (void)reportIssue:(id)sender
@@ -4534,112 +4548,86 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 else [_terminalInput setStringValue:@""];
 }
 
+static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogValues *values,
+                                        char *error, size_t capacity)
+{
+    return [(AxyneWorkspaceView *)context applyRunnerValues:values error:error
+                                                   capacity:capacity] ? 1 : 0;
+}
+
+/* Runner 설정 (preferences window chrome, see app_dialogs.h): the panel stays
+ * open on a rejected configuration and shows the reason. */
 - (BOOL)configureRunner
 {
-    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 280)];
-    NSTextField *executable = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 246, 460, 24)];
-    NSTextField *workingDirectory = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 201, 460, 24)];
-    NSTextView *arguments = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 70)];
-    NSTextView *environment = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 70)];
-    NSScrollView *argumentsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 122, 460, 70)];
-    NSScrollView *environmentScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 32, 460, 70)];
-    NSString *initialExecutable = _actionRunner.executable != NULL
-        ? [NSString stringWithUTF8String:_actionRunner.executable] : @"";
-    NSString *initialWorkingDirectory = _actionRunner.working_directory != NULL
-        ? [NSString stringWithUTF8String:_actionRunner.working_directory] : @"";
-    [executable setStringValue:initialExecutable != nil ? initialExecutable : @""];
-    [workingDirectory setStringValue:initialWorkingDirectory != nil
-        ? initialWorkingDirectory : @""];
-    [arguments setString:axyne_macos_runner_lines(_actionRunner.arguments,
-                                                   _actionRunner.argument_count)];
-    [environment setString:axyne_macos_runner_lines(_actionRunner.environment,
-                                                     _actionRunner.environment_count)];
-    [arguments setFont:[NSFont userFixedPitchFontOfSize:11]];
-    [environment setFont:[NSFont userFixedPitchFontOfSize:11]];
-    [argumentsScroll setHasVerticalScroller:YES];
-    [argumentsScroll setDocumentView:arguments];
-    [environmentScroll setHasVerticalScroller:YES];
-    [environmentScroll setDocumentView:environment];
-    [accessory addSubview:axyne_macos_label(@"Executable", 224)];
-    [accessory addSubview:executable];
-    [accessory addSubview:axyne_macos_label(@"Arguments (one per line)", 194)];
-    [accessory addSubview:argumentsScroll];
-    [accessory addSubview:axyne_macos_label(@"Working directory (optional)", 179)];
-    [accessory addSubview:workingDirectory];
-    [accessory addSubview:axyne_macos_label(
-        @"Environment overrides (NAME=VALUE per line)", 104)];
-    [accessory addSubview:environmentScroll];
-    [alert setMessageText:@"Configure Build/Run Runner"];
-    [alert setInformativeText:@"Arguments are passed directly to the executable; no shell is used."];
-    [alert setAccessoryView:accessory];
-    [alert addButtonWithTitle:@"Save"];
-    [alert addButtonWithTitle:@"Cancel"];
-    NSInteger response = [alert runModal];
+    NSString *executable = _actionRunner.executable != NULL
+        ? [NSString stringWithUTF8String:_actionRunner.executable] : nil;
+    NSString *workingDirectory = _actionRunner.working_directory != NULL
+        ? [NSString stringWithUTF8String:_actionRunner.working_directory] : nil;
+    NSString *arguments = axyne_macos_runner_lines(_actionRunner.arguments,
+                                                    _actionRunner.argument_count);
+    NSString *environment = axyne_macos_runner_lines(_actionRunner.environment,
+                                                      _actionRunner.environment_count);
+    AxyneRunnerDialogValues initial = {
+        executable != nil ? [executable UTF8String] : "",
+        [arguments UTF8String],
+        workingDirectory != nil ? [workingDirectory UTF8String] : "",
+        [environment UTF8String]
+    };
+    AxyneRunnerDialogHooks hooks = { self, axyne_macos_runner_save_hook };
+    return axyne_runner_dialog_show([self window], &initial, &hooks) != 0;
+}
+
+/* Validates and stores the dialog's values in _actionRunner. On failure the
+ * Korean reason is written to `message`. */
+- (BOOL)applyRunnerValues:(const AxyneRunnerDialogValues *)values
+                    error:(char *)message capacity:(size_t)capacity
+{
+    char *executable = strdup(values->executable != NULL ? values->executable : "");
+    char *arguments = strdup(values->arguments != NULL ? values->arguments : "");
+    char *workingDirectory = strdup(
+        values->working_directory != NULL ? values->working_directory : "");
+    char *environment = strdup(values->environment != NULL ? values->environment : "");
+    char **argumentValues = NULL;
+    char **environmentValues = NULL;
+    size_t argumentCount = 0;
+    size_t environmentCount = 0;
+    AxyneRunnerSpec spec = {0};
+    AxyneError error = {0};
+    AxyneStatus status = AXYNE_STATUS_OK;
     BOOL accepted = NO;
-    if (response == NSAlertFirstButtonReturn) {
-        const char *executableText = [[executable stringValue] UTF8String];
-        const char *argumentsText = [[arguments string] UTF8String];
-        const char *workingDirectoryText = [[workingDirectory stringValue] UTF8String];
-        const char *environmentText = [[environment string] UTF8String];
-        char *executableUTF8 = strdup(executableText != NULL ? executableText : "");
-        char *argumentsUTF8 = strdup(argumentsText != NULL ? argumentsText : "");
-        char *workingDirectoryUTF8 = strdup(
-            workingDirectoryText != NULL ? workingDirectoryText : "");
-        char *environmentUTF8 = strdup(environmentText != NULL ? environmentText : "");
-        char **argumentValues = NULL;
-        char **environmentValues = NULL;
-        size_t argumentCount = 0;
-        size_t environmentCount = 0;
-        AxyneRunnerSpec spec = {0};
-        AxyneError error = {0};
-        AxyneStatus status = AXYNE_STATUS_OK;
-        if (executableUTF8 == NULL || executableUTF8[0] == '\0' ||
-            argumentsUTF8 == NULL || workingDirectoryUTF8 == NULL ||
-            environmentUTF8 == NULL ||
-            !axyne_macos_runner_split_lines(argumentsUTF8, &argumentValues,
-                                            &argumentCount) ||
-            !axyne_macos_runner_split_lines(environmentUTF8, &environmentValues,
-                                            &environmentCount)) {
-            status = AXYNE_STATUS_OUT_OF_MEMORY;
-            (void)snprintf(error.message, sizeof(error.message),
-                           "Unable to read runner configuration.");
-        } else {
-            spec.executable = executableUTF8;
-            spec.arguments = (const char *const *)argumentValues;
-            spec.argument_count = argumentCount;
-            spec.working_directory = workingDirectoryUTF8[0] != '\0'
-                ? workingDirectoryUTF8 : NULL;
-            spec.environment = (const char *const *)environmentValues;
-            spec.environment_count = environmentCount;
-            status = axyne_runner_configure(&_actionRunner, &spec, &error);
-        }
-        free(executableUTF8);
-        free(argumentsUTF8);
-        free(workingDirectoryUTF8);
-        free(environmentUTF8);
-        axyne_macos_runner_values_free(argumentValues, argumentCount);
-        axyne_macos_runner_values_free(environmentValues, environmentCount);
-        if (status == AXYNE_STATUS_OK) {
+    message[0] = '\0';
+    if (executable == NULL || arguments == NULL || workingDirectory == NULL ||
+        environment == NULL ||
+        !axyne_macos_runner_split_lines(arguments, &argumentValues, &argumentCount) ||
+        !axyne_macos_runner_split_lines(environment, &environmentValues,
+                                        &environmentCount)) {
+        (void)snprintf(message, capacity,
+                       "Runner 설정이 올바르지 않습니다. 설정을 읽지 못했습니다.");
+    } else if (executable[0] == '\0') {
+        (void)snprintf(message, capacity,
+                       "Runner 설정이 올바르지 않습니다. 실행 파일을 입력하세요.");
+    } else {
+        spec.executable = executable;
+        spec.arguments = (const char *const *)argumentValues;
+        spec.argument_count = argumentCount;
+        spec.working_directory = workingDirectory[0] != '\0' ? workingDirectory : NULL;
+        spec.environment = (const char *const *)environmentValues;
+        spec.environment_count = environmentCount;
+        status = axyne_runner_configure(&_actionRunner, &spec, &error);
+        if (status == AXYNE_STATUS_OK)
             accepted = YES;
-        } else {
-            NSAlert *errorAlert = [[[NSAlert alloc] init] autorelease];
-            [errorAlert setMessageText:@"Invalid runner configuration"];
-            NSString *detail = [NSString stringWithUTF8String:
-                error.message[0] != '\0' ? error.message :
-                "Unable to configure runner."];
-            [errorAlert setInformativeText:detail != nil ? detail : @""];
-            [errorAlert addButtonWithTitle:@"OK"];
-            [errorAlert runModal];
-        }
+        else
+            (void)snprintf(message, capacity, "Runner 설정이 올바르지 않습니다. %s",
+                           status == AXYNE_STATUS_INVALID_ARGUMENT
+                               ? "환경 변수는 NAME=VALUE 형식이어야 하며 이름이 겹칠 수 없습니다."
+                               : "설정을 적용하지 못했습니다.");
     }
-    [executable release];
-    [workingDirectory release];
-    [arguments release];
-    [environment release];
-    [argumentsScroll release];
-    [environmentScroll release];
-    [accessory release];
+    free(executable);
+    free(arguments);
+    free(workingDirectory);
+    free(environment);
+    axyne_macos_runner_values_free(argumentValues, argumentCount);
+    axyne_macos_runner_values_free(environmentValues, environmentCount);
     return accepted;
 }
 

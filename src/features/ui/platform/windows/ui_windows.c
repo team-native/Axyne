@@ -33,6 +33,7 @@
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
 #include "../../preferences_window.h"
+#include "../../app_dialogs.h"
 
 enum {
     AXYNE_TOP_MENU = AXYNE_UI_MENU,
@@ -1630,174 +1631,99 @@ static char *axyne_edit_utf8(HWND edit)
     return utf8;
 }
 
-static void axyne_runner_copy_wide(const char *value, wchar_t *buffer,
-                                   size_t capacity)
+/* "a\nb\nc" for the dialog; NULL on allocation failure. */
+static char *axyne_runner_join_lines(char **values, size_t count)
 {
-    wchar_t *wide;
-    if (buffer == NULL || capacity == 0) return;
-    buffer[0] = L'\0';
-    if (value == NULL) return;
-    wide = axyne_wide(value);
-    if (wide != NULL && wcslen(wide) < capacity)
-        (void)wcscpy_s(buffer, capacity, wide);
-    free(wide);
-}
-
-static void axyne_runner_copy_lines_wide(char **values, size_t count,
-                                         wchar_t *buffer, size_t capacity)
-{
-    size_t i, used = 0;
-    if (buffer == NULL || capacity == 0) return;
-    buffer[0] = L'\0';
+    size_t i, length = 1;
+    char *text, *cursor;
+    for (i = 0; i < count; ++i) length += strlen(values[i]) + 1;
+    text = (char *)malloc(length);
+    if (text == NULL) return NULL;
+    cursor = text;
     for (i = 0; i < count; ++i) {
-        wchar_t *wide = axyne_wide(values[i]);
-        size_t length;
-        if (wide == NULL) continue;
-        length = wcslen(wide);
-        if (used != 0 && used + 1 < capacity) buffer[used++] = L'\r';
-        if (used != 0 && used + 1 < capacity) buffer[used++] = L'\n';
-        if (used + length >= capacity) {
-            free(wide);
-            break;
-        }
-        memcpy(buffer + used, wide, (length + 1) * sizeof(*wide));
-        used += length;
-        free(wide);
+        size_t n = strlen(values[i]);
+        if (i != 0) *cursor++ = '\n';
+        memcpy(cursor, values[i], n);
+        cursor += n;
     }
+    *cursor = '\0';
+    return text;
 }
 
+/* Validates and stores the dialog's values in the runner configuration; on
+ * failure writes the Korean reason into `message`. */
+static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues *values,
+                                    char *message, size_t capacity)
+{
+    AxyneRunnerConfig *config = (AxyneRunnerConfig *)context;
+    char *executable = _strdup(values->executable != NULL ? values->executable : "");
+    char *arguments = _strdup(values->arguments != NULL ? values->arguments : "");
+    char *working_directory = _strdup(
+        values->working_directory != NULL ? values->working_directory : "");
+    char *environment = _strdup(values->environment != NULL ? values->environment : "");
+    char **argument_values = NULL;
+    char **environment_values = NULL;
+    size_t argument_count = 0;
+    size_t environment_count = 0;
+    AxyneRunnerSpec spec = {0};
+    AxyneError error = {0};
+    int accepted = 0;
+    message[0] = '\0';
+    if (executable == NULL || arguments == NULL || working_directory == NULL ||
+        environment == NULL ||
+        !axyne_runner_split_lines(arguments, &argument_values, &argument_count) ||
+        !axyne_runner_split_lines(environment, &environment_values, &environment_count)) {
+        (void)snprintf(message, capacity,
+                       "Runner 설정이 올바르지 않습니다. 설정을 읽지 못했습니다.");
+    } else if (executable[0] == '\0') {
+        (void)snprintf(message, capacity,
+                       "Runner 설정이 올바르지 않습니다. 실행 파일을 입력하세요.");
+    } else {
+        AxyneStatus status;
+        spec.executable = executable;
+        spec.arguments = (const char *const *)argument_values;
+        spec.argument_count = argument_count;
+        spec.working_directory = working_directory[0] != '\0' ? working_directory : NULL;
+        spec.environment = (const char *const *)environment_values;
+        spec.environment_count = environment_count;
+        status = axyne_runner_configure(config, &spec, &error);
+        if (status == AXYNE_STATUS_OK)
+            accepted = 1;
+        else
+            (void)snprintf(message, capacity, "Runner 설정이 올바르지 않습니다. %s",
+                           status == AXYNE_STATUS_INVALID_ARGUMENT
+                               ? "환경 변수는 NAME=VALUE 형식이어야 하며 이름이 겹칠 수 없습니다."
+                               : "설정을 적용하지 못했습니다.");
+    }
+    free(executable);
+    free(arguments);
+    free(working_directory);
+    free(environment);
+    axyne_runner_values_free(argument_values, argument_count);
+    axyne_runner_values_free(environment_values, environment_count);
+    return accepted;
+}
+
+/* Build > Runner 설정: the preferences-style dialog (app_dialogs.h). */
 static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
 {
-    enum {
-        AXYNE_RUNNER_EXECUTABLE_EDIT = 1001,
-        AXYNE_RUNNER_ARGUMENTS_EDIT = 1002,
-        AXYNE_RUNNER_WORKING_DIRECTORY_EDIT = 1003,
-        AXYNE_RUNNER_ENVIRONMENT_EDIT = 1004
-    };
-    wchar_t executable[32768] = L"";
-    wchar_t arguments[32768] = L"";
-    wchar_t working_directory[32768] = L"";
-    wchar_t environment[32768] = L"";
-    HWND dialog;
-    HWND executable_edit;
-    HWND arguments_edit;
-    HWND working_directory_edit;
-    HWND environment_edit;
-    int accepted = 0;
+    char *arguments, *environment;
+    AxyneRunnerDialogValues initial;
+    AxyneRunnerDialogHooks hooks;
+    int accepted;
     if (config == NULL) return 0;
-    axyne_runner_copy_wide(config->executable, executable,
-                           sizeof(executable) / sizeof(*executable));
-    axyne_runner_copy_lines_wide(config->arguments, config->argument_count,
-                                 arguments, sizeof(arguments) / sizeof(*arguments));
-    axyne_runner_copy_wide(config->working_directory, working_directory,
-                           sizeof(working_directory) / sizeof(*working_directory));
-    axyne_runner_copy_lines_wide(config->environment, config->environment_count,
-                                 environment, sizeof(environment) / sizeof(*environment));
-    dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
-        L"#32770", L"Configure Build/Run Runner",
-        WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
-        640, 380, owner, NULL, GetModuleHandleW(NULL), NULL);
-    if (dialog == NULL) return 0;
-    CreateWindowW(L"STATIC", L"Executable", WS_CHILD | WS_VISIBLE,
-        12, 12, 120, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
-    executable_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", executable,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        140, 10, 470, 24, dialog, (HMENU)AXYNE_RUNNER_EXECUTABLE_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"STATIC", L"Arguments (one per line)", WS_CHILD | WS_VISIBLE,
-        12, 45, 180, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
-    arguments_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", arguments,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-        WS_VSCROLL, 12, 66, 598, 78, dialog, (HMENU)AXYNE_RUNNER_ARGUMENTS_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"STATIC", L"Working directory (optional)", WS_CHILD | WS_VISIBLE,
-        12, 155, 200, 20, dialog, NULL, GetModuleHandleW(NULL), NULL);
-    working_directory_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
-        working_directory, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        12, 176, 598, 24, dialog, (HMENU)AXYNE_RUNNER_WORKING_DIRECTORY_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"STATIC", L"Environment overrides (NAME=VALUE per line)",
-        WS_CHILD | WS_VISIBLE, 12, 211, 320, 20, dialog, NULL,
-        GetModuleHandleW(NULL), NULL);
-    environment_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", environment,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-        WS_VSCROLL, 12, 232, 598, 78, dialog,
-        (HMENU)AXYNE_RUNNER_ENVIRONMENT_EDIT,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-        BS_DEFPUSHBUTTON, 440, 325, 78, 28, dialog, (HMENU)IDOK,
-        GetModuleHandleW(NULL), NULL);
-    CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        528, 325, 82, 28, dialog, (HMENU)IDCANCEL,
-        GetModuleHandleW(NULL), NULL);
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-    SetFocus(executable_edit);
-    while (IsWindow(dialog)) {
-        MSG message;
-        int result = GetMessageW(&message, NULL, 0, 0);
-        if (result <= 0) break;
-        if (message.message == WM_COMMAND &&
-            (LOWORD(message.wParam) == IDOK ||
-             LOWORD(message.wParam) == IDCANCEL)) {
-            if (LOWORD(message.wParam) == IDCANCEL) {
-                DestroyWindow(dialog);
-                break;
-            }
-            {
-                char *executable_utf8 = axyne_edit_utf8(executable_edit);
-                char *arguments_utf8 = axyne_edit_utf8(arguments_edit);
-                char *working_directory_utf8 = axyne_edit_utf8(working_directory_edit);
-                char *environment_utf8 = axyne_edit_utf8(environment_edit);
-                char **argument_values = NULL;
-                char **environment_values = NULL;
-                size_t argument_count = 0;
-                size_t environment_count = 0;
-                AxyneRunnerSpec spec = {0};
-                AxyneError error;
-                AxyneStatus status = AXYNE_STATUS_OK;
-                if (executable_utf8 == NULL || executable_utf8[0] == '\0' ||
-                    arguments_utf8 == NULL || working_directory_utf8 == NULL ||
-                    environment_utf8 == NULL ||
-                    !axyne_runner_split_lines(arguments_utf8, &argument_values,
-                                              &argument_count) ||
-                    !axyne_runner_split_lines(environment_utf8, &environment_values,
-                                              &environment_count)) {
-                    status = AXYNE_STATUS_OUT_OF_MEMORY;
-                    (void)snprintf(error.message, sizeof(error.message),
-                                   "Unable to read runner configuration.");
-                } else {
-                    spec.executable = executable_utf8;
-                    spec.arguments = (const char *const *)argument_values;
-                    spec.argument_count = argument_count;
-                    spec.working_directory = working_directory_utf8[0] != '\0'
-                        ? working_directory_utf8 : NULL;
-                    spec.environment = (const char *const *)environment_values;
-                    spec.environment_count = environment_count;
-                    status = axyne_runner_configure(config, &spec, &error);
-                }
-                free(executable_utf8);
-                free(arguments_utf8);
-                free(working_directory_utf8);
-                free(environment_utf8);
-                axyne_runner_values_free(argument_values, argument_count);
-                axyne_runner_values_free(environment_values, environment_count);
-                if (status == AXYNE_STATUS_OK) {
-                    accepted = 1;
-                    DestroyWindow(dialog);
-                    break;
-                }
-                MessageBoxA(dialog, error.message[0] != '\0' ? error.message :
-                            "Invalid runner configuration.",
-                            "Axyne - Runner", MB_OK | MB_ICONERROR);
-            }
-        } else if (!IsDialogMessageW(dialog, &message)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
+    arguments = axyne_runner_join_lines(config->arguments, config->argument_count);
+    environment = axyne_runner_join_lines(config->environment, config->environment_count);
+    initial.executable = config->executable != NULL ? config->executable : "";
+    initial.arguments = arguments != NULL ? arguments : "";
+    initial.working_directory = config->working_directory != NULL
+        ? config->working_directory : "";
+    initial.environment = environment != NULL ? environment : "";
+    hooks.context = config;
+    hooks.save = axyne_runner_dialog_save;
+    accepted = axyne_runner_dialog_show(owner, &initial, &hooks);
+    free(arguments);
+    free(environment);
     return accepted;
 }
 
@@ -2733,58 +2659,62 @@ static void axyne_toggle_fullscreen(HWND window, AxyneWindowState *state)
     }
 }
 
-static void axyne_append_shortcut_line(wchar_t *text, size_t capacity,
-                                       const wchar_t *keys, const wchar_t *label)
+/* Appends a row whose chips are `keys` (UTF-8, "Ctrl+Shift+S"). */
+static void axyne_shortcut_row(AxyneShortcutRow *rows, size_t *count,
+                               const char *label, const char *keys)
 {
-    wchar_t line[160];
-    (void)swprintf_s(line, 160, L"  %-16ls %ls\r\n", keys, label);
-    wcscat_s(text, capacity, line);
+    rows[*count].label = label;
+    rows[*count].keys = keys;
+    ++*count;
 }
 
 /* Lists the shortcuts implemented here plus the effective Preferences
  * bindings (which can differ from the defaults shown in the menus). */
 static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
 {
-    static const wchar_t *const fixed[][2] = {
-        {L"Ctrl+G", L"줄로 이동"}, {L"Ctrl+/", L"줄 주석 토글"},
-        {L"Ctrl+D", L"줄 복제"}, {L"Alt+Up / Alt+Down", L"줄 위/아래로 이동"},
-        {L"Tab / Shift+Tab", L"들여쓰기 / 내어쓰기"},
-        {L"Ctrl+Shift+O", L"폴더 열기"},
-        {L"Ctrl+Shift+E", L"탐색기"}, {L"Ctrl+J", L"하단 패널"},
-        {L"Ctrl+Shift+U", L"출력"}, {L"Ctrl+Shift+M", L"문제"},
-        {L"Ctrl+`", L"터미널"}, {L"Ctrl+=  Ctrl+-  Ctrl+0", L"확대 / 축소 / 기본 크기"},
-        {L"Alt+Z", L"자동 줄 바꿈"}, {L"F11", L"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)"},
-        {L"Shift+F11", L"프로시저 나가기"}, {L"Shift+F5", L"디버깅 중지"},
-        {L"Ctrl+Shift+F9", L"모든 중단점 삭제"}
+    static const AxyneShortcutRow fixed[] = {
+        {"줄로 이동", "Ctrl+G"}, {"줄 주석 토글", "Ctrl+/"},
+        {"줄 복제", "Ctrl+D"}, {"줄 위로 이동", "Alt+Up"},
+        {"줄 아래로 이동", "Alt+Down"}, {"들여쓰기", "Tab"},
+        {"내어쓰기", "Shift+Tab"}, {"폴더 열기", "Ctrl+Shift+O"},
+        {"탐색기", "Ctrl+Shift+E"}, {"하단 패널", "Ctrl+J"},
+        {"출력", "Ctrl+Shift+U"}, {"문제", "Ctrl+Shift+M"},
+        {"터미널", "Ctrl+`"}, {"확대", "Ctrl+="}, {"축소", "Ctrl+-"},
+        {"기본 크기", "Ctrl+0"}, {"자동 줄 바꿈", "Alt+Z"},
+        {"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)", "F11"},
+        {"프로시저 나가기", "Shift+F11"}, {"디버깅 중지", "Shift+F5"},
+        {"모든 중단점 삭제", "Ctrl+Shift+F9"}
     };
-    wchar_t text[4096];
+    AxyneShortcutRow bindings[AXYNE_ACTION_COUNT];
+    char keys[AXYNE_ACTION_COUNT][64];
+    size_t binding_rows = 0;
+    AxyneShortcutSection sections[2];
     size_t i;
-    text[0] = L'\0';
-    for (i = 0; i < sizeof(fixed) / sizeof(fixed[0]); ++i)
-        axyne_append_shortcut_line(text, 4096, fixed[i][0], fixed[i][1]);
-    wcscat_s(text, 4096, L"\r\nPreferences\r\n");
-    for (i = 0; i < state->preferences.binding_count; ++i) {
+    for (i = 0; i < state->preferences.binding_count && binding_rows < AXYNE_ACTION_COUNT; ++i) {
         const AxyneKeyBinding *binding = &state->preferences.bindings[i];
-        wchar_t keys[64] = L"";
-        wchar_t key[AXYNE_PREFERENCE_KEY_MAX];
-        wchar_t *action;
-        size_t k;
+        char *text = keys[binding_rows];
+        size_t k, used = 0;
         if (!binding->enabled || binding->key[0] == '\0') continue;
+        text[0] = '\0';
         if ((binding->modifiers & (AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_COMMAND)) != 0)
-            wcscat_s(keys, 64, L"Ctrl+");
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0) wcscat_s(keys, 64, L"Alt+");
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0) wcscat_s(keys, 64, L"Shift+");
-        for (k = 0; binding->key[k] != '\0' && k + 1 < AXYNE_PREFERENCE_KEY_MAX; ++k)
-            key[k] = (wchar_t)toupper((unsigned char)binding->key[k]);
-        key[k] = L'\0';
-        wcscat_s(keys, 64, key);
-        action = axyne_wide(axyne_preferences_action_name(binding->action));
-        if (action != NULL) {
-            axyne_append_shortcut_line(text, 4096, keys, action);
-            free(action);
-        }
+            used += (size_t)snprintf(text + used, 64 - used, "Ctrl+");
+        if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0)
+            used += (size_t)snprintf(text + used, 64 - used, "Alt+");
+        if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0)
+            used += (size_t)snprintf(text + used, 64 - used, "Shift+");
+        for (k = 0; binding->key[k] != '\0' && used + 1 < 64; ++k)
+            text[used++] = (char)toupper((unsigned char)binding->key[k]);
+        text[used] = '\0';
+        axyne_shortcut_row(bindings, &binding_rows,
+                           axyne_dialogs_action_title((int)binding->action), text);
     }
-    MessageBoxW(window, text, L"Keyboard Shortcuts", MB_OK | MB_ICONINFORMATION);
+    sections[0].title = "단축키";
+    sections[0].rows = fixed;
+    sections[0].row_count = sizeof(fixed) / sizeof(fixed[0]);
+    sections[1].title = "환경 설정 키 바인딩";
+    sections[1].rows = bindings;
+    sections[1].row_count = binding_rows;
+    axyne_shortcuts_dialog_show(window, sections, 2);
 }
 
 static int axyne_action_command(HWND window, AxyneWindowState *state, UINT command)
