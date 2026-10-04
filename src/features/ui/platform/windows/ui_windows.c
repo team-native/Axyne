@@ -3705,7 +3705,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_BUILD, L"빌드", L"Ctrl+B", flags);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_RUN, L"실행", L"F5", flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_CONFIGURE_RUNNER, L"실행 구성...", NULL,
+        axyne_menu_add(menu, &pool, AXYNE_CMD_CONFIGURE_RUNNER, L"Runner 설정...", NULL,
                        MF_ENABLED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_TERMINAL_STOP, L"빌드 취소", NULL,
@@ -4713,6 +4713,7 @@ static UINT axyne_palette_command_message(AxynePaletteCommandId id)
     case AXYNE_PALETTE_COMMAND_PANEL_OUTPUT: return AXYNE_CMD_PANEL_OUTPUT;
     case AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS: return AXYNE_CMD_PANEL_PROBLEMS;
     case AXYNE_PALETTE_COMMAND_PANEL_TERMINAL: return AXYNE_CMD_PANEL_TERMINAL;
+    case AXYNE_PALETTE_COMMAND_CONFIGURE_RUNNER: return AXYNE_CMD_CONFIGURE_RUNNER;
     default: return 0;
     }
 }
