@@ -754,6 +754,59 @@ AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
     return AXYNE_STATUS_OK;
 }
 
+AxyneStatus axyne_fs_read_head(const char *utf8_path, size_t max_bytes,
+                               char **contents, size_t *length, int *truncated,
+                               AxyneError *error)
+{
+    FILE *file;
+    char *buffer;
+    size_t read_size;
+    if (contents == NULL || length == NULL || !axyne_valid_path(utf8_path) ||
+        max_bytes > SIZE_MAX - 2u)
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "path, contents, and length are required");
+    *contents = NULL;
+    *length = 0;
+    if (truncated != NULL) *truncated = 0;
+#ifdef _WIN32
+    {
+        wchar_t *wide = axyne_wide(utf8_path);
+        if (wide == NULL)
+            return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "path is not valid UTF-8 or memory is unavailable");
+        if (_wfopen_s(&file, wide, L"rb") != 0) file = NULL;
+        free(wide);
+    }
+#else
+    file = fopen(utf8_path, "rb");
+#endif
+    if (file == NULL) {
+        return axyne_system_error(error, axyne_current_open_error(), "open");
+    }
+    /* One extra byte tells whether the file continues past max_bytes. */
+    buffer = (char *)malloc(max_bytes + 2u);
+    if (buffer == NULL) {
+        fclose(file);
+        return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                           "unable to allocate file buffer");
+    }
+    read_size = fread(buffer, 1, max_bytes + 1u, file);
+    if (ferror(file)) {
+        free(buffer);
+        fclose(file);
+        return axyne_error(error, AXYNE_STATUS_IO_ERROR, "unable to read file");
+    }
+    fclose(file);
+    if (read_size > max_bytes) {
+        read_size = max_bytes;
+        if (truncated != NULL) *truncated = 1;
+    }
+    buffer[read_size] = '\0';
+    *contents = buffer;
+    *length = read_size;
+    return axyne_error(error, AXYNE_STATUS_OK, "");
+}
+
 AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
                                 size_t length, AxyneError *error)
 {
