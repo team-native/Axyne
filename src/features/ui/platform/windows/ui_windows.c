@@ -783,8 +783,12 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     /* Default scroll width is 2000, which keeps the horizontal bar always
      * scrollable. Start at 1 and let tracking grow it to the widest line; the
      * call also shrinks it on every document load. */
-    SendMessageA(state->editor, SCI_SETSCROLLWIDTH, 1, 0);
-    SendMessageA(state->editor, SCI_SETSCROLLWIDTHTRACKING, 1, 0);
+    {
+        LRESULT xoffset = SendMessageA(state->editor, SCI_GETXOFFSET, 0, 0);
+        SendMessageA(state->editor, SCI_SETSCROLLWIDTH, 1, 0);
+        SendMessageA(state->editor, SCI_SETSCROLLWIDTHTRACKING, 1, 0);
+        if (xoffset > 0) SendMessageA(state->editor, SCI_SETXOFFSET, (WPARAM)xoffset, 0);
+    }
     axyne_theme_editor_scrollbars(state->editor, state->preferences.theme.editor_background);
     axyne_apply_editor_lexer(state, axyne_active(state));
     SendMessageA(state->editor, SCI_SETCARETLINEBACK,

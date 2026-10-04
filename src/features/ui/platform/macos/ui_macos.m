@@ -1789,8 +1789,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     /* Scintilla's default scroll width is 2000, which keeps the horizontal bar
      * permanently scrollable. Start at 1 and let tracking grow it only to the
      * widest line seen; this call also shrinks it again on every document load. */
+    NSInteger xoffset = [self sendEditorMessage:SCI_GETXOFFSET wParam:0 lParam:0];
     (void)[self sendEditorMessage:SCI_SETSCROLLWIDTH wParam:1 lParam:0];
     (void)[self sendEditorMessage:SCI_SETSCROLLWIDTHTRACKING wParam:1 lParam:0];
+    /* The reset clamps the horizontal position; restoring a non-zero offset
+     * makes Scintilla widen the scroll range again for the long line. */
+    if (xoffset > 0) (void)[self sendEditorMessage:SCI_SETXOFFSET wParam:(uintptr_t)xoffset lParam:0];
     NSScrollView *scroll = nil;
     if ([_editorView respondsToSelector:@selector(scrollView)])
         scroll = [(id)_editorView scrollView];
@@ -3117,6 +3121,11 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
         (void)[self sendEditorMessage:SCI_SETBACKSPACEUNINDENTS wParam:1 lParam:0];
         (void)[self sendEditorMessage:SCI_SETTABINDENTS wParam:1 lParam:0];
         [self addSubview:_editorView];
+        /* NSScrollView resets its scroller style to the system's whenever the
+         * preferred style changes (mouse/trackpad, system setting). */
+        [[NSNotificationCenter defaultCenter] addObserver:self
+            selector:@selector(applyEditorScrollers)
+            name:NSPreferredScrollerStyleDidChangeNotification object:nil];
         [self setNeedsLayout:YES];
         [_editorLoadError release];
         _editorLoadError = nil;
@@ -4478,6 +4487,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     /* Scintilla's active buffer also holds a reference to its Lexilla lexer.
      * Destroy it before unloading Lexilla, including when AppKit retains the
      * editor subview until the superclass tears down its children. */
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [(id)_editorView setDelegate:nil];
     (void)[self sendEditorMessage:SCI_SETILEXER wParam:0 lParam:0];
     axyne_documents_destroy(&_documents);
