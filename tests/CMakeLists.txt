@@ -12,6 +12,7 @@ add_executable(axyne_tests
     test_outline.c
     test_binary_files.c
     test_empty_state.c
+    test_build_target.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -94,7 +95,13 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> outline
             "${AXYNE_TEST_FIXTURE_DIR}/outline"
 )
+add_test(
+    NAME axyne-build-target
+    COMMAND $<TARGET_FILE:axyne_tests> build-target
+            "${AXYNE_TEST_FIXTURE_DIR}/build-target"
+)
 set_tests_properties(
+    axyne-build-target
     axyne-git-repair
     axyne-preview-tabs
     axyne-documents-search
