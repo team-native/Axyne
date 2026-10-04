@@ -344,6 +344,18 @@ static const char *const t_java_run[] = { "-cp", "{dir}", "{name}", NULL };
 static const char *const t_cc[] = { "{flags}", "{file}", "-o", "{out}", NULL };
 static const char *const t_cl[] = { "{flags}", "{file}", "/Fe:{out}", NULL };
 
+/* Joins `dir` and `leaf`; no separator is added after a root such as "/",
+ * "C:\\" or the drive-relative "C:". */
+static void join_path(char *buffer, size_t size, const char *dir, char separator,
+                      const char *leaf, const char *suffix)
+{
+    size_t length = strlen(dir);
+    int bare = length != 0 && (dir[length - 1] == '/' || dir[length - 1] == '\\' ||
+                               dir[length - 1] == ':');
+    (void)snprintf(buffer, size, "%s%s%s%s", dir, bare ? "" : (separator == '\\' ? "\\" : "/"),
+                   leaf, suffix);
+}
+
 static int has_extension(const char *base, const char *wanted)
 {
     const char *extension = path_extension(base);
@@ -446,6 +458,10 @@ AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
         else {
             size_t dir_length = base_offset - 1;
             if (dir_length == 0) dir_length = 1; /* "/file" -> "/" */
+            else if (dir_length == 2 && file_path[1] == ':')
+                dir_length = 3; /* "C:\\file" -> "C:\\", not the drive's cwd */
+            else if (base_offset == 2 && file_path[1] == ':')
+                dir_length = 2; /* "C:file" -> "C:" */
             dir = (char *)malloc(dir_length + 1);
             if (dir != NULL) { memcpy(dir, file_path, dir_length); dir[dir_length] = '\0'; }
         }
@@ -533,9 +549,10 @@ AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
     {
         int use_cargo = 0;
         if (language == AXYNE_LANGUAGE_RUST) {
-            char *manifest = (char *)malloc(strlen(dir) + 12);
+            size_t manifest_size = strlen(dir) + 12;
+            char *manifest = (char *)malloc(manifest_size);
             if (manifest == NULL) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; }
-            (void)sprintf(manifest, "%s%cCargo.toml", dir, separator);
+            join_path(manifest, manifest_size, dir, separator, "Cargo.toml", "");
             use_cargo = exe[0] != NULL && file_exists(manifest);
             free(manifest);
             if (!use_cargo && exe[1] == NULL) {
@@ -576,7 +593,7 @@ AxyneStatus axyne_language_resolve_runner(AxyneLanguageId language,
                 size_t length = strlen(dir) + 1 + strlen(name) + strlen(out_suffix) + 1;
                 out = (char *)malloc(length);
                 if (out == NULL) { status = AXYNE_STATUS_OUT_OF_MEMORY; goto done; }
-                (void)snprintf(out, length, "%s%c%s%s", dir, separator, name, out_suffix);
+                join_path(out, length, dir, separator, name, out_suffix);
             }
         }
         context.out = out;
