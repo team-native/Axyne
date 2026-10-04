@@ -622,6 +622,14 @@ static const char *axyne_git_hint(AxyneGitHintKind kind,
     return NULL;
 }
 
+static void axyne_git_init_result(AxyneGitResult *result)
+{
+    result->output = NULL;
+    result->length = 0;
+    result->exit_code = -1;
+    result->output_truncated = 0;
+}
+
 /* Runs one step with batch environment and stderr labelling. Returns
  * AXYNE_STATUS_OK whenever git ran to completion (check step->exit_code) and
  * another status when git could not be run at all. */
@@ -629,12 +637,17 @@ static AxyneStatus axyne_git_step(const char *workspace,
                                   const char *const *arguments, size_t count,
                                   AxyneGitResult *step, AxyneError *error)
 {
-    AxyneStatus status = axyne_git_run_ex(workspace, arguments, count,
+    AxyneStatus status;
+    axyne_git_init_result(step);
+    status = axyne_git_run_ex(workspace, arguments, count,
         axyne_git_batch_environment, AXYNE_GIT_BATCH_ENVIRONMENT_COUNT, 1,
         step, error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_OUT_OF_MEMORY &&
         step->exit_code >= 0)
         return AXYNE_STATUS_OK;
+    /* Callers return on a non-OK status without freeing the step; a pipe
+     * failure (exit code -1) can still have captured output. */
+    if (status != AXYNE_STATUS_OK) axyne_git_result_free(step);
     return status;
 }
 
@@ -705,27 +718,33 @@ static AxyneStatus axyne_git_sequence_finish(AxyneGitSequence *sequence,
     return axyne_git_error(error, AXYNE_STATUS_OK, "");
 }
 
-static void axyne_git_init_result(AxyneGitResult *result)
+/* First stdout line of a step's output without its line ending. Lines the
+ * report labelled "[stderr] " (Git warnings) are skipped so they cannot be
+ * mistaken for the value. Returns 0 when there is none or it does not fit. */
+static int axyne_git_first_line(const AxyneGitResult *step, char *line,
+                                size_t capacity)
 {
-    result->output = NULL;
-    result->length = 0;
-    result->exit_code = -1;
-    result->output_truncated = 0;
-}
-
-/* First line of a step's output without its line ending. */
-static void axyne_git_first_line(const AxyneGitResult *step, char *line,
-                                 size_t capacity)
-{
-    size_t n = 0;
+    static const char label[] = "[stderr] ";
+    size_t start = 0;
     line[0] = '\0';
-    if (step->output == NULL) return;
-    while (n + 1 < capacity && n < step->length &&
-           step->output[n] != '\n' && step->output[n] != '\r') {
-        line[n] = step->output[n];
-        ++n;
+    if (step->output == NULL) return 0;
+    while (start < step->length) {
+        size_t end = start, n;
+        while (end < step->length && step->output[end] != '\n' &&
+               step->output[end] != '\r')
+            ++end;
+        n = end - start;
+        if (n != 0 && !(n >= sizeof(label) - 1 &&
+                        memcmp(step->output + start, label,
+                               sizeof(label) - 1) == 0)) {
+            if (n >= capacity) return 0;
+            memcpy(line, step->output + start, n);
+            line[n] = '\0';
+            return 1;
+        }
+        start = end + 1;
     }
-    line[n] = '\0';
+    return 0;
 }
 
 static int axyne_git_blank(const char *text)
@@ -922,7 +941,7 @@ AxyneStatus axyne_git_push(const char *utf8_workspace, AxyneGitResult *result,
     AxyneGitSequence sequence;
     AxyneGitResult step;
     AxyneStatus status;
-    char branch[512];
+    char branch[1024];
     const char *upstream_push[5];
 
     if (result == NULL)
@@ -943,8 +962,10 @@ AxyneStatus axyne_git_push(const char *utf8_workspace, AxyneGitResult *result,
     } else if (step.exit_code != 0) {
         axyne_git_sequence_record(&sequence, branch_arguments, 4, &step, NULL,
                                   AXYNE_GIT_HINT_PUSH);
+    } else if (!axyne_git_first_line(&step, branch, sizeof(branch))) {
+        axyne_git_sequence_failure(&sequence,
+            "현재 브랜치 이름을 확인할 수 없습니다.");
     }
-    axyne_git_first_line(&step, branch, sizeof(branch));
     axyne_git_result_free(&step);
     if (sequence.exit_code != 0 || sequence.allocation_failed ||
         sequence.report != NULL)
