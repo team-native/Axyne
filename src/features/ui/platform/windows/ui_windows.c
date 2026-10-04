@@ -2791,16 +2791,57 @@ static size_t axyne_explorer_visible_rows(AxyneWindowState *state, int bottom)
     return rows;
 }
 
-static int axyne_workspace_row_at(HWND window, AxyneWindowState *state, int y)
+/* Sticky folder rows: fills `out` (room for AXYNE_EXPLORER_MAX_PINNED) with
+ * the node indices, outermost first, of the ancestors of the first visible
+ * row. They are painted over the first list rows. One list row stays free. */
+static size_t axyne_explorer_pinned_rows(AxyneWindowState *state, int bottom,
+                                         size_t *out)
+{
+    size_t rows = axyne_explorer_visible_rows(state, bottom);
+    size_t limit = rows > 1 ? rows - 1 : 0;
+    if (state->explorer.root == NULL || limit == 0) return 0;
+    if (limit > AXYNE_EXPLORER_MAX_PINNED) limit = AXYNE_EXPLORER_MAX_PINNED;
+    return axyne_explorer_pinned_ancestors(&state->explorer,
+        state->explorer_scroll, limit, out);
+}
+
+/* Slot (row position from the list top) under y, or -1 outside the list. */
+static int axyne_workspace_slot_at(HWND window, AxyneWindowState *state, int y)
 {
     const int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS +
         AXYNE_UI_EXPLORER_HEADER;
     RECT client;
-    size_t row, rows;
+    size_t rows;
     GetClientRect(window, &client);
     rows = axyne_explorer_visible_rows(state, client.bottom - AXYNE_STATUS);
     if (y < top || y >= top + (int)rows * AXYNE_UI_ROW) return -1;
-    row = state->explorer_scroll + (size_t)((y - top) / AXYNE_UI_ROW);
+    return (y - top) / AXYNE_UI_ROW;
+}
+
+static int axyne_workspace_pinned_at(HWND window, AxyneWindowState *state, int y)
+{
+    size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
+    RECT client;
+    int slot = axyne_workspace_slot_at(window, state, y);
+    GetClientRect(window, &client);
+    return slot >= 0 && (size_t)slot <
+        axyne_explorer_pinned_rows(state, client.bottom - AXYNE_STATUS, pinned);
+}
+
+static int axyne_workspace_row_at(HWND window, AxyneWindowState *state, int y)
+{
+    size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
+    size_t row, pinned_count;
+    RECT client;
+    int slot = axyne_workspace_slot_at(window, state, y);
+    if (slot < 0) return -1;
+    GetClientRect(window, &client);
+    pinned_count = axyne_explorer_pinned_rows(state, client.bottom - AXYNE_STATUS,
+                                              pinned);
+    /* A pinned row stands for its real node, so selection, rename, delete and
+     * the context menu act on that folder. */
+    if ((size_t)slot < pinned_count) return (int)pinned[slot];
+    row = state->explorer_scroll + (size_t)slot;
     if (row >= state->explorer.count || row > (size_t)INT_MAX) return -1;
     return (int)row;
 }
@@ -2815,7 +2856,9 @@ static void axyne_workspace_open_selected(HWND window,
     if (index >= state->explorer.count) return;
     node = &state->explorer.nodes[index];
     state->explorer_selection = index; state->explorer_has_selection = 1;
-    if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+    if (axyne_explorer_is_root_node(node)) {
+        /* The root is a header: always expanded, a click only selects it. */
+    } else if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
         if (!double_click &&
             axyne_explorer_toggle(&state->explorer, index, NULL) != AXYNE_STATUS_OK)
             MessageBoxA(window, "Unable to read the workspace folder.",
@@ -2830,6 +2873,29 @@ static void axyne_workspace_open_selected(HWND window,
         }
     }
     InvalidateRect(window, NULL, FALSE);
+}
+
+/* Click on the explorer list at y. A pinned ancestor selects its folder and
+ * scrolls the list to it; it neither toggles nor opens anything. */
+static void axyne_workspace_click(HWND window, AxyneWindowState *state, int y,
+                                  int double_click)
+{
+    int row = axyne_workspace_row_at(window, state, y);
+    if (row < 0) return;
+    if (axyne_workspace_pinned_at(window, state, y)) {
+        RECT client;
+        size_t rows, max_scroll, target;
+        GetClientRect(window, &client);
+        rows = axyne_explorer_visible_rows(state, client.bottom - AXYNE_STATUS);
+        max_scroll = state->explorer.count > rows ? state->explorer.count - rows : 0;
+        target = axyne_explorer_scroll_target((size_t)row);
+        state->explorer_selection = (size_t)row;
+        state->explorer_has_selection = 1;
+        state->explorer_scroll = target > max_scroll ? max_scroll : target;
+        InvalidateRect(window, NULL, FALSE);
+        return;
+    }
+    axyne_workspace_open_selected(window, state, (size_t)row, double_click);
 }
 
 static int axyne_workspace_refresh(HWND window, AxyneWindowState *state)
@@ -4783,6 +4849,42 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
     SendMessageA(state->editor, SCI_SETCARETLINEVISIBLE, 0, 0);
 }
 
+/* One explorer row whose top edge is at `y`; also used for pinned ancestors. */
+static void axyne_paint_explorer_row(HDC dc, AxyneWindowState *state, size_t i,
+                                     int y)
+{
+    AxyneExplorerNode *node = &state->explorer.nodes[i];
+    wchar_t *name = axyne_wide(node->name);
+    int x = 8 + (int)node->depth * AXYNE_UI_INDENT;
+    int is_root = axyne_explorer_is_root_node(node);
+    /* Figma rows: 10px chevron or 20px badge, a 6px gap, then the name. The
+     * label ends 12px before the sidebar edge and gets a tail ellipsis. */
+    RECT slot = {x, y, x + 10, y + AXYNE_UI_ROW};
+    RECT label = {x + 16, y, axyne_sidebar_width(state) - 12, y + AXYNE_UI_ROW};
+    int selected = state->explorer_has_selection && state->explorer_selection == i;
+    if (selected)
+        axyne_fill(dc, 0, y, axyne_sidebar_width(state) - 1, y + AXYNE_UI_ROW,
+                   AXYNE_SELECTION_BG);
+    if (is_root) {
+        /* Header-like row: no chevron, always expanded. */
+        label.left = 12;
+    } else if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
+        axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, slot,
+            axyne_explorer_is_expanded(&state->explorer, node->path)
+                ? L"⌄" : L"›", DT_CENTER);
+    } else {
+        slot.right = x + AXYNE_UI_BADGE_WIDTH;
+        axyne_paint_badge(dc, state->tab_badge_font, node->name, slot);
+        label.left = slot.right + 6;
+    }
+    axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
+                   ? RGB(255, 255, 255)
+                   : (axyne_explorer_is_dimmed(node) ? AXYNE_SIDEBAR_MUTED
+                                                     : AXYNE_SIDEBAR_TEXT), label,
+                   name != NULL ? name : L"(invalid name)", DT_LEFT);
+    free(name);
+}
+
 static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
                                  int editor_top, int bottom)
 {
@@ -4799,31 +4901,25 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
     }
     for (i = state->explorer_scroll; i < state->explorer.count &&
          i - state->explorer_scroll < rows; ++i) {
-        AxyneExplorerNode *node = &state->explorer.nodes[i];
-        wchar_t *name = axyne_wide(node->name);
-        int x = 8 + (int)node->depth * AXYNE_UI_INDENT;
-        /* Figma rows: 10px chevron or 20px badge, a 6px gap, then the name. */
-        RECT slot = {x, y, x + 10, y + AXYNE_UI_ROW};
-        RECT label = {x + 16, y, axyne_sidebar_width(state) - 12, y + AXYNE_UI_ROW};
-        int selected = state->explorer_has_selection && state->explorer_selection == i;
-        if (selected)
-            axyne_fill(dc, 0, y, axyne_sidebar_width(state), y + AXYNE_UI_ROW, AXYNE_SELECTION_BG);
-        if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
-            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, slot,
-                axyne_explorer_is_expanded(&state->explorer, node->path)
-                    ? L"⌄" : L"›", DT_CENTER);
-        } else {
-            slot.right = x + AXYNE_UI_BADGE_WIDTH;
-            axyne_paint_badge(dc, state->tab_badge_font, node->name, slot);
-            label.left = slot.right + 6;
-        }
-        axyne_text_rect(dc, state->ui_font, selected && AXYNE_REFERENCE
-                       ? RGB(255, 255, 255)
-                       : (axyne_explorer_is_dimmed(node) ? AXYNE_SIDEBAR_MUTED
-                                                         : AXYNE_SIDEBAR_TEXT), label,
-                       name != NULL ? name : L"(invalid name)", DT_LEFT);
-        free(name);
+        axyne_paint_explorer_row(dc, state, i, y);
         y += AXYNE_UI_ROW;
+    }
+    {
+        size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
+        size_t pinned_count = axyne_explorer_pinned_rows(state, bottom, pinned);
+        int list_top = editor_top + AXYNE_UI_EXPLORER_HEADER;
+        int pinned_bottom = list_top + (int)pinned_count * AXYNE_UI_ROW;
+        size_t p;
+        if (pinned_count > 0) {
+            /* Opaque sidebar background over the first rows, hairline below. */
+            axyne_fill(dc, 0, list_top, axyne_sidebar_width(state) - 1,
+                       pinned_bottom, AXYNE_PANEL);
+            for (p = 0; p < pinned_count; ++p)
+                axyne_paint_explorer_row(dc, state, pinned[p],
+                                         list_top + (int)p * AXYNE_UI_ROW);
+            axyne_fill(dc, 0, pinned_bottom - 1, axyne_sidebar_width(state) - 1,
+                       pinned_bottom, AXYNE_BORDER);
+        }
     }
     RestoreDC(dc, saved_dc);
 }
@@ -5210,8 +5306,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         GetClientRect(window, &client);
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
-            int row = axyne_workspace_row_at(window, state, y);
-            if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row, 1);
+            axyne_workspace_click(window, state, y, 1);
             return 0;
         }
         /* Elsewhere a rapid second click must behave like a normal click. */
@@ -5261,8 +5356,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
-            int row = axyne_workspace_row_at(window, state, y);
-            if (row >= 0) axyne_workspace_open_selected(window, state, (size_t)row, 0);
+            if (axyne_workspace_row_at(window, state, y) >= 0)
+                axyne_workspace_click(window, state, y, 0);
             else if (state->explorer.root == NULL &&
                      y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER &&
                      y < AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER + AXYNE_UI_ROW)
