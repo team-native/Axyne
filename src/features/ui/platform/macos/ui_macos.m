@@ -24,6 +24,8 @@
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
 #include "axyne/ui_design.h"
+#include "axyne/popup_menu_layout.h"
+#include "popup_menu_macos.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "Scintilla.h"
@@ -743,6 +745,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _activeMenuIndex; /* bar item whose popup is open, or -1 */
     NSInteger _hoverMenuIndex;  /* bar item under the pointer, or -1 */
     NSTrackingArea *_menuTracking;
+    AxynePopupMenu *_popup; /* open Axyne popup (menu bar, build target, context), or nil */
     NSInteger _explorerFirstRow;
     CGFloat _tabScroll;
     void *_lexillaModule;
@@ -885,6 +888,27 @@ static BOOL axyne_macos_reference_surfaces(const AxyneThemePreferences *theme)
         theme->toolbar == 0x1c1e22;
 }
 
+/* Popup menu colours: the Figma menu frames on the reference theme (the same
+ * values as the Windows popup), the theme's own colours otherwise. */
+static AxynePopupMenuColors axyne_macos_popup_colors(const AxyneThemePreferences *theme)
+{
+    AxynePopupMenuColors colors;
+    if (axyne_macos_reference_surfaces(theme)) {
+        colors.background = 0x202329; colors.border = 0x2b2e35;
+        colors.hover = 0x402d5c; colors.hoverText = 0xf4edf9;
+        colors.text = 0xd2d5db; colors.muted = 0x969ba5;
+        colors.disabled = 0x666c76; colors.separator = 0x2b2e35;
+        colors.check = 0xa667e8;
+    } else {
+        colors.background = theme->panel; colors.border = theme->border;
+        colors.hover = theme->border; colors.hoverText = theme->text;
+        colors.text = theme->text; colors.muted = theme->muted;
+        colors.disabled = theme->muted; colors.separator = theme->border;
+        colors.check = theme->accent;
+    }
+    return colors;
+}
+
 static uint32_t axyne_macos_output_background(const AxyneThemePreferences *theme)
 {
     return axyne_macos_reference_surfaces(theme) ? 0x1d1f23 : theme->background;
@@ -960,7 +984,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
         isEqualToString:[key lowercaseString]];
 }
 
-@interface AxyneWorkspaceView (AxyneActions)
+@interface AxyneWorkspaceView (AxyneActions) <AxynePopupMenuDelegate>
 - (void)newDocument:(id)sender;
 - (void)openDocument:(id)sender;
 - (void)saveDocument:(id)sender;
@@ -1005,6 +1029,10 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (NSRect)menuBarItemRect:(NSUInteger)index;
 - (NSInteger)menuBarIndexAtPoint:(NSPoint)point;
 - (void)openMenuBarMenu:(NSUInteger)index;
+- (void)openMenuBarMenu:(NSUInteger)index selectFirst:(BOOL)selectFirst;
+- (BOOL)showPopupMenu:(NSMenu *)menu belowScreenRect:(NSRect)anchor gap:(CGFloat)gap
+          selectFirst:(BOOL)selectFirst;
+- (void)closePopupMenu;
 - (void)setMenuHover:(NSInteger)index;
 - (BOOL)editorActionable;
 - (void)goToLine:(id)sender;
@@ -1724,20 +1752,19 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [item setState:entries[i].checked ? NSControlStateValueOn : NSControlStateValueOff];
         [menu addItem:item];
     }
-    /* Anchor the menu's top-left corner under the button's bottom-left corner
-     * in screen coordinates, so the flipped/unflipped view difference cannot
-     * shift it. The chevron points up while the menu is open. */
+    /* Anchor the popup's top-left corner under the button's bottom-left
+     * corner in screen coordinates, so the flipped/unflipped view difference
+     * cannot shift it. The chevron points up while the popup is open; the
+     * popup's close callback flips it back. */
     NSRect inWindow = [button convertRect:[button bounds] toView:nil];
     NSRect onScreen = [[button window] convertRectToScreen:inWindow];
-    _buildMenuOpen = YES;
-    [self updateChromeTitles];
-    [button display];
-    [menu popUpMenuPositioningItem:nil
-        atLocation:NSMakePoint(NSMinX(onScreen), NSMinY(onScreen) - 2)
-        inView:nil];
-    _buildMenuOpen = NO;
-    [self updateChromeTitles];
-    [button setNeedsDisplay:YES];
+    [self closePopupMenu];
+    if ([self showPopupMenu:menu belowScreenRect:onScreen gap:AXYNE_POPUP_ANCHOR_GAP
+            selectFirst:NO]) {
+        _buildMenuOpen = YES;
+        [self updateChromeTitles];
+        [button display];
+    }
 }
 
 - (void)pickBuildTarget:(id)sender
@@ -3108,32 +3135,98 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 }
 
 /* The bar shows the submenus of the native main menu (item 0 is the
- * application menu), so a bar item runs exactly the actions, key equivalents
- * and validateMenuItem: rules of the matching system-menu entry. */
+ * application menu) in the Axyne popup, so a bar item runs exactly the
+ * actions, key equivalents and validateMenuItem: rules of the matching
+ * system-menu entry. The popup is not modal: it closes itself on a click
+ * outside, Esc, an item or deactivation, and moving across the bar switches
+ * menus (popupMenu:pointerMovedOutsideToScreenPoint:). */
 - (void)openMenuBarMenu:(NSUInteger)index
+{
+    [self openMenuBarMenu:index selectFirst:NO];
+}
+
+- (void)openMenuBarMenu:(NSUInteger)index selectFirst:(BOOL)selectFirst
 {
     NSMenu *mainMenu = [NSApp mainMenu];
     NSMenu *submenu;
-    BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
-        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
-    if (mainMenu == nil || (NSInteger)index + 1 >= [mainMenu numberOfItems]) return;
+    NSRect item, anchor, onScreen;
+    if (mainMenu == nil || (NSInteger)index + 1 >= [mainMenu numberOfItems] ||
+        [self window] == nil) return;
     submenu = [[mainMenu itemAtIndex:(NSInteger)index + 1] submenu];
     if (submenu == nil) return;
-    [submenu setAppearance:[NSAppearance appearanceNamed:
-        light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua]];
+    /* The popup drops from the bottom edge of the whole bar strip. */
+    item = [self menuBarItemRect:index];
+    anchor = NSMakeRect(NSMinX(item), 0, NSWidth(item), AXYNE_MENU);
+    onScreen = [[self window] convertRectToScreen:[self convertRect:anchor toView:nil]];
+    [self closePopupMenu];
+    if (![self showPopupMenu:submenu belowScreenRect:onScreen gap:0
+            selectFirst:selectFirst]) return;
     _activeMenuIndex = (NSInteger)index;
     [self setNeedsDisplay:YES];
     [self displayIfNeeded];
-    /* Blocks until the popup is dismissed; a chosen item has already run. */
-    [submenu popUpMenuPositioningItem:nil
-        atLocation:NSMakePoint(NSMinX([self menuBarItemRect:index]), AXYNE_MENU)
-        inView:self];
-    /* The same menu also drops down from the system menu bar, so give it
-     * back its system appearance. */
-    [submenu setAppearance:nil];
+}
+
+- (BOOL)showPopupMenu:(NSMenu *)menu belowScreenRect:(NSRect)anchor gap:(CGFloat)gap
+          selectFirst:(BOOL)selectFirst
+{
+    AxynePopupMenuColors colors = axyne_macos_popup_colors(&_preferences.theme);
+    AxynePopupMenu *popup;
+    [self closePopupMenu];
+    popup = [[AxynePopupMenu alloc] initWithMenu:menu colors:&colors];
+    if (popup == nil) return NO;
+    [popup setDelegate:self];
+    if (![popup presentBelowScreenRect:anchor gap:gap ownerWindow:[self window]
+                           selectFirst:selectFirst]) {
+        [popup setDelegate:nil];
+        [popup release];
+        return NO;
+    }
+    _popup = popup; /* keeps the alloc retain */
+    return YES;
+}
+
+- (void)closePopupMenu
+{
+    if (_popup != nil) [_popup close];
+}
+
+/* The popup has closed (item chosen, Esc, outside click, deactivation or a
+ * replacement): drop it and reset everything that showed it as open. */
+- (void)popupMenuDidClose:(AxynePopupMenu *)popup
+{
+    if (popup != _popup) return;
+    _popup = nil;
+    [popup setDelegate:nil];
+    [popup autorelease];
     _activeMenuIndex = -1;
     _hoverMenuIndex = -1;
+    if (_buildMenuOpen) {
+        _buildMenuOpen = NO;
+        [self updateChromeTitles];
+        [_targetButton setNeedsDisplay:YES];
+    }
     [self setNeedsDisplay:YES];
+}
+
+/* Moving across the bar while a bar menu is open switches to that menu. */
+- (void)popupMenu:(AxynePopupMenu *)popup pointerMovedOutsideToScreenPoint:(NSPoint)point
+{
+    NSRect inWindow;
+    NSInteger index;
+    if (popup != _popup || _activeMenuIndex < 0 || [self window] == nil) return;
+    inWindow = [[self window] convertRectFromScreen:NSMakeRect(point.x, point.y, 0, 0)];
+    index = [self menuBarIndexAtPoint:[self convertPoint:inWindow.origin fromView:nil]];
+    if (index >= 0 && index != _activeMenuIndex)
+        [self openMenuBarMenu:(NSUInteger)index selectFirst:NO];
+}
+
+/* Left/Right in a bar menu moves to the neighbouring one (wrapping). */
+- (void)popupMenu:(AxynePopupMenu *)popup requestsNeighbor:(NSInteger)direction
+{
+    NSInteger count = AXYNE_UI_MENU_COUNT;
+    if (popup != _popup || _activeMenuIndex < 0) return;
+    [self openMenuBarMenu:(NSUInteger)((_activeMenuIndex + direction + count) % count)
+              selectFirst:YES];
 }
 
 - (void)setMenuHover:(NSInteger)index
@@ -3887,7 +3980,10 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
             action:@selector(removeExplorerItem:) keyEquivalent:@""];
         [rename setTarget:self]; [remove setTarget:self];
     }
-    [menu popUpMenuPositioningItem:nil atLocation:point inView:self];
+    /* The popup's top-left corner sits at the click point. */
+    NSRect click = [[self window] convertRectToScreen:
+        [self convertRect:NSMakeRect(point.x, point.y, 0, 0) toView:nil]];
+    [self showPopupMenu:menu belowScreenRect:click gap:0 selectFirst:NO];
     [self setNeedsDisplay:YES];
 }
 
@@ -5180,6 +5276,12 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
 }
 - (void)dealloc
 {
+    if (_popup != nil) {
+        [_popup setDelegate:nil];
+        [_popup close];
+        [_popup release];
+        _popup = nil;
+    }
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
     axyne_palette_ctl_destroy(&_palette);

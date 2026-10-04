@@ -247,3 +247,24 @@ Runner 설정 (Build menu) and 키보드 단축키 (Help menu) were NSAlert / Me
 Known gaps: the macOS panels were reviewed by eye only (the sources cannot be compiled off a Mac); the Windows dialogs were compile-checked with zig cc and not run; the Windows runner areas keep a native (dark themed) scroll bar.
 
 Units: shared shortcut chip helper with tests; macOS Runner 설정; macOS keyboard shortcuts; Windows Runner 설정 and dialog frame; Windows keyboard shortcuts; this record.
+
+## Popup menus (macOS)
+
+The lists that drop from the in-window menu bar (파일 ... 도움말), the build-target chip and the explorer context menu were stock NSMenu popups. They are now Axyne-styled panels (`popup_menu_macos.m`); layout, accelerator text and keyboard navigation math live in the header-only `include/axyne/popup_menu_layout.h`, covered by `axyne-popup-menu`. Windows already draws its popups owner-style and is unchanged.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Look | Follow Axyne's design instead of the macOS default | USER (confirmed) | CONFIRMED |
+| Item table | The popup lists the same NSMenu: title, key-equivalent text (control, option, shift, command glyphs then the key; an upper-case equivalent implies Shift), checkmark column from the item state, separators, disabled items dimmed (group headers are disabled items), submenu arrow with a nested popup (File > 최근 항목). Key equivalents stay owned by the native NSMenu | ASSUMED | ASSUMED |
+| Metrics and colours | Figma 24:14189 (and the Windows popup): 1px border, radius 5, padding 4, 27px rows, 3px row radius, 10px row inset, 18px status column, 8px gap, 9px separator rows, 12px labels, 10px accelerator text, check `#a667e8`; reference theme `#202329` surface, `#2b2e35` border and separators, `#402d5c` hover with `#f4edf9` text, `#d2d5db` text, `#969ba5` dim, `#666c76` disabled. Other themes use panel, border, text, muted and accent like Windows. Width follows the widest row, 160 px minimum, 640 px maximum | ASSUMED | ASSUMED |
+| Placement | Under the bar item (flush with the bar) or 2px under the chip, left edges aligned, clamped to the screen's visible area; opens above when there is no room below; submenus open to the right overlapping 3px and flip left at the screen edge; the context menu's corner sits at the click | ASSUMED | ASSUMED |
+| Validation | Items are validated when the popup opens with `[menu update]`, the native path (`validateMenuItem:`: empty state, debugger gating) | USER (same enabled state as the native menu) | CONFIRMED |
+| Choosing | A click on an enabled row, released on the same row, or Return closes the popup first and then sends `[NSApp sendAction:to:from:]` with the item (nil target uses the responder chain; tag and represented object are kept, e.g. `pickBuildTarget:`) | ASSUMED | ASSUMED |
+| Keyboard | Up/Down move and wrap over enabled rows (separators, headers and disabled rows are skipped), Home/End jump, Return activates, Esc closes one level then the popup, Right opens a submenu (else next bar menu), Left leaves a submenu (else previous bar menu); other keys are swallowed, Command/Control chords close the popup and reach the key equivalents | ASSUMED | ASSUMED |
+| Menu bar | The bar item stays lit while its menu is open; moving the pointer over another bar item switches menus; a new menu opened with the arrow keys selects its first row | ASSUMED | ASSUMED |
+| Closing | Click outside (swallowed, like the native menu; clicking the bar item or chip again closes it), Esc, choosing an item, app deactivation, a click in another app, or the owner window resigning key, moving, resizing or closing. One local and one global event monitor, removed on close | ASSUMED | ASSUMED |
+| Build-target chevron | `_buildMenuOpen` is set while the popup is open and cleared in its close callback | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the macOS popup was reviewed by eye only (the sources cannot be compiled off a Mac); press-drag-release from the bar item onto a row is not supported (click the item, then click the row); rows have no icons.
+
+Units: shared popup layout helper with tests; macOS popup panel and view; menu bar dropdowns; build-target popup; explorer context menu; this record.
