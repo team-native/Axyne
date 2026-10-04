@@ -239,7 +239,7 @@ static const AxynePaletteCommand command_table[] = {
     { AXYNE_PALETTE_COMMAND_OPEN_FILE, "파일 열기", "open file",
       { PRIMARY, "O", 0, NULL } },
     { AXYNE_PALETTE_COMMAND_OPEN_FOLDER, "폴더 열기", "open folder workspace",
-      { 0, NULL, 0, NULL } },
+      { PRIMARY | SHIFT, "O", 0, NULL } },
     { AXYNE_PALETTE_COMMAND_SAVE, "저장", "save",
       { PRIMARY, "S", 0, NULL } },
     { AXYNE_PALETTE_COMMAND_SAVE_AS, "다른 이름으로 저장", "save as",
