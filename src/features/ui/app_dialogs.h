@@ -22,6 +22,14 @@ enum {
     AXYNE_DLG_BROWSE_WIDTH = 84,
     AXYNE_DLG_NOTE_GAP = 8,
     AXYNE_DLG_NOTE_HEIGHT = 14,
+    AXYNE_DLG_SHORTCUTS_WIDTH = 560,
+    AXYNE_DLG_SHORTCUTS_HEIGHT = 520,
+    AXYNE_DLG_SHORTCUT_ROW = 28,        /* one shortcut row */
+    AXYNE_DLG_SHORTCUT_HEADING = 22,    /* section heading row */
+    AXYNE_DLG_SHORTCUT_SECTION_GAP = 14,
+    AXYNE_DLG_CHIP_HEIGHT = 20,
+    AXYNE_DLG_CHIP_GAP = 4,
+    AXYNE_DLG_CHIP_PADDING = 7,
     AXYNE_DLG_RUNNER_WIDTH = 520,
     AXYNE_DLG_RUNNER_HEIGHT = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD +
         (AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT) + AXYNE_DLG_GAP +
@@ -32,6 +40,11 @@ enum {
 };
 
 #define AXYNE_DLG_COLOR_ERROR 0xe5737du
+
+/* Key chips: the same look as the empty-state shortcut guide. */
+#define AXYNE_DLG_COLOR_CHIP_FILL 0x1f2126u
+#define AXYNE_DLG_COLOR_CHIP_STROKE 0x2a2d33u
+#define AXYNE_DLG_COLOR_CHIP_TEXT 0xd5d8ddu
 
 /* Runner settings (Build > Runner 설정). Strings are UTF-8; arguments and
  * environment hold one entry per line. */
@@ -56,6 +69,31 @@ typedef struct AxyneRunnerDialogHooks {
 int axyne_runner_dialog_show(void *native_owner,
                              const AxyneRunnerDialogValues *initial,
                              const AxyneRunnerDialogHooks *hooks);
+
+/* Keyboard shortcuts (Help > 키보드 단축키). `keys` is the shortcut as the
+ * menus print it ("⇧⌘S", "Ctrl+Shift+S"); the dialog splits it into chips
+ * with axyne_shortcut_chips(). A row without keys shows its label only. */
+typedef struct AxyneShortcutRow {
+    const char *label;
+    const char *keys;
+} AxyneShortcutRow;
+
+typedef struct AxyneShortcutSection {
+    const char *title;
+    const AxyneShortcutRow *rows;
+    size_t row_count;
+} AxyneShortcutSection;
+
+/* Shows the list modally over `native_owner` (NSWindow * or HWND, may be
+ * NULL). The strings are copied; nothing is retained after it returns. */
+void axyne_shortcuts_dialog_show(void *native_owner,
+                                 const AxyneShortcutSection *sections,
+                                 size_t section_count);
+
+#ifdef __APPLE__
+/* Korean title of a Preferences action (AxynePreferenceAction), UTF-8. */
+const char *axyne_dialogs_action_title(int action);
+#endif
 
 #ifdef __cplusplus
 }
