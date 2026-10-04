@@ -507,6 +507,9 @@ static int command_script_checks(void)
     AXYNE_TEST_CHECK(!axyne_language_is_command_script("tsc"));
     AXYNE_TEST_CHECK(!axyne_language_is_command_script(NULL));
 
+    /* On Windows builds the resolver already wraps the script itself, so the
+     * unwrapped-then-wrapped sequence below only applies elsewhere. */
+#ifndef _WIN32
     /* Non-Windows platform flag: untouched even for a .cmd. */
     fake_make(&fake, NULL, 0);
     fake.items[2].executable = (char *)"C:\\Program Files\\nodejs\\tsc.cmd";
@@ -535,6 +538,13 @@ static int command_script_checks(void)
         AXYNE_TEST_STATUS(axyne_language_step_wrap_command_script(&plan.run, cmd, 1), AXYNE_STATUS_OK);
         AXYNE_TEST_CHECK(strcmp(plan.run.executable, cmd) != 0);
     }
+#else
+    fake_make(&fake, NULL, 0);
+    fake.items[2].executable = (char *)"C:\\Program Files\\nodejs\\tsc.cmd";
+    AXYNE_TEST_STATUS(resolve(AXYNE_LANGUAGE_TYPESCRIPT, &fake, &target, "C:\\p\\a.ts", &plan, message, sizeof(message)), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(strstr(plan.build.executable, "cmd.exe") != NULL);
+    AXYNE_TEST_STREQ(plan.build.arguments[0], "/d");
+#endif
     axyne_language_plan_free(&plan);
 
     /* Metacharacters inside quotes stay arguments; '"' and '%' are refused. */
