@@ -698,6 +698,27 @@ static void axyne_auto_indent(AxyneWindowState *state,
     }
 }
 
+/* Native scrollbars of the Scintilla window follow the editor theme: the
+ * "DarkMode_Explorer" visual style (Windows 10 1809+) darkens the track and
+ * thumb; "Explorer" restores the light ones. uxtheme is loaded lazily and
+ * older systems simply keep the default scrollbars. */
+static void axyne_theme_editor_scrollbars(HWND editor, uint32_t background)
+{
+    typedef HRESULT (WINAPI *SetTheme)(HWND, LPCWSTR, LPCWSTR);
+    HMODULE module;
+    SetTheme set_theme;
+    BOOL dark = (((background >> 16) & 0xffu) * 299u +
+                 ((background >> 8) & 0xffu) * 587u +
+                 (background & 0xffu) * 114u) / 1000u < 128u;
+    if (editor == NULL) return;
+    module = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (module == NULL) return;
+    set_theme = (SetTheme)(uintptr_t)GetProcAddress(module, "SetWindowTheme");
+    if (set_theme != NULL)
+        (void)set_theme(editor, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    FreeLibrary(module);
+}
+
 static void axyne_apply_editor_preferences(AxyneWindowState *state)
 {
     wchar_t *font_name = NULL;
@@ -759,6 +780,12 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     SendMessageA(state->editor, SCI_SETUSETABS, state->preferences.editor.insert_spaces ? 0 : 1, 0);
     SendMessageA(state->editor, SCI_SETWRAPMODE, state->preferences.editor.word_wrap ? 1 : 0, 0);
     SendMessageA(state->editor, SCI_SETVIEWWS, state->preferences.editor.show_whitespace ? 1 : 0, 0);
+    /* Default scroll width is 2000, which keeps the horizontal bar always
+     * scrollable. Start at 1 and let tracking grow it to the widest line; the
+     * call also shrinks it on every document load. */
+    SendMessageA(state->editor, SCI_SETSCROLLWIDTH, 1, 0);
+    SendMessageA(state->editor, SCI_SETSCROLLWIDTHTRACKING, 1, 0);
+    axyne_theme_editor_scrollbars(state->editor, state->preferences.theme.editor_background);
     axyne_apply_editor_lexer(state, axyne_active(state));
     SendMessageA(state->editor, SCI_SETCARETLINEBACK,
                  (WPARAM)axyne_theme_color(axyne_caret_line_color(&state->preferences.theme)), 0);
