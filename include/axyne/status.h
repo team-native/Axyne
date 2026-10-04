@@ -13,7 +13,10 @@ typedef enum AxyneStatus {
     AXYNE_STATUS_IO_ERROR,
     AXYNE_STATUS_UNSUPPORTED,
     AXYNE_STATUS_OUT_OF_MEMORY,
-    AXYNE_STATUS_BUSY
+    AXYNE_STATUS_BUSY,
+    /* The file looks binary (NUL byte or invalid UTF-8 in its head) and is
+     * not opened as text. */
+    AXYNE_STATUS_BINARY
 } AxyneStatus;
 
 typedef struct AxyneError {
