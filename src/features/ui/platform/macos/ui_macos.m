@@ -710,6 +710,11 @@ static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
 
 @end
 
+/* The deferred discovery block must not retain the workspace: a retained view
+ * would never deallocate when the main queue is not drained (the editor runtime
+ * test), leaking its Scintilla documents. The block holds only this box. */
+typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
+
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     AxyneEmptyEditorView *_emptyView;
@@ -755,6 +760,7 @@ static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
     AxyneRuntimeList _runtimes;
     BOOL _runtimesDiscovered;
     BOOL _runtimeDiscoveryScheduled;
+    AxyneDiscoveryBox *_discoveryBox;
     /* Plan whose run step starts when its build step exits with 0. */
     AxyneLanguagePlan _pendingPlan;
     BOOL _pendingRun;
@@ -1658,11 +1664,18 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)scheduleRuntimeDiscovery
 {
     if (_runtimesDiscovered || _runtimeDiscoveryScheduled) return;
+    AxyneDiscoveryBox *box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    if (box == NULL) return;
     _runtimeDiscoveryScheduled = YES;
-    [self retain];
+    box->target = self;
+    _discoveryBox = box;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self discoverRuntimes];
-        [self release];
+        if (box->target != nil) {
+            AxyneWorkspaceView *view = box->target;
+            view->_discoveryBox = NULL;
+            [view discoverRuntimes];
+        }
+        free(box);
     });
 }
 
@@ -4994,6 +5007,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
 - (void)dealloc
 {
     [self closePaletteRestoringFocus:NO];
+    if (_discoveryBox != NULL) _discoveryBox->target = nil;
     axyne_palette_ctl_destroy(&_palette);
     if (_gitRun != NULL) {
         AxyneMacGitRun *run = _gitRun;
