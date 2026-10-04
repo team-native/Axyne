@@ -3980,7 +3980,10 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
             action:@selector(removeExplorerItem:) keyEquivalent:@""];
         [rename setTarget:self]; [remove setTarget:self];
     }
-    [menu popUpMenuPositioningItem:nil atLocation:point inView:self];
+    /* The popup's top-left corner sits at the click point. */
+    NSRect click = [[self window] convertRectToScreen:
+        [self convertRect:NSMakeRect(point.x, point.y, 0, 0) toView:nil]];
+    [self showPopupMenu:menu belowScreenRect:click gap:0 selectFirst:NO];
     [self setNeedsDisplay:YES];
 }
 
