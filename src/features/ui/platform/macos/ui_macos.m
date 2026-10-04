@@ -704,6 +704,25 @@ static BOOL axyne_macos_prefers_dark(NSView *view)
     return [match isEqualToString:NSAppearanceNameDarkAqua];
 }
 
+/* Perceived luminance below mid-grey: scrollers use the dark appearance. */
+static BOOL axyne_macos_color_is_dark(uint32_t rgb)
+{
+    uint32_t red = (rgb >> 16) & 0xffu, green = (rgb >> 8) & 0xffu, blue = rgb & 0xffu;
+    return (red * 299u + green * 587u + blue * 114u) / 1000u < 128u;
+}
+
+/* The NSScrollView inside ScintillaView, found without relying on a private
+ * accessor: use `scrollView` when exposed, otherwise search the subviews. */
+static NSScrollView *axyne_macos_find_scroll_view(NSView *view)
+{
+    if ([view isKindOfClass:[NSScrollView class]]) return (NSScrollView *)view;
+    for (NSView *child in [view subviews]) {
+        NSScrollView *found = axyne_macos_find_scroll_view(child);
+        if (found != nil) return found;
+    }
+    return nil;
+}
+
 static BOOL axyne_macos_reference_surfaces(const AxyneThemePreferences *theme)
 {
     return theme->background == 0x16171a && theme->panel == 0x1f2126 &&
@@ -885,6 +904,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)showGlobalPreferences:(id)sender;
 - (void)showWorkspacePreferences:(id)sender;
 - (void)applyPreferences;
+- (void)applyEditorScrollers;
 - (void)applySystemAppearance;
 - (void)updateChromeTitles;
 - (void)applyEditorLexer;
@@ -1754,11 +1774,51 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self sendEditorMessage:SCI_SETCARETLINEVISIBLE
                          wParam:_preferences.editor.highlight_current_line ? 1 : 0
                          lParam:0];
+        [self applyEditorScrollers];
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
         [self applyEditorLexer];
     }
     [self setNeedsDisplay:YES];
+}
+
+- (void)applyEditorScrollers
+{
+    if (_editorView == nil) return;
+    BOOL dark = axyne_macos_color_is_dark(_preferences.theme.editor_background);
+    /* Scintilla's default scroll width is 2000, which keeps the horizontal bar
+     * permanently scrollable. Start at 1 and let tracking grow it only to the
+     * widest line seen; this call also shrinks it again on every document load. */
+    NSInteger xoffset = [self sendEditorMessage:SCI_GETXOFFSET wParam:0 lParam:0];
+    (void)[self sendEditorMessage:SCI_SETSCROLLWIDTH wParam:1 lParam:0];
+    (void)[self sendEditorMessage:SCI_SETSCROLLWIDTHTRACKING wParam:1 lParam:0];
+    /* The reset clamps the horizontal position; restoring a non-zero offset
+     * makes Scintilla widen the scroll range again for the long line. */
+    if (xoffset > 0) (void)[self sendEditorMessage:SCI_SETXOFFSET wParam:(uintptr_t)xoffset lParam:0];
+    NSScrollView *scroll = nil;
+    if ([_editorView respondsToSelector:@selector(scrollView)])
+        scroll = [(id)_editorView scrollView];
+    if (![scroll isKindOfClass:[NSScrollView class]])
+        scroll = axyne_macos_find_scroll_view(_editorView);
+    /* NSAppearance assignment needs macOS 10.14; older systems keep the default. */
+    if ([_editorView respondsToSelector:@selector(setAppearance:)]) {
+        NSAppearance *appearance = [NSAppearance appearanceNamed:
+            dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+        if (appearance != nil) {
+            [_editorView setAppearance:appearance];
+            if (scroll != nil) [scroll setAppearance:appearance];
+        }
+    }
+    if (scroll != nil) {
+        /* Overlay scrollers float above the text, so no opaque track is drawn
+         * and the horizontal bar no longer starts right of the line-number
+         * ruler (which left a blank corner with legacy scrollers). */
+        [scroll setScrollerStyle:NSScrollerStyleOverlay];
+        [scroll setAutohidesScrollers:YES];
+        [scroll setScrollerKnobStyle:dark ? NSScrollerKnobStyleLight
+                                          : NSScrollerKnobStyleDark];
+        [scroll tile];
+    }
 }
 
 - (void)applySystemAppearance
@@ -3061,6 +3121,11 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
         (void)[self sendEditorMessage:SCI_SETBACKSPACEUNINDENTS wParam:1 lParam:0];
         (void)[self sendEditorMessage:SCI_SETTABINDENTS wParam:1 lParam:0];
         [self addSubview:_editorView];
+        /* NSScrollView resets its scroller style to the system's whenever the
+         * preferred style changes (mouse/trackpad, system setting). */
+        [[NSNotificationCenter defaultCenter] addObserver:self
+            selector:@selector(applyEditorScrollers)
+            name:NSPreferredScrollerStyleDidChangeNotification object:nil];
         [self setNeedsLayout:YES];
         [_editorLoadError release];
         _editorLoadError = nil;
@@ -4422,6 +4487,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     /* Scintilla's active buffer also holds a reference to its Lexilla lexer.
      * Destroy it before unloading Lexilla, including when AppKit retains the
      * editor subview until the superclass tears down its children. */
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [(id)_editorView setDelegate:nil];
     (void)[self sendEditorMessage:SCI_SETILEXER wParam:0 lParam:0];
     axyne_documents_destroy(&_documents);
