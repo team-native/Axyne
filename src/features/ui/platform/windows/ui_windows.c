@@ -150,6 +150,7 @@ typedef struct AxyneWindowState {
     AxyneProcess *terminal_process;
     AxyneProcess *git_process;
     AxyneGitUiRun *git_run;
+    int git_batch_busy; /* a commit, push or pull runs on a worker thread */
     HWND terminal_output;
     HWND terminal_input;
     HWND terminal_start;
@@ -268,7 +269,8 @@ enum { AXYNE_CMD_GOTO_LINE = 1200, AXYNE_CMD_SELECT_LINE,
        AXYNE_CMD_DEBUG_STOP, AXYNE_CMD_DEBUG_STEP_INTO,
        AXYNE_CMD_DEBUG_STEP_OUT, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS,
        AXYNE_CMD_OPEN_PREFERENCES_FILE, AXYNE_CMD_SHORTCUTS,
-       AXYNE_CMD_REPORT_ISSUE, AXYNE_CMD_BUILD_TARGET };
+       AXYNE_CMD_REPORT_ISSUE, AXYNE_CMD_BUILD_TARGET, AXYNE_CMD_GIT_COMMIT,
+       AXYNE_CMD_GIT_PUSH, AXYNE_CMD_GIT_PULL };
 
 enum { AXYNE_CMD_EXIT = 1090 };
 
@@ -277,6 +279,7 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_EXIT = WM_APP + 23,
        AXYNE_WM_GIT_COMPLETE = WM_APP + 24,
        AXYNE_WM_LSP_STATUS = WM_APP + 25,
+       AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30 };
 
 typedef struct AxyneExplorerMessage {
@@ -1433,7 +1436,7 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
                     "Axyne - Git", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (state->git_process != NULL) {
+    if (state->git_process != NULL || state->git_batch_busy) {
         MessageBoxA(window, "A Git operation is already running.",
                     "Axyne - Git", MB_OK | MB_ICONINFORMATION);
         return;
@@ -1503,6 +1506,163 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
         free(display);
         axyne_git_string_free(header);
     }
+}
+
+/* Commit, push and pull run several Git steps through the blocking core
+ * functions, so they run on a worker thread that posts the finished report
+ * back to the window. If the window is already gone the worker frees the
+ * batch itself. */
+typedef struct AxyneGitBatch {
+    HWND window;
+    char *workspace;
+    char *message;   /* commit only */
+    int kind;        /* AXYNE_CMD_GIT_COMMIT, _PUSH or _PULL */
+    int stage_all;
+    char *report;    /* malloc'd by the worker */
+} AxyneGitBatch;
+
+static void axyne_git_batch_free(AxyneGitBatch *batch)
+{
+    if (batch == NULL) return;
+    free(batch->workspace);
+    free(batch->message);
+    free(batch->report);
+    free(batch);
+}
+
+static DWORD WINAPI axyne_git_batch_thread(LPVOID opaque)
+{
+    AxyneGitBatch *batch = (AxyneGitBatch *)opaque;
+    AxyneGitResult result;
+    AxyneError error;
+    AxyneStatus status;
+    memset(&result, 0, sizeof(result));
+    memset(&error, 0, sizeof(error));
+    if (batch->kind == AXYNE_CMD_GIT_COMMIT)
+        status = axyne_git_commit(batch->workspace, batch->message,
+                                  batch->stage_all, &result, &error);
+    else if (batch->kind == AXYNE_CMD_GIT_PUSH)
+        status = axyne_git_push(batch->workspace, &result, &error);
+    else
+        status = axyne_git_pull(batch->workspace, &result, &error);
+    if (result.output != NULL) {
+        batch->report = result.output; /* ownership moves to the batch */
+        result.output = NULL;
+    } else {
+        /* The operation could not start (Git missing, bad request, memory). */
+        const char *text = status != AXYNE_STATUS_OK && error.message[0] != '\0'
+            ? error.message : "Unable to run the Git operation.";
+        size_t size = strlen(text) + 2;
+        batch->report = (char *)malloc(size);
+        if (batch->report != NULL) (void)snprintf(batch->report, size, "%s\n", text);
+    }
+    if (!PostMessageW(batch->window, AXYNE_WM_GIT_BATCH_COMPLETE, 0, (LPARAM)batch))
+        axyne_git_batch_free(batch);
+    return 0;
+}
+
+static void axyne_git_ui_set_output(AxyneWindowState *state, const char *report)
+{
+    char *display;
+    wchar_t *wide;
+    if (state->terminal_output == NULL) return;
+    display = axyne_git_ui_display_text(report);
+    wide = axyne_git_ui_wide(display);
+    SendMessageW(state->terminal_output, EM_SETLIMITTEXT, 0, 0);
+    SetWindowTextW(state->terminal_output, wide != NULL ? wide : L"(invalid Git output)");
+    SendMessageW(state->terminal_output, EM_SETSEL, 0, 0);
+    SendMessageW(state->terminal_output, EM_SCROLLCARET, 0, 0);
+    free(wide);
+    free(display);
+}
+
+/* Takes ownership of `message` (malloc'd UTF-8, commit only; may be NULL). */
+static void axyne_git_batch_start(HWND window, AxyneWindowState *state, int command,
+                                  char *message, int stage_all)
+{
+    static const char *const commit_arguments[] = { "commit" };
+    static const char *const push_arguments[] = { "push" };
+    static const char *const pull_arguments[] = { "pull", "--ff-only" };
+    const char *const *arguments = command == AXYNE_CMD_GIT_COMMIT ? commit_arguments
+        : (command == AXYNE_CMD_GIT_PUSH ? push_arguments : pull_arguments);
+    size_t argument_count = command == AXYNE_CMD_GIT_PULL ? 2 : 1;
+    AxyneGitBatch *batch;
+    HANDLE thread;
+    if (state->explorer.root == NULL) {
+        free(message);
+        MessageBoxA(window, "Open a workspace folder before using Git.",
+                    "Axyne - Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (state->git_process != NULL || state->git_batch_busy) {
+        free(message);
+        MessageBoxA(window, "A Git operation is already running.",
+                    "Axyne - Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    batch = (AxyneGitBatch *)calloc(1, sizeof(*batch));
+    if (batch != NULL) batch->workspace = _strdup(state->explorer.root);
+    if (batch == NULL || batch->workspace == NULL) {
+        free(message);
+        axyne_git_batch_free(batch);
+        MessageBoxA(window, "Unable to allocate Git operation.",
+                    "Axyne - Git", MB_OK | MB_ICONERROR);
+        return;
+    }
+    batch->window = window;
+    batch->message = message;
+    batch->kind = command;
+    batch->stage_all = stage_all;
+    thread = CreateThread(NULL, 0, axyne_git_batch_thread, batch, 0, NULL);
+    if (thread == NULL) {
+        axyne_git_batch_free(batch);
+        MessageBoxA(window, "Unable to start Git operation.",
+                    "Axyne - Git", MB_OK | MB_ICONERROR);
+        return;
+    }
+    CloseHandle(thread); /* detached: the result arrives as a window message */
+    state->git_batch_busy = 1;
+    axyne_git_ui_show_output(window, state);
+    {
+        AxyneGitCapture pending;
+        char *header;
+        axyne_git_capture_init(&pending, 0);
+        header = axyne_git_format_report(arguments, argument_count, &pending, 0,
+                                         "Running...");
+        if (header != NULL) axyne_git_ui_set_output(state, header);
+        axyne_git_string_free(header);
+    }
+    InvalidateRect(window, NULL, FALSE);
+}
+
+static void axyne_git_batch_complete(HWND window, AxyneWindowState *state,
+                                     AxyneGitBatch *batch)
+{
+    axyne_git_ui_show_output(window, state);
+    axyne_git_ui_set_output(state, batch->report != NULL
+        ? batch->report : "Unable to allocate Git output.\n");
+    state->git_batch_busy = 0;
+    axyne_git_batch_free(batch);
+    InvalidateRect(window, NULL, FALSE);
+}
+
+/* 커밋…: asks for the message first, then runs on the worker thread. */
+static void axyne_git_commit_command(HWND window, AxyneWindowState *state)
+{
+    char *message = NULL;
+    int stage_all = 1;
+    if (state->explorer.root == NULL) {
+        MessageBoxA(window, "Open a workspace folder before using Git.",
+                    "Axyne - Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (state->git_process != NULL || state->git_batch_busy) {
+        MessageBoxA(window, "A Git operation is already running.",
+                    "Axyne - Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (!axyne_git_commit_dialog_show(window, &message, &stage_all)) return;
+    axyne_git_batch_start(window, state, AXYNE_CMD_GIT_COMMIT, message, stage_all);
 }
 
 static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
@@ -3702,7 +3862,8 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_DEBUG_STEP_OUT, L"프로시저 나가기", L"Shift+F11",
                        axyne_action_flags(state, AXYNE_CMD_DEBUG_STEP_OUT));
     } else if (menu_index == 5) {
-        UINT git_flags = state->explorer.root != NULL && state->git_process == NULL
+        UINT git_flags = state->explorer.root != NULL && state->git_process == NULL &&
+                         !state->git_batch_busy
             ? MF_ENABLED : MF_GRAYED;
         axyne_menu_add(menu, &pool, AXYNE_TERMINAL_START, L"새 터미널", NULL,
                        state->terminal_process == NULL &&
@@ -3720,6 +3881,10 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_STAGE_ALL, L"모두 스테이지", NULL, git_flags);
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_UNSTAGE_ALL, L"모두 스테이지 해제", NULL,
                        git_flags);
+        axyne_menu_separator(menu, &pool);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_COMMIT, L"Git 커밋...", NULL, git_flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_PUSH, L"Git 푸시", NULL, git_flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_PULL, L"Git 풀", NULL, git_flags);
     } else {
         axyne_menu_add(menu, &pool, AXYNE_CMD_SHORTCUTS, L"키보드 단축키 참조", NULL,
                        MF_ENABLED);
@@ -5970,6 +6135,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_git_start(window, state, "All workspace changes staged.", command);
         else if (command == AXYNE_CMD_GIT_UNSTAGE_ALL)
             axyne_git_start(window, state, "All changes unstaged.", command);
+        else if (command == AXYNE_CMD_GIT_COMMIT)
+            axyne_git_commit_command(window, state);
+        else if (command == AXYNE_CMD_GIT_PUSH)
+            axyne_git_batch_start(window, state, command, NULL, 0);
+        else if (command == AXYNE_CMD_GIT_PULL)
+            axyne_git_batch_start(window, state, command, NULL, 0);
         else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
         else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
         else if (state->editor != NULL &&
@@ -6135,6 +6306,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (state->git_run == (AxyneGitUiRun *)l_param)
             axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
         if (state->closing) DestroyWindow(window);
+        return 0;
+    case AXYNE_WM_GIT_BATCH_COMPLETE:
+        axyne_git_batch_complete(window, state, (AxyneGitBatch *)l_param);
         return 0;
     case AXYNE_WM_LSP_STATUS: {
         AxyneLspStatusMessage *message = (AxyneLspStatusMessage *)l_param;
