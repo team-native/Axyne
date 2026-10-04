@@ -48,7 +48,7 @@ int main(void)
     check_menu_titles();
     static const char *names[] = { "a.c", "a.h", "a.cpp", "a.m", "a.mm",
         "a.md", "a.txt", "a.html", "a.css", "a.sh", "a.java", "a.tsx",
-        "a.jsx", "a.yml", "a.yaml", "a.xml", "a.swift", "a.go", "a.rs",
+        "a.jsx", "a.yml", "a.yaml", "a.xml", "a.kt", "a.kts", "a.slint", "a.swift", "a.go", "a.rs",
         "a.json", "a.py", "a.ts", "a.js", "a.cmake", "a.zzzzz", "noext" };
     size_t i;
     expect("main.c", "C");
@@ -65,6 +65,9 @@ int main(void)
     expect("a.yaml", "YML");
     expect("a.xml", "XML");
     expect("a.swift", "SW");
+    expect("Main.kt", "KT");
+    expect("b.kts", "KT");
+    expect("app.slint", "SL");
     expect("a.go", "GO");
     expect("a.rs", "RS");
     expect("CMakeLists.txt", "CM");

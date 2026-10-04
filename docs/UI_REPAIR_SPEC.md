@@ -185,3 +185,11 @@ Branch `feature/language-runners-core`. Shared rules (no UI): `include/axyne/lan
 Known gaps: a Windows `tsc.cmd` or `kotlinc.bat` is started as a plain executable in build/run steps (only the version probe goes through `cmd.exe`), a non-host architecture may build but not run, `kotlinc` can exceed the two-second probe on a cold JVM start, and none of the new runtime kinds was exercised against real installed toolchains.
 
 Units: runtime kinds; build target model with tests; language registry and resolver with tests; this record.
+## Kotlin and Slint syntax
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Kotlin | `.kt` and `.kts` highlight as `kotlin` on the `cpp` lexer (Lexilla has no Kotlin lexer) with hard/soft keywords, common types and `null true false` literals. Raw strings and templates use the cpp lexer's default look | USER (request) / AGENT_PARAMETER (word lists) | CONFIRMED / ASSUMED |
+| Slint | `.slint` highlights as `slint` on the `cpp` lexer (C-like comments and strings) with declaration keywords, property types, built-in elements and `true false` | USER (request) / AGENT_PARAMETER (word lists) | CONFIRMED / ASSUMED |
+| Badges | Explorer/tab chips `KT` (`#b48ae0`, kt and kts) and `SL` (`#6fa8dc`, slint) | AGENT_PARAMETER | ASSUMED |
+| Toggle comment | Kotlin and Slint use `//` (`kts` and `slint` added to the slash list in `editor_actions.h`) | AGENT | ASSUMED |
