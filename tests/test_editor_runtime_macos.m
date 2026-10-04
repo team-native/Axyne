@@ -267,8 +267,19 @@ static int run_tests(NSString *pngPath)
         }
         CHECK(editor_message(workspace, SCI_GETINDENT, 0, 0) == 6);
         CHECK(editor_message(workspace, SCI_GETUSETABS, 0, 0) == 0);
+        STAGE("empty state");
+        // With only the hidden placeholder the shortcut guide replaces the
+        // editor: the Scintilla view is hidden and the guide owns focus.
+        Ivar emptyIvar = class_getInstanceVariable(workspaceClass, "_emptyView");
+        CHECK(emptyIvar != NULL);
+        NSView *emptyView = object_getIvar(workspace, emptyIvar);
+        CHECK(emptyView != nil && axyne_documents_empty_state(documents));
+        CHECK(![emptyView isHidden] && [editor isHidden]);
+        CHECK([window firstResponder] == emptyView);
         STAGE("open files");
         [workspace openPath:firstPath];
+        CHECK([emptyView isHidden] && ![editor isHidden]);
+        CHECK(!axyne_documents_empty_state(documents));
         CHECK(documents->count == 2 && documents->active_index == 1);
         CHECK(editor_equals(workspace, first, sizeof(first) - 1));
         CHECK(documents->documents[1].length == sizeof(first) - 1);
@@ -281,6 +292,20 @@ static int run_tests(NSString *pngPath)
         CHECK(editor_equals(workspace, second, sizeof(second) - 1));
         CHECK(editor_message(workspace, SCI_GETLEXER, 0, 0) != 0);
         CHECK([window firstResponder] == [editor content]);
+
+        STAGE("binary file");
+        {
+            // A binary file shows a notice and creates no tab.
+            NSString *binaryPath = [root stringByAppendingPathComponent:@"blob.bin"];
+            const char blob[] = "\x7f" "ELF\0\1\2\3";
+            CHECK(axyne_fs_write_file([binaryPath fileSystemRepresentation], blob,
+                sizeof(blob) - 1, NULL) == AXYNE_STATUS_OK);
+            size_t alertsBefore = alertCount;
+            [workspace openPath:binaryPath];
+            CHECK(alertCount == alertsBefore + 1);
+            CHECK(documents->count == 3 && documents->active_index == 2);
+            CHECK(editor_equals(workspace, second, sizeof(second) - 1));
+        }
 
         STAGE("tab switching");
         // Keep edits and undo history in the first tab across repeated switches.

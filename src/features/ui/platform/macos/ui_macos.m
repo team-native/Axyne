@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 
 #include "axyne/document.h"
+#include "axyne/empty_state.h"
 #include "axyne/search.h"
 #include "axyne/explorer.h"
 #include "axyne/watcher.h"
@@ -582,8 +583,136 @@ typedef NS_ENUM(NSInteger, AxynePaletteHit) {
 
 @end
 
+/* Shortcut guide shown in place of the source editor while no document is
+ * open (axyne_documents_empty_state). It is not a text view: no caret, no line
+ * numbers, typing is swallowed. Rows are NSDictionaries with "label"
+ * (NSString) and "keys" (NSArray of NSString, one key chip each). */
+@interface AxyneEmptyEditorView : NSView {
+    NSColor *_backgroundColor;
+    NSColor *_labelColor;
+    NSColor *_keyTextColor;
+    NSColor *_chipFillColor;
+    NSColor *_chipStrokeColor;
+    NSArray *_guideRows;
+}
+- (void)setBackgroundColor:(NSColor *)background labelColor:(NSColor *)label
+              keyTextColor:(NSColor *)keyText chipFillColor:(NSColor *)chipFill
+           chipStrokeColor:(NSColor *)chipStroke;
+- (void)setGuideRows:(NSArray *)rows;
+@end
+
+static const CGFloat AXYNE_GUIDE_ROW_HEIGHT = 32;
+static const CGFloat AXYNE_GUIDE_CHIP_HEIGHT = 20;
+static const CGFloat AXYNE_GUIDE_CHIP_GAP = 4;
+static const CGFloat AXYNE_GUIDE_CHIP_PADDING = 7;
+static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
+
+@implementation AxyneEmptyEditorView
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        [self setAccessibilityElement:YES];
+        [self setAccessibilityRole:NSAccessibilityGroupRole];
+        [self setAccessibilityLabel:@"단축키 안내"];
+    }
+    return self;
+}
+
+- (void)dealloc
+{
+    [_backgroundColor release]; [_labelColor release]; [_keyTextColor release];
+    [_chipFillColor release]; [_chipStrokeColor release]; [_guideRows release];
+    [super dealloc];
+}
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (NSFocusRingType)focusRingType { return NSFocusRingTypeNone; }
+/* Typing in the empty state does nothing (no beep, no text). Menu key
+ * equivalents are resolved before keyDown: and keep working. */
+- (void)keyDown:(NSEvent *)event { (void)event; }
+
+- (void)setBackgroundColor:(NSColor *)background labelColor:(NSColor *)label
+              keyTextColor:(NSColor *)keyText chipFillColor:(NSColor *)chipFill
+           chipStrokeColor:(NSColor *)chipStroke
+{
+    [background retain]; [_backgroundColor release]; _backgroundColor = background;
+    [label retain]; [_labelColor release]; _labelColor = label;
+    [keyText retain]; [_keyTextColor release]; _keyTextColor = keyText;
+    [chipFill retain]; [_chipFillColor release]; _chipFillColor = chipFill;
+    [chipStroke retain]; [_chipStrokeColor release]; _chipStrokeColor = chipStroke;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setGuideRows:(NSArray *)rows
+{
+    [rows retain]; [_guideRows release]; _guideRows = rows;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    NSRect bounds = [self bounds];
+    NSFont *labelFont = [NSFont systemFontOfSize:13];
+    NSFont *keyFont = [NSFont systemFontOfSize:12];
+    NSDictionary *labelAttributes = @{ NSFontAttributeName: labelFont,
+        NSForegroundColorAttributeName: _labelColor != nil ? _labelColor : [NSColor grayColor] };
+    NSDictionary *keyAttributes = @{ NSFontAttributeName: keyFont,
+        NSForegroundColorAttributeName: _keyTextColor != nil ? _keyTextColor : [NSColor whiteColor] };
+    CGFloat labelWidth = 0, keysWidth = 0;
+    NSUInteger count = [_guideRows count];
+    [(_backgroundColor != nil ? _backgroundColor : [NSColor blackColor]) setFill];
+    NSRectFill(bounds);
+    if (count == 0) return;
+    for (NSDictionary *row in _guideRows) {
+        NSString *label = [row objectForKey:@"label"];
+        CGFloat width = 0;
+        labelWidth = MAX(labelWidth, ceil([label sizeWithAttributes:labelAttributes].width));
+        for (NSString *key in [row objectForKey:@"keys"]) {
+            width += MAX(AXYNE_GUIDE_CHIP_HEIGHT, ceil([key sizeWithAttributes:keyAttributes].width) +
+                2 * AXYNE_GUIDE_CHIP_PADDING) + AXYNE_GUIDE_CHIP_GAP;
+        }
+        keysWidth = MAX(keysWidth, width > 0 ? width - AXYNE_GUIDE_CHIP_GAP : 0);
+    }
+    CGFloat blockWidth = labelWidth + AXYNE_GUIDE_COLUMN_GAP + keysWidth;
+    CGFloat originX = MAX(8, floor((NSWidth(bounds) - blockWidth) / 2));
+    CGFloat originY = MAX(8, floor((NSHeight(bounds) - AXYNE_GUIDE_ROW_HEIGHT * (CGFloat)count) / 2));
+    CGFloat y = originY;
+    for (NSDictionary *row in _guideRows) {
+        NSString *label = [row objectForKey:@"label"];
+        CGFloat x = originX + labelWidth + AXYNE_GUIDE_COLUMN_GAP;
+        CGFloat labelHeight = ceil([label sizeWithAttributes:labelAttributes].height);
+        [label drawAtPoint:NSMakePoint(originX, y + floor((AXYNE_GUIDE_ROW_HEIGHT - labelHeight) / 2))
+            withAttributes:labelAttributes];
+        for (NSString *key in [row objectForKey:@"keys"]) {
+            NSSize extent = [key sizeWithAttributes:keyAttributes];
+            CGFloat width = MAX(AXYNE_GUIDE_CHIP_HEIGHT, ceil(extent.width) + 2 * AXYNE_GUIDE_CHIP_PADDING);
+            NSRect chip = NSMakeRect(x, y + floor((AXYNE_GUIDE_ROW_HEIGHT - AXYNE_GUIDE_CHIP_HEIGHT) / 2),
+                width, AXYNE_GUIDE_CHIP_HEIGHT);
+            NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(chip, 0.5, 0.5)
+                xRadius:4 yRadius:4];
+            if (_chipFillColor != nil) { [_chipFillColor setFill]; [shape fill]; }
+            if (_chipStrokeColor != nil) { [_chipStrokeColor setStroke]; [shape setLineWidth:1]; [shape stroke]; }
+            [key drawAtPoint:NSMakePoint(NSMinX(chip) + floor((width - extent.width) / 2),
+                    NSMinY(chip) + floor((AXYNE_GUIDE_CHIP_HEIGHT - extent.height) / 2))
+                withAttributes:keyAttributes];
+            x += width + AXYNE_GUIDE_CHIP_GAP;
+        }
+        y += AXYNE_GUIDE_ROW_HEIGHT;
+    }
+}
+
+@end
+
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
+    AxyneEmptyEditorView *_emptyView;
+    BOOL _emptyShown;
+    BOOL _emptyGuideDirty;
     NSBundle *_scintillaBundle;
     NSString *_editorLoadError;
     NSButton *_newButton;
@@ -828,6 +957,9 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
                         lParam:(intptr_t)lParam;
 - (void)loadScintillaView;
 - (BOOL)requireEditorFor:(NSString *)action;
+- (BOOL)isEmptyState;
+- (void)updateEmptyState;
+- (void)applyEmptyGuideTheme;
 - (BOOL)editorReadyForSave;
 - (AxyneExplorerNode *)selectedExplorerNode;
 - (void)editCut:(id)sender;
@@ -1253,6 +1385,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
+        _emptyView = [[AxyneEmptyEditorView alloc] initWithFrame:NSZeroRect];
+        [_emptyView setHidden:YES];
+        [self addSubview:_emptyView];
+        _emptyGuideDirty = YES;
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
         _targetButton = axyne_macos_toolbar_button(@"Runner 설정", self, @selector(configureRunnerAction:));
@@ -1361,9 +1497,75 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return &_documents.documents[_documents.active_index];
 }
 
+/* The editor area shows the shortcut guide instead of a text buffer while
+ * the active document is the hidden empty placeholder. */
+- (BOOL)isEmptyState
+{
+    return axyne_documents_empty_state(&_documents) != 0;
+}
+
+- (void)applyEmptyGuideTheme
+{
+    BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
+    BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
+        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
+    BOOL figma = reference && !light;
+    [_emptyView setBackgroundColor:axyne_preference_color(_preferences.theme.editor_background)
+        labelColor:axyne_preference_color(figma ? 0x737780 : _preferences.theme.muted)
+        keyTextColor:axyne_preference_color(figma ? 0xd5d8dd : _preferences.theme.text)
+        chipFillColor:axyne_preference_color(figma ? 0x1f2126 : _preferences.theme.panel)
+        chipStrokeColor:axyne_preference_color(figma ? 0x2a2d33 : _preferences.theme.border)];
+    _emptyGuideDirty = YES;
+    [self updateEmptyState];
+}
+
+/* Shows the guide and hides the Scintilla view (with its margins and
+ * scrollers) in the empty state, and the reverse otherwise. The hidden
+ * placeholder buffer still exists in the model; it is just never visible. */
+- (void)updateEmptyState
+{
+    BOOL empty = [self isEmptyState] && _editorView != nil;
+    NSWindow *window = [self window];
+    if (_emptyView == nil) return;
+    if (empty && (!_emptyShown || _emptyGuideDirty)) {
+        static const char *const labels[AXYNE_GUIDE_COUNT] = {
+            "새 파일", "파일 열기", "폴더 열기", "파일 이동", "명령 실행", "파일에서 찾기" };
+        AxyneGuideRow guide[AXYNE_GUIDE_COUNT];
+        size_t count = axyne_empty_guide_rows(&_preferences, 1, guide, AXYNE_GUIDE_COUNT);
+        NSMutableArray *rows = [NSMutableArray arrayWithCapacity:count];
+        for (size_t i = 0; i < count; ++i) {
+            NSMutableArray *keys = [NSMutableArray arrayWithCapacity:guide[i].key_count];
+            NSString *label = [NSString stringWithUTF8String:labels[guide[i].id]];
+            for (size_t k = 0; k < guide[i].key_count; ++k) {
+                NSString *key = [NSString stringWithUTF8String:guide[i].keys[k]];
+                if (key != nil) [keys addObject:key];
+            }
+            if (label != nil)
+                [rows addObject:@{ @"label": label, @"keys": keys }];
+        }
+        [_emptyView setGuideRows:rows];
+        _emptyGuideDirty = NO;
+    }
+    if (empty == _emptyShown && [_emptyView isHidden] == !empty) return;
+    _emptyShown = empty;
+    [_emptyView setHidden:!empty];
+    [_editorView setHidden:empty];
+    if (empty) {
+        /* A hidden Scintilla view must not keep the keyboard. */
+        NSResponder *responder = [window firstResponder];
+        if (window != nil && (responder == nil || ![responder isKindOfClass:[NSView class]] ||
+            [(NSView *)responder isDescendantOf:_editorView]))
+            (void)[window makeFirstResponder:_emptyView];
+    }
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
 - (void)refreshActionControls
 {
-    AxyneDocument *document = [self activeDocument];
+    [self updateEmptyState];
+    /* The hidden placeholder is not a document the user can act on. */
+    AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
     BOOL terminalActive = _terminalProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     BOOL savedDocument = document != NULL && !document->is_untitled &&
@@ -1379,6 +1581,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_saveButton setEnabled:document != NULL];
+    [_undoButton setEnabled:document != NULL];
+    [_redoButton setEnabled:document != NULL];
     NSString *target = _actionRunner.executable == NULL ? @"Runner 설정" :
         [[NSString stringWithUTF8String:_actionRunner.executable] lastPathComponent];
     [_targetButton setTitle:target];
@@ -1401,7 +1605,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
     SEL action = [menuItem action];
-    AxyneDocument *document = [self activeDocument];
+    /* Empty state: only the hidden placeholder exists, so there is nothing
+     * to save, close, build, search or edit. */
+    BOOL emptyState = [self isEmptyState];
+    AxyneDocument *document = emptyState ? NULL : [self activeDocument];
     BOOL hasDocument = document != NULL;
     BOOL savedDocument = hasDocument && !document->is_untitled &&
         document->path != NULL && !document->is_dirty;
@@ -1411,7 +1618,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         action == @selector(saveDocumentAs:))
         return hasDocument;
     if (action == @selector(closeDocument:))
-        return hasDocument && !axyne_document_tab_hidden(document);
+        return hasDocument;
     if (action == @selector(buildDocument:) ||
         action == @selector(runDocument:))
         return hasDocument && !terminalActive && !debuggerActive;
@@ -1444,11 +1651,11 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         return [self editorActionable] &&
             axyne_editor_comment_token(document->path) != NULL;
     if (action == @selector(zoomInEditor:) || action == @selector(zoomOutEditor:) ||
-        action == @selector(zoomResetEditor:)) return _editorView != nil;
+        action == @selector(zoomResetEditor:)) return _editorView != nil && !emptyState;
     if (action == @selector(toggleWordWrap:)) {
         [menuItem setState:_preferences.editor.word_wrap
             ? NSControlStateValueOn : NSControlStateValueOff];
-        return _editorView != nil;
+        return _editorView != nil && !emptyState;
     }
     if (action == @selector(toggleExplorer:)) {
         [menuItem setState:_explorerHidden ? NSControlStateValueOff : NSControlStateValueOn];
@@ -1470,7 +1677,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         return axyne_debugger_enabled_breakpoints(&_debugger) != 0;
     if (action == @selector(openPreferencesFile:)) return [self preferencesFileExists];
     if (action == @selector(undo:) || action == @selector(redo:)) {
-        if (_editorView == nil) return NO;
+        if (_editorView == nil || emptyState) return NO;
         return [self sendEditorMessage:action == @selector(undo:)
             ? SCI_CANUNDO : SCI_CANREDO wParam:0 lParam:0] != 0;
     }
@@ -1482,7 +1689,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             @selector(selectAll:);
         NSResponder *external = [self externalTextResponder];
         if (external != nil) return [external respondsToSelector:standard];
-        if (_editorView == nil) return NO;
+        if (_editorView == nil || emptyState) return NO;
         if (action == @selector(editPaste:))
             return [self sendEditorMessage:SCI_CANPASTE wParam:0 lParam:0] != 0;
         if (action == @selector(editSelectAll:)) return YES;
@@ -1718,6 +1925,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [(AxyneChromeButton *)_searchButton setStrokeColor:axyne_preference_color(
         reference ? 0x3a3d44 : _preferences.theme.border)];
     [self updateChromeTitles];
+    [self applyEmptyGuideTheme];
     if (_editorView != nil) {
         [self sendEditorMessage:SCI_STYLESETFORE wParam:32
                               lParam:axyne_editor_color(_preferences.theme.editor_text)];
@@ -1976,7 +2184,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
-    if ([self window] != nil)
+    /* In the empty state the editor stays hidden and keeps no focus. */
+    if ([self window] != nil && ![self isEmptyState])
         [[self window] makeFirstResponder:[(id)_editorView content]];
     return YES;
 }
@@ -1994,6 +2203,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)updateWindowTitle
 {
     AxyneDocument *doc = [self activeDocument];
+    if ([self isEmptyState]) {
+        [[self window] setTitle:@"Axyne"];
+        return;
+    }
     NSString *name = doc != NULL && doc->title != NULL
         ? [NSString stringWithUTF8String:doc->title] : @"Untitled";
     if (name == nil) name = @"Untitled";
@@ -2135,12 +2348,14 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)undo:(id)sender
 {
     (void)sender;
+    if ([self isEmptyState]) return;
     (void)[self sendEditorMessage:SCI_UNDO wParam:0 lParam:0];
 }
 
 - (void)redo:(id)sender
 {
     (void)sender;
+    if ([self isEmptyState]) return;
     (void)[self sendEditorMessage:SCI_REDO wParam:0 lParam:0];
 }
 
@@ -2170,6 +2385,16 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         ? axyne_documents_open_preview(&_documents, [path UTF8String], &index,
                                        &evicted, &replaced, &error)
         : axyne_documents_open(&_documents, [path UTF8String], &index, &error);
+    if (status == AXYNE_STATUS_BINARY) {
+        /* Nothing was opened: no tab is created and a preview tab stays. */
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setAlertStyle:NSAlertStyleInformational];
+        [alert setMessageText:[NSString stringWithFormat:@"바이너리 파일은 표시할 수 없습니다: %@",
+            [path lastPathComponent]]];
+        [alert addButtonWithTitle:@"확인"];
+        [alert runModal];
+        return;
+    }
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
         NSString *detail = [NSString stringWithUTF8String:error.message];
@@ -2644,8 +2869,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
  * terminal input owns the keyboard, and not without an open document. */
 - (BOOL)editorActionable
 {
-    return _editorView != nil && [self activeDocument] != NULL &&
-        [self externalTextResponder] == nil;
+    return _editorView != nil && ![self isEmptyState] &&
+        [self activeDocument] != NULL && [self externalTextResponder] == nil;
 }
 
 - (void)goToLine:(id)sender
@@ -2760,7 +2985,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     (void)sender;
     _panelHidden = !_panelHidden;
     if (_panelHidden && [self window] != nil && _editorView != nil)
-        [[self window] makeFirstResponder:[(id)_editorView content]];
+        [[self window] makeFirstResponder:[self isEmptyState]
+            ? (NSResponder *)_emptyView : (NSResponder *)[(id)_editorView content]];
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
 }
 
@@ -2917,13 +3143,15 @@ static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableString *out)
 - (void)saveDocument:(id)sender
 {
     (void)sender;
+    if ([self isEmptyState]) return;
     (void)[self saveActive];
 }
 
 - (void)saveDocumentAs:(id)sender
 {
     (void)sender;
-    if ([self activeDocument] == NULL || ![self editorReadyForSave]) return;
+    if ([self isEmptyState] || [self activeDocument] == NULL ||
+        ![self editorReadyForSave]) return;
     NSSavePanel *panel = [NSSavePanel savePanel];
     if ([panel runModal] == NSModalResponseOK)
         (void)[self saveActiveToPath:[[panel URL] path]];
@@ -3687,6 +3915,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 
 - (void)findOrReplace:(BOOL)replace
 {
+    if ([self isEmptyState]) return;
     NSString *q = [self askForText:replace ? @"Replace" : @"Find" label:@"Find text"];
     if ([q length] == 0 || ![self captureEditor]) return;
     NSString *r = replace ? [self askForText:@"Replace" label:@"Replace with"] : nil;
@@ -4136,12 +4365,14 @@ else [_terminalInput setStringValue:@""];
 - (void)buildDocument:(id)sender
 {
     (void)sender;
+    if ([self isEmptyState]) return;
     [self startAction:NO];
 }
 
 - (void)runDocument:(id)sender
 {
     (void)sender;
+    if ([self isEmptyState]) return;
     [self startAction:YES];
 }
 
@@ -4223,6 +4454,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
         MAX(0, width - [self sidebarWidth]), MAX(0, bottomTop - editorTop))];
+    [_emptyView setFrame:[_editorView frame]];
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
@@ -4553,14 +4785,18 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
         color:_lastExitFailed ? axyne_preference_color(0xe5a445) :
               (_hasExitStatus ? axyne_preference_color(0xa3c98a) : muted) family:@"SF Pro Text"];
-    NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
-    NSInteger line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
-    NSInteger column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
-    NSString *editing = [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    UTF-8",
-        (long)line, (long)column, _preferences.editor.insert_spaces ? @"공백" : @"탭",
-        _preferences.editor.tab_width];
-    [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
-        size:11 color:text family:@"SF Pro Text"];
+    if (![self isEmptyState]) {
+        /* No editor position in the empty state, so the whole editing
+         * summary (line/column, indent style, encoding) stays blank. */
+        NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+        NSInteger line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
+        NSInteger column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
+        NSString *editing = [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    UTF-8",
+            (long)line, (long)column, _preferences.editor.insert_spaces ? @"공백" : @"탭",
+            _preferences.editor.tab_width];
+        [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
+            size:11 color:text family:@"SF Pro Text"];
+    }
     if (_editorView == nil)
         [self drawLabel:@"Required Scintilla framework failed to load"
             at:NSMakePoint([self sidebarWidth] + 24, editorTop + 24) size:12 color:muted family:@"Menlo"];
@@ -4618,6 +4854,9 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_editorView removeFromSuperview];
     [_editorView release];
     _editorView = nil;
+    [_emptyView removeFromSuperview];
+    [_emptyView release];
+    _emptyView = nil;
     [_newButton release]; [_openButton release]; [_saveButton release];
     [_undoButton release]; [_redoButton release];
     [_buildButton release]; [_runButton release];
@@ -4750,7 +4989,9 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     _paletteOverlay = nil;
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
-    if (restore && _editorView != nil) [[self window] makeFirstResponder:_editorView];
+    if (restore && _editorView != nil)
+        [[self window] makeFirstResponder:[self isEmptyState]
+            ? (NSResponder *)_emptyView : (NSResponder *)_editorView];
 }
 
 - (void)layoutPalette
@@ -4928,7 +5169,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 
 - (void)paletteGotoLine:(size_t)line column:(size_t)column
 {
-    if (_editorView == nil) return;
+    if (_editorView == nil || [self isEmptyState]) return;
     NSInteger count = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
     line = axyne_palette_clamp_line(line, count > 0 ? (size_t)count : 1);
     NSInteger start = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:line - 1 lParam:0];
@@ -5138,8 +5379,10 @@ static void axyne_install_menu(NSApplication *application,
         action:@selector(closeDocument:) keyEquivalent:@"w"];
     [closeItem setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
+    /* Command+Shift+O (an upper-case equivalent implies Shift, as with
+     * Save As); the empty-state shortcut guide shows the same chord. */
     NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"폴더 열기…"
-        action:@selector(openWorkspace:) keyEquivalent:@""];
+        action:@selector(openWorkspace:) keyEquivalent:@"O"];
     [workspaceItem setTarget:workspace];
     NSMenuItem *workspacePreferences = [fileMenu addItemWithTitle:@"작업 영역 설정…"
         action:@selector(showWorkspacePreferences:) keyEquivalent:@""];
