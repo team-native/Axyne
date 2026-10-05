@@ -793,8 +793,10 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneRuntimeList _runtimes;
     BOOL _runtimesDiscovered;
     BOOL _runtimeDiscoveryScheduled;
+    BOOL _workspaceRefreshPending; /* one coalesced explorer reload is queued */
     BOOL _buildMenuOpen; /* chevron points up while the popup is open */
     AxyneDiscoveryBox *_discoveryBox;
+    AxyneDiscoveryBox *_refreshBox; /* assign-only target of the queued reload */
     /* Plan whose run step starts when its build step exits with 0. */
     AxyneLanguagePlan _pendingPlan;
     BOOL _pendingRun;
@@ -1480,6 +1482,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [_terminalOutput setAutoresizingMask:NSViewWidthSizable];
         [[_terminalOutput textContainer] setWidthTracksTextView:YES];
         [_terminalOutput setTextContainerInset:NSMakeSize(0, 6)];
+        /* The log can hold up to 1 MiB of text. Contiguous layout keeps glyph
+         * and line-fragment data for all of it; non-contiguous layout lays out
+         * only what is scrolled into view. */
+        [[_terminalOutput layoutManager] setAllowsNonContiguousLayout:YES];
         [self addSubview:_terminalScroll];
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
@@ -2327,16 +2333,17 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (doc == NULL || _editorView == nil) return YES;
     NSInteger length = [self sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
     if (length < 0 || (uint64_t)length >= SIZE_MAX) return NO;
-    char *text = malloc((size_t)length + 1);
+    /* Borrow Scintilla's contiguous buffer instead of copying the whole
+     * document on every capture; it stays valid until the editor changes,
+     * and set_contents copies it only when the text differs. */
+    const char *text = (const char *)(intptr_t)[self sendEditorMessage:SCI_GETCHARACTERPOINTER
+                                                                wParam:0 lParam:0];
     if (text == NULL) return NO;
-    (void)[self sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)length + 1
-                            lParam:(intptr_t)text];
     BOOL changed = doc->length != (size_t)length ||
         memcmp(doc->contents, text, (size_t)length) != 0;
     BOOL modified = [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0;
     AxyneStatus status = changed ? axyne_documents_set_contents(&_documents,
         _documents.active_index, text, (size_t)length, NULL) : AXYNE_STATUS_OK;
-    free(text);
     if (status == AXYNE_STATUS_OK) {
         if (modified) (void)axyne_documents_mark_dirty(&_documents,
             _documents.active_index, NULL);
@@ -2795,7 +2802,26 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (void)workspaceEvent
 {
-    [self refreshExplorer];
+    /* A build or `git status` can emit thousands of events in a burst; each
+     * used to rebuild the whole explorer list. Queue one reload and let the
+     * burst collapse into it. The box holds no retain (see
+     * scheduleRuntimeDiscovery); dealloc clears its target. */
+    if (_workspaceRefreshPending) return;
+    AxyneDiscoveryBox *box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    if (box == NULL) { [self refreshExplorer]; return; }
+    _workspaceRefreshPending = YES;
+    box->target = self;
+    _refreshBox = box;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (box->target != nil) {
+            AxyneWorkspaceView *view = box->target;
+            view->_refreshBox = NULL;
+            view->_workspaceRefreshPending = NO;
+            [view refreshExplorer];
+        }
+        free(box);
+    });
 }
 
 - (BOOL)refreshExplorer
@@ -5532,6 +5558,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     }
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
+    if (_refreshBox != NULL) _refreshBox->target = nil;
     axyne_palette_ctl_destroy(&_palette);
     if (_gitRun != NULL) {
         AxyneMacGitRun *run = _gitRun;

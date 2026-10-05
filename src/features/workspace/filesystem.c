@@ -807,6 +807,43 @@ AxyneStatus axyne_fs_read_head(const char *utf8_path, size_t max_bytes,
     return axyne_error(error, AXYNE_STATUS_OK, "");
 }
 
+AxyneStatus axyne_fs_file_contains_nul(const char *utf8_path,
+                                       int *contains_nul, AxyneError *error)
+{
+    FILE *file;
+    unsigned char buffer[32 * 1024];
+    size_t read_size;
+    int found = 0;
+    if (contains_nul == NULL || !axyne_valid_path(utf8_path))
+        return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "path and output are required");
+    *contains_nul = 0;
+#ifdef _WIN32
+    {
+        wchar_t *wide = axyne_wide(utf8_path);
+        if (wide == NULL)
+            return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "path is not valid UTF-8 or memory is unavailable");
+        if (_wfopen_s(&file, wide, L"rb") != 0) file = NULL;
+        free(wide);
+    }
+#else
+    file = fopen(utf8_path, "rb");
+#endif
+    if (file == NULL) {
+        return axyne_system_error(error, axyne_current_open_error(), "open");
+    }
+    while (!found && (read_size = fread(buffer, 1, sizeof(buffer), file)) != 0)
+        found = memchr(buffer, '\0', read_size) != NULL;
+    if (!found && ferror(file)) {
+        fclose(file);
+        return axyne_error(error, AXYNE_STATUS_IO_ERROR, "unable to read file");
+    }
+    fclose(file);
+    *contains_nul = found;
+    return axyne_error(error, AXYNE_STATUS_OK, "");
+}
+
 AxyneStatus axyne_fs_write_file(const char *utf8_path, const char *contents,
                                 size_t length, AxyneError *error)
 {

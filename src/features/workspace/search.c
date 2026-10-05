@@ -156,6 +156,11 @@ static void walk(const char *directory, SearchWalk *ctx)
             }
         } else {
             char *data = NULL; size_t length = 0;
+            int has_nul = 0;
+            /* Reject binary files by streaming; reading one whole just to
+               find its first NUL costs memory proportional to its size. */
+            if (axyne_fs_file_contains_nul(entry->path, &has_nul, NULL) != AXYNE_STATUS_OK ||
+                has_nul) continue;
             if (axyne_fs_read_file(entry->path, &data, &length, NULL) != AXYNE_STATUS_OK) continue;
             if (!binary_data(data, length)) {
                 size_t at = 0, previous = SIZE_MAX;

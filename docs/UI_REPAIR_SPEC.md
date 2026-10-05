@@ -331,3 +331,40 @@ Typing in the code editor shows a completion list and Tab accepts the selected e
 Known gaps: the macOS code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run, so the popup keys were not exercised in a real editor.
 
 Units: shared completion core with tests; Windows adapter; macOS adapter; this record.
+
+## Memory optimization
+
+Report: RSS rises from about 90 MB to 244 MB while using the UI and the file system. No Windows or macOS build could be run or profiled for this work, so the real peak of the reported scenario was not reproduced. The shared C core was measured on Linux (ASan/UBSan/LSan over the document, search, palette, explorer and preferences test cases: no leaks, no overflows); everything in the UI layers below is code reading plus a compile check. Every change keeps behavior identical; changes that would alter behavior are listed as proposals only.
+
+| Finding | Evidence | Status |
+|---|---|---|
+| Folder search read every file whole before checking for a NUL byte, so a large binary file (build output, archive) was fully loaded just to be skipped | Harness over a 300 MB zero-filled file plus three text files: peak RSS 294 MB before, 2.8 MB after the streaming probe | CONFIRMED |
+| Every editor capture (save, open, close tab, find, LSP sync, ...) copied the whole document out of Scintilla, then compared it with the retained copy | Code reading (`axyne_capture_editor_internal`, `captureEditorSnapshot`): one transient allocation the size of the active file per capture | CONFIRMED (code), size effect ASSUMED |
+| Loading a file recorded the insertion in Scintilla's undo buffer (a second full copy) and emptied the buffer right after | Code reading of `editor_document.h`; Scintilla `CellBuffer::InsertString` appends the text to the undo history when collection is on | CONFIRMED (code), size effect ASSUMED |
+| Each file-watch event, at any depth (a build, `git status`, the IDE's own writes), posted a message that rebuilt the entire explorer list and repainted the window; a burst queued thousands of full rebuilds | Code reading of the Windows event handler and the macOS `workspaceEvent`; the watcher recurses over the whole tree and reports modifications | CONFIRMED (code), RSS effect ASSUMED (allocator churn and fragmentation) |
+| Appending terminal output read the whole log (up to 1 MiB) into a temporary buffer, then copied it again into the combined buffer, per output chunk | Code reading of `axyne_terminal_append` (Windows) | CONFIRMED (code), effect ASSUMED |
+| The macOS output `NSTextView` holds up to 1 MiB of text with contiguous layout, which keeps glyph and line data for the entire log | Hypothesis from how TextKit 1 lays out text; not measured | ASSUMED |
+| Core leak check: explorer reload, palette walk, search, documents, preferences | ASan/LSan clean on all listed test cases; 200 repeated reloads keep a constant node count | CONFIRMED |
+
+Changes (one commit each):
+
+| Change | Where |
+|---|---|
+| `axyne_fs_file_contains_nul` streams a file through a 32 KiB buffer; folder search skips a file that contains a NUL before it reads the file. Same files are skipped as before (a NUL anywhere), so results are unchanged | `filesystem.c/.h`, `search.c`, test `memory-limits` |
+| Undo collection is off while the text of a document is inserted, then on again; the undo buffer is still emptied afterwards. Notifications were already ignored during a load | `editor_document.h` (both platforms) |
+| The capture compares against and copies from `SCI_GETCHARACTERPOINTER` (valid until the editor changes) instead of an allocated copy | `ui_windows.c`, `ui_macos.m` |
+| Queued explorer events collapse into one reload: Windows drains the already posted events before reloading; macOS queues one reload 50 ms out and ignores events until it runs | `ui_windows.c`, `ui_macos.m` |
+| `axyne_terminal_append` reads the existing text directly into the combined buffer; the macOS output view allows non-contiguous layout | `ui_windows.c`, `ui_macos.m` |
+
+Proposals that need your decision (not implemented, they change behavior or are unmeasured):
+
+1. Each open document keeps a second copy of its text in the core (`AxyneDocument.contents`) next to Scintilla's buffer. Dropping it for inactive clean tabs would remove a full copy per open file, but LSP open/change, save and the capture comparison read it, so it needs a reload-on-activation rule.
+2. `axyne_search_workspace` keeps every match in memory with no limit while the UI shows 20. A cap, or skipping files above a size, changes what search reports.
+3. `axyne_search_workspace` currently never reports a match: in `search.c` the loop condition `at > previous` starts with `previous = SIZE_MAX`, so the first hit is rejected. The existing test only checks `count <= 3`. Fixing it is a visible behavior change and, once results appear, makes item 2 matter.
+4. Windows search and the palette file walk follow directory junctions and symbolic links to directories (the POSIX listing does not). Search has no depth limit, so a link loop recurses until the path limit.
+5. The command palette walk lists `.git` contents (the explorer and search hide them); results are capped at 20000 paths, so the cost is bounded.
+6. Windows renders the editor with DirectWrite by default (a preference). Its text surfaces and per-process Direct2D/DirectWrite state are a likely part of the first-paint jump; switching the default to GDI is user-visible.
+7. Every tab switch re-applies preferences and styles and runs `SCI_COLOURISE` over the whole document; limiting it to the visible range needs a check of the lexer-change behavior on real Scintilla.
+8. The output panels cap at 1 MiB; a smaller cap lowers the macOS `NSTextView` and Windows edit-control cost but cuts visible history.
+
+Not verified: no Windows or macOS binary was built or run for this record, so no real RSS before/after is available. The Windows file was compile-checked with zig cc; `ui_macos.m` was reviewed by eye and never compiled.

@@ -53,7 +53,12 @@ static int axyne_editor_load_document(AxyneDocument *document,
         send(editor, SCI_GETDOCPOINTER, 0, 0) == created;
     if (loaded) {
         send(editor, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
+        /* The undo buffer is emptied right after loading, so recording the
+         * insertion would only keep a second copy of the whole file alive
+         * until then. Collection is per document; turn it back on after. */
+        send(editor, SCI_SETUNDOCOLLECTION, 0, 0);
         send(editor, SCI_ADDTEXT, document->length, (intptr_t)document->contents);
+        send(editor, SCI_SETUNDOCOLLECTION, 1, 0);
         loaded = send(editor, SCI_GETSTATUS, 0, 0) == SC_STATUS_OK &&
             send(editor, SCI_GETTEXTLENGTH, 0, 0) == (intptr_t)document->length;
     }
