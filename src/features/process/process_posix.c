@@ -4,9 +4,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -98,6 +100,67 @@ static int set_nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL);
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+/* Startup has a fixed deadline, not a retry policy. The child positively
+ * acknowledges ownership of its group; EOF alone cannot prove that setup ran.
+ * The same close-on-exec pipe then reports exec failure or successful exec. */
+static int read_startup(int fd, int *group_ready, int *child_errno)
+{
+    struct timespec deadline, now;
+    int packet;
+    size_t offset = 0;
+    *group_ready = 0;
+    *child_errno = 0;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return 0;
+    deadline.tv_sec += 10;
+    for (;;) {
+        struct pollfd descriptor = { fd, POLLIN, 0 };
+        long remaining;
+        int result;
+        ssize_t amount;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+        remaining = (long)(deadline.tv_sec - now.tv_sec) * 1000 +
+                    (deadline.tv_nsec - now.tv_nsec) / 1000000;
+        if (remaining <= 0) { errno = ETIMEDOUT; return 0; }
+        result = poll(&descriptor, 1, (int)remaining);
+        if (result < 0 && errno == EINTR) continue;
+        if (result == 0) { errno = ETIMEDOUT; return 0; }
+        if (result < 0) return 0;
+        amount = read(fd, (char *)&packet + offset, sizeof(packet) - offset);
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) return 0;
+        if (amount == 0) {
+            if (offset == 0 && *group_ready) return 1;
+            errno = EIO;
+            return 0;
+        }
+        offset += (size_t)amount;
+        if (offset != sizeof(packet)) continue;
+        if (packet != 0) { *child_errno = packet; return 1; }
+        if (*group_ready) { errno = EIO; return 0; }
+        *group_ready = 1;
+        offset = 0;
+    }
+}
+
+/* Only async-signal-safe operations are allowed between fork and exec. A
+ * single integer fits in PIPE_BUF, so interrupted writes can be retried
+ * without producing a partial packet. */
+static int write_startup(int fd, int value)
+{
+    ssize_t amount;
+    do { amount = write(fd, &value, sizeof(value)); }
+    while (amount < 0 && errno == EINTR);
+    return amount == (ssize_t)sizeof(value);
+}
+
+static void stop_startup_child(pid_t child, int group_ready)
+{
+    if (group_ready) (void)kill(-child, SIGKILL);
+    /* Also cover failure before the child creates the dedicated group. */
+    (void)kill(child, SIGKILL);
+    while (waitpid(child, NULL, 0) < 0 && errno == EINTR) { }
 }
 
 static char *find_executable(const char *executable)
@@ -271,8 +334,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
                                 AxyneProcess **out, AxyneError *error)
 {
     int input[2] = { -1, -1 }, output[2] = { -1, -1 }, errors[2] = { -1, -1 };
-    int exec_error[2] = { -1, -1 }, child_errno = 0;
-    ssize_t received;
+    int exec_error[2] = { -1, -1 }, child_errno = 0, group_ready = 0;
     pid_t child;
     char *executable = NULL;
     char **environment = NULL;
@@ -302,7 +364,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     arguments[0] = (char *)spec->executable;
     for (i = 0; i < spec->argument_count; ++i) arguments[i + 1] = (char *)spec->arguments[i];
     if (pipe(input) != 0 || pipe(output) != 0 || pipe(errors) != 0 || pipe(exec_error) != 0 ||
-        !set_cloexec(exec_error[1])) {
+        !set_cloexec(exec_error[0]) || !set_cloexec(exec_error[1])) {
         status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR, "Unable to create process pipes");
         goto cleanup;
     }
@@ -313,38 +375,45 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     }
     if (child == 0) {
         int saved_errno;
+        close(exec_error[0]);
         if (setpgid(0, 0) != 0) {
-            saved_errno = errno; (void)write(exec_error[1], &saved_errno, sizeof(saved_errno)); _exit(127);
+            saved_errno = errno; (void)write_startup(exec_error[1], saved_errno); _exit(127);
         }
-        close(input[1]); close(output[0]); close(errors[0]); close(exec_error[0]);
+        if (!write_startup(exec_error[1], 0)) _exit(127);
+        close(input[1]); close(output[0]); close(errors[0]);
         if (dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0 ||
             dup2(errors[1], STDERR_FILENO) < 0 ||
             (spec->working_directory != NULL && chdir(spec->working_directory) != 0)) {
-            saved_errno = errno; (void)write(exec_error[1], &saved_errno, sizeof(saved_errno)); _exit(127);
+            saved_errno = errno; (void)write_startup(exec_error[1], saved_errno); _exit(127);
         }
         close(input[0]); close(output[1]); close(errors[1]);
         execve(executable, arguments, environment);
-        saved_errno = errno; (void)write(exec_error[1], &saved_errno, sizeof(saved_errno)); _exit(127);
+        saved_errno = errno; (void)write_startup(exec_error[1], saved_errno); _exit(127);
     }
-    /* The child creates its group before exec; the parent closes the race
-       before the process handle can be returned to the caller. */
-    if (setpgid(child, child) != 0 &&
-        !(errno == EACCES && getpgid(child) == child)) {
-        (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0);
-        status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR,
-                                         "Unable to create child process group");
-        goto cleanup;
-    }
+    /* Only the child sets its group. A parent setpgid/getpgid check races
+     * both child-owned setup and short-lived children exiting on macOS. */
     close(input[0]); input[0] = -1; close(output[1]); output[1] = -1;
     close(errors[1]); errors[1] = -1; close(exec_error[1]); exec_error[1] = -1;
-    do { received = read(exec_error[0], &child_errno, sizeof(child_errno)); }
-    while (received < 0 && errno == EINTR);
+    if (!read_startup(exec_error[0], &group_ready, &child_errno)) {
+        int saved_errno = errno;
+        char message[256];
+        stop_startup_child(child, group_ready);
+        (void)snprintf(message, sizeof(message), "Unable to confirm child process startup: %s",
+                       strerror(saved_errno));
+        status = axyne_process_set_error(error, AXYNE_STATUS_IO_ERROR, message);
+        goto cleanup;
+    }
     close(exec_error[0]); exec_error[0] = -1;
-    if (received > 0) {
-        (void)waitpid(child, NULL, 0);
+    if (child_errno != 0) {
+        char message[256];
+        stop_startup_child(child, group_ready);
+        (void)snprintf(message, sizeof(message), "%s: %s",
+                       group_ready ? "Unable to execute child process" :
+                                     "Unable to create child process group",
+                       strerror(child_errno));
         status = axyne_process_set_error(error,
             child_errno == EACCES ? AXYNE_STATUS_PERMISSION_DENIED : AXYNE_STATUS_IO_ERROR,
-            "Unable to execute child process");
+            message);
         goto cleanup;
     }
     if (!set_nonblocking(output[0]) || !set_nonblocking(errors[0])) {
