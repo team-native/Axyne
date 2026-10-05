@@ -796,6 +796,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     BOOL _workspaceRefreshPending; /* one coalesced explorer reload is queued */
     BOOL _buildMenuOpen; /* chevron points up while the popup is open */
     AxyneDiscoveryBox *_discoveryBox;
+    AxyneDiscoveryBox *_refreshBox; /* assign-only target of the queued reload */
     /* Plan whose run step starts when its build step exits with 0. */
     AxyneLanguagePlan _pendingPlan;
     BOOL _pendingRun;
@@ -1097,7 +1098,6 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)renameExplorerItem:(id)sender;
 - (void)removeExplorerItem:(id)sender;
 - (void)workspaceEvent;
-- (void)flushWorkspaceRefresh;
 - (BOOL)refreshExplorer;
 - (void)scrollTabsBy:(CGFloat)delta;
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
@@ -2804,17 +2804,24 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     /* A build or `git status` can emit thousands of events in a burst; each
      * used to rebuild the whole explorer list. Queue one reload and let the
-     * burst collapse into it. */
+     * burst collapse into it. The box holds no retain (see
+     * scheduleRuntimeDiscovery); dealloc clears its target. */
     if (_workspaceRefreshPending) return;
+    AxyneDiscoveryBox *box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    if (box == NULL) { [self refreshExplorer]; return; }
     _workspaceRefreshPending = YES;
-    [self performSelector:@selector(flushWorkspaceRefresh) withObject:nil
-               afterDelay:0.05];
-}
-
-- (void)flushWorkspaceRefresh
-{
-    _workspaceRefreshPending = NO;
-    [self refreshExplorer];
+    box->target = self;
+    _refreshBox = box;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (box->target != nil) {
+            AxyneWorkspaceView *view = box->target;
+            view->_refreshBox = NULL;
+            view->_workspaceRefreshPending = NO;
+            [view refreshExplorer];
+        }
+        free(box);
+    });
 }
 
 - (BOOL)refreshExplorer
@@ -5551,6 +5558,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     }
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
+    if (_refreshBox != NULL) _refreshBox->target = nil;
     axyne_palette_ctl_destroy(&_palette);
     if (_gitRun != NULL) {
         AxyneMacGitRun *run = _gitRun;
