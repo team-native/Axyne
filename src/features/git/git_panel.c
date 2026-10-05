@@ -695,6 +695,14 @@ AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
     status = panel_run(utf8_workspace, arguments, argument_count, 1, 0, 0,
                        &result, &git_message, error);
     if (status != AXYNE_STATUS_OK) return status;
+    /* A captured prefix is not a complete history window. In particular,
+     * missing parent records must not make the UI hide "load more". */
+    if (result.output_truncated) {
+        axyne_git_result_free(&result);
+        axyne_git_string_free(git_message);
+        return panel_error(error, AXYNE_STATUS_IO_ERROR,
+                           "Commit graph exceeds the Git output limit");
+    }
     if (result.exit_code != 0) {
         /* "does not have any commits yet" is an empty repository. */
         int empty = git_message != NULL &&

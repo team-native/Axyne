@@ -26,6 +26,7 @@
 #include "axyne/debugger.h"
 #include "axyne/preferences.h"
 #include "axyne/git.h"
+#include "axyne/git_graph_geometry.h"
 #include "axyne/git_panel.h"
 #include "axyne/lsp.h"
 #include "axyne/palette_controller.h"
@@ -118,7 +119,6 @@ enum {
     AXYNE_GIT_BUTTON = 24,
     AXYNE_GIT_GRAPH_ROW = 36,
     AXYNE_GIT_LANE_WIDTH = 12,
-    AXYNE_GIT_LANE_MIN = 4,
     AXYNE_GIT_PAD = 8,
     AXYNE_GIT_GAP = 6,
     AXYNE_GIT_MESSAGE = 5030, /* commit message EDIT control id */
@@ -5701,6 +5701,7 @@ typedef struct AxyneGitPanelJob {
     int has_staged;
     AxyneGitGraph graph; /* refresh jobs only */
     int have_graph;
+    char *graph_error;   /* reported even when the changes snapshot succeeded */
     int graph_count;     /* refresh jobs: commits to read (set on the UI thread) */
     /* Diff and commit-file jobs: they never touch the snapshot and run beside
      * other jobs; only the newest request (serial) is applied. */
@@ -5722,6 +5723,7 @@ static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
     free(job->workspace);
     free(job->op_error);
     free(job->error);
+    free(job->graph_error);
     free(job->path);
     free(job->orig_path);
     free(job->hash);
@@ -5760,7 +5762,10 @@ static void axyne_git_panel_job_snapshot(AxyneGitPanelJob *job)
         memset(&error, 0, sizeof(error));
         job->have_graph = axyne_git_graph(job->workspace,
             job->graph_count, &job->graph, &error) == AXYNE_STATUS_OK;
-        if (!job->have_graph) axyne_git_graph_free(&job->graph);
+        if (!job->have_graph) {
+            job->graph_error = axyne_git_panel_message_copy(&error);
+            axyne_git_graph_free(&job->graph);
+        }
     }
 }
 
@@ -6239,6 +6244,8 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
             /* An older job finishing while a larger request is queued keeps
              * the loading state until that request arrives. */
             if (current) git->graph_loading = 0;
+            if (current && job->graph_error != NULL)
+                axyne_git_panel_show_report(window, state, job->graph_error);
             axyne_git_expansion_sync(git);
             if (git->selected_hash != NULL) {
                 size_t i;
@@ -6751,27 +6758,25 @@ static COLORREF axyne_git_lane_color(int index)
 
 /* Width of one lane cell: shrinks when the graph has many lanes so the lane
  * strip never takes more than 40% of the sidebar. */
-static int axyne_git_lane_width(const AxyneGitGraph *graph, int list_width)
+static double axyne_git_lane_width(const AxyneGitGraph *graph, int list_width)
 {
     int cap = list_width * 40 / 100;
     int lanes = graph->max_lanes > 0 ? graph->max_lanes : 1;
-    int width = AXYNE_GIT_LANE_WIDTH;
-    if (lanes * width > cap) width = cap / lanes;
-    return width < AXYNE_GIT_LANE_MIN ? AXYNE_GIT_LANE_MIN : width;
+    return axyne_git_graph_lane_width(lanes, AXYNE_GIT_LANE_WIDTH, cap);
 }
 
-static int axyne_git_lane_strip(const AxyneGitGraph *graph, int lane_width,
+static int axyne_git_lane_strip(const AxyneGitGraph *graph, double lane_width,
                                 int list_width)
 {
     int cap = list_width * 40 / 100;
-    int strip = (graph->max_lanes > 0 ? graph->max_lanes : 1) * lane_width;
+    int strip = (int)((graph->max_lanes > 0 ? graph->max_lanes : 1) * lane_width + 0.5);
     return strip < cap ? strip : cap;
 }
 
 /* Draws the lane cells of one row (see the contract in git_panel.h): `y` is
  * the row top, `h` its height, `x0` the left edge of cell 0. */
 static void axyne_git_paint_lanes(HDC dc, const AxyneGitGraphRow *row, int x0,
-                                  int lane_width, int y, int h, int is_head,
+                                  double lane_width, int y, int h, int is_head,
                                   COLORREF behind)
 {
     int ym = y + h / 2;
@@ -6893,7 +6898,7 @@ static int axyne_git_row_is_head(const AxyneGitGraphRow *row)
 
 static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
                                       const AxyneGitGraphRow *row, int selected,
-                                      int right, int lane_width, int strip, int y)
+                                      int right, double lane_width, int strip, int y)
 {
     COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
     int text_x = 10 + strip + 8;
@@ -6951,7 +6956,7 @@ static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
  * stays continuous. A lane continues when the cell leaves through its bottom
  * edge: DOWN, or the FORK connector that ends there. */
 static void axyne_git_paint_lane_continuation(HDC dc, const AxyneGitGraphRow *row,
-                                              int x0, int lane_width, int y, int h)
+                                              int x0, double lane_width, int y, int h)
 {
     int i;
     for (i = 0; i < row->lane_count; ++i) {
@@ -6971,7 +6976,7 @@ static void axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
                                             const AxyneGitGraphRow *commit,
                                             const AxyneGitItem *item,
                                             const AxyneGitPanelUi *git, int right,
-                                            int lane_width, int strip, int y)
+                                            double lane_width, int strip, int y)
 {
     const AxyneGitChange *change = item->kind == AXYNE_GIT_ITEM_FILE
         ? &git->expanded_files.items[item->file] : NULL;
@@ -7046,7 +7051,7 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
     const AxyneGitPanelUi *git = &state->git_panel;
     RECT label = layout->graph_label;
     int width = layout->graph_list.right - layout->graph_list.left;
-    int lane_width = axyne_git_lane_width(&git->graph, width);
+    double lane_width = axyne_git_lane_width(&git->graph, width);
     int strip = axyne_git_lane_strip(&git->graph, lane_width, width);
     int y = layout->graph_list.top;
     int saved_dc;

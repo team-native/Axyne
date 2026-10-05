@@ -29,7 +29,7 @@ typedef struct AxyneGitPanelTheme {
 - (const char *)gitPanelWorkspace:(AxyneGitPanelView *)panel;
 /* A commit, push, pull or other Git menu operation is running. */
 - (BOOL)gitPanelBusy:(AxyneGitPanelView *)panel;
-/* Shows text in the output panel (stage / unstage errors only). */
+/* Shows text in the output panel (stage / unstage and graph load errors). */
 - (void)gitPanel:(AxyneGitPanelView *)panel showText:(NSString *)text;
 /* A file's unified diff (valid UTF-8) to show as a read-only tab in the
  * editor area under `title`; a later call replaces the previous diff tab. */
