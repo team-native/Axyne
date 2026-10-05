@@ -85,6 +85,16 @@ static const AxyneSyntaxStyle yaml_styles[] = {
     { 6, PURPLE }, { 7, GREEN }, { 9, PLAIN }
 };
 
+/* SCE_DIFF_*: comment 1 (text outside the diff, e.g. the commit heading),
+ * command 2 (diff --git), header 3 (---/+++), position 4 (@@ ... @@),
+ * deleted 5, added 6, changed 7, patch add/delete 8/9, removed patch
+ * add/delete 10/11. Used by the read-only Git diff tabs. */
+static const AxyneSyntaxStyle diff_styles[] = {
+    { 1, COMMENT }, { 2, KEYWORD }, { 3, ORANGE }, { 4, PURPLE },
+    { 5, 0xe07f7f }, { 6, GREEN }, { 7, KEYWORD }, { 8, GREEN },
+    { 9, 0xe07f7f }, { 10, GREEN }, { 11, 0xe07f7f }
+};
+
 #define C_KW "auto break case const continue default do else enum extern for " \
     "goto if inline register restrict return sizeof static struct switch " \
     "typedef union volatile while"
@@ -238,6 +248,7 @@ static const AxyneSyntaxLanguage languages[] = {
       STYLES(cmake_styles) },
     { "yaml", "yaml",
       { "true false yes no on off null", NULL, NULL, NULL }, STYLES(yaml_styles) },
+    { "diff", "diff", { NULL, NULL, NULL, NULL }, STYLES(diff_styles) },
     { "text", "null", { NULL, NULL, NULL, NULL }, NULL, 0 }
 };
 
@@ -265,6 +276,7 @@ static const ExtensionMap extensions[] = {
     { "md", "markdown" }, { "markdown", "markdown" },
     { "cmake", "cmake" },
     { "yml", "yaml" }, { "yaml", "yaml" },
+    { "diff", "diff" }, { "patch", "diff" },
     { "txt", "text" }
 };
 

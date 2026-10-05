@@ -25,7 +25,7 @@ int main(void)
     size_t i, k;
     static const char *ids[] = { "cpp", "java", "javascript", "typescript",
         "swift", "kotlin", "slint", "go", "rust", "python", "json", "css", "html", "xml", "bash",
-        "markdown", "cmake", "yaml", "text" };
+        "markdown", "cmake", "yaml", "diff", "text" };
 
     expect(NULL, "cpp", "cpp");
     expect("", "cpp", "cpp");
@@ -50,6 +50,8 @@ int main(void)
     expect("x.cmake", "cmake", "cmake");
     expect("ci.yml", "yaml", "yaml");
     expect("ci.YAML", "yaml", "yaml");
+    expect("fix.diff", "diff", "diff");
+    expect("0001-x.PATCH", "diff", "diff");
     expect("notes.txt", "text", "null");
     expect("/dir.d/Makefile", "text", "null");
     expect("file.", "text", "null");

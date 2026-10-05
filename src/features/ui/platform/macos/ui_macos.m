@@ -1701,7 +1701,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [_debugBreakpoint setEnabled:savedDocument];
     [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
-    [_saveButton setEnabled:document != NULL];
+    [_saveButton setEnabled:document != NULL && axyne_document_can_save(document)];
     [_undoButton setEnabled:document != NULL];
     [_redoButton setEnabled:document != NULL];
     [_targetButton setTitle:[self buildTargetLabel]];
@@ -1859,7 +1859,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     if (action == @selector(saveDocument:) ||
         action == @selector(saveDocumentAs:))
-        return hasDocument;
+        return hasDocument && axyne_document_can_save(document);
     if (action == @selector(closeDocument:))
         return hasDocument;
     if (action == @selector(buildDocument:) ||
@@ -1976,8 +1976,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (void)applyEditorLexer
 {
     AxyneDocument *document = [self activeDocument];
-    const AxyneSyntaxLanguage *language = axyne_syntax_for_path(
-        document == NULL ? NULL : document->path);
+    const AxyneSyntaxLanguage *language = document != NULL && document->is_virtual
+        ? axyne_syntax_by_id("diff")
+        : axyne_syntax_for_path(document == NULL ? NULL : document->path);
     BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
     void *lexer;
     if (_editorView == nil || _createLexer == NULL) return;
@@ -2478,6 +2479,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     if (!loaded) return NO;
     [self applyPreferences];
     [self applyEditorLexer];
+    /* Virtual (Git diff) documents are read-only; the flag belongs to the
+     * Scintilla document, so every other tab is explicitly writable. */
+    (void)[self sendEditorMessage:SCI_SETREADONLY wParam:doc->is_virtual ? 1 : 0 lParam:0];
     [self updateLineNumberMargin];
     [self updateBraceHighlight];
     [self setNeedsDisplay:YES];
@@ -2562,7 +2566,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (BOOL)saveActiveToPath:(NSString *)path
 {
-    if (path == nil || ![self editorReadyForSave] || ![self captureEditor])
+    if (path == nil || [self activeDocument] == NULL ||
+        !axyne_document_can_save([self activeDocument]) ||
+        ![self editorReadyForSave] || ![self captureEditor])
         return NO;
     const char *utf8Path = [path UTF8String];
     AxyneError error;
@@ -2587,7 +2593,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 - (BOOL)saveActive
 {
     AxyneDocument *doc = [self activeDocument];
-    if (doc == NULL || ![self editorReadyForSave]) return NO;
+    if (doc == NULL || !axyne_document_can_save(doc) || ![self editorReadyForSave])
+        return NO;
     if (doc->is_untitled) {
         NSSavePanel *panel = [NSSavePanel savePanel];
         if ([panel runModal] != NSModalResponseOK) return NO;
@@ -3633,8 +3640,51 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self startGitBatch:1 message:NULL stageAll:0];
 }
 
-/* Diffs, commit details and stage errors go to the output panel, which is
- * shown if it was hidden. */
+/* A clicked file's diff opens as a read-only tab in the editor area (the
+ * preview slot: the next diff or Explorer preview replaces it). Nothing is
+ * written to disk and the document never joins the recent list, LSP or the
+ * file watcher. */
+- (void)gitPanel:(AxyneGitPanelView *)panel openDiffTitle:(NSString *)title
+            text:(NSString *)text
+{
+    const char *titleBytes = [title UTF8String];
+    const char *textBytes = [text UTF8String];
+    (void)panel;
+    if (titleBytes == NULL || titleBytes[0] == '\0' || textBytes == NULL) return;
+    if (![self requireEditorFor:@"open a diff"]) return;
+    if (![self captureEditor]) return;
+    size_t previousCount = _documents.count;
+    size_t previousIndex = _documents.active_index;
+    size_t index = 0;
+    int replaced = 0;
+    AxyneDocument evicted;
+    AxyneError error;
+    memset(&evicted, 0, sizeof(evicted));
+    memset(&error, 0, sizeof(error));
+    if (axyne_documents_open_virtual(&_documents, titleBytes, textBytes,
+            strlen(textBytes), &index, &evicted, &replaced, &error) != AXYNE_STATUS_OK)
+        return;
+    (void)axyne_documents_set_active(&_documents, index, NULL);
+    if (![self loadActiveDocument]) {
+        if (replaced)
+            axyne_documents_revert_preview_open(&_documents, index, &evicted, replaced);
+        else if (_documents.count > previousCount)
+            (void)axyne_documents_close(&_documents, index, NULL);
+        (void)axyne_documents_set_active(&_documents, previousIndex, NULL);
+        return;
+    }
+    if (replaced) {
+        if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, &evicted, NULL);
+        if (evicted.owns_native_editor_document)
+            (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
+                lParam:(intptr_t)evicted.native_editor_document];
+        axyne_document_dispose(&evicted);
+    }
+    [self setNeedsDisplay:YES];
+}
+
+/* Stage and unstage errors go to the output panel, which is shown if it was
+ * hidden. */
 - (void)gitPanel:(AxyneGitPanelView *)panel showText:(NSString *)text
 {
     const char *bytes;
@@ -3838,6 +3888,7 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
 {
     (void)sender;
     if ([self isEmptyState] || [self activeDocument] == NULL ||
+        !axyne_document_can_save([self activeDocument]) ||
         ![self editorReadyForSave]) return;
     NSSavePanel *panel = [NSSavePanel savePanel];
     if ([panel runModal] == NSModalResponseOK)
@@ -5342,7 +5393,8 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
             axyne_macos_tab_title_attributes(doc->preview != 0, nil)].width;
 
         /* 14 padding, badge, 8 gap, name, 8 gap, close glyph, 14 padding. */
-        CGFloat width = MIN(240, 14 + axyne_macos_tab_badge_width(doc->title) + 8 +
+        CGFloat width = MIN(240, 14 + axyne_macos_tab_badge_width(
+            doc->is_virtual ? "x.diff" : doc->title) + 8 +
             ceil(nameWidth) + 8 + 8 + 14);
         if (i == index) return NSMakeRect(x, AXYNE_CONTENT_TOP, width, AXYNE_TABS);
         x += width;
@@ -5668,9 +5720,10 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
             NSRectFill(NSMakeRect(NSMinX(frame), NSMinY(frame), NSWidth(frame), 2));
         }
         CGFloat badgeX = NSMinX(frame) + 14;
-        CGFloat badgeWidth = axyne_macos_tab_badge_width(doc->title);
+        CGFloat badgeWidth = axyne_macos_tab_badge_width(doc->is_virtual ? "x.diff" : doc->title);
         CGFloat nameX = badgeX + badgeWidth + 8;
-        [self drawFileBadge:(doc->path != NULL && doc->path[0] != '\0') ? doc->path : doc->title
+        [self drawFileBadge:doc->is_virtual ? "x.diff"
+                : (doc->path != NULL && doc->path[0] != '\0') ? doc->path : doc->title
             inRect:NSMakeRect(badgeX, AXYNE_CONTENT_TOP + 10, badgeWidth, 16) tab:YES];
         NSString *title = [NSString stringWithUTF8String:doc->title != NULL ? doc->title : "Untitled"];
         [NSGraphicsContext saveGraphicsState];
@@ -5907,7 +5960,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     if (paths == NULL) return;
     for (size_t i = 0; i < _documents.count; ++i) {
         const AxyneDocument *document = &_documents.documents[i];
-        if (!document->is_untitled && document->path != NULL) paths[count++] = document->path;
+        if (axyne_document_has_file(document)) paths[count++] = document->path;
     }
     AxyneStatus status = axyne_palette_ctl_open(&_palette, _explorer.root,
         (const char *const *)paths, count, [initial UTF8String]);

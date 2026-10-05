@@ -182,20 +182,26 @@ typedef enum AxyneGitPanelTaskKind {
     GP_TASK_STAGE = 0,
     GP_TASK_UNSTAGE,
     GP_TASK_FILE_DIFF,
-    GP_TASK_COMMIT_DIFF
+    GP_TASK_COMMIT_DIFF,   /* one file of a commit */
+    GP_TASK_COMMIT_FILES   /* the files a commit changed (inline list) */
 } AxyneGitPanelTaskKind;
 
 typedef struct AxyneGitPanelTask {
     int kind;
-    unsigned long sequence;   /* output requests: newest one wins */
+    unsigned long sequence;   /* diff requests: newest one wins */
+    unsigned long expandSequence; /* file-list requests: newest one wins */
+    unsigned long generation; /* workspace generation when it was started */
     char *workspace;
     char **paths;             /* stage / unstage */
     size_t pathCount;
-    char *path, *origPath;    /* file diff */
+    char *path, *origPath;    /* file diff / commit file diff */
     int staged;
-    const char *label;        /* static text describing which diff it is */
-    char *hash, *subject, *author, *date; /* commit */
-    char *text;               /* result for the output panel (valid UTF-8) or NULL */
+    char *hash;               /* commit file diff / commit file list */
+    char *title;              /* diff: title of the editor tab */
+    AxyneGitChanges files;    /* commit file list result */
+    int filesOk;
+    char message[160];        /* first line of Git's error for the file list */
+    char *text;               /* result: diff text (valid UTF-8), stage error or NULL */
 } AxyneGitPanelTask;
 
 static AxyneGitPanelTask *gp_task_create(int kind, const char *workspace)
@@ -215,7 +221,8 @@ static void gp_task_free(AxyneGitPanelTask *task)
     for (i = 0; i < task->pathCount; ++i) free(task->paths[i]);
     free(task->paths);
     free(task->path); free(task->origPath);
-    free(task->hash); free(task->subject); free(task->author); free(task->date);
+    free(task->hash); free(task->title);
+    axyne_git_changes_free(&task->files);
     free(task->text);
     free(task->workspace);
     free(task);
@@ -238,7 +245,10 @@ static void gp_task_finish_text(AxyneGitPanelTask *task, GpBuf *buf)
     memset(buf, 0, sizeof(*buf));
 }
 
-static void gp_task_run_file_diff(AxyneGitPanelTask *task)
+/* Unified diff text of a file (working tree / index) or of one file of a
+ * commit, for the read-only editor tab. A failure becomes the text so the
+ * user sees Git's own message. */
+static void gp_task_run_diff(AxyneGitPanelTask *task)
 {
     AxyneGitDiff diff;
     AxyneError error;
@@ -247,85 +257,33 @@ static void gp_task_run_file_diff(AxyneGitPanelTask *task)
     memset(&diff, 0, sizeof(diff));
     memset(&error, 0, sizeof(error));
     memset(&buf, 0, sizeof(buf));
-    status = axyne_git_file_diff(task->workspace, task->path, task->origPath,
-                                 task->staged, &diff, &error);
-    gp_buf_puts(&buf, "diff: ");
-    gp_buf_puts(&buf, task->path);
-    gp_buf_puts(&buf, "  (");
-    gp_buf_puts(&buf, task->label);
-    gp_buf_puts(&buf, ")\n\n");
+    status = task->kind == GP_TASK_FILE_DIFF
+        ? axyne_git_file_diff(task->workspace, task->path, task->origPath,
+                              task->staged, &diff, &error)
+        : axyne_git_commit_diff(task->workspace, task->hash, task->path, &diff, &error);
     if (status != AXYNE_STATUS_OK) {
         gp_buf_puts(&buf, error.message[0] != '\0' ? error.message : "Git diff 실행 실패");
         gp_buf_puts(&buf, "\n");
     } else if (diff.length == 0 || diff.text == NULL) {
-        gp_buf_puts(&buf, "(차이 없음)\n");
+        gp_buf_puts(&buf, "(변경 내용 없음)\n");
     } else {
         gp_buf_append(&buf, diff.text, diff.length);
-        if (diff.length > 0 && diff.text[diff.length - 1] != '\n') gp_buf_puts(&buf, "\n");
+        if (diff.text[diff.length - 1] != '\n') gp_buf_puts(&buf, "\n");
         if (diff.truncated) gp_buf_puts(&buf, "\n[diff가 1 MiB에서 잘렸습니다]\n");
     }
     axyne_git_diff_free(&diff);
     gp_task_finish_text(task, &buf);
 }
 
-static void gp_task_run_commit(AxyneGitPanelTask *task)
+static void gp_task_run_commit_files(AxyneGitPanelTask *task)
 {
-    AxyneGitChanges files;
-    AxyneGitDiff diff;
     AxyneError error;
-    AxyneStatus status;
-    GpBuf buf;
-    size_t i;
-    char count[32];
-    memset(&files, 0, sizeof(files));
-    memset(&diff, 0, sizeof(diff));
     memset(&error, 0, sizeof(error));
-    memset(&buf, 0, sizeof(buf));
-    gp_buf_puts(&buf, "commit ");
-    gp_buf_puts(&buf, task->hash);
-    gp_buf_puts(&buf, "\n");
-    gp_buf_puts(&buf, task->subject);
-    gp_buf_puts(&buf, "\n");
-    gp_buf_puts(&buf, task->author);
-    gp_buf_puts(&buf, "  ");
-    gp_buf_puts(&buf, task->date);
-    gp_buf_puts(&buf, "\n\n");
-    status = axyne_git_commit_files(task->workspace, task->hash, &files, &error);
-    if (status != AXYNE_STATUS_OK) {
-        gp_buf_puts(&buf, error.message[0] != '\0' ? error.message : "Git show 실행 실패");
-        gp_buf_puts(&buf, "\n");
-    } else {
-        (void)snprintf(count, sizeof(count), "%zu", files.count);
-        gp_buf_puts(&buf, "변경된 파일 (");
-        gp_buf_puts(&buf, count);
-        gp_buf_puts(&buf, ")\n");
-        for (i = 0; i < files.count; ++i) {
-            char letter[3] = { files.items[i].index_status, '\t', '\0' };
-            gp_buf_puts(&buf, letter);
-            if (files.items[i].orig_path != NULL) {
-                gp_buf_puts(&buf, files.items[i].orig_path);
-                gp_buf_puts(&buf, " -> ");
-            }
-            gp_buf_puts(&buf, files.items[i].path);
-            gp_buf_puts(&buf, "\n");
-        }
-        gp_buf_puts(&buf, "\n");
-        memset(&error, 0, sizeof(error));
-        status = axyne_git_commit_diff(task->workspace, task->hash, NULL, &diff, &error);
-        if (status != AXYNE_STATUS_OK) {
-            gp_buf_puts(&buf, error.message[0] != '\0' ? error.message : "Git diff 실행 실패");
-            gp_buf_puts(&buf, "\n");
-        } else if (diff.length == 0 || diff.text == NULL) {
-            gp_buf_puts(&buf, "(차이 없음)\n");
-        } else {
-            gp_buf_append(&buf, diff.text, diff.length);
-            if (diff.text[diff.length - 1] != '\n') gp_buf_puts(&buf, "\n");
-            if (diff.truncated) gp_buf_puts(&buf, "\n[diff가 1 MiB에서 잘렸습니다]\n");
-        }
-    }
-    axyne_git_changes_free(&files);
-    axyne_git_diff_free(&diff);
-    gp_task_finish_text(task, &buf);
+    if (axyne_git_commit_files(task->workspace, task->hash, &task->files, &error) ==
+        AXYNE_STATUS_OK)
+        task->filesOk = 1;
+    else
+        gp_first_line(error.message, task->message, sizeof(task->message));
 }
 
 static void gp_task_run(AxyneGitPanelTask *task)
@@ -344,8 +302,10 @@ static void gp_task_run(AxyneGitPanelTask *task)
                 ? "스테이지 실패" : "스테이지 해제 실패", &error);
         return;
     }
-    if (task->kind == GP_TASK_FILE_DIFF) gp_task_run_file_diff(task);
-    else if (task->kind == GP_TASK_COMMIT_DIFF) gp_task_run_commit(task);
+    if (task->kind == GP_TASK_FILE_DIFF || task->kind == GP_TASK_COMMIT_DIFF)
+        gp_task_run_diff(task);
+    else if (task->kind == GP_TASK_COMMIT_FILES)
+        gp_task_run_commit_files(task);
 }
 
 
@@ -436,6 +396,19 @@ typedef struct GpGeometry {
     NSRect graphHeader, graph;
 } GpGeometry;
 
+/* The graph list is a sequence of virtual items: each commit is one item
+ * (kGpGraphRow tall); the expanded commit is followed by one item per changed
+ * file, or a single note item while loading, on failure or when the commit
+ * changed no files (kGpRow tall). Scrolling (in pixels), hit testing and
+ * drawing all walk this sequence. */
+typedef enum GpItemKind { GP_ITEM_COMMIT = 0, GP_ITEM_FILE, GP_ITEM_NOTE } GpItemKind;
+
+typedef struct GpItem {
+    int kind;
+    size_t commit; /* index into the graph (the owning commit for sub items) */
+    size_t file;   /* index into the expanded file list for GP_ITEM_FILE */
+} GpItem;
+
 @interface AxyneGitPanelView () <NSTextViewDelegate>
 {
     AxyneGitPanelTheme _theme;
@@ -461,6 +434,15 @@ typedef struct GpGeometry {
     CGFloat _graphScroll;
     char *_selectedHash;
     unsigned long _outputSequence;
+    /* The commit whose changed files are listed inline below its row (only
+     * one at a time). _expandedState: 0 none, 1 loading, 2 ready, 3 failed. */
+    char *_expandedHash;
+    size_t _expandedRow;
+    AxyneGitChanges _expandedFiles;
+    int _expandedState;
+    char _expandedError[160];
+    unsigned long _expandSequence;
+    char *_selectedCommitFile;    /* selected file row under the expanded commit */
 }
 @end
 
@@ -528,6 +510,9 @@ typedef struct GpGeometry {
     axyne_git_graph_free(&_graph);
     free(_selectedHash);
     free(_selectedPath);
+    free(_selectedCommitFile);
+    free(_expandedHash);
+    axyne_git_changes_free(&_expandedFiles);
     [_notice release];
     [_leftStyle release];
     [_centerStyle release];
@@ -613,7 +598,99 @@ typedef struct GpGeometry {
     _changesScroll = gp_clamp(_changesScroll, 0,
         MAX(0, (CGFloat)_changes.count * kGpRow - NSHeight(g.changes)));
     _graphScroll = gp_clamp(_graphScroll, 0,
-        MAX(0, (CGFloat)_graph.count * kGpGraphRow - NSHeight(g.graph)));
+        MAX(0, [self graphContentHeight] - NSHeight(g.graph)));
+}
+
+/* ---- graph items (commits and the expanded commit's files) ---------------------- */
+
+- (size_t)expandedExtra
+{
+    if (_expandedHash == NULL || _expandedRow >= _graph.count) return 0;
+    if (_expandedState == 2 && _expandedFiles.count > 0) return _expandedFiles.count;
+    return 1;
+}
+
+- (size_t)itemCount
+{
+    return _graph.count + [self expandedExtra];
+}
+
+- (GpItem)itemAtIndex:(size_t)i
+{
+    GpItem item;
+    size_t extra = [self expandedExtra];
+    memset(&item, 0, sizeof(item));
+    if (extra == 0 || i <= _expandedRow) {
+        item.kind = GP_ITEM_COMMIT;
+        item.commit = i;
+    } else if (i <= _expandedRow + extra) {
+        item.commit = _expandedRow;
+        if (_expandedState == 2 && _expandedFiles.count > 0) {
+            item.kind = GP_ITEM_FILE;
+            item.file = i - _expandedRow - 1;
+        } else {
+            item.kind = GP_ITEM_NOTE;
+        }
+    } else {
+        item.kind = GP_ITEM_COMMIT;
+        item.commit = i - extra;
+    }
+    return item;
+}
+
+- (CGFloat)heightOfItem:(const GpItem *)item
+{
+    return item->kind == GP_ITEM_COMMIT ? kGpGraphRow : kGpRow;
+}
+
+- (CGFloat)graphContentHeight
+{
+    return (CGFloat)_graph.count * kGpGraphRow + (CGFloat)[self expandedExtra] * kGpRow;
+}
+
+/* The item under `offset` pixels from the top of the (unscrolled) graph
+ * content; NO past the last item. */
+- (BOOL)itemAtOffset:(CGFloat)offset item:(GpItem *)out
+{
+    size_t count = [self itemCount], i;
+    CGFloat top = 0;
+    if (offset < 0) return NO;
+    for (i = 0; i < count; ++i) {
+        GpItem item = [self itemAtIndex:i];
+        CGFloat height = [self heightOfItem:&item];
+        if (offset < top + height) { *out = item; return YES; }
+        top += height;
+    }
+    return NO;
+}
+
+/* Collapses the inline file list and invalidates a file-list request that is
+ * still running. */
+- (void)clearExpansion
+{
+    free(_expandedHash);
+    _expandedHash = NULL;
+    axyne_git_changes_free(&_expandedFiles);
+    _expandedState = 0;
+    _expandedError[0] = '\0';
+    _expandedRow = 0;
+    free(_selectedCommitFile);
+    _selectedCommitFile = NULL;
+    ++_expandSequence;
+}
+
+/* Re-finds the expanded commit in a freshly loaded graph; collapses when it
+ * is gone. */
+- (void)syncExpansion
+{
+    size_t i;
+    if (_expandedHash == NULL) return;
+    for (i = 0; i < _graph.count; ++i)
+        if (_graph.rows[i].hash != NULL && strcmp(_graph.rows[i].hash, _expandedHash) == 0) {
+            _expandedRow = i;
+            return;
+        }
+    [self clearExpansion];
 }
 
 - (void)layoutParts
@@ -675,6 +752,7 @@ typedef struct GpGeometry {
     workspace = [_delegate gitPanelWorkspace:self];
     if (workspace == NULL || workspace[0] == '\0') {
         [self clearResults];
+        [self clearExpansion];
         [self resetScrolls];
         [_notice release];
         _notice = nil;
@@ -717,11 +795,15 @@ typedef struct GpGeometry {
             _hasStaged = load->hasStaged;
             _graph = load->graph;
             memset(&load->graph, 0, sizeof(load->graph));
+            [self syncExpansion];
         } else if (load->changesStatus == AXYNE_STATUS_IO_ERROR) {
+            [self clearExpansion];
             _notice = [@"Git 저장소가 아닙니다." retain];
         } else if (load->changesStatus == AXYNE_STATUS_NOT_FOUND) {
+            [self clearExpansion];
             _notice = [@"Git을 찾을 수 없습니다." retain];
         } else {
+            [self clearExpansion];
             NSString *detail = load->message[0] != '\0'
                 ? [NSString stringWithUTF8String:load->message] : nil;
             _notice = [(detail != nil ? detail : @"Git을 실행할 수 없습니다.") retain];
@@ -745,6 +827,7 @@ typedef struct GpGeometry {
 {
     ++_generation;
     [self clearResults];
+    [self clearExpansion];
     [self resetScrolls];
     gp_set_string(&_selectedPath, NULL);
     gp_set_string(&_selectedHash, NULL);
@@ -761,6 +844,7 @@ typedef struct GpGeometry {
     if (!_loaded && !_loading) return;
     ++_generation;
     [self clearResults];
+    [self clearExpansion];
     [self resetScrolls];
     [_notice release];
     _notice = nil;
@@ -804,6 +888,15 @@ typedef struct GpGeometry {
     if (string != nil) [_delegate gitPanel:self showText:string];
 }
 
+/* Opens the diff as a read-only tab in the editor area. */
+- (void)deliverDiffTitle:(const char *)title text:(const char *)text
+{
+    NSString *titleString = title != NULL ? [NSString stringWithUTF8String:title] : nil;
+    NSString *textString = text != NULL ? [NSString stringWithUTF8String:text] : nil;
+    if (titleString != nil && textString != nil)
+        [_delegate gitPanel:self openDiffTitle:titleString text:textString];
+}
+
 /* Main thread; takes ownership of `task`. */
 - (void)finishTask:(AxyneGitPanelTask *)task
 {
@@ -811,8 +904,25 @@ typedef struct GpGeometry {
         _stageBusy = NO;
         [self deliverText:task->text];
         if (![self isHidden]) [self refresh];
-    } else if (task->sequence == _outputSequence) {
-        [self deliverText:task->text];
+    } else if (task->kind == GP_TASK_COMMIT_FILES) {
+        if (task->generation == _generation && task->expandSequence == _expandSequence &&
+            _expandedHash != NULL && task->hash != NULL &&
+            strcmp(_expandedHash, task->hash) == 0) {
+            axyne_git_changes_free(&_expandedFiles);
+            if (task->filesOk) {
+                _expandedFiles = task->files;
+                memset(&task->files, 0, sizeof(task->files));
+                _expandedState = 2;
+            } else {
+                _expandedState = 3;
+                (void)snprintf(_expandedError, sizeof(_expandedError), "%s",
+                    task->message[0] != '\0' ? task->message : "Git 실행 실패");
+            }
+            [self clampScrolls];
+            [self setNeedsDisplay:YES];
+        }
+    } else if (task->sequence == _outputSequence && task->generation == _generation) {
+        [self deliverDiffTitle:task->title text:task->text];
     }
     gp_task_free(task);
 }
@@ -843,6 +953,18 @@ typedef struct GpGeometry {
 }
 
 
+/* "<prefix><file name>" for the title of a diff tab (malloc'ed or NULL). */
+static char *gp_diff_title(const char *prefix, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    const char *base = slash != NULL ? slash + 1 : path;
+    size_t size = strlen(prefix) + strlen(base) + 1;
+    char *title = (char *)malloc(size);
+    if (title != NULL) (void)snprintf(title, size, "%s%s", prefix, base);
+    return title;
+}
+
+/* A clicked changed file opens its diff in the editor area. */
 - (void)showDiffForChange:(const AxyneGitChange *)change
 {
     const char *workspace = [_delegate gitPanelWorkspace:self];
@@ -853,34 +975,75 @@ typedef struct GpGeometry {
     task->path = strdup(change->path);
     task->origPath = change->orig_path != NULL ? strdup(change->orig_path) : NULL;
     task->staged = change->staged;
-    task->label = change->staged ? "스테이지된 변경"
-        : (change->kind == '?' ? "추적되지 않는 파일" : "작업 트리 변경");
-    if (task->path == NULL || (change->orig_path != NULL && task->origPath == NULL)) {
+    task->title = gp_diff_title("변경: ", change->path);
+    if (task->path == NULL || task->title == NULL ||
+        (change->orig_path != NULL && task->origPath == NULL)) {
         gp_task_free(task);
         return;
     }
     task->sequence = ++_outputSequence;
+    task->generation = _generation;
     [self startTask:task];
 }
 
-- (void)showCommitForRow:(const AxyneGitGraphRow *)row
+/* A clicked file under the expanded commit opens that file's commit diff. */
+- (void)showCommitFileDiff:(const AxyneGitChange *)file
 {
     const char *workspace = [_delegate gitPanelWorkspace:self];
     AxyneGitPanelTask *task;
-    if (workspace == NULL) return;
+    char prefix[16];
+    if (workspace == NULL || _expandedHash == NULL) return;
     task = gp_task_create(GP_TASK_COMMIT_DIFF, workspace);
     if (task == NULL) return;
-    task->hash = strdup(row->hash);
-    task->subject = strdup(row->subject != NULL ? row->subject : "");
-    task->author = strdup(row->author != NULL ? row->author : "");
-    task->date = strdup(row->date != NULL ? row->date : "");
-    if (task->hash == NULL || task->subject == NULL || task->author == NULL ||
-        task->date == NULL) {
+    (void)snprintf(prefix, sizeof(prefix), "%.7s: ", _expandedHash);
+    task->hash = strdup(_expandedHash);
+    task->path = strdup(file->path);
+    task->title = gp_diff_title(prefix, file->path);
+    if (task->hash == NULL || task->path == NULL || task->title == NULL) {
         gp_task_free(task);
         return;
     }
     task->sequence = ++_outputSequence;
+    task->generation = _generation;
     [self startTask:task];
+}
+
+/* A clicked commit expands the list of files it changed right below its row
+ * (one commit at a time); clicking the expanded commit collapses it. */
+- (void)toggleCommitAtRow:(size_t)row
+{
+    const char *hash;
+    const char *workspace = [_delegate gitPanelWorkspace:self];
+    BOOL collapse;
+    if (row >= _graph.count || _graph.rows[row].hash == NULL) return;
+    hash = _graph.rows[row].hash;
+    collapse = _expandedHash != NULL && strcmp(_expandedHash, hash) == 0;
+    gp_set_string(&_selectedPath, NULL);
+    gp_set_string(&_selectedHash, hash);
+    [self clearExpansion];
+    if (!collapse && workspace != NULL) {
+        AxyneGitPanelTask *task = gp_task_create(GP_TASK_COMMIT_FILES, workspace);
+        _expandedHash = strdup(hash);
+        _expandedRow = row;
+        _expandedState = 1;
+        if (task != NULL && _expandedHash != NULL) {
+            task->hash = strdup(hash);
+            task->expandSequence = _expandSequence;
+            task->generation = _generation;
+            if (task->hash != NULL) {
+                [self startTask:task];
+            } else {
+                gp_task_free(task);
+                _expandedState = 3;
+                (void)snprintf(_expandedError, sizeof(_expandedError), "%s", "Git 실행 실패");
+            }
+        } else {
+            gp_task_free(task);
+            [self clearExpansion];
+        }
+    }
+    [self clampScrolls];
+    [self setNeedsDisplay:YES];
 }
 
 - (BOOL)canCommit
@@ -914,6 +1077,8 @@ typedef struct GpGeometry {
         if (row < 0 || (size_t)row >= _changes.count) return;
         if (point.x < 28) { [self toggleStageForChange:&_changes.items[row]]; return; }
         gp_set_string(&_selectedPath, _changes.items[row].path);
+        gp_set_string(&_selectedHash, NULL);
+        gp_set_string(&_selectedCommitFile, NULL);
         [self setNeedsDisplay:YES];
         [self showDiffForChange:&_changes.items[row]];
         return;
@@ -927,11 +1092,17 @@ typedef struct GpGeometry {
         return;
     }
     if (NSPointInRect(point, g.graph)) {
-        row = (NSInteger)floor((point.y - NSMinY(g.graph) + _graphScroll) / kGpGraphRow);
-        if (row < 0 || (size_t)row >= _graph.count) return;
-        gp_set_string(&_selectedHash, _graph.rows[row].hash);
-        [self setNeedsDisplay:YES];
-        [self showCommitForRow:&_graph.rows[row]];
+        GpItem item;
+        if (![self itemAtOffset:point.y - NSMinY(g.graph) + _graphScroll item:&item]) return;
+        if (item.kind == GP_ITEM_COMMIT) {
+            [self toggleCommitAtRow:item.commit];
+        } else if (item.kind == GP_ITEM_FILE) {
+            gp_set_string(&_selectedPath, NULL);
+            gp_set_string(&_selectedHash, NULL);
+            gp_set_string(&_selectedCommitFile, _expandedFiles.items[item.file].path);
+            [self setNeedsDisplay:YES];
+            [self showCommitFileDiff:&_expandedFiles.items[item.file]];
+        }
         return;
     }
 }
@@ -1131,7 +1302,7 @@ typedef struct GpGeometry {
 
 - (void)drawGraphInRect:(NSRect)rect
 {
-    size_t first, i;
+    size_t count, i;
     CGFloat y;
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(rect);
@@ -1139,15 +1310,97 @@ typedef struct GpGeometry {
         gp_draw_text(@"커밋이 없습니다", NSMakeRect(16, NSMinY(rect), NSWidth(rect) - 24, kGpRow),
                      [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
     } else {
-        first = (size_t)floor(_graphScroll / kGpGraphRow);
-        for (i = first; i < _graph.count; ++i) {
-            y = NSMinY(rect) + (CGFloat)i * kGpGraphRow - _graphScroll;
+        count = [self itemCount];
+        y = NSMinY(rect) - _graphScroll;
+        for (i = 0; i < count; ++i) {
+            GpItem item = [self itemAtIndex:i];
+            CGFloat height = [self heightOfItem:&item];
             if (y >= NSMaxY(rect)) break;
-            [self drawGraphRow:&_graph.rows[i]
-                        inRect:NSMakeRect(0, y, NSWidth(rect), kGpGraphRow)];
+            if (y + height > NSMinY(rect)) {
+                NSRect row = NSMakeRect(0, y, NSWidth(rect), height);
+                if (item.kind == GP_ITEM_COMMIT)
+                    [self drawGraphRow:&_graph.rows[item.commit] inRect:row];
+                else
+                    [self drawCommitFileItem:&item inRect:row];
+            }
+            y += height;
         }
     }
     [NSGraphicsContext restoreGraphicsState];
+}
+
+/* A file row (kind chip, name, dim directory) or a note row (loading, failure,
+ * no files) under the expanded commit. The lanes of that commit that continue
+ * below it run through the row as plain vertical lines, so the lane strip
+ * stays continuous: a lane continues when its cell leaves through the bottom
+ * edge (DOWN, or the FORK connector that ends there). */
+- (void)drawCommitFileItem:(const GpItem *)item inRect:(NSRect)rect
+{
+    const AxyneGitGraphRow *commit = &_graph.rows[item->commit];
+    const AxyneGitChange *change = item->kind == GP_ITEM_FILE
+        ? &_expandedFiles.items[item->file] : NULL;
+    BOOL selected = change != NULL && _selectedCommitFile != NULL &&
+        strcmp(_selectedCommitFile, change->path) == 0;
+    int cells = MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes);
+    CGFloat left = 10;
+    CGFloat textX = left + cells * kGpLane + 8;
+    CGFloat textRight = NSMaxX(rect) - 8;
+    int i;
+    if (selected) {
+        [gp_color(_theme.reference ? 0x2f343c : _theme.border) setFill];
+        NSRectFill(rect);
+    }
+    for (i = 0; i < commit->lane_count && i < cells; ++i) {
+        unsigned flags = commit->lanes[i].flags;
+        CGFloat cx = left + i * kGpLane + kGpLane / 2 + 0.5;
+        NSBezierPath *path;
+        if ((flags & (AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK)) == 0) continue;
+        path = [NSBezierPath bezierPath];
+        [path setLineWidth:1.5];
+        [path moveToPoint:NSMakePoint(cx, NSMinY(rect))];
+        [path lineToPoint:NSMakePoint(cx, NSMaxY(rect))];
+        [gp_color(kGpLanePalette[commit->lanes[i].color % AXYNE_GIT_GRAPH_PALETTE]) setStroke];
+        [path stroke];
+    }
+    if (change == NULL) {
+        NSString *note = _expandedState == 1 ? @"불러오는 중…"
+            : (_expandedState == 3 ? gp_string(_expandedError) : @"변경된 파일 없음");
+        gp_draw_text(note, NSMakeRect(textX, NSMinY(rect), MAX(0, textRight - textX), kGpRow),
+                     [NSFont systemFontOfSize:11], gp_color(_theme.muted), _leftStyle);
+        return;
+    }
+    {
+        NSRect chip = NSMakeRect(textX, NSMinY(rect) + floor((kGpRow - 14) / 2), 14, 14);
+        char letter = change->kind != '\0' ? change->kind : '?';
+        NSString *kind = [NSString stringWithFormat:@"%c", letter];
+        uint32_t kindRgb = gp_kind_color(letter);
+        const char *slash = strrchr(change->path, '/');
+        NSString *name = gp_string(slash != NULL ? slash + 1 : change->path);
+        NSFont *nameFont = [NSFont systemFontOfSize:12];
+        NSFont *directoryFont = [NSFont systemFontOfSize:11];
+        CGFloat nameX = textX + 20;
+        CGFloat available = MAX(0, textRight - nameX);
+        CGFloat nameWidth;
+        gp_draw_chip(kind, chip, [gp_color(kindRgb) colorWithAlphaComponent:
+            AXYNE_UI_BADGE_ALPHA_PERCENT / 100.0], gp_color(kindRgb),
+            [NSFont monospacedSystemFontOfSize:AXYNE_UI_BADGE_FONT_PT weight:NSFontWeightBold]);
+        nameWidth = ceil([name sizeWithAttributes:@{NSFontAttributeName: nameFont}].width);
+        gp_draw_text(name, NSMakeRect(nameX, NSMinY(rect), MIN(available, nameWidth), kGpRow),
+                     nameFont, selected ? gp_color(_theme.text)
+                         : gp_color(_theme.light ? 0x24272d : 0xc4c8ce), _leftStyle);
+        if (slash != NULL && available - nameWidth > 24) {
+            char *directoryText = (char *)malloc((size_t)(slash - change->path) + 1);
+            if (directoryText != NULL) {
+                memcpy(directoryText, change->path, (size_t)(slash - change->path));
+                directoryText[slash - change->path] = '\0';
+                gp_draw_text(gp_string(directoryText),
+                             NSMakeRect(nameX + nameWidth + 6, NSMinY(rect),
+                                        available - nameWidth - 6, kGpRow),
+                             directoryFont, gp_color(_theme.muted), _leftStyle);
+                free(directoryText);
+            }
+        }
+    }
 }
 
 /* Lane cells (vertical lines, join/fork curves, the commit dot) followed by
