@@ -793,6 +793,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneRuntimeList _runtimes;
     BOOL _runtimesDiscovered;
     BOOL _runtimeDiscoveryScheduled;
+    BOOL _workspaceRefreshPending; /* one coalesced explorer reload is queued */
     BOOL _buildMenuOpen; /* chevron points up while the popup is open */
     AxyneDiscoveryBox *_discoveryBox;
     /* Plan whose run step starts when its build step exits with 0. */
@@ -1096,6 +1097,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)renameExplorerItem:(id)sender;
 - (void)removeExplorerItem:(id)sender;
 - (void)workspaceEvent;
+- (void)flushWorkspaceRefresh;
 - (BOOL)refreshExplorer;
 - (void)scrollTabsBy:(CGFloat)delta;
 - (void)showWorkspaceError:(NSString *)prefix error:(AxyneError *)error;
@@ -2796,6 +2798,18 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 
 - (void)workspaceEvent
 {
+    /* A build or `git status` can emit thousands of events in a burst; each
+     * used to rebuild the whole explorer list. Queue one reload and let the
+     * burst collapse into it. */
+    if (_workspaceRefreshPending) return;
+    _workspaceRefreshPending = YES;
+    [self performSelector:@selector(flushWorkspaceRefresh) withObject:nil
+               afterDelay:0.05];
+}
+
+- (void)flushWorkspaceRefresh
+{
+    _workspaceRefreshPending = NO;
     [self refreshExplorer];
 }
 
