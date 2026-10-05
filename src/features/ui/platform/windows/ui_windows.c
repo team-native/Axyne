@@ -2484,17 +2484,18 @@ static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
     if (doc->native_editor_document == NULL) return 1;
     LRESULT length = SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
     if (length < 0 || (uint64_t)length >= SIZE_MAX) return 0;
-    char *text = (char *)malloc((size_t)length + 1);
+    /* Borrow Scintilla's contiguous buffer instead of copying the whole
+     * document on every capture; it stays valid until the editor changes,
+     * and set_contents copies it only when the text differs. */
+    const char *text = (const char *)(uintptr_t)SendMessageA(
+        state->editor, SCI_GETCHARACTERPOINTER, 0, 0);
     if (text == NULL) return 0;
-    SendMessageA(state->editor, SCI_GETTEXT, (WPARAM)((size_t)length + 1),
-                 (LPARAM)text);
     AxyneError error;
     int changed = doc->length != (size_t)length ||
         memcmp(doc->contents, text, (size_t)length) != 0;
     int modified = SendMessageA(state->editor, SCI_GETMODIFY, 0, 0) != 0;
     AxyneStatus status = changed ? axyne_documents_set_contents(&state->documents,
         state->documents.active_index, text, (size_t)length, &error) : AXYNE_STATUS_OK;
-    free(text);
     if (status == AXYNE_STATUS_OK) {
         if (modified) (void)axyne_documents_mark_dirty(&state->documents,
             state->documents.active_index, NULL);
