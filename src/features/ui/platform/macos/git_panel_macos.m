@@ -21,7 +21,7 @@ static const CGFloat kGpPushWidth = 56;
 static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
 static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
 static const int kGpMaxLanes = 10;        /* lanes drawn; wider graphs are cut */
-static const unsigned kGpRefreshDelayMs = 300;
+static const unsigned kGpRefreshDelayMs = 500;
 
 /* ---- lifetime box ----------------------------------------------------------
  * Background blocks must never keep the view alive (the editor runtime test
@@ -71,6 +71,34 @@ static void gp_first_line(const char *text, char *out, size_t capacity)
     out[i] = '\0';
 }
 
+/* Growable byte buffer for the text sent to the output panel. */
+typedef struct GpBuf {
+    char *data;
+    size_t length, capacity;
+    int failed;
+} GpBuf;
+
+static void gp_buf_append(GpBuf *buf, const char *text, size_t length)
+{
+    if (buf->failed || length == 0) return;
+    if (buf->length + length + 1 > buf->capacity) {
+        size_t wanted = buf->capacity == 0 ? 1024 : buf->capacity;
+        char *grown;
+        while (wanted < buf->length + length + 1) wanted *= 2;
+        grown = (char *)realloc(buf->data, wanted);
+        if (grown == NULL) { buf->failed = 1; return; }
+        buf->data = grown;
+        buf->capacity = wanted;
+    }
+    memcpy(buf->data + buf->length, text, length);
+    buf->length += length;
+    buf->data[buf->length] = '\0';
+}
+
+static void gp_buf_puts(GpBuf *buf, const char *text)
+{
+    if (text != NULL) gp_buf_append(buf, text, strlen(text));
+}
 
 /* Copy of `in` with every byte that is not part of valid UTF-8 (and every NUL)
  * replaced by '?', so one bad byte in a diff cannot blank the whole output. */
@@ -163,6 +191,10 @@ typedef struct AxyneGitPanelTask {
     char *workspace;
     char **paths;             /* stage / unstage */
     size_t pathCount;
+    char *path, *origPath;    /* file diff */
+    int staged;
+    const char *label;        /* static text describing which diff it is */
+    char *hash, *subject, *author, *date; /* commit */
     char *text;               /* result for the output panel (valid UTF-8) or NULL */
 } AxyneGitPanelTask;
 
@@ -182,6 +214,8 @@ static void gp_task_free(AxyneGitPanelTask *task)
     if (task == NULL) return;
     for (i = 0; i < task->pathCount; ++i) free(task->paths[i]);
     free(task->paths);
+    free(task->path); free(task->origPath);
+    free(task->hash); free(task->subject); free(task->author); free(task->date);
     free(task->text);
     free(task->workspace);
     free(task);
@@ -196,6 +230,103 @@ static char *gp_error_text(const char *title, const AxyneError *error)
     return gp_utf8_clean(line, strlen(line));
 }
 
+static void gp_task_finish_text(AxyneGitPanelTask *task, GpBuf *buf)
+{
+    if (!buf->failed && buf->data != NULL)
+        task->text = gp_utf8_clean(buf->data, buf->length);
+    free(buf->data);
+    memset(buf, 0, sizeof(*buf));
+}
+
+static void gp_task_run_file_diff(AxyneGitPanelTask *task)
+{
+    AxyneGitDiff diff;
+    AxyneError error;
+    AxyneStatus status;
+    GpBuf buf;
+    memset(&diff, 0, sizeof(diff));
+    memset(&error, 0, sizeof(error));
+    memset(&buf, 0, sizeof(buf));
+    status = axyne_git_file_diff(task->workspace, task->path, task->origPath,
+                                 task->staged, &diff, &error);
+    gp_buf_puts(&buf, "diff: ");
+    gp_buf_puts(&buf, task->path);
+    gp_buf_puts(&buf, "  (");
+    gp_buf_puts(&buf, task->label);
+    gp_buf_puts(&buf, ")\n\n");
+    if (status != AXYNE_STATUS_OK) {
+        gp_buf_puts(&buf, error.message[0] != '\0' ? error.message : "Git diff 실행 실패");
+        gp_buf_puts(&buf, "\n");
+    } else if (diff.length == 0 || diff.text == NULL) {
+        gp_buf_puts(&buf, "(차이 없음)\n");
+    } else {
+        gp_buf_append(&buf, diff.text, diff.length);
+        if (diff.length > 0 && diff.text[diff.length - 1] != '\n') gp_buf_puts(&buf, "\n");
+        if (diff.truncated) gp_buf_puts(&buf, "\n[diff가 1 MiB에서 잘렸습니다]\n");
+    }
+    axyne_git_diff_free(&diff);
+    gp_task_finish_text(task, &buf);
+}
+
+static void gp_task_run_commit(AxyneGitPanelTask *task)
+{
+    AxyneGitChanges files;
+    AxyneGitDiff diff;
+    AxyneError error;
+    AxyneStatus status;
+    GpBuf buf;
+    size_t i;
+    char count[32];
+    memset(&files, 0, sizeof(files));
+    memset(&diff, 0, sizeof(diff));
+    memset(&error, 0, sizeof(error));
+    memset(&buf, 0, sizeof(buf));
+    gp_buf_puts(&buf, "commit ");
+    gp_buf_puts(&buf, task->hash);
+    gp_buf_puts(&buf, "\n");
+    gp_buf_puts(&buf, task->subject);
+    gp_buf_puts(&buf, "\n");
+    gp_buf_puts(&buf, task->author);
+    gp_buf_puts(&buf, "  ");
+    gp_buf_puts(&buf, task->date);
+    gp_buf_puts(&buf, "\n\n");
+    status = axyne_git_commit_files(task->workspace, task->hash, &files, &error);
+    if (status != AXYNE_STATUS_OK) {
+        gp_buf_puts(&buf, error.message[0] != '\0' ? error.message : "Git show 실행 실패");
+        gp_buf_puts(&buf, "\n");
+    } else {
+        (void)snprintf(count, sizeof(count), "%zu", files.count);
+        gp_buf_puts(&buf, "변경된 파일 (");
+        gp_buf_puts(&buf, count);
+        gp_buf_puts(&buf, ")\n");
+        for (i = 0; i < files.count; ++i) {
+            char letter[3] = { files.items[i].index_status, '\t', '\0' };
+            gp_buf_puts(&buf, letter);
+            if (files.items[i].orig_path != NULL) {
+                gp_buf_puts(&buf, files.items[i].orig_path);
+                gp_buf_puts(&buf, " -> ");
+            }
+            gp_buf_puts(&buf, files.items[i].path);
+            gp_buf_puts(&buf, "\n");
+        }
+        gp_buf_puts(&buf, "\n");
+        memset(&error, 0, sizeof(error));
+        status = axyne_git_commit_diff(task->workspace, task->hash, NULL, &diff, &error);
+        if (status != AXYNE_STATUS_OK) {
+            gp_buf_puts(&buf, error.message[0] != '\0' ? error.message : "Git diff 실행 실패");
+            gp_buf_puts(&buf, "\n");
+        } else if (diff.length == 0 || diff.text == NULL) {
+            gp_buf_puts(&buf, "(차이 없음)\n");
+        } else {
+            gp_buf_append(&buf, diff.text, diff.length);
+            if (diff.text[diff.length - 1] != '\n') gp_buf_puts(&buf, "\n");
+            if (diff.truncated) gp_buf_puts(&buf, "\n[diff가 1 MiB에서 잘렸습니다]\n");
+        }
+    }
+    axyne_git_changes_free(&files);
+    axyne_git_diff_free(&diff);
+    gp_task_finish_text(task, &buf);
+}
 
 static void gp_task_run(AxyneGitPanelTask *task)
 {
@@ -213,6 +344,8 @@ static void gp_task_run(AxyneGitPanelTask *task)
                 ? "스테이지 실패" : "스테이지 해제 실패", &error);
         return;
     }
+    if (task->kind == GP_TASK_FILE_DIFF) gp_task_run_file_diff(task);
+    else if (task->kind == GP_TASK_COMMIT_DIFF) gp_task_run_commit(task);
 }
 
 
@@ -228,7 +361,9 @@ static NSColor *gp_color(uint32_t rgb)
 
 static NSString *gp_string(const char *utf8)
 {
-    NSString *text = utf8 != NULL ? [NSString stringWithUTF8String:utf8] : nil;
+    NSString *text;
+    if (utf8 == NULL) return @"";
+    text = [NSString stringWithUTF8String:utf8];
     return text != nil ? text : @"(이름 오류)";
 }
 
@@ -325,6 +460,7 @@ typedef struct GpGeometry {
     AxyneGitGraph _graph;
     CGFloat _graphScroll;
     char *_selectedHash;
+    unsigned long _outputSequence;
 }
 @end
 
@@ -674,6 +810,8 @@ typedef struct GpGeometry {
         _stageBusy = NO;
         [self deliverText:task->text];
         [self refresh];
+    } else if (task->sequence == _outputSequence) {
+        [self deliverText:task->text];
     }
     gp_task_free(task);
 }
@@ -704,6 +842,45 @@ typedef struct GpGeometry {
 }
 
 
+- (void)showDiffForChange:(const AxyneGitChange *)change
+{
+    const char *workspace = [_delegate gitPanelWorkspace:self];
+    AxyneGitPanelTask *task;
+    if (workspace == NULL) return;
+    task = gp_task_create(GP_TASK_FILE_DIFF, workspace);
+    if (task == NULL) return;
+    task->path = strdup(change->path);
+    task->origPath = change->orig_path != NULL ? strdup(change->orig_path) : NULL;
+    task->staged = change->staged;
+    task->label = change->staged ? "스테이지된 변경"
+        : (change->kind == '?' ? "추적되지 않는 파일" : "작업 트리 변경");
+    if (task->path == NULL || (change->orig_path != NULL && task->origPath == NULL)) {
+        gp_task_free(task);
+        return;
+    }
+    task->sequence = ++_outputSequence;
+    [self startTask:task];
+}
+
+- (void)showCommitForRow:(const AxyneGitGraphRow *)row
+{
+    const char *workspace = [_delegate gitPanelWorkspace:self];
+    AxyneGitPanelTask *task;
+    if (workspace == NULL) return;
+    task = gp_task_create(GP_TASK_COMMIT_DIFF, workspace);
+    if (task == NULL) return;
+    task->hash = strdup(row->hash);
+    task->subject = strdup(row->subject != NULL ? row->subject : "");
+    task->author = strdup(row->author != NULL ? row->author : "");
+    task->date = strdup(row->date != NULL ? row->date : "");
+    if (task->hash == NULL || task->subject == NULL || task->author == NULL ||
+        task->date == NULL) {
+        gp_task_free(task);
+        return;
+    }
+    task->sequence = ++_outputSequence;
+    [self startTask:task];
+}
 
 - (BOOL)canCommit
 {
@@ -737,6 +914,7 @@ typedef struct GpGeometry {
         if (point.x < 28) { [self toggleStageForChange:&_changes.items[row]]; return; }
         gp_set_string(&_selectedPath, _changes.items[row].path);
         [self setNeedsDisplay:YES];
+        [self showDiffForChange:&_changes.items[row]];
         return;
     }
     if (NSPointInRect(point, g.commit)) {
@@ -752,6 +930,7 @@ typedef struct GpGeometry {
         if (row < 0 || (size_t)row >= _graph.count) return;
         gp_set_string(&_selectedHash, _graph.rows[row].hash);
         [self setNeedsDisplay:YES];
+        [self showCommitForRow:&_graph.rows[row]];
         return;
     }
 }
