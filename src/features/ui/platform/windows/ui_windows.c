@@ -144,7 +144,16 @@ typedef struct AxyneGitPanelUi {
     int wheel_remainder;
     unsigned diff_serial; /* newest diff request; older results are dropped */
     char *selected_path; /* selected change (repository path) or NULL */
-    char *selected_hash; /* selected commit or NULL (never both selected) */
+    char *selected_hash; /* selected commit or NULL (one selection at a time) */
+    char *selected_cfile; /* selected file row under the expanded commit */
+    /* The commit whose changed files are listed inline below its row (only
+     * one at a time). expanded_state: 0 none, 1 loading, 2 ready, 3 failed. */
+    char *expanded_hash;
+    size_t expanded_row;  /* index of that commit in graph, (size_t)-1 = none */
+    AxyneGitChanges expanded_files;
+    int expanded_state;
+    char expanded_error[256];
+    unsigned expand_serial; /* newest file-list request; older results are dropped */
     HWND message_edit;   /* multi-line commit message */
     int message_filled;  /* the message has a non-blank character */
     int message_focus;
@@ -675,7 +684,9 @@ static void axyne_apply_editor_lexer(AxyneWindowState *state,
     void *lexer;
     if (state == NULL || state->editor == NULL || state->create_lexer == NULL)
         return;
-    language = axyne_syntax_for_path(document == NULL ? NULL : document->path);
+    language = document != NULL && document->is_virtual
+        ? axyne_syntax_by_id("diff")
+        : axyne_syntax_for_path(document == NULL ? NULL : document->path);
     lexer = state->create_lexer(language->lexer);
     if (lexer == NULL) {
         axyne_debug_log("Axyne: Lexilla CreateLexer(\"%s\") failed (%lu); "
@@ -2593,7 +2604,8 @@ static int axyne_editor_ready_for_save(HWND window, AxyneWindowState *state)
 static int axyne_save_active(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
-    if (doc == NULL || !axyne_editor_ready_for_save(window, state)) return 0;
+    if (doc == NULL || !axyne_document_can_save(doc)) return 0;
+    if (!axyne_editor_ready_for_save(window, state)) return 0;
     if (!axyne_capture_editor(state)) return 0;
     char *path = NULL;
     AxyneStatus status;
@@ -2665,6 +2677,9 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
         }
         axyne_apply_editor_preferences(state);
         axyne_apply_editor_lexer(state, doc);
+        /* Virtual (Git diff) documents are read-only; the flag belongs to the
+         * Scintilla document, so every other tab is explicitly writable. */
+        SendMessageA(state->editor, SCI_SETREADONLY, doc->is_virtual ? 1 : 0, 0);
         axyne_update_line_number_margin(state);
         axyne_update_brace_highlight(state);
     }
@@ -2786,6 +2801,47 @@ static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
     axyne_update_title(window, state);
 }
 
+/* Opens (or replaces, in the preview slot) a read-only virtual document such
+ * as a Git diff. `text` is copied. Nothing is written to disk and the
+ * document never joins the recent list, LSP or the file watcher. */
+static int axyne_open_virtual_document(HWND window, AxyneWindowState *state,
+                                       const char *title, const char *text,
+                                       size_t length)
+{
+    if (!axyne_capture_editor(state)) return 0;
+    size_t previous_count = state->documents.count;
+    size_t previous_index = state->documents.active_index;
+    size_t index = 0;
+    int replaced = 0;
+    AxyneDocument evicted;
+    AxyneError error;
+    memset(&evicted, 0, sizeof(evicted));
+    memset(&error, 0, sizeof(error));
+    if (axyne_documents_open_virtual(&state->documents, title, text, length,
+                                     &index, &evicted, &replaced, &error) !=
+        AXYNE_STATUS_OK)
+        return 0;
+    if (!axyne_show_document(state, index)) {
+        if (replaced) {
+            axyne_documents_revert_preview_open(&state->documents, index,
+                                                &evicted, replaced);
+        } else if (state->documents.count > previous_count) {
+            (void)axyne_documents_close(&state->documents, index, NULL);
+        }
+        (void)axyne_documents_set_active(&state->documents, previous_index, NULL);
+        return 0;
+    }
+    if (replaced) {
+        if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
+        if (evicted.owns_native_editor_document && state->editor != NULL)
+            SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
+                         (LPARAM)evicted.native_editor_document);
+        axyne_document_dispose(&evicted);
+    }
+    axyne_update_title(window, state);
+    return 1;
+}
+
 /* Tab to activate when `closing` goes away: the next shown tab, else the
  * previous shown one, else any neighbour (only hidden buffers remain). */
 static size_t axyne_successor_index(const AxyneDocumentSet *set, size_t closing)
@@ -2874,6 +2930,11 @@ static int axyne_preferences_file_exists(const AxyneWindowState *state)
  * shortcut can never run a command its menu item shows as unavailable. */
 static int axyne_action_enabled(AxyneWindowState *state, UINT command)
 {
+    if (command == AXYNE_CMD_SAVE || command == AXYNE_CMD_SAVE_AS) {
+        /* A Git diff tab has no file to write. */
+        const AxyneDocument *document = axyne_active_visible(state);
+        return document != NULL && axyne_document_can_save(document);
+    }
     if (axyne_command_needs_document(command)) return !axyne_empty_state(state);
     switch (command) {
     case AXYNE_CMD_GOTO_LINE: case AXYNE_CMD_SELECT_LINE:
@@ -3832,6 +3893,8 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     HMENU recent = axyne_menu_create();
     AxyneDocument *document = axyne_active_visible(state);
     UINT document_flags = document != NULL ? MF_ENABLED : MF_GRAYED;
+    UINT save_flags = document != NULL && axyne_document_can_save(document)
+        ? MF_ENABLED : MF_GRAYED;
     size_t i;
     if (menu == NULL || recent == NULL) {
         if (menu != NULL) DestroyMenu(menu);
@@ -3855,9 +3918,9 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     axyne_menu_seal(recent);
     axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
     axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", document_flags);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", save_flags);
     axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", NULL,
-                   document_flags);
+                   save_flags);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
     axyne_menu_separator(menu, &pool);
@@ -4275,7 +4338,9 @@ static void axyne_toolbar_layout(AxyneWindowState *state, int width,
 
 static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
 {
-    if (command == AXYNE_CMD_SAVE) return axyne_active_visible(state) != NULL;
+    if (command == AXYNE_CMD_SAVE)
+        return axyne_active_visible(state) != NULL &&
+               axyne_document_can_save(axyne_active_visible(state));
     if (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO)
         return state->editor != NULL && !axyne_empty_state(state) &&
             SendMessageA(state->editor,
@@ -5300,7 +5365,7 @@ static void axyne_palette_open(HWND window, AxyneWindowState *state, const char 
     if (paths == NULL) return;
     for (i = 0; i < state->documents.count; ++i) {
         const AxyneDocument *document = &state->documents.documents[i];
-        if (!document->is_untitled && document->path != NULL) paths[count++] = document->path;
+        if (axyne_document_has_file(document)) paths[count++] = document->path;
     }
     if (axyne_palette_ctl_open(&state->palette, state->explorer.root, paths, count,
                                initial) != AXYNE_STATUS_OK) {
@@ -5611,7 +5676,8 @@ static void axyne_git_panel_toggle_view(HWND window, AxyneWindowState *state)
 /* ---- Git panel: worker jobs ---------------------------------------------- */
 
 enum { AXYNE_GITJOB_REFRESH = 1, AXYNE_GITJOB_STAGE, AXYNE_GITJOB_UNSTAGE,
-       AXYNE_GITJOB_FILE_DIFF, AXYNE_GITJOB_COMMIT_DIFF };
+       AXYNE_GITJOB_FILE_DIFF, AXYNE_GITJOB_COMMIT_DIFF,
+       AXYNE_GITJOB_COMMIT_FILES };
 
 /* One unit of Git work. The UI thread fills it, a worker thread runs the
  * blocking core calls and posts it back as AXYNE_WM_GIT_PANEL_DONE; whoever
@@ -5631,15 +5697,15 @@ typedef struct AxyneGitPanelJob {
     int has_staged;
     AxyneGitGraph graph; /* refresh jobs only */
     int have_graph;
-    /* Diff jobs: they never touch the snapshot and run beside other jobs;
-     * only the newest request (serial) is shown. */
+    /* Diff and commit-file jobs: they never touch the snapshot and run beside
+     * other jobs; only the newest request (serial) is applied. */
     unsigned serial;
-    char *path;          /* file diff */
+    char *path;          /* file diff / commit file diff */
     char *orig_path;     /* staged rename source or NULL */
     int staged;
-    char *hash;          /* commit diff */
-    char *header;        /* commit diff: the heading shown above the files */
-    char *report;        /* text for the Output panel */
+    char *hash;          /* commit file diff / commit file list */
+    char *title;         /* diff jobs: title of the editor tab */
+    char *report;        /* diff jobs: unified diff text for the editor tab */
 } AxyneGitPanelJob;
 
 static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
@@ -5654,7 +5720,7 @@ static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
     free(job->path);
     free(job->orig_path);
     free(job->hash);
-    free(job->header);
+    free(job->title);
     free(job->report);
     axyne_git_changes_free(&job->changes);
     axyne_git_graph_free(&job->graph);
@@ -5736,68 +5802,30 @@ static void axyne_git_text_diff(AxyneGitText *text, const AxyneGitDiff *diff)
         axyne_git_text_puts(text, "\n[diff가 1 MiB에서 잘렸습니다]\n");
 }
 
-/* Builds the Output panel text of a file or commit diff. Failures become
- * part of the text so the user sees Git's own message. */
+static void axyne_git_panel_sanitize_utf8(char *text);
+
+/* Builds the unified diff text shown in the read-only editor tab (a file's
+ * diff, or one file of a commit). Failures become the text so the user sees
+ * Git's own message. */
 static void axyne_git_panel_job_diff(AxyneGitPanelJob *job)
 {
     AxyneGitText text;
     AxyneGitDiff diff;
     AxyneError error;
+    AxyneStatus status;
     memset(&text, 0, sizeof(text));
     memset(&diff, 0, sizeof(diff));
     memset(&error, 0, sizeof(error));
-    if (job->kind == AXYNE_GITJOB_FILE_DIFF) {
-        axyne_git_text_puts(&text, "$ git diff ");
-        if (job->staged) axyne_git_text_puts(&text, "--cached ");
-        axyne_git_text_puts(&text, "-- ");
-        axyne_git_text_puts(&text, job->path);
-        axyne_git_text_puts(&text, "\n");
-        if (axyne_git_file_diff(job->workspace, job->path, job->orig_path,
-                                job->staged, &diff, &error) == AXYNE_STATUS_OK)
-            axyne_git_text_diff(&text, &diff);
-        else {
-            axyne_git_text_puts(&text, error.message);
-            axyne_git_text_puts(&text, "\n");
-        }
+    status = job->kind == AXYNE_GITJOB_FILE_DIFF
+        ? axyne_git_file_diff(job->workspace, job->path, job->orig_path,
+                              job->staged, &diff, &error)
+        : axyne_git_commit_diff(job->workspace, job->hash, job->path, &diff, &error);
+    if (status == AXYNE_STATUS_OK) {
+        axyne_git_text_diff(&text, &diff);
     } else {
-        AxyneGitChanges files;
-        memset(&files, 0, sizeof(files));
-        axyne_git_text_puts(&text, job->header != NULL ? job->header : "");
+        axyne_git_text_puts(&text, error.message[0] != '\0' ? error.message
+                                                             : "Unable to run Git.");
         axyne_git_text_puts(&text, "\n");
-        if (axyne_git_commit_files(job->workspace, job->hash, &files, &error) == AXYNE_STATUS_OK) {
-            char line[64];
-            size_t i;
-            (void)snprintf(line, sizeof(line), "변경된 파일 (%zu):\n", files.count);
-            axyne_git_text_puts(&text, line);
-            for (i = 0; i < files.count; ++i) {
-                const AxyneGitChange *file = &files.items[i];
-                line[0] = ' ';
-                line[1] = ' ';
-                line[2] = file->kind != '\0' ? file->kind : '?';
-                line[3] = ' ';
-                line[4] = ' ';
-                axyne_git_text_append(&text, line, 5);
-                if (file->orig_path != NULL) {
-                    axyne_git_text_puts(&text, file->orig_path);
-                    axyne_git_text_puts(&text, " -> ");
-                }
-                axyne_git_text_puts(&text, file->path);
-                axyne_git_text_puts(&text, "\n");
-            }
-        } else {
-            axyne_git_text_puts(&text, error.message);
-            axyne_git_text_puts(&text, "\n");
-        }
-        axyne_git_changes_free(&files);
-        axyne_git_text_puts(&text, "\n");
-        memset(&error, 0, sizeof(error));
-        if (axyne_git_commit_diff(job->workspace, job->hash, NULL, &diff, &error) ==
-            AXYNE_STATUS_OK)
-            axyne_git_text_diff(&text, &diff);
-        else {
-            axyne_git_text_puts(&text, error.message);
-            axyne_git_text_puts(&text, "\n");
-        }
     }
     axyne_git_diff_free(&diff);
     if (text.failed) {
@@ -5805,6 +5833,7 @@ static void axyne_git_panel_job_diff(AxyneGitPanelJob *job)
         text.data = NULL;
     }
     job->report = text.data != NULL ? text.data : _strdup("Unable to allocate Git output.\n");
+    axyne_git_panel_sanitize_utf8(job->report);
 }
 
 static DWORD WINAPI axyne_git_panel_thread(LPVOID opaque)
@@ -5814,6 +5843,12 @@ static DWORD WINAPI axyne_git_panel_thread(LPVOID opaque)
     memset(&error, 0, sizeof(error));
     if (job->kind == AXYNE_GITJOB_FILE_DIFF || job->kind == AXYNE_GITJOB_COMMIT_DIFF) {
         axyne_git_panel_job_diff(job);
+    } else if (job->kind == AXYNE_GITJOB_COMMIT_FILES) {
+        if (axyne_git_commit_files(job->workspace, job->hash, &job->changes, &error) ==
+            AXYNE_STATUS_OK)
+            job->have_changes = 1;
+        else
+            job->error = axyne_git_panel_message_copy(&error);
     } else {
         if (job->kind == AXYNE_GITJOB_STAGE || job->kind == AXYNE_GITJOB_UNSTAGE) {
             AxyneStatus status = job->kind == AXYNE_GITJOB_STAGE
@@ -5888,10 +5923,42 @@ static void axyne_git_panel_show_report(HWND window, AxyneWindowState *state,
 
 /* ---- Git panel: data ------------------------------------------------------ */
 
+/* Collapses the inline file list of the expanded commit and invalidates a
+ * file-list request that is still running. */
+static void axyne_git_expansion_clear(AxyneGitPanelUi *git)
+{
+    free(git->expanded_hash);
+    git->expanded_hash = NULL;
+    axyne_git_changes_free(&git->expanded_files);
+    git->expanded_state = 0;
+    git->expanded_error[0] = '\0';
+    git->expanded_row = (size_t)-1;
+    free(git->selected_cfile);
+    git->selected_cfile = NULL;
+    ++git->expand_serial;
+}
+
+/* Re-finds the expanded commit in a freshly loaded graph; collapses when it
+ * is gone. */
+static void axyne_git_expansion_sync(AxyneGitPanelUi *git)
+{
+    size_t i;
+    git->expanded_row = (size_t)-1;
+    if (git->expanded_hash == NULL) return;
+    for (i = 0; i < git->graph.count; ++i)
+        if (git->graph.rows[i].hash != NULL &&
+            strcmp(git->graph.rows[i].hash, git->expanded_hash) == 0) {
+            git->expanded_row = i;
+            return;
+        }
+    axyne_git_expansion_clear(git);
+}
+
 static void axyne_git_panel_clear(AxyneGitPanelUi *git)
 {
     axyne_git_changes_free(&git->changes);
     axyne_git_graph_free(&git->graph);
+    axyne_git_expansion_clear(git);
     git->graph_ok = 0;
     git->loaded = 0;
     git->repo_ok = 0;
@@ -5951,16 +6018,134 @@ static void axyne_git_panel_after_git_operation(HWND window, AxyneWindowState *s
     axyne_git_panel_refresh(window, state);
 }
 
+/* The graph list is a sequence of virtual items: every commit is one item
+ * (AXYNE_GIT_GRAPH_ROW tall); the expanded commit is followed by one item per
+ * changed file, or a single note item while loading, on failure or when the
+ * commit changed no files (AXYNE_GIT_ROW tall). Scrolling, painting and hit
+ * testing all walk this sequence. */
+enum { AXYNE_GIT_ITEM_COMMIT = 0, AXYNE_GIT_ITEM_FILE, AXYNE_GIT_ITEM_NOTE };
+
+typedef struct AxyneGitItem {
+    int kind;
+    size_t commit; /* index into graph.rows (the owning commit for sub items) */
+    size_t file;   /* index into expanded_files for AXYNE_GIT_ITEM_FILE */
+} AxyneGitItem;
+
+static size_t axyne_git_expanded_extra(const AxyneGitPanelUi *git)
+{
+    if (git->expanded_hash == NULL || git->expanded_row >= git->graph.count) return 0;
+    if (git->expanded_state == 2 && git->expanded_files.count > 0)
+        return git->expanded_files.count;
+    return 1;
+}
+
+static size_t axyne_git_item_count(const AxyneGitPanelUi *git)
+{
+    return git->graph.count + axyne_git_expanded_extra(git);
+}
+
+static AxyneGitItem axyne_git_item_at(const AxyneGitPanelUi *git, size_t i)
+{
+    AxyneGitItem item;
+    size_t extra = axyne_git_expanded_extra(git);
+    memset(&item, 0, sizeof(item));
+    if (extra == 0 || i <= git->expanded_row) {
+        item.kind = AXYNE_GIT_ITEM_COMMIT;
+        item.commit = i;
+    } else if (i <= git->expanded_row + extra) {
+        item.commit = git->expanded_row;
+        if (git->expanded_state == 2 && git->expanded_files.count > 0) {
+            item.kind = AXYNE_GIT_ITEM_FILE;
+            item.file = i - git->expanded_row - 1;
+        } else {
+            item.kind = AXYNE_GIT_ITEM_NOTE;
+        }
+    } else {
+        item.kind = AXYNE_GIT_ITEM_COMMIT;
+        item.commit = i - extra;
+    }
+    return item;
+}
+
+static int axyne_git_item_height(const AxyneGitItem *item)
+{
+    return item->kind == AXYNE_GIT_ITEM_COMMIT ? AXYNE_GIT_GRAPH_ROW : AXYNE_GIT_ROW;
+}
+
+static int axyne_git_graph_content_height(const AxyneGitPanelUi *git)
+{
+    return (int)git->graph.count * AXYNE_GIT_GRAPH_ROW +
+           (int)axyne_git_expanded_extra(git) * AXYNE_GIT_ROW;
+}
+
+/* Largest first-visible item index that still fills the list. */
+static int axyne_git_graph_max_scroll(const AxyneGitPanelUi *git, int list_height)
+{
+    size_t count = axyne_git_item_count(git);
+    size_t i;
+    int used = 0;
+    size_t fit = 0;
+    if (count == 0 || list_height <= 0) return 0;
+    for (i = count; i > 0; --i) {
+        AxyneGitItem item = axyne_git_item_at(git, i - 1);
+        int height = axyne_git_item_height(&item);
+        if (used + height > list_height) break;
+        used += height;
+        ++fit;
+    }
+    if (fit == 0) fit = 1;
+    return (int)(count - fit);
+}
+
+/* Number of items starting at `first` that fit completely (scroll thumb). */
+static int axyne_git_graph_items_fitting(const AxyneGitPanelUi *git, int first,
+                                         int list_height)
+{
+    size_t count = axyne_git_item_count(git);
+    size_t i;
+    int used = 0;
+    int fit = 0;
+    for (i = (size_t)first; i < count; ++i) {
+        AxyneGitItem item = axyne_git_item_at(git, i);
+        int height = axyne_git_item_height(&item);
+        if (used + height > list_height) break;
+        used += height;
+        ++fit;
+    }
+    return fit;
+}
+
+/* Item under `offset` pixels below the list top when the list starts at item
+ * `first`. Returns 0 when the point is past the last item. */
+static int axyne_git_item_at_offset(const AxyneGitPanelUi *git, int first, int offset,
+                                    size_t *index, AxyneGitItem *item)
+{
+    size_t count = axyne_git_item_count(git);
+    size_t i;
+    int top = 0;
+    if (offset < 0) return 0;
+    for (i = (size_t)first; i < count; ++i) {
+        AxyneGitItem candidate = axyne_git_item_at(git, i);
+        int height = axyne_git_item_height(&candidate);
+        if (offset < top + height) {
+            *index = i;
+            *item = candidate;
+            return 1;
+        }
+        top += height;
+    }
+    return 0;
+}
+
 static void axyne_git_panel_clamp_scroll(AxyneWindowState *state, int change_rows,
-                                         int graph_rows)
+                                         int graph_height)
 {
     AxyneGitPanelUi *git = &state->git_panel;
     int count = (int)git->changes.count;
     int max_scroll = count > change_rows && change_rows > 0 ? count - change_rows : 0;
     if (git->changes_scroll > max_scroll) git->changes_scroll = max_scroll;
     if (git->changes_scroll < 0) git->changes_scroll = 0;
-    count = (int)git->graph.count;
-    max_scroll = count > graph_rows && graph_rows > 0 ? count - graph_rows : 0;
+    max_scroll = axyne_git_graph_max_scroll(git, graph_height);
     if (git->graph_scroll > max_scroll) git->graph_scroll = max_scroll;
     if (git->graph_scroll < 0) git->graph_scroll = 0;
 }
@@ -5972,11 +6157,31 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
     AxyneGitPanelUi *git = &state->git_panel;
     int pending;
     if (job->kind == AXYNE_GITJOB_FILE_DIFF || job->kind == AXYNE_GITJOB_COMMIT_DIFF) {
-        /* Only the newest request is shown, and never over the report of a
-         * running commit, push or pull. */
+        /* Only the newest request opens (or replaces) the read-only diff tab
+         * in the editor area. */
         if (job->serial == git->diff_serial && job->generation == git->generation &&
-            job->report != NULL && !state->git_batch_busy && state->git_process == NULL)
-            axyne_git_panel_show_report(window, state, job->report);
+            job->report != NULL && job->title != NULL)
+            (void)axyne_open_virtual_document(window, state, job->title, job->report,
+                                              strlen(job->report));
+        axyne_git_panel_job_free(job);
+        return;
+    }
+    if (job->kind == AXYNE_GITJOB_COMMIT_FILES) {
+        if (job->generation == git->generation && job->serial == git->expand_serial &&
+            git->expanded_hash != NULL && job->hash != NULL &&
+            strcmp(git->expanded_hash, job->hash) == 0) {
+            axyne_git_changes_free(&git->expanded_files);
+            if (job->have_changes) {
+                git->expanded_files = job->changes;
+                memset(&job->changes, 0, sizeof(job->changes));
+                git->expanded_state = 2;
+            } else {
+                git->expanded_state = 3;
+                (void)snprintf(git->expanded_error, sizeof(git->expanded_error), "%s",
+                               job->error != NULL ? job->error : "Unable to run Git.");
+            }
+            InvalidateRect(window, NULL, FALSE);
+        }
         axyne_git_panel_job_free(job);
         return;
     }
@@ -5989,6 +6194,7 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
             git->graph = job->graph;
             memset(&job->graph, 0, sizeof(job->graph));
             git->graph_ok = job->have_graph;
+            axyne_git_expansion_sync(git);
             if (git->selected_hash != NULL) {
                 size_t i;
                 int found = 0;
@@ -6002,6 +6208,7 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
         } else if (!job->have_changes) {
             axyne_git_graph_free(&git->graph);
             git->graph_ok = 0;
+            axyne_git_expansion_clear(git);
             free(git->selected_hash);
             git->selected_hash = NULL;
         }
@@ -6040,8 +6247,19 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
     if (pending) axyne_git_panel_refresh(window, state);
 }
 
-/* Clicking a changed file shows its diff (index against HEAD for a staged
- * row, working tree against index otherwise) in the Output panel. */
+/* "<prefix><file name>" for the title of a diff tab. */
+static char *axyne_git_diff_title(const char *prefix, const char *path)
+{
+    const char *base = axyne_ui_basename(path);
+    size_t size = strlen(prefix) + strlen(base) + 1;
+    char *title = (char *)malloc(size);
+    if (title != NULL) (void)snprintf(title, size, "%s%s", prefix, base);
+    return title;
+}
+
+/* Clicking a changed file opens its diff (index against HEAD for a staged
+ * row, working tree against index otherwise) as a read-only tab in the editor
+ * area; the next click replaces that tab. */
 static void axyne_git_panel_show_file_diff(HWND window, AxyneWindowState *state,
                                            size_t index)
 {
@@ -6055,8 +6273,10 @@ static void axyne_git_panel_show_file_diff(HWND window, AxyneWindowState *state,
     job->kind = AXYNE_GITJOB_FILE_DIFF;
     job->staged = change->staged != 0;
     job->path = _strdup(change->path);
+    job->title = axyne_git_diff_title("변경: ", change->path);
     if (job->staged && change->orig_path != NULL) job->orig_path = _strdup(change->orig_path);
-    if (job->path == NULL || (job->staged && change->orig_path != NULL && job->orig_path == NULL)) {
+    if (job->path == NULL || job->title == NULL ||
+        (job->staged && change->orig_path != NULL && job->orig_path == NULL)) {
         axyne_git_panel_job_free(job);
         return;
     }
@@ -6064,34 +6284,72 @@ static void axyne_git_panel_show_file_diff(HWND window, AxyneWindowState *state,
     (void)axyne_git_panel_start_job(window, state, job);
 }
 
-/* Clicking a commit shows its files and diff in the Output panel. */
-static void axyne_git_panel_show_commit(HWND window, AxyneWindowState *state,
-                                        size_t index)
+/* Clicking a file under the expanded commit opens that file's diff of the
+ * commit in the editor area. */
+static void axyne_git_panel_show_commit_file(HWND window, AxyneWindowState *state,
+                                             size_t index)
 {
     AxyneGitPanelUi *git = &state->git_panel;
-    const AxyneGitGraphRow *row;
+    const AxyneGitChange *file;
     AxyneGitPanelJob *job;
-    size_t size;
-    if (index >= git->graph.count || git->graph.rows[index].hash == NULL) return;
-    row = &git->graph.rows[index];
+    char prefix[16];
+    if (git->expanded_hash == NULL || git->expanded_state != 2 ||
+        index >= git->expanded_files.count) return;
+    file = &git->expanded_files.items[index];
     job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
     if (job == NULL) return;
+    (void)snprintf(prefix, sizeof(prefix), "%.7s: ", git->expanded_hash);
     job->kind = AXYNE_GITJOB_COMMIT_DIFF;
-    job->hash = _strdup(row->hash);
-    size = strlen(row->hash) + (row->author != NULL ? strlen(row->author) : 0) +
-           (row->date != NULL ? strlen(row->date) : 0) +
-           (row->subject != NULL ? strlen(row->subject) : 0) + 32;
-    job->header = (char *)malloc(size);
-    if (job->hash == NULL || job->header == NULL) {
+    job->hash = _strdup(git->expanded_hash);
+    job->path = _strdup(file->path);
+    job->title = axyne_git_diff_title(prefix, file->path);
+    if (job->hash == NULL || job->path == NULL || job->title == NULL) {
         axyne_git_panel_job_free(job);
         return;
     }
-    (void)snprintf(job->header, size, "commit %s\n%s \xc2\xb7 %s\n%s\n", row->hash,
-                   row->author != NULL ? row->author : "",
-                   row->date != NULL ? row->date : "",
-                   row->subject != NULL ? row->subject : "");
     job->serial = ++git->diff_serial;
     (void)axyne_git_panel_start_job(window, state, job);
+}
+
+/* Clicking a commit expands the list of files it changed right below its row
+ * (only one commit at a time); clicking the expanded commit collapses it. The
+ * file list is read on a worker thread. */
+static void axyne_git_panel_toggle_commit(HWND window, AxyneWindowState *state,
+                                          size_t index)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    const char *hash;
+    AxyneGitPanelJob *job;
+    int collapse;
+    if (index >= git->graph.count || git->graph.rows[index].hash == NULL) return;
+    hash = git->graph.rows[index].hash;
+    collapse = git->expanded_hash != NULL && strcmp(git->expanded_hash, hash) == 0;
+    free(git->selected_path);
+    git->selected_path = NULL;
+    free(git->selected_hash);
+    git->selected_hash = _strdup(hash);
+    axyne_git_expansion_clear(git);
+    if (!collapse) {
+        git->expanded_hash = _strdup(hash);
+        git->expanded_row = index;
+        git->expanded_state = 1;
+        job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
+        if (git->expanded_hash != NULL && job != NULL &&
+            (job->hash = _strdup(hash)) != NULL) {
+            job->kind = AXYNE_GITJOB_COMMIT_FILES;
+            job->serial = git->expand_serial;
+            /* start_job owns (and on failure frees) the job. */
+            if (!axyne_git_panel_start_job(window, state, job)) {
+                git->expanded_state = 3;
+                (void)snprintf(git->expanded_error, sizeof(git->expanded_error), "%s",
+                               "Unable to run Git.");
+            }
+        } else {
+            axyne_git_panel_job_free(job);
+            axyne_git_expansion_clear(git);
+        }
+    }
+    InvalidateRect(window, NULL, FALSE);
 }
 
 /* No mutating Git work (menu command, commit, push, stage) is running. */
@@ -6186,7 +6444,7 @@ static void axyne_git_panel_layout(const AxyneWindowState *state, AxyneGitLayout
     need = (state->git_panel.changes.count > 0
                 ? (int)state->git_panel.changes.count : 1) * AXYNE_GIT_ROW;
     graph_need = (state->git_panel.graph.count > 0
-                      ? (int)state->git_panel.graph.count * AXYNE_GIT_GRAPH_ROW
+                      ? axyne_git_graph_content_height(&state->git_panel)
                       : AXYNE_GIT_ROW);
     half = space / 2;
     half -= half % AXYNE_GIT_ROW;
@@ -6413,11 +6671,6 @@ static void axyne_git_paint_changes(HDC dc, AxyneWindowState *state,
 
 /* ---- Git panel: commit graph ---------------------------------------------- */
 
-static int axyne_git_graph_rows_in(const RECT *list)
-{
-    return list->bottom > list->top ? (list->bottom - list->top) / AXYNE_GIT_GRAPH_ROW : 0;
-}
-
 static COLORREF axyne_git_lane_color(int index)
 {
     static const uint32_t palette[AXYNE_GIT_GRAPH_PALETTE] = {
@@ -6625,12 +6878,105 @@ static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
     }
 }
 
+/* The lanes of `row` that continue below it, drawn as plain vertical lines
+ * through a row inserted under that commit (its file list), so the lane strip
+ * stays continuous. A lane continues when the cell leaves through its bottom
+ * edge: DOWN, or the FORK connector that ends there. */
+static void axyne_git_paint_lane_continuation(HDC dc, const AxyneGitGraphRow *row,
+                                              int x0, int lane_width, int y, int h)
+{
+    int i;
+    for (i = 0; i < row->lane_count; ++i) {
+        unsigned flags = row->lanes[i].flags;
+        POINT points[2];
+        if ((flags & (AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK)) == 0) continue;
+        points[0].x = points[1].x = x0 + i * lane_width + lane_width / 2;
+        points[0].y = y;
+        points[1].y = y + h;
+        axyne_git_polyline(dc, 2, axyne_git_lane_color(row->lanes[i].color), points, 2);
+    }
+}
+
+/* A file row (kind badge, name, dim directory) or a note row (loading,
+ * failure, no files) under the expanded commit `commit`. */
+static void axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
+                                            const AxyneGitGraphRow *commit,
+                                            const AxyneGitItem *item,
+                                            const AxyneGitPanelUi *git, int right,
+                                            int lane_width, int strip, int y)
+{
+    const AxyneGitChange *change = item->kind == AXYNE_GIT_ITEM_FILE
+        ? &git->expanded_files.items[item->file] : NULL;
+    int selected = change != NULL && git->selected_cfile != NULL &&
+                   strcmp(git->selected_cfile, change->path) == 0;
+    COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
+    int x = 10 + strip + 8;
+    int limit = right - 14;
+    RECT rect;
+    if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_ROW, AXYNE_SELECTION_BG);
+    {
+        int saved_dc = SaveDC(dc);
+        IntersectClipRect(dc, 10 - 2, y, 10 + strip + 2, y + AXYNE_GIT_ROW);
+        axyne_git_paint_lane_continuation(dc, commit, 10, lane_width, y, AXYNE_GIT_ROW);
+        RestoreDC(dc, saved_dc);
+    }
+    if (change == NULL) {
+        const wchar_t *note = git->expanded_state == 1 ? L"불러오는 중..."
+            : (git->expanded_state == 3 ? NULL : L"변경된 파일 없음");
+        wchar_t *failure = git->expanded_state == 3 ? axyne_wide(git->expanded_error) : NULL;
+        rect.left = x;
+        rect.top = y;
+        rect.right = limit;
+        rect.bottom = y + AXYNE_GIT_ROW;
+        if (rect.right > rect.left)
+            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect,
+                            note != NULL ? note : (failure != NULL ? failure : L"Git 오류"),
+                            DT_LEFT);
+        free(failure);
+        return;
+    }
+    {
+        const char *base = axyne_ui_basename(change->path);
+        size_t dir_length = base > change->path ? (size_t)(base - change->path) - 1 : 0;
+        wchar_t *name = axyne_wide(base);
+        wchar_t *dir = dir_length != 0 ? axyne_git_wide_range(change->path, dir_length) : NULL;
+        wchar_t kind[2];
+        RECT chip = {x, y + 4, x + 16, y + AXYNE_GIT_ROW - 4};
+        int text_x = x + 22;
+        int name_width;
+        kind[0] = (wchar_t)(unsigned char)(change->kind != '\0' ? change->kind : '?');
+        kind[1] = L'\0';
+        axyne_git_paint_chip(dc, state->tab_badge_font, chip, kind,
+                             axyne_git_kind_color(change->kind), behind);
+        if (name == NULL) name = _wcsdup(L"(invalid name)");
+        if (name != NULL) {
+            name_width = axyne_git_text_width(dc, state->ui_font, name);
+            rect.left = text_x;
+            rect.top = y;
+            rect.right = text_x + name_width < limit ? text_x + name_width + 2 : limit;
+            rect.bottom = y + AXYNE_GIT_ROW;
+            if (rect.right > rect.left)
+                axyne_text_rect(dc, state->ui_font,
+                                selected && AXYNE_REFERENCE ? RGB(255, 255, 255)
+                                                            : AXYNE_SIDEBAR_TEXT,
+                                rect, name, DT_LEFT);
+            if (dir != NULL && text_x + name_width + 8 < limit - 16) {
+                rect.left = text_x + name_width + 8;
+                rect.right = limit;
+                axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, dir,
+                                DT_LEFT);
+            }
+        }
+        free(name);
+        free(dir);
+    }
+}
+
 static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
                                   const AxyneGitLayout *layout)
 {
     const AxyneGitPanelUi *git = &state->git_panel;
     RECT label = layout->graph_label;
-    int rows = axyne_git_graph_rows_in(&layout->graph_list);
     int width = layout->graph_list.right - layout->graph_list.left;
     int lane_width = axyne_git_lane_width(&git->graph, width);
     int strip = axyne_git_lane_strip(&git->graph, lane_width, width);
@@ -6651,17 +6997,26 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
         axyne_git_panel_message(dc, state, layout->graph_list.top,
                                 layout->graph_list.bottom, L"커밋 없음");
     } else {
-        for (i = (size_t)git->graph_scroll; i < git->graph.count &&
-             (int)(i - (size_t)git->graph_scroll) < rows + 1; ++i) {
-            const AxyneGitGraphRow *row = &git->graph.rows[i];
-            int selected = git->selected_hash != NULL && row->hash != NULL &&
-                           strcmp(git->selected_hash, row->hash) == 0;
-            axyne_git_paint_graph_row(dc, state, row, selected,
-                                      layout->graph_list.right, lane_width, strip, y);
-            y += AXYNE_GIT_GRAPH_ROW;
+        size_t items = axyne_git_item_count(git);
+        for (i = (size_t)git->graph_scroll; i < items && y < layout->graph_list.bottom; ++i) {
+            AxyneGitItem item = axyne_git_item_at(git, i);
+            const AxyneGitGraphRow *row = &git->graph.rows[item.commit];
+            if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
+                int selected = git->selected_hash != NULL && row->hash != NULL &&
+                               strcmp(git->selected_hash, row->hash) == 0;
+                axyne_git_paint_graph_row(dc, state, row, selected,
+                                          layout->graph_list.right, lane_width, strip, y);
+            } else {
+                axyne_git_paint_commit_file_row(dc, state, row, &item, git,
+                                                layout->graph_list.right, lane_width,
+                                                strip, y);
+            }
+            y += axyne_git_item_height(&item);
         }
-        axyne_git_paint_thumb(dc, &layout->graph_list, git->graph_scroll, rows,
-                              (int)git->graph.count, AXYNE_GIT_GRAPH_ROW);
+        axyne_git_paint_thumb(dc, &layout->graph_list, git->graph_scroll,
+            axyne_git_graph_items_fitting(git, git->graph_scroll,
+                layout->graph_list.bottom - layout->graph_list.top),
+            (int)items, AXYNE_GIT_GRAPH_ROW);
     }
     RestoreDC(dc, saved_dc);
 }
@@ -6874,7 +7229,7 @@ static void axyne_paint_git_panel(HDC dc, AxyneWindowState *state, int bottom)
     } else {
         axyne_git_panel_layout(state, &layout);
         axyne_git_panel_clamp_scroll(state, axyne_git_rows_in(&layout.changes_list),
-                                     axyne_git_graph_rows_in(&layout.graph_list));
+                                     layout.graph_list.bottom - layout.graph_list.top);
         axyne_git_paint_changes(dc, state, &layout);
         if (layout.fits) {
             axyne_git_paint_commit_box(dc, state, &layout);
@@ -6909,7 +7264,9 @@ static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, i
         } else {
             free(git->selected_path);
             free(git->selected_hash);
+            free(git->selected_cfile);
             git->selected_hash = NULL;
+            git->selected_cfile = NULL;
             git->selected_path = _strdup(git->changes.items[row].path);
             InvalidateRect(window, NULL, FALSE);
             axyne_git_panel_show_file_diff(window, state, row);
@@ -6917,15 +7274,22 @@ static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, i
         return;
     }
     if (layout.fits && PtInRect(&layout.graph_list, point)) {
-        size_t row = (size_t)git->graph_scroll +
-                     (size_t)((y - layout.graph_list.top) / AXYNE_GIT_GRAPH_ROW);
-        if (row >= git->graph.count || git->graph.rows[row].hash == NULL) return;
-        free(git->selected_hash);
-        free(git->selected_path);
-        git->selected_path = NULL;
-        git->selected_hash = _strdup(git->graph.rows[row].hash);
-        InvalidateRect(window, NULL, FALSE);
-        axyne_git_panel_show_commit(window, state, row);
+        size_t index;
+        AxyneGitItem item;
+        if (!axyne_git_item_at_offset(git, git->graph_scroll, y - layout.graph_list.top,
+                                      &index, &item)) return;
+        if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
+            axyne_git_panel_toggle_commit(window, state, item.commit);
+        } else if (item.kind == AXYNE_GIT_ITEM_FILE) {
+            free(git->selected_path);
+            git->selected_path = NULL;
+            free(git->selected_hash);
+            git->selected_hash = NULL;
+            free(git->selected_cfile);
+            git->selected_cfile = _strdup(git->expanded_files.items[item.file].path);
+            InvalidateRect(window, NULL, FALSE);
+            axyne_git_panel_show_commit_file(window, state, item.file);
+        }
     }
 }
 
@@ -6948,7 +7312,7 @@ static int axyne_git_panel_wheel(HWND window, AxyneWindowState *state, POINT poi
     if (over_changes) git->changes_scroll -= steps * 3;
     else git->graph_scroll -= steps * 2;
     axyne_git_panel_clamp_scroll(state, axyne_git_rows_in(&layout.changes_list),
-                                 axyne_git_graph_rows_in(&layout.graph_list));
+                                 layout.graph_list.bottom - layout.graph_list.top);
     InvalidateRect(window, NULL, FALSE);
     return 1;
 }
@@ -7228,6 +7592,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         if (!AXYNE_REFERENCE)
             axyne_fill(dc, tab_right - 1, tab_top, tab_right, editor_top, AXYNE_BORDER);
         axyne_paint_badge(dc, state->tab_badge_font,
+                          doc->is_virtual ? "x.diff" :
                           doc->path != NULL && doc->path[0] != '\0' ? doc->path : doc->title,
                           badge);
         wchar_t *name = axyne_wide(doc->title != NULL ? doc->title : "Untitled");
@@ -7751,6 +8116,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_SAVE_AS) {
             char *path = NULL;
             if (axyne_active(state) == NULL ||
+                !axyne_document_can_save(axyne_active(state)) ||
                 !axyne_editor_ready_for_save(window, state)) return 0;
             if (axyne_choose_path(window, 1, &path)) {
                 if (!axyne_capture_editor(state)) {

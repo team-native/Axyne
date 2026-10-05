@@ -397,3 +397,24 @@ A left-sidebar "Git" tab that switches with the explorer. This section records t
 Known gaps: the real-repository tests run on POSIX only (the Windows and macOS builds were compile-checked with zig cc, not run); the Windows untracked-file diff relies on Git for Windows accepting `/dev/null` for `git diff --no-index`; the panels themselves are not built yet.
 
 Units: change list with stage/unstage core; commit graph with lane layout; commit files and diff core; this record.
+
+## Git panel: commit file list and diff tabs
+
+Follow-up to the Git panel: file diffs leave the bottom output panel and open in the editor area.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Commit click | Clicking a commit expands, inline just below its row (later rows move down), the files that commit changed (kind badge, name, dim directory); clicking the same commit again collapses it; only one commit is expanded at a time. Nothing is printed to the console | USER | CONFIRMED |
+| File click | Clicking a file (a working-tree change row or a file row under an expanded commit) opens its diff as a read-only tab in the editor area, with diff syntax colouring; clicking another file replaces the previous diff tab; clicking the same one again re-reads and re-shows it | USER | CONFIRMED |
+| Output panel | The bottom output panel is no longer used for panel clicks; menu Git status / diff / log keep using it. Stage and unstage failures still appear there | USER | CONFIRMED |
+| Tab title | `변경: <file name>` for a working-tree or staged change, `<hash7>: <file name>` for a file of a commit; the base name only, not the repository path | ASSUMED | ASSUMED |
+| Tab slot | The diff tab uses the preview-tab slot (italic title): the next diff or Explorer preview replaces it in place, a normal tab is never replaced. It keeps its place and is not turned into a normal tab by clicking it | ASSUMED | ASSUMED |
+| Virtual document | A diff tab is a virtual read-only document (no path, never dirty): closing needs no prompt; Save and Save As are disabled; it is excluded from the recent list, palette file lists, LSP, the file watcher, debugger and build; there is no session restore to exclude it from | ASSUMED | ASSUMED |
+| Rename in a commit | The diff of a renamed file of a commit is limited to its new path, so Git shows it as added; a staged rename in the change list keeps both paths and shows the rename | ASSUMED | ASSUMED |
+| Expanded rows | The expanded file list scrolls with the graph (wheel and thumb count commit and file rows); the lanes of the commit that continue below it run straight through the file rows; a refresh keeps the expansion while the commit still exists and collapses it otherwise; the commit row is not scrolled into view when expanding near the bottom | ASSUMED | ASSUMED |
+| Empty and errors | Loading, a failed file list and a commit without files show one dim note row; an empty diff shows `(변경 내용 없음)`, a failed diff shows Git's message, a diff cut at 1 MiB ends with a notice | ASSUMED | ASSUMED |
+| Threading | The file list and the diff are read on worker threads; results of an older click, an older workspace or a collapsed commit are dropped | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the macOS panel and editor code was only syntax-checked against stub headers here (no AppKit), so CI is its first real compile; the shared virtual-document model is covered by `axyne-preview-tabs`, the diff language by `axyne-syntax`.
+
+Units: virtual read-only document model; diff syntax language; Windows panel; macOS panel; this record.
