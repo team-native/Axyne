@@ -165,6 +165,30 @@ static int test_large_document(void)
     return 1;
 }
 
+static int test_slice(void)
+{
+    /* slice "ial foo fo" cut at both edges: "ial" (head) is incomplete */
+    const char slice[] = "ial foo_bar fo";
+    size_t prefix = 0, begin = 1, end = 1;
+    char *list = axyne_completion_build_slice(slice, strlen(slice),
+        strlen(slice), 1, 0, NULL, 0, &prefix);
+    CHECK(list != NULL && strcmp(list, "foo_bar") == 0 && prefix == 2);
+    free(list);
+    list = axyne_completion_build_slice("ia ia", 5, 5, 1, 0, NULL, 0, &prefix);
+    CHECK(list == NULL); /* head word is cut, the typed word is excluded */
+    list = axyne_completion_build_slice("fo foobar", 9, 2, 0, 1, NULL, 0, &prefix);
+    CHECK(list == NULL); /* tail word touches a cut edge */
+    axyne_completion_window(100, 50, &begin, &end);
+    CHECK(begin == 0 && end == 100);
+    axyne_completion_window(AXYNE_COMPLETION_MAX_SCAN * 4, 10, &begin, &end);
+    CHECK(begin == 0 && end == AXYNE_COMPLETION_MAX_SCAN);
+    axyne_completion_window(AXYNE_COMPLETION_MAX_SCAN * 4,
+                            AXYNE_COMPLETION_MAX_SCAN * 4, &begin, &end);
+    CHECK(end == AXYNE_COMPLETION_MAX_SCAN * 4 &&
+          end - begin == AXYNE_COMPLETION_MAX_SCAN);
+    return 1;
+}
+
 int axyne_test_completion(const char *root)
 {
     (void)root;
@@ -175,5 +199,6 @@ int axyne_test_completion(const char *root)
     CHECK(test_limit());
     CHECK(test_utf8());
     CHECK(test_large_document());
+    CHECK(test_slice());
     return 1;
 }

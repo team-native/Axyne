@@ -774,13 +774,17 @@ static void axyne_show_completion(AxyneWindowState *state)
     language = axyne_syntax_for_path(document == NULL ? NULL : document->path);
     length = SendMessageA(state->editor, SCI_GETLENGTH, 0, 0);
     caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
-    text = (const char *)SendMessageA(state->editor, SCI_GETCHARACTERPOINTER,
-                                      0, 0);
     list = NULL;
-    if (text != NULL && length > 0 && caret > 0 && caret <= length)
-        list = axyne_completion_build(text, (size_t)length, (size_t)caret,
-                                      language->keywords,
-                                      AXYNE_SYNTAX_KEYWORD_SETS, &prefix);
+    if (length > 0 && caret > 0 && caret <= length) {
+        size_t begin, end;
+        axyne_completion_window((size_t)length, (size_t)caret, &begin, &end);
+        text = (const char *)SendMessageA(state->editor, SCI_GETRANGEPOINTER,
+                                          (WPARAM)begin, (LPARAM)(end - begin));
+        if (text != NULL)
+            list = axyne_completion_build_slice(text, end - begin,
+                (size_t)caret - begin, begin > 0, end < (size_t)length,
+                language->keywords, AXYNE_SYNTAX_KEYWORD_SETS, &prefix);
+    }
     if (list == NULL) {
         if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
             SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);

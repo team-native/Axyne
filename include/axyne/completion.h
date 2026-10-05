@@ -33,4 +33,22 @@ char *axyne_completion_build(const char *text, size_t length, size_t caret,
                              const char *const *keyword_sets,
                              size_t keyword_set_count, size_t *prefix_bytes);
 
+/* The byte range [*begin, *end) of a document of `length` bytes that is worth
+ * scanning for a caret at `caret` (the whole document up to
+ * AXYNE_COMPLETION_MAX_SCAN bytes, else a window around the caret). Adapters
+ * fetch only this range (SCI_GETRANGEPOINTER) so big files are never made
+ * contiguous on each keystroke. */
+void axyne_completion_window(size_t length, size_t caret, size_t *begin,
+                             size_t *end);
+
+/* Like axyne_completion_build for a slice of the document: `caret` is relative
+ * to the slice, and cut_head / cut_tail say that the slice begins / ends in
+ * the middle of the document, so a word touching that edge may be incomplete
+ * and is not suggested. */
+char *axyne_completion_build_slice(const char *text, size_t length,
+                                   size_t caret, int cut_head, int cut_tail,
+                                   const char *const *keyword_sets,
+                                   size_t keyword_set_count,
+                                   size_t *prefix_bytes);
+
 #endif

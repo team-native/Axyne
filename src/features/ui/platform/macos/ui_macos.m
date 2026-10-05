@@ -2116,12 +2116,16 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     language = axyne_syntax_for_path(document->path);
     length = [self sendEditorMessage:SCI_GETLENGTH wParam:0 lParam:0];
     caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
-    text = (const char *)(intptr_t)[self sendEditorMessage:SCI_GETCHARACTERPOINTER
-                                                    wParam:0 lParam:0];
-    if (text != NULL && length > 0 && caret > 0 && caret <= length)
-        list = axyne_completion_build(text, (size_t)length, (size_t)caret,
-                                      language->keywords,
-                                      AXYNE_SYNTAX_KEYWORD_SETS, &prefix);
+    if (length > 0 && caret > 0 && caret <= length) {
+        size_t begin, end;
+        axyne_completion_window((size_t)length, (size_t)caret, &begin, &end);
+        text = (const char *)(intptr_t)[self sendEditorMessage:SCI_GETRANGEPOINTER
+            wParam:(uintptr_t)begin lParam:(intptr_t)(end - begin)];
+        if (text != NULL)
+            list = axyne_completion_build_slice(text, end - begin,
+                (size_t)caret - begin, begin > 0, end < (size_t)length,
+                language->keywords, AXYNE_SYNTAX_KEYWORD_SETS, &prefix);
+    }
     if (list == NULL) {
         if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
             (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
