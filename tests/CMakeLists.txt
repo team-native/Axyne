@@ -21,6 +21,7 @@ add_executable(axyne_tests
     test_shortcut_chips.c
     test_popup_menu.c
     test_completion.c
+    test_memory_limits.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -149,7 +150,13 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> languages
             "${AXYNE_TEST_FIXTURE_DIR}/languages"
 )
+add_test(
+    NAME axyne-memory-limits
+    COMMAND $<TARGET_FILE:axyne_tests> memory-limits
+            "${AXYNE_TEST_FIXTURE_DIR}/memory-limits"
+)
 set_tests_properties(
+    axyne-memory-limits
     axyne-build-target
     axyne-languages
     axyne-build-selector
