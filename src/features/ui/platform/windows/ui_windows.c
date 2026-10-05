@@ -449,7 +449,9 @@ static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_reset(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_after_git_operation(HWND window,
                                                 AxyneWindowState *state);
-static void axyne_git_panel_message_clear(AxyneWindowState *state);
+static void axyne_git_panel_message_clear_if(AxyneWindowState *state,
+                                             unsigned generation,
+                                             const char *committed);
 static void axyne_palette_open(HWND window, AxyneWindowState *state,
                                const char *initial);
 static int axyne_palette_document(void *user, char **path, char **text,
@@ -1616,6 +1618,7 @@ typedef struct AxyneGitBatch {
     int kind;        /* AXYNE_CMD_GIT_COMMIT, _PUSH, _PULL or _LOG */
     int stage_all;
     int from_panel;  /* started from the Git panel's buttons */
+    unsigned generation; /* panel workspace generation when it started */
     int ok;          /* the core call returned AXYNE_STATUS_OK */
     char *report;    /* malloc'd by the worker */
 } AxyneGitBatch;
@@ -1721,6 +1724,7 @@ static void axyne_git_batch_start(HWND window, AxyneWindowState *state, int comm
     batch->kind = command;
     batch->stage_all = stage_all;
     batch->from_panel = from_panel;
+    batch->generation = state->git_panel.generation;
     thread = CreateThread(NULL, 0, axyne_git_batch_thread, batch, 0, NULL);
     if (thread == NULL) {
         axyne_git_batch_free(batch);
@@ -1750,7 +1754,7 @@ static void axyne_git_batch_complete(HWND window, AxyneWindowState *state,
     axyne_git_ui_set_output(state, batch->report != NULL
         ? batch->report : "Unable to allocate Git output.\n");
     if (batch->from_panel && batch->ok && batch->kind == AXYNE_CMD_GIT_COMMIT)
-        axyne_git_panel_message_clear(state);
+        axyne_git_panel_message_clear_if(state, batch->generation, batch->message);
     state->git_batch_busy = 0;
     axyne_git_batch_free(batch);
     InvalidateRect(window, NULL, FALSE);
@@ -6712,10 +6716,25 @@ static void axyne_git_panel_message_update(AxyneWindowState *state)
     state->git_panel.message_filled = filled;
 }
 
-static void axyne_git_panel_message_clear(AxyneWindowState *state)
+/* Clears the box after a successful commit, but only when the workspace is
+ * unchanged and the box still holds the message that was committed (the user
+ * may have typed a new one meanwhile). */
+static void axyne_git_panel_message_clear_if(AxyneWindowState *state,
+                                             unsigned generation,
+                                             const char *committed)
 {
-    if (state->git_panel.message_edit != NULL)
-        SetWindowTextW(state->git_panel.message_edit, L"");
+    wchar_t *wide;
+    char *current;
+    int same;
+    if (state->git_panel.message_edit == NULL || committed == NULL ||
+        generation != state->git_panel.generation) return;
+    wide = axyne_git_panel_message_text(state);
+    current = wide != NULL ? axyne_utf8(wide) : NULL;
+    free(wide);
+    same = current != NULL && strcmp(current, committed) == 0;
+    free(current);
+    if (!same) return;
+    SetWindowTextW(state->git_panel.message_edit, L"");
     state->git_panel.message_filled = 0;
 }
 
@@ -8226,6 +8245,15 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                     (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
                     axyne_git_panel_commit(window, current);
                     continue;
+                }
+                {
+                    int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    int shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    int forward = message.message == WM_SYSKEYDOWN ||
+                        (ctrl && shift && (message.wParam == 'G' || message.wParam == 'E')) ||
+                        (ctrl && !shift && message.wParam == 'S');
+                    if (forward && axyne_handle_key(window, current, message.wParam))
+                        continue;
                 }
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
