@@ -10,6 +10,7 @@
 
 #include "axyne/git.h"
 #include "axyne/git_panel.h"
+#include "axyne/git_graph_geometry.h"
 
 #ifdef _WIN32
 /* The fixtures drive Git through a POSIX shell; the Windows build only
@@ -775,6 +776,79 @@ static int axyne_test_panel_graph_lanes(const char *root)
     return 1;
 }
 
+/* Rewritten side tips can all wait for one far-away ancestor. Exercise both
+ * the native renderers' shared geometry and repeated history-window growth. */
+static int axyne_test_graph_continuity(const char *root)
+{
+    char wide[1024], large[1024], out[8192];
+    AxyneGitGraph graph = {0}, prefix = {0};
+    AxyneError error = {0};
+    int limits[] = {200, 400, 625};
+    size_t i, j;
+    AXYNE_TEST_CHECK(axyne_test_path(wide, sizeof(wide), root, "g-wide"));
+    AXYNE_TEST_CHECK(axyne_test_path(large, sizeof(large), root, "g-large"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(wide));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(large));
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "awk 'BEGIN { for(i=1;i<=601;i++) { "
+        "printf \"commit refs/heads/main\\nmark :%%d\\ncommitter T <t@example.invalid> %%d +0000\\ndata 2\\nx\\n\", i, 1700000000+i; "
+        "if(i>1) printf \"from :%%d\\n\", i-1; printf \"\\n\"; } "
+        "for(i=1;i<=24;i++) printf \"commit refs/heads/side%%d\\ncommitter T <t@example.invalid> %%d +0000\\ndata 2\\ns\\nfrom :1\\n\\n\", i, 1700001000+i; }' "
+        "| git fast-import --quiet", wide), 0);
+    for (i = 0; i < sizeof(limits) / sizeof(limits[0]); ++i) {
+        double mac, win;
+        AXYNE_TEST_STATUS(axyne_git_graph(wide, limits[i], &graph, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_EQ_INT(graph.count, limits[i]);
+        AXYNE_TEST_EQ_INT(graph.max_lanes, 25);
+        AXYNE_TEST_EQ_INT(axyne_test_graph_invariants(&graph), i == 2 ? 0 : 25);
+        mac = axyne_git_graph_lane_width(graph.max_lanes, 10, 100);
+        win = axyne_git_graph_lane_width(graph.max_lanes, 12, 120);
+        /* All 25 lane centres, including dots past the old column-9 cutoff,
+         * fit in their strip without changing logical columns. */
+        for (j = 0; j < (size_t)graph.max_lanes; ++j) {
+            AXYNE_TEST_CHECK((j + 0.5) * mac < 100);
+            AXYNE_TEST_CHECK((j + 0.5) * win < 120);
+        }
+        AXYNE_TEST_CHECK(graph.rows[24].column > 9);
+        for (j = 0; j < prefix.count; ++j) {
+            int c;
+            AXYNE_TEST_STREQ(graph.rows[j].hash, prefix.rows[j].hash);
+            AXYNE_TEST_EQ_INT(graph.rows[j].column, prefix.rows[j].column);
+            AXYNE_TEST_EQ_INT(graph.rows[j].lane_count, prefix.rows[j].lane_count);
+            for (c = 0; c < graph.rows[j].lane_count; ++c) {
+                AXYNE_TEST_EQ_INT(graph.rows[j].lanes[c].flags, prefix.rows[j].lanes[c].flags);
+                AXYNE_TEST_EQ_INT(graph.rows[j].lanes[c].color, prefix.rows[j].lanes[c].color);
+            }
+        }
+        axyne_git_graph_free(&prefix);
+        prefix = graph;
+        memset(&graph, 0, sizeof(graph));
+    }
+    axyne_git_graph_free(&prefix);
+    AXYNE_TEST_CHECK(axyne_git_graph_lane_width(10, 10, 100) == 10);
+    AXYNE_TEST_CHECK(axyne_git_graph_lane_width(1000, 12, 120) < 1);
+    /* The rewritten Axyne history measured 64 lanes, highest dot column 63.
+     * Even after Windows integer rasterization that endpoint stays inside. */
+    AXYNE_TEST_CHECK(63.5 * axyne_git_graph_lane_width(64, 10, 100) < 100);
+    AXYNE_TEST_CHECK((int)(63.5 * axyne_git_graph_lane_width(64, 12, 120)) < 120);
+    /* More than 1 MiB is valid. Beyond the existing 16 MiB capture budget,
+     * reject the partial result rather than presenting a false history end. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "awk 'BEGIN { for(j=0;j<80000;j++) s=s \"x\"; for(i=1;i<=220;i++) "
+        "printf \"commit refs/heads/main\\ncommitter T <t@example.invalid> %%d +0000\\ndata 80001\\n%%s\\n\\n\", 1700000000+i, s; }' "
+        "| git fast-import --quiet", large), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(large, 200, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 200);
+    AXYNE_TEST_EQ_INT(strlen(graph.rows[199].subject), 80000);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph(large, 220, &graph, &error), AXYNE_STATUS_IO_ERROR);
+    AXYNE_TEST_CHECK(graph.rows == NULL && graph.count == 0);
+    AXYNE_TEST_CHECK(strstr(error.message, "output limit") != NULL);
+    return 1;
+}
+
 static const AxyneGitChange *axyne_test_find_kind(const AxyneGitChanges *changes,
                                                   const char *path, char kind)
 {
@@ -983,6 +1057,7 @@ static int axyne_test_git_panel_run(const char *root)
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph_lanes(root));
+    AXYNE_TEST_CHECK(axyne_test_graph_continuity(root));
     AXYNE_TEST_CHECK(axyne_test_panel_details(root));
     return 1;
 }

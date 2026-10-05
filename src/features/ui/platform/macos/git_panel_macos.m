@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "axyne/git_panel.h"
+#include "axyne/git_graph_geometry.h"
 #include "axyne/ui_design.h"
 
 /* Layout metrics, logical pixels. The sidebar column is flipped (y grows
@@ -21,7 +22,6 @@ static const CGFloat kGpPushWidth = 56;
 static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
 static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
 static const int kGpGraphStep = 200;      /* commits added per "더 불러오기" */
-static const int kGpMaxLanes = 10;        /* lanes drawn; wider graphs are cut */
 static const unsigned kGpRefreshDelayMs = 500;
 
 /* ---- lifetime box ----------------------------------------------------------
@@ -1396,9 +1396,9 @@ static char *gp_diff_title(const char *prefix, const char *path)
                     [self drawGraphRow:&_graph.rows[item.commit] inRect:row];
                 else if (item.kind == GP_ITEM_MORE)
                     gp_draw_text(_graphLoadingMore ? @"더 불러오는 중…" : @"더 불러오기",
-                        NSMakeRect(10 + MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes) * kGpLane + 8,
+                        NSMakeRect(10 + MAX(_graph.max_lanes, 1) * axyne_git_graph_lane_width(_graph.max_lanes, kGpLane, 100) + 8,
                                    y, MAX(0, NSWidth(rect) - 16 -
-                                       (10 + MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes) * kGpLane + 8)),
+                                       (10 + MAX(_graph.max_lanes, 1) * axyne_git_graph_lane_width(_graph.max_lanes, kGpLane, 100) + 8)),
                                    kGpRow),
                         [NSFont systemFontOfSize:11],
                         gp_color(_graphLoadingMore ? _theme.muted : _theme.accent), _leftStyle);
@@ -1423,9 +1423,10 @@ static char *gp_diff_title(const char *prefix, const char *path)
         ? &_expandedFiles.items[item->file] : NULL;
     BOOL selected = change != NULL && _selectedCommitFile != NULL &&
         strcmp(_selectedCommitFile, change->path) == 0;
-    int cells = MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes);
+    int cells = MAX(_graph.max_lanes, 1);
+    CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
     CGFloat left = 10;
-    CGFloat textX = left + cells * kGpLane + 8;
+    CGFloat textX = left + cells * laneWidth + 8;
     CGFloat textRight = NSMaxX(rect) - 8;
     int i;
     if (selected) {
@@ -1434,7 +1435,7 @@ static char *gp_diff_title(const char *prefix, const char *path)
     }
     for (i = 0; i < commit->lane_count && i < cells; ++i) {
         unsigned flags = commit->lanes[i].flags;
-        CGFloat cx = left + i * kGpLane + kGpLane / 2 + 0.5;
+        CGFloat cx = left + i * laneWidth + laneWidth / 2 + 0.5;
         NSBezierPath *path;
         if ((flags & (AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK)) == 0) continue;
         path = [NSBezierPath bezierPath];
@@ -1490,10 +1491,11 @@ static char *gp_diff_title(const char *prefix, const char *path)
 - (void)drawGraphRow:(const AxyneGitGraphRow *)row inRect:(NSRect)rect
 {
     BOOL selected = _selectedHash != NULL && strcmp(_selectedHash, row->hash) == 0;
-    int cells = MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes);
+    int cells = MAX(_graph.max_lanes, 1);
+    CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
     CGFloat left = 10;
     CGFloat top = NSMinY(rect), bottom = NSMaxY(rect), middle = floor(top + NSHeight(rect) / 2) + 0.5;
-    CGFloat textX = left + cells * kGpLane + 8;
+    CGFloat textX = left + cells * laneWidth + 8;
     CGFloat textRight = NSMaxX(rect) - 8;
     CGFloat dotX;
     BOOL current = NO;
@@ -1508,10 +1510,10 @@ static char *gp_diff_title(const char *prefix, const char *path)
         [gp_color(_theme.reference ? 0x2f343c : _theme.border) setFill];
         NSRectFill(rect);
     }
-    dotX = left + MIN(row->column, cells - 1) * kGpLane + kGpLane / 2 + 0.5;
+    dotX = left + row->column * laneWidth + laneWidth / 2 + 0.5;
     for (i = 0; i < row->lane_count && i < cells; ++i) {
         unsigned flags = row->lanes[i].flags;
-        CGFloat cx = left + i * kGpLane + kGpLane / 2 + 0.5;
+        CGFloat cx = left + i * laneWidth + laneWidth / 2 + 0.5;
         NSColor *color = gp_color(kGpLanePalette[row->lanes[i].color % AXYNE_GIT_GRAPH_PALETTE]);
         BOOL up, down;
         NSBezierPath *path;
