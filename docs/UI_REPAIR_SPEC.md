@@ -290,3 +290,24 @@ The Git entries could only inspect and stage. Git 커밋…, Git 푸시 and Git 
 Known gaps: the macOS dialog and menu code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run; the real-repository tests run on POSIX only.
 
 Units: shared Git commit/push/pull core with tests; commit message dialog (macOS, Windows); File menu actions (macOS, Windows); this record.
+
+## Git commit history
+
+The workspace's commit history can be viewed from the same Git menu group. Core: `axyne_git_log` in `include/axyne/git.h`, covered by `axyne-git-log` against real temporary repositories.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Capability | The commit history of the open workspace's Git repository can be viewed ("커밋 기록도 볼 수 있으면 좋을지도") | USER | CONFIRMED |
+| Placement | Git 기록 보기 is the last Git entry, directly after Git 풀 (macOS File menu; Windows Tools menu). No shortcut. Same gating as the other Git entries. Command palette entry not added, following Git 커밋/푸시/풀 | ASSUMED | ASSUMED |
+| Display | Output panel, same report layout as the other Git commands (`$ git <args>` header, then the lines); no separate window or list control, no selecting a commit to see its diff | ASSUMED | ASSUMED |
+| Line format | One line per commit, tab-separated: abbreviated hash, short date (`YYYY-MM-DD`), author name, subject (`git log --date=short --pretty=format:%h%x09%ad%x09%an%x09%s`). Newest first. The columns are tab-aligned, not padded | ASSUMED | ASSUMED |
+| Scope | The current branch's history from HEAD only (not all branches); merges are listed like any commit | ASSUMED | ASSUMED |
+| Count | The UI shows the latest 100 commits; the core clamps any request to 1..500. There is no paging or "load more" | ASSUMED | ASSUMED |
+| Empty repository | Not an error: the report says "아직 커밋이 없습니다." | ASSUMED | ASSUMED |
+| Not a repository | Same explanatory text and `[exit N]` as the other Git commands | ASSUMED | ASSUMED |
+| Non-interactive | `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `LC_MESSAGES=C`, `--no-pager`, like commit/push/pull | ASSUMED | ASSUMED |
+| Threading | Runs on the existing Git batch worker thread; the Git entries stay disabled until it returns | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the macOS menu code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run; the real-repository tests run on POSIX only.
+
+Units: Git log core with tests; Git 기록 보기 menu actions (macOS, Windows); this record.
