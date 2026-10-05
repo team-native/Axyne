@@ -26,6 +26,7 @@
 #include "axyne/debugger.h"
 #include "axyne/preferences.h"
 #include "axyne/git.h"
+#include "axyne/git_panel.h"
 #include "axyne/lsp.h"
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
@@ -104,6 +105,10 @@ static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
 typedef struct AxyneGitUiRun AxyneGitUiRun;
 typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
 
+/* The left column shows either the file explorer or the Git panel. */
+enum { AXYNE_SIDEBAR_TAB_EXPLORER = 0, AXYNE_SIDEBAR_TAB_GIT = 1,
+       AXYNE_SIDEBAR_TAB_COUNT = 2, AXYNE_SIDEBAR_TAB_PAD = 9 };
+
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
     HMODULE lexilla_module;
@@ -175,6 +180,7 @@ typedef struct AxyneWindowState {
     char lsp_status[192];
     int menu_active; /* 1-based index of the menu bar item whose popup is open */
     int explorer_hidden; /* View > Explorer */
+    int sidebar_tab;     /* AXYNE_SIDEBAR_TAB_*: what the sidebar shows */
     int panel_hidden;    /* View > Bottom Panel */
     int sidebar_size;    /* dragged explorer width; 0 = default, session only */
     int panel_size;      /* dragged bottom panel height; 0 = default */
@@ -271,7 +277,8 @@ enum { AXYNE_CMD_GOTO_LINE = 1200, AXYNE_CMD_SELECT_LINE,
        AXYNE_CMD_DEBUG_STEP_OUT, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS,
        AXYNE_CMD_OPEN_PREFERENCES_FILE, AXYNE_CMD_SHORTCUTS,
        AXYNE_CMD_REPORT_ISSUE, AXYNE_CMD_BUILD_TARGET, AXYNE_CMD_GIT_COMMIT,
-       AXYNE_CMD_GIT_PUSH, AXYNE_CMD_GIT_PULL, AXYNE_CMD_GIT_LOG };
+       AXYNE_CMD_GIT_PUSH, AXYNE_CMD_GIT_PULL, AXYNE_CMD_GIT_LOG,
+       AXYNE_CMD_VIEW_GIT };
 
 enum { AXYNE_CMD_EXIT = 1090 };
 
@@ -2885,7 +2892,8 @@ static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
         {"줄 복제", "Ctrl+D"}, {"줄 위로 이동", "Alt+Up"},
         {"줄 아래로 이동", "Alt+Down"}, {"들여쓰기", "Tab"},
         {"내어쓰기", "Shift+Tab"}, {"폴더 열기", "Ctrl+Shift+O"},
-        {"탐색기", "Ctrl+Shift+E"}, {"하단 패널", "Ctrl+J"},
+        {"탐색기", "Ctrl+Shift+E"}, {"Git 패널", "Ctrl+Shift+G"},
+        {"하단 패널", "Ctrl+J"},
         {"출력", "Ctrl+Shift+U"}, {"문제", "Ctrl+Shift+M"},
         {"터미널", "Ctrl+`"}, {"확대", "Ctrl+="}, {"축소", "Ctrl+-"},
         {"기본 크기", "Ctrl+0"}, {"자동 줄 바꿈", "Alt+Z"},
@@ -2968,7 +2976,16 @@ static int axyne_action_command(HWND window, AxyneWindowState *state, UINT comma
     case AXYNE_CMD_INDENT: SendMessageA(state->editor, SCI_TAB, 0, 0); break;
     case AXYNE_CMD_OUTDENT: SendMessageA(state->editor, SCI_BACKTAB, 0, 0); break;
     case AXYNE_CMD_VIEW_EXPLORER:
-        state->explorer_hidden = !state->explorer_hidden;
+        /* Explorer shown -> hide; hidden or showing the Git tab -> show the
+         * explorer tab. */
+        if (state->explorer_hidden) {
+            state->explorer_hidden = 0;
+            state->sidebar_tab = AXYNE_SIDEBAR_TAB_EXPLORER;
+        } else if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER) {
+            state->sidebar_tab = AXYNE_SIDEBAR_TAB_EXPLORER;
+        } else {
+            state->explorer_hidden = 1;
+        }
         axyne_layout(window, state);
         break;
     case AXYNE_CMD_VIEW_PANEL:
@@ -3036,6 +3053,7 @@ static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
     } else if (control && shift && !alt) {
         if (key == 'O') command = AXYNE_CMD_WORKSPACE;
         else if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
+        else if (key == 'G') command = AXYNE_CMD_VIEW_GIT;
         else if (key == 'U') command = AXYNE_CMD_PANEL_OUTPUT;
         else if (key == 'M') command = AXYNE_CMD_PANEL_PROBLEMS;
         else if (key == VK_F9) command = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS;
@@ -3850,7 +3868,13 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
                        MF_ENABLED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_VIEW_EXPLORER, L"탐색기", L"Ctrl+Shift+E",
-                       MF_ENABLED | (state->explorer_hidden ? 0 : MF_CHECKED));
+                       MF_ENABLED | (!state->explorer_hidden &&
+                           state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER
+                           ? MF_CHECKED : 0));
+        axyne_menu_add(menu, &pool, AXYNE_CMD_VIEW_GIT, L"Git 패널", L"Ctrl+Shift+G",
+                       MF_ENABLED | (!state->explorer_hidden &&
+                           state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT
+                           ? MF_CHECKED : 0));
         axyne_menu_add(menu, &pool, AXYNE_CMD_VIEW_PANEL, L"하단 패널", L"Ctrl+J",
                        MF_ENABLED | shown);
         axyne_menu_separator(menu, &pool);
@@ -5410,6 +5434,121 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
     RestoreDC(dc, saved_dc);
 }
 
+/* ---- Sidebar tabs: 탐색기 | Git ----------------------------------------- */
+
+static int axyne_git_panel_visible(const AxyneWindowState *state)
+{
+    return !state->explorer_hidden && state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT;
+}
+
+static const wchar_t *axyne_sidebar_tab_label(int index)
+{
+    return index == AXYNE_SIDEBAR_TAB_GIT ? L"Git" : L"탐색기";
+}
+
+/* Tab `index` of the two-tab header at the top of the sidebar. */
+static RECT axyne_sidebar_tab_rect(const AxyneWindowState *state, int index)
+{
+    RECT rect;
+    int left = 4;
+    int i;
+    for (i = 0; i < index; ++i)
+        left += axyne_measure_text(state->font_small, axyne_sidebar_tab_label(i)) +
+                2 * AXYNE_SIDEBAR_TAB_PAD;
+    rect.left = left;
+    rect.top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
+    rect.right = left + axyne_measure_text(state->font_small,
+        axyne_sidebar_tab_label(index)) + 2 * AXYNE_SIDEBAR_TAB_PAD;
+    rect.bottom = rect.top + AXYNE_UI_EXPLORER_HEADER;
+    return rect;
+}
+
+static void axyne_paint_sidebar_header(HDC dc, AxyneWindowState *state)
+{
+    int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
+    int saved_dc = SaveDC(dc);
+    int i;
+    IntersectClipRect(dc, 0, top, axyne_sidebar_width(state) - 1,
+                      top + AXYNE_UI_EXPLORER_HEADER);
+    for (i = 0; i < AXYNE_SIDEBAR_TAB_COUNT; ++i) {
+        RECT rect = axyne_sidebar_tab_rect(state, i);
+        int active = state->sidebar_tab == i;
+        axyne_text_rect(dc, state->font_small,
+                        active ? AXYNE_SIDEBAR_TEXT : AXYNE_SIDEBAR_MUTED, rect,
+                        axyne_sidebar_tab_label(i), DT_CENTER);
+        if (active)
+            axyne_fill(dc, rect.left + AXYNE_SIDEBAR_TAB_PAD, rect.bottom - 3,
+                       rect.right - AXYNE_SIDEBAR_TAB_PAD, rect.bottom - 1,
+                       AXYNE_ACCENT);
+    }
+    RestoreDC(dc, saved_dc);
+}
+
+static void axyne_sidebar_select_tab(HWND window, AxyneWindowState *state, int tab)
+{
+    state->sidebar_tab = tab;
+    axyne_layout(window, state);
+}
+
+/* A click in the header strip: switches tabs. Returns nonzero when the click
+ * landed in the header (handled, even when nothing changes). */
+static int axyne_sidebar_header_click(HWND window, AxyneWindowState *state,
+                                      int x, int y)
+{
+    POINT point = {x, y};
+    int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
+    int i;
+    if (state->explorer_hidden || x < 0 || x >= axyne_sidebar_width(state) ||
+        y < top || y >= top + AXYNE_UI_EXPLORER_HEADER) return 0;
+    for (i = 0; i < AXYNE_SIDEBAR_TAB_COUNT; ++i) {
+        RECT rect = axyne_sidebar_tab_rect(state, i);
+        if (PtInRect(&rect, point)) {
+            if (state->sidebar_tab != i) axyne_sidebar_select_tab(window, state, i);
+            return 1;
+        }
+    }
+    return 1;
+}
+
+/* View > Git Panel: shows the sidebar on the Git tab; with the Git tab already
+ * showing it goes back to the explorer tab. */
+static void axyne_git_panel_toggle_view(HWND window, AxyneWindowState *state)
+{
+    if (axyne_git_panel_visible(state)) {
+        state->sidebar_tab = AXYNE_SIDEBAR_TAB_EXPLORER;
+    } else {
+        state->explorer_hidden = 0;
+        state->sidebar_tab = AXYNE_SIDEBAR_TAB_GIT;
+    }
+    axyne_layout(window, state);
+}
+
+/* One muted line in the list area (empty-state style of the explorer). */
+static void axyne_git_panel_message(HDC dc, AxyneWindowState *state, int top,
+                                    int bottom, const wchar_t *text)
+{
+    RECT rect = {12, top + 4, axyne_sidebar_width(state) - 12, bottom};
+    HFONT previous = (HFONT)SelectObject(dc, state->ui_font);
+    SetTextColor(dc, AXYNE_SIDEBAR_MUTED);
+    SetBkMode(dc, TRANSPARENT);
+    if (rect.right > rect.left && rect.bottom > rect.top)
+        DrawTextW(dc, text, -1, &rect, DT_LEFT | DT_TOP | DT_WORDBREAK |
+                  DT_NOPREFIX | DT_END_ELLIPSIS);
+    SelectObject(dc, previous);
+}
+
+static void axyne_paint_git_panel(HDC dc, AxyneWindowState *state, int bottom)
+{
+    int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    int saved_dc = SaveDC(dc);
+    IntersectClipRect(dc, 0, top, axyne_sidebar_width(state) - 1, bottom);
+    if (state->explorer.root == NULL)
+        axyne_git_panel_message(dc, state, top, bottom, L"열린 폴더가 없습니다");
+    else
+        axyne_git_panel_message(dc, state, top, bottom, L"불러오는 중...");
+    RestoreDC(dc, saved_dc);
+}
+
 static void axyne_layout(HWND window, AxyneWindowState *state)
 {
     RECT client;
@@ -5700,9 +5839,11 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         tab_left = tab_right;
     }
     if (!state->explorer_hidden) {
-        RECT header = {12, editor_top, axyne_sidebar_width(state) - 8, editor_top + AXYNE_UI_EXPLORER_HEADER};
-        axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, header, L"탐색기", DT_LEFT);
-        axyne_paint_explorer(dc, state, editor_top, status_top);
+        axyne_paint_sidebar_header(dc, state);
+        if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT)
+            axyne_paint_git_panel(dc, state, status_top);
+        else
+            axyne_paint_explorer(dc, state, editor_top, status_top);
     }
     if (!state->panel_hidden) {
         size_t i;
@@ -5918,6 +6059,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         GetClientRect(window, &client);
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
+            if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER)
+                return axyne_window_proc(window, WM_LBUTTONDOWN, w_param, l_param);
             axyne_workspace_click(window, state, y, 1);
             return 0;
         }
@@ -5977,8 +6120,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             return 0;
         }
+        if (axyne_sidebar_header_click(window, state, x, y)) return 0;
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
+            if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER) return 0;
             if (axyne_workspace_row_at(window, state, y) >= 0)
                 axyne_workspace_click(window, state, y, 0);
             else if (state->explorer.root == NULL &&
@@ -6038,9 +6183,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         GetClientRect(window, &client);
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
-            int row = axyne_workspace_row_at(window, state, y);
-            HMENU menu = CreatePopupMenu();
-            POINT point = {x, y};
+            int row;
+            HMENU menu;
+            POINT point;
+            if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER) return 0;
+            row = axyne_workspace_row_at(window, state, y);
+            menu = CreatePopupMenu();
+            point.x = x;
+            point.y = y;
             if (row >= 0) {
                 state->explorer_selection = (size_t)row;
                 state->explorer_has_selection = 1;
@@ -6098,7 +6248,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return 0;
         }
         if (message == WM_MOUSEHWHEEL) break;
-        if (point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
+        if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER &&
+            point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
             point.y < client.bottom - AXYNE_STATUS) {
             size_t rows = axyne_explorer_visible_rows(state, client.bottom - AXYNE_STATUS);
             size_t max_scroll = state->explorer.count > rows ? state->explorer.count - rows : 0;
@@ -6214,6 +6365,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_git_batch_start(window, state, command, NULL, 0);
         else if (command == AXYNE_CMD_GIT_LOG)
             axyne_git_batch_start(window, state, command, NULL, 0);
+        else if (command == AXYNE_CMD_VIEW_GIT)
+            axyne_git_panel_toggle_view(window, state);
         else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
         else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
         else if (state->editor != NULL &&
