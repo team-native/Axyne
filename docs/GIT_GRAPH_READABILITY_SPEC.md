@@ -26,6 +26,7 @@ and removes secondary parent hashes before layout. No Git history is changed.
 | core | Mode-aware query, compatible wrapper, merge-window fixtures | Existing parser/layout | compact, full, bounds | COMPLETE |
 | native | Native mode selectors, captured request mode, activation refresh and stale suppression | core, existing async loaders | refresh, stale, selection, parity | COMPLETE |
 | validation | Build and regression validation, report platform limits | core, native | delivery, bounds | COMPLETE (local scope) |
+| ci-budget | Give only the Git panel integration suite a 180-second CTest timeout | Existing common 60-second test group | USER, bounds | COMPLETE |
 
 ## Validation and limits
 
@@ -66,3 +67,14 @@ Windows mode changes now increment a separate graph request generation,
 leaving workspace generation intact for successful commit message clearing.
 Loads capture that generation to reject a Compact/Full/Compact round trip's
 older response. Windows commit/message runtime coverage requires Windows CI.
+
+## CI validation budget
+
+Source: USER; status: CONFIRMED. Only `axyne-git-panel` overrides the common
+60-second timeout with 180 seconds. The graph suite exercises large-history,
+merge and bounded-output integration fixtures; CI process-launch variability
+has exceeded 60 seconds despite local runs around 14 seconds. This changes
+the test execution budget only. Assertions, history counts, Git capture
+limits and all other test timeouts remain unchanged.
+Reconfiguration confirmed generated CTest properties of 180 seconds for
+Git panel and 60 seconds for Git log; graph-only rerun passed in 16.69s.
