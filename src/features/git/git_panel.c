@@ -671,6 +671,14 @@ static int panel_layout_row(PanelLayout *layout, AxyneGitGraphRow *row)
 AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
                             AxyneGitGraph *out, AxyneError *error)
 {
+    return axyne_git_graph_with_mode(utf8_workspace, max_count,
+                                    AXYNE_GIT_GRAPH_FULL, out, error);
+}
+
+AxyneStatus axyne_git_graph_with_mode(const char *utf8_workspace, int max_count,
+                                     AxyneGitGraphMode mode,
+                                     AxyneGitGraph *out, AxyneError *error)
+{
     char count_text[16];
     const char *arguments[] = {
         "--no-pager", "log", "--exclude=refs/stash", "--all", "--date-order",
@@ -689,6 +697,10 @@ AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
     out->rows = NULL;
     out->count = 0;
     out->max_lanes = 0;
+    if (mode != AXYNE_GIT_GRAPH_FULL && mode != AXYNE_GIT_GRAPH_COMPACT)
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Invalid graph mode");
+    if (mode == AXYNE_GIT_GRAPH_COMPACT) arguments[3] = "--first-parent";
     if (max_count < 1) max_count = 1;
     if (max_count > AXYNE_GIT_GRAPH_MAX_COUNT) max_count = AXYNE_GIT_GRAPH_MAX_COUNT;
     (void)snprintf(count_text, sizeof(count_text), "%d", max_count);
@@ -726,6 +738,13 @@ AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
         parsed = panel_parse_record(&row, result.output + pos, length);
         pos += length + 1;
         if (parsed < 0) continue;
+        /* Preserve commit metadata, but omit untraversed merge edges in this
+         * explicitly filtered history so they cannot create phantom lanes. */
+        if (mode == AXYNE_GIT_GRAPH_COMPACT && row.parent_count > 1) {
+            size_t i;
+            for (i = 1; i < row.parent_count; ++i) free(row.parents[i]);
+            row.parent_count = 1;
+        }
         if (parsed == 0 || !panel_layout_row(&layout, &row)) {
             panel_row_free(&row);
             goto oom;

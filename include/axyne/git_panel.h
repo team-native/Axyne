@@ -166,6 +166,17 @@ AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
                             AxyneGitGraph *out, AxyneError *error);
 void axyne_git_graph_free(AxyneGitGraph *graph);
 
+typedef enum AxyneGitGraphMode {
+    AXYNE_GIT_GRAPH_FULL = 0,
+    AXYNE_GIT_GRAPH_COMPACT = 1
+} AxyneGitGraphMode;
+
+/* Compact is HEAD's first-parent history, with only first-parent edges.
+ * Full preserves the all-ref DAG exposed by axyne_git_graph. */
+AxyneStatus axyne_git_graph_with_mode(const char *utf8_workspace, int max_count,
+                                     AxyneGitGraphMode mode,
+                                     AxyneGitGraph *out, AxyneError *error);
+
 /* ---- commit details and diffs ------------------------------------------- */
 
 /* Files changed by a commit (`git show --name-status -M`; for a merge, against

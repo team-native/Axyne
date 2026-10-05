@@ -188,6 +188,11 @@ set_tests_properties(
     PROPERTIES TIMEOUT 60
 )
 
+# Git graph integration fixtures include large histories, merge layouts and
+# bounded-output captures. CI process-launch variability can exceed 60s even
+# when local runs finish quickly; allow headroom for this suite alone.
+set_tests_properties(axyne-git-panel PROPERTIES TIMEOUT 180)
+
 # Clear-all-breakpoints helper over the real breakpoint table (no gdb needed).
 add_executable(axyne_debugger_actions_tests test_debugger_actions.c)
 target_include_directories(axyne_debugger_actions_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
