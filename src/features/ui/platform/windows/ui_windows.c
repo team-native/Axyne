@@ -109,6 +109,30 @@ typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
 enum { AXYNE_SIDEBAR_TAB_EXPLORER = 0, AXYNE_SIDEBAR_TAB_GIT = 1,
        AXYNE_SIDEBAR_TAB_COUNT = 2, AXYNE_SIDEBAR_TAB_PAD = 9 };
 
+/* Git panel geometry (logical pixels) and its debounced refresh timer. */
+enum {
+    AXYNE_GIT_ROW = AXYNE_UI_ROW,
+    AXYNE_GIT_LABEL = 22,
+    AXYNE_GIT_REFRESH_TIMER = 5120,
+    AXYNE_GIT_REFRESH_DELAY = 300
+};
+
+/* Snapshot of the Git panel's data. Written only on the UI thread: worker
+ * jobs return their results by window message and are applied there. */
+typedef struct AxyneGitPanelUi {
+    AxyneGitChanges changes;
+    int loaded;          /* a snapshot of the current workspace arrived */
+    int repo_ok;         /* the change list could be read */
+    char error[512];     /* Git's message when !repo_ok */
+    int has_staged;
+    int job_busy;        /* a refresh or stage job runs on a worker thread */
+    int refresh_pending; /* another refresh was requested meanwhile */
+    unsigned generation; /* bumped per workspace; stale results are dropped */
+    int changes_scroll;  /* first visible change row */
+    int wheel_remainder;
+    char *selected_path; /* selected change (repository path) or NULL */
+} AxyneGitPanelUi;
+
 typedef struct AxyneWindowState {
     HMODULE scintilla_module;
     HMODULE lexilla_module;
@@ -181,6 +205,7 @@ typedef struct AxyneWindowState {
     int menu_active; /* 1-based index of the menu bar item whose popup is open */
     int explorer_hidden; /* View > Explorer */
     int sidebar_tab;     /* AXYNE_SIDEBAR_TAB_*: what the sidebar shows */
+    AxyneGitPanelUi git_panel;
     int panel_hidden;    /* View > Bottom Panel */
     int sidebar_size;    /* dragged explorer width; 0 = default, session only */
     int panel_size;      /* dragged bottom panel height; 0 = default */
@@ -288,7 +313,8 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_GIT_COMPLETE = WM_APP + 24,
        AXYNE_WM_LSP_STATUS = WM_APP + 25,
        AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
-       AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30 };
+       AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
+       AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -402,6 +428,10 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
 static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
 static void axyne_layout(HWND window, AxyneWindowState *state);
+static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state);
+static void axyne_git_panel_reset(HWND window, AxyneWindowState *state);
+static void axyne_git_panel_after_git_operation(HWND window,
+                                                AxyneWindowState *state);
 static void axyne_palette_open(HWND window, AxyneWindowState *state,
                                const char *initial);
 static int axyne_palette_document(void *user, char **path, char **text,
@@ -1698,6 +1728,7 @@ static void axyne_git_batch_complete(HWND window, AxyneWindowState *state,
     state->git_batch_busy = 0;
     axyne_git_batch_free(batch);
     InvalidateRect(window, NULL, FALSE);
+    axyne_git_panel_after_git_operation(window, state);
 }
 
 /* 커밋…: asks for the message first, then runs on the worker thread. */
@@ -3185,6 +3216,7 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
     state->explorer_scroll = 0;
     axyne_load_workspace_preferences(state, root);
     free(root);
+    axyne_git_panel_reset(window, state);
     InvalidateRect(window, NULL, FALSE);
     return 1;
 }
@@ -5463,6 +5495,17 @@ static RECT axyne_sidebar_tab_rect(const AxyneWindowState *state, int index)
     return rect;
 }
 
+/* Refresh button at the right end of the header (Git tab only). */
+static RECT axyne_git_refresh_rect(const AxyneWindowState *state)
+{
+    RECT rect;
+    rect.top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + 4;
+    rect.bottom = rect.top + AXYNE_UI_EXPLORER_HEADER - 8;
+    rect.right = axyne_sidebar_width(state) - 1 - 6;
+    rect.left = rect.right - 24;
+    return rect;
+}
+
 static void axyne_paint_sidebar_header(HDC dc, AxyneWindowState *state)
 {
     int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
@@ -5481,6 +5524,12 @@ static void axyne_paint_sidebar_header(HDC dc, AxyneWindowState *state)
                        rect.right - AXYNE_SIDEBAR_TAB_PAD, rect.bottom - 1,
                        AXYNE_ACCENT);
     }
+    if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT) {
+        RECT refresh = axyne_git_refresh_rect(state);
+        axyne_text_rect(dc, state->font_glyph13,
+                        state->git_panel.job_busy ? AXYNE_ACCENT : AXYNE_SIDEBAR_MUTED,
+                        refresh, L"\u21bb", DT_CENTER);
+    }
     RestoreDC(dc, saved_dc);
 }
 
@@ -5488,6 +5537,7 @@ static void axyne_sidebar_select_tab(HWND window, AxyneWindowState *state, int t
 {
     state->sidebar_tab = tab;
     axyne_layout(window, state);
+    if (axyne_git_panel_visible(state)) axyne_git_panel_refresh(window, state);
 }
 
 /* A click in the header strip: switches tabs. Returns nonzero when the click
@@ -5507,6 +5557,10 @@ static int axyne_sidebar_header_click(HWND window, AxyneWindowState *state,
             return 1;
         }
     }
+    if (axyne_git_panel_visible(state)) {
+        RECT refresh = axyne_git_refresh_rect(state);
+        if (PtInRect(&refresh, point)) axyne_git_panel_refresh(window, state);
+    }
     return 1;
 }
 
@@ -5521,9 +5575,304 @@ static void axyne_git_panel_toggle_view(HWND window, AxyneWindowState *state)
         state->sidebar_tab = AXYNE_SIDEBAR_TAB_GIT;
     }
     axyne_layout(window, state);
+    if (axyne_git_panel_visible(state)) axyne_git_panel_refresh(window, state);
 }
 
-/* One muted line in the list area (empty-state style of the explorer). */
+/* ---- Git panel: worker jobs ---------------------------------------------- */
+
+enum { AXYNE_GITJOB_REFRESH = 1, AXYNE_GITJOB_STAGE, AXYNE_GITJOB_UNSTAGE };
+
+/* One unit of Git work. The UI thread fills it, a worker thread runs the
+ * blocking core calls and posts it back as AXYNE_WM_GIT_PANEL_DONE; whoever
+ * ends up holding the pointer (window handler, or the worker when the post
+ * fails) frees it. */
+typedef struct AxyneGitPanelJob {
+    HWND window;
+    int kind;
+    unsigned generation;
+    char *workspace;
+    char **paths;        /* stage / unstage; owned */
+    size_t path_count;
+    char *op_error;      /* a stage / unstage failure */
+    char *error;         /* the snapshot could not be read */
+    AxyneGitChanges changes;
+    int have_changes;
+    int has_staged;
+} AxyneGitPanelJob;
+
+static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
+{
+    size_t i;
+    if (job == NULL) return;
+    for (i = 0; i < job->path_count; ++i) free(job->paths[i]);
+    free(job->paths);
+    free(job->workspace);
+    free(job->op_error);
+    free(job->error);
+    axyne_git_changes_free(&job->changes);
+    free(job);
+}
+
+static char *axyne_git_panel_message_copy(const AxyneError *error)
+{
+    return _strdup(error != NULL && error->message[0] != '\0'
+        ? error->message : "Unable to run Git.");
+}
+
+static void axyne_git_panel_job_snapshot(AxyneGitPanelJob *job)
+{
+    AxyneError error;
+    size_t i;
+    memset(&error, 0, sizeof(error));
+    if (axyne_git_changes(job->workspace, &job->changes, &error) != AXYNE_STATUS_OK) {
+        job->error = axyne_git_panel_message_copy(&error);
+        return;
+    }
+    job->have_changes = 1;
+    memset(&error, 0, sizeof(error));
+    if (axyne_git_has_staged(job->workspace, &job->has_staged, &error) != AXYNE_STATUS_OK) {
+        job->has_staged = 0;
+        for (i = 0; i < job->changes.count; ++i)
+            if (job->changes.items[i].staged || job->changes.items[i].partially)
+                job->has_staged = 1;
+    }
+}
+
+static DWORD WINAPI axyne_git_panel_thread(LPVOID opaque)
+{
+    AxyneGitPanelJob *job = (AxyneGitPanelJob *)opaque;
+    AxyneError error;
+    memset(&error, 0, sizeof(error));
+    if (job->kind == AXYNE_GITJOB_STAGE || job->kind == AXYNE_GITJOB_UNSTAGE) {
+        AxyneStatus status = job->kind == AXYNE_GITJOB_STAGE
+            ? axyne_git_stage_paths(job->workspace, (const char *const *)job->paths,
+                                    job->path_count, &error)
+            : axyne_git_unstage_paths(job->workspace, (const char *const *)job->paths,
+                                      job->path_count, &error);
+        if (status != AXYNE_STATUS_OK) job->op_error = axyne_git_panel_message_copy(&error);
+    }
+    axyne_git_panel_job_snapshot(job);
+    if (!PostMessageW(job->window, AXYNE_WM_GIT_PANEL_DONE, 0, (LPARAM)job))
+        axyne_git_panel_job_free(job);
+    return 0;
+}
+
+/* Takes ownership of `job`. Returns nonzero when the worker was started. */
+static int axyne_git_panel_start_job(HWND window, AxyneWindowState *state,
+                                     AxyneGitPanelJob *job)
+{
+    HANDLE thread;
+    if (job == NULL) return 0;
+    job->window = window;
+    job->generation = state->git_panel.generation;
+    job->workspace = state->explorer.root != NULL ? _strdup(state->explorer.root) : NULL;
+    if (job->workspace == NULL) {
+        axyne_git_panel_job_free(job);
+        return 0;
+    }
+    thread = CreateThread(NULL, 0, axyne_git_panel_thread, job, 0, NULL);
+    if (thread == NULL) {
+        axyne_git_panel_job_free(job);
+        return 0;
+    }
+    CloseHandle(thread); /* detached: the result arrives as a window message */
+    return 1;
+}
+
+/* Invalid UTF-8 in Git output (file contents, odd names) must not blank the
+ * Output panel: replace each bad byte with '?'. */
+static void axyne_git_panel_sanitize_utf8(char *text)
+{
+    unsigned char *p = (unsigned char *)text;
+    if (p == NULL) return;
+    while (*p != '\0') {
+        size_t need = 0;
+        size_t i;
+        if (*p < 0x80) { ++p; continue; }
+        if (*p >= 0xc2 && *p <= 0xdf) need = 1;
+        else if (*p >= 0xe0 && *p <= 0xef) need = 2;
+        else if (*p >= 0xf0 && *p <= 0xf4) need = 3;
+        for (i = 1; need != 0 && i <= need; ++i)
+            if ((p[i] & 0xc0) != 0x80) { need = 0; break; }
+        if (need == 0) { *p++ = '?'; continue; }
+        if (need == 2 && ((*p == 0xe0 && p[1] < 0xa0) || (*p == 0xed && p[1] > 0x9f)))
+            { *p++ = '?'; continue; }
+        if (need == 3 && ((*p == 0xf0 && p[1] < 0x90) || (*p == 0xf4 && p[1] > 0x8f)))
+            { *p++ = '?'; continue; }
+        p += need + 1;
+    }
+}
+
+/* Shows text in the Output panel (revealing the panel if it was hidden). */
+static void axyne_git_panel_show_report(HWND window, AxyneWindowState *state,
+                                        char *text)
+{
+    axyne_git_panel_sanitize_utf8(text);
+    state->panel_hidden = 0;
+    axyne_git_ui_show_output(window, state);
+    axyne_git_ui_set_output(state, text);
+}
+
+/* ---- Git panel: data ------------------------------------------------------ */
+
+static void axyne_git_panel_clear(AxyneGitPanelUi *git)
+{
+    axyne_git_changes_free(&git->changes);
+    git->loaded = 0;
+    git->repo_ok = 0;
+    git->error[0] = '\0';
+    git->has_staged = 0;
+    git->changes_scroll = 0;
+    free(git->selected_path);
+    git->selected_path = NULL;
+}
+
+/* The workspace changed (or went away): drop everything, refresh when shown. */
+static void axyne_git_panel_reset(HWND window, AxyneWindowState *state)
+{
+    ++state->git_panel.generation;
+    axyne_git_panel_clear(&state->git_panel);
+    state->git_panel.refresh_pending = 0;
+    InvalidateRect(window, NULL, FALSE);
+    if (axyne_git_panel_visible(state)) axyne_git_panel_refresh(window, state);
+}
+
+static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    AxyneGitPanelJob *job;
+    if (!axyne_git_panel_visible(state)) return;
+    if (state->explorer.root == NULL) {
+        if (git->loaded || git->changes.count != 0) axyne_git_panel_clear(git);
+        InvalidateRect(window, NULL, FALSE);
+        return;
+    }
+    if (git->job_busy) {
+        git->refresh_pending = 1;
+        return;
+    }
+    job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
+    if (job == NULL) return;
+    job->kind = AXYNE_GITJOB_REFRESH;
+    if (axyne_git_panel_start_job(window, state, job)) {
+        git->job_busy = 1;
+        InvalidateRect(window, NULL, FALSE);
+    }
+}
+
+/* Workspace file-watch events arrive in bursts: refresh once they settle. */
+static void axyne_git_panel_schedule_refresh(HWND window, AxyneWindowState *state)
+{
+    if (!axyne_git_panel_visible(state) || state->explorer.root == NULL) return;
+    SetTimer(window, AXYNE_GIT_REFRESH_TIMER, AXYNE_GIT_REFRESH_DELAY, NULL);
+}
+
+/* After a commit, push, pull or any menu Git command. */
+static void axyne_git_panel_after_git_operation(HWND window, AxyneWindowState *state)
+{
+    axyne_git_panel_refresh(window, state);
+}
+
+static void axyne_git_panel_clamp_scroll(AxyneWindowState *state, int rows)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    int count = (int)git->changes.count;
+    int max_scroll = count > rows && rows > 0 ? count - rows : 0;
+    if (git->changes_scroll > max_scroll) git->changes_scroll = max_scroll;
+    if (git->changes_scroll < 0) git->changes_scroll = 0;
+}
+
+/* Applies a finished job on the UI thread. */
+static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
+                                 AxyneGitPanelJob *job)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    int pending;
+    git->job_busy = 0;
+    if (job->generation == git->generation && state->explorer.root != NULL &&
+        job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
+        axyne_git_changes_free(&git->changes);
+        if (job->have_changes) {
+            git->changes = job->changes;
+            memset(&job->changes, 0, sizeof(job->changes));
+            git->repo_ok = 1;
+            git->error[0] = '\0';
+            git->has_staged = job->has_staged;
+            if (git->selected_path != NULL) {
+                size_t i;
+                int found = 0;
+                for (i = 0; i < git->changes.count && !found; ++i)
+                    found = strcmp(git->changes.items[i].path, git->selected_path) == 0;
+                if (!found) {
+                    free(git->selected_path);
+                    git->selected_path = NULL;
+                }
+            }
+        } else {
+            git->repo_ok = 0;
+            git->has_staged = 0;
+            free(git->selected_path);
+            git->selected_path = NULL;
+            (void)snprintf(git->error, sizeof(git->error), "%s",
+                           job->error != NULL ? job->error : "Unable to run Git.");
+        }
+        git->loaded = 1;
+        if (job->op_error != NULL) axyne_git_panel_show_report(window, state, job->op_error);
+        axyne_layout(window, state);
+    }
+    pending = git->refresh_pending;
+    git->refresh_pending = 0;
+    axyne_git_panel_job_free(job);
+    InvalidateRect(window, NULL, FALSE);
+    if (pending) axyne_git_panel_refresh(window, state);
+}
+
+/* No mutating Git work (menu command, commit, push, stage) is running. */
+static int axyne_git_panel_idle(const AxyneWindowState *state)
+{
+    return !state->git_panel.job_busy && !state->git_batch_busy &&
+           state->git_process == NULL;
+}
+
+/* Checkbox click: a fully staged file is unstaged (with its rename source),
+ * anything else - unstaged, untracked, conflicted or partially staged - is
+ * staged. */
+static void axyne_git_panel_toggle_stage(HWND window, AxyneWindowState *state,
+                                         size_t index)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    const AxyneGitChange *change;
+    AxyneGitPanelJob *job;
+    size_t count;
+    int unstage;
+    if (index >= git->changes.count || !axyne_git_panel_idle(state)) return;
+    change = &git->changes.items[index];
+    unstage = change->staged != 0;
+    count = unstage && change->orig_path != NULL ? 2 : 1;
+    job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
+    if (job == NULL) return;
+    job->kind = unstage ? AXYNE_GITJOB_UNSTAGE : AXYNE_GITJOB_STAGE;
+    job->paths = (char **)calloc(count, sizeof(char *));
+    if (job->paths == NULL) {
+        axyne_git_panel_job_free(job);
+        return;
+    }
+    job->path_count = count; /* NULL entries are fine for free() */
+    job->paths[0] = _strdup(change->path);
+    if (count == 2) job->paths[1] = _strdup(change->orig_path);
+    if (job->paths[0] == NULL || (count == 2 && job->paths[1] == NULL)) {
+        axyne_git_panel_job_free(job);
+        return;
+    }
+    if (axyne_git_panel_start_job(window, state, job)) {
+        git->job_busy = 1;
+        InvalidateRect(window, NULL, FALSE);
+    }
+}
+
+/* ---- Git panel: layout, painting, input ---------------------------------- */
+
+/* Wrapped muted text in the list area (empty-state style of the explorer). */
 static void axyne_git_panel_message(HDC dc, AxyneWindowState *state, int top,
                                     int bottom, const wchar_t *text)
 {
@@ -5537,16 +5886,274 @@ static void axyne_git_panel_message(HDC dc, AxyneWindowState *state, int top,
     SelectObject(dc, previous);
 }
 
+typedef struct AxyneGitLayout {
+    RECT changes_label;
+    RECT changes_list;
+} AxyneGitLayout;
+
+static void axyne_git_panel_layout(const AxyneWindowState *state, AxyneGitLayout *out)
+{
+    int right = axyne_sidebar_width(state) - 1;
+    int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
+    int bottom = state->client_height - AXYNE_STATUS;
+    if (right < 0) right = 0;
+    if (bottom < top + AXYNE_GIT_LABEL) bottom = top + AXYNE_GIT_LABEL;
+    out->changes_label.left = 0;
+    out->changes_label.right = right;
+    out->changes_label.top = top;
+    out->changes_label.bottom = top + AXYNE_GIT_LABEL;
+    out->changes_list.left = 0;
+    out->changes_list.right = right;
+    out->changes_list.top = top + AXYNE_GIT_LABEL;
+    out->changes_list.bottom = bottom;
+}
+
+static int axyne_git_rows_in(const RECT *list)
+{
+    return list->bottom > list->top ? (list->bottom - list->top) / AXYNE_GIT_ROW : 0;
+}
+
+/* Kind letter colours (the file-badge palette of ui_design.h). */
+static COLORREF axyne_git_kind_color(char kind)
+{
+    switch (kind) {
+    case 'A': return axyne_theme_color(0xa3c98a);
+    case 'D': return axyne_theme_color(0xe07f7f);
+    case 'R': case 'C': return axyne_theme_color(0x7db5e3);
+    case 'U': return axyne_theme_color(0xc79ad9);
+    case '?': return axyne_theme_color(0x8cc7c0);
+    default: return axyne_theme_color(0xd9b36c);
+    }
+}
+
+static void axyne_git_polyline(HDC dc, int width, COLORREF color,
+                               const POINT *points, int count)
+{
+    HPEN pen = CreatePen(PS_SOLID, width, color);
+    HGDIOBJ previous;
+    if (pen == NULL) return;
+    previous = SelectObject(dc, pen);
+    Polyline(dc, points, count);
+    SelectObject(dc, previous);
+    DeleteObject(pen);
+}
+
+/* Badge-style chip: label over the accent colour at the badge alpha. */
+static void axyne_git_paint_chip(HDC dc, HFONT font, RECT chip, const wchar_t *label,
+                                 COLORREF color, COLORREF behind)
+{
+    COLORREF fill = axyne_blend(behind, color, AXYNE_UI_BADGE_ALPHA_PERCENT);
+    axyne_round_fill(dc, chip.left, chip.top, chip.right, chip.bottom,
+                     AXYNE_UI_BADGE_RADIUS, fill, fill);
+    axyne_text_rect(dc, font, color, chip, label, DT_CENTER);
+}
+
+/* mode: 0 unchecked, 1 checked, 2 partially staged. */
+static void axyne_git_paint_checkbox(HDC dc, int x, int y, int mode, COLORREF behind)
+{
+    if (mode == 0) {
+        axyne_round_fill(dc, x, y, x + 14, y + 14, 3, behind, AXYNE_SIDEBAR_MUTED);
+        return;
+    }
+    axyne_round_fill(dc, x, y, x + 14, y + 14, 3, AXYNE_ACCENT, AXYNE_ACCENT);
+    if (mode == 1) {
+        POINT tick[3];
+        tick[0].x = x + 3;  tick[0].y = y + 7;
+        tick[1].x = x + 6;  tick[1].y = y + 10;
+        tick[2].x = x + 11; tick[2].y = y + 4;
+        axyne_git_polyline(dc, 2, AXYNE_RUN_TEXT, tick, 3);
+    } else {
+        POINT dash[2];
+        dash[0].x = x + 3;  dash[0].y = y + 7;
+        dash[1].x = x + 11; dash[1].y = y + 7;
+        axyne_git_polyline(dc, 2, AXYNE_RUN_TEXT, dash, 2);
+    }
+}
+
+static wchar_t *axyne_git_wide_range(const char *text, size_t length)
+{
+    char *copy = (char *)malloc(length + 1);
+    wchar_t *wide;
+    if (copy == NULL) return NULL;
+    memcpy(copy, text, length);
+    copy[length] = '\0';
+    wide = axyne_wide(copy);
+    free(copy);
+    return wide;
+}
+
+static int axyne_git_text_width(HDC dc, HFONT font, const wchar_t *text)
+{
+    HFONT previous = (HFONT)SelectObject(dc, font);
+    SIZE size = {0, 0};
+    GetTextExtentPoint32W(dc, text, (int)wcslen(text), &size);
+    SelectObject(dc, previous);
+    return size.cx;
+}
+
+/* Thin scroll indicator at the right edge of a virtual list. */
+static void axyne_git_paint_thumb(HDC dc, const RECT *list, int first, int rows,
+                                  int total, int unit)
+{
+    int height = list->bottom - list->top;
+    int thumb, offset;
+    if (total <= rows || rows <= 0 || height <= 0) return;
+    (void)unit;
+    thumb = height * rows / total;
+    if (thumb < 16) thumb = 16;
+    if (thumb > height) thumb = height;
+    offset = (height - thumb) * first / (total - rows);
+    axyne_fill(dc, list->right - 4, list->top + offset, list->right - 1,
+               list->top + offset + thumb, AXYNE_BORDER);
+}
+
+static void axyne_git_paint_change_row(HDC dc, AxyneWindowState *state,
+                                       const AxyneGitChange *change, int selected,
+                                       int right, int y)
+{
+    COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
+    const char *base = axyne_ui_basename(change->path);
+    size_t dir_length = base > change->path ? (size_t)(base - change->path) - 1 : 0;
+    wchar_t *name = axyne_wide(base);
+    wchar_t *dir = dir_length != 0 ? axyne_git_wide_range(change->path, dir_length) : NULL;
+    wchar_t kind[2];
+    RECT chip = {30, y + 4, 30 + 16, y + AXYNE_GIT_ROW - 4};
+    int x = 54;
+    int limit = right - 14;
+    int name_width;
+    RECT rect;
+    if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_ROW, AXYNE_SELECTION_BG);
+    axyne_git_paint_checkbox(dc, 10, y + (AXYNE_GIT_ROW - 14) / 2,
+                             change->staged ? 1 : (change->partially ? 2 : 0), behind);
+    kind[0] = (wchar_t)(unsigned char)change->kind;
+    kind[1] = L'\0';
+    axyne_git_paint_chip(dc, state->tab_badge_font, chip, kind,
+                         axyne_git_kind_color(change->kind), behind);
+    if (name == NULL) name = _wcsdup(L"(invalid name)");
+    if (name != NULL) {
+        name_width = axyne_git_text_width(dc, state->ui_font, name);
+        rect.left = x;
+        rect.top = y;
+        rect.right = x + name_width < limit ? x + name_width + 2 : limit;
+        rect.bottom = y + AXYNE_GIT_ROW;
+        axyne_text_rect(dc, state->ui_font,
+                        selected && AXYNE_REFERENCE ? RGB(255, 255, 255)
+                                                    : AXYNE_SIDEBAR_TEXT,
+                        rect, name, DT_LEFT);
+        if (dir != NULL && x + name_width + 8 < limit - 16) {
+            rect.left = x + name_width + 8;
+            rect.right = limit;
+            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, dir, DT_LEFT);
+        }
+    }
+    free(name);
+    free(dir);
+}
+
+static void axyne_git_paint_changes(HDC dc, AxyneWindowState *state,
+                                    const AxyneGitLayout *layout)
+{
+    const AxyneGitPanelUi *git = &state->git_panel;
+    wchar_t title[48];
+    RECT label = layout->changes_label;
+    int rows = axyne_git_rows_in(&layout->changes_list);
+    int y = layout->changes_list.top;
+    int saved_dc;
+    size_t i;
+    (void)swprintf_s(title, 48, L"변경 사항 (%llu)", (unsigned long long)git->changes.count);
+    label.left = 12;
+    axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, label, title, DT_LEFT);
+    saved_dc = SaveDC(dc);
+    IntersectClipRect(dc, layout->changes_list.left, layout->changes_list.top,
+                      layout->changes_list.right, layout->changes_list.bottom);
+    if (git->changes.count == 0) {
+        axyne_git_panel_message(dc, state, layout->changes_list.top,
+                                layout->changes_list.bottom, L"변경 사항 없음");
+    } else {
+        for (i = (size_t)git->changes_scroll; i < git->changes.count &&
+             (int)(i - (size_t)git->changes_scroll) < rows + 1; ++i) {
+            const AxyneGitChange *change = &git->changes.items[i];
+            int selected = git->selected_path != NULL &&
+                           strcmp(git->selected_path, change->path) == 0;
+            axyne_git_paint_change_row(dc, state, change, selected,
+                                       layout->changes_list.right, y);
+            y += AXYNE_GIT_ROW;
+        }
+        axyne_git_paint_thumb(dc, &layout->changes_list, git->changes_scroll, rows,
+                              (int)git->changes.count, AXYNE_GIT_ROW);
+    }
+    RestoreDC(dc, saved_dc);
+}
+
 static void axyne_paint_git_panel(HDC dc, AxyneWindowState *state, int bottom)
 {
+    AxyneGitLayout layout;
     int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     int saved_dc = SaveDC(dc);
     IntersectClipRect(dc, 0, top, axyne_sidebar_width(state) - 1, bottom);
-    if (state->explorer.root == NULL)
+    if (state->explorer.root == NULL) {
         axyne_git_panel_message(dc, state, top, bottom, L"열린 폴더가 없습니다");
-    else
+    } else if (!state->git_panel.loaded) {
         axyne_git_panel_message(dc, state, top, bottom, L"불러오는 중...");
+    } else if (!state->git_panel.repo_ok) {
+        wchar_t *text = NULL;
+        if (strstr(state->git_panel.error, "not a Git repository") != NULL ||
+            strstr(state->git_panel.error, "not a git repository") != NULL) {
+            axyne_git_panel_message(dc, state, top, bottom, L"Git 저장소가 아닙니다");
+        } else {
+            text = axyne_wide(state->git_panel.error);
+            axyne_git_panel_message(dc, state, top, bottom,
+                                    text != NULL ? text : L"Git 오류");
+            free(text);
+        }
+    } else {
+        axyne_git_panel_layout(state, &layout);
+        axyne_git_panel_clamp_scroll(state, axyne_git_rows_in(&layout.changes_list));
+        axyne_git_paint_changes(dc, state, &layout);
+    }
     RestoreDC(dc, saved_dc);
+}
+
+/* Click in the sidebar body while the Git tab shows. */
+static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, int y)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    AxyneGitLayout layout;
+    POINT point = {x, y};
+    if (state->explorer.root == NULL || !git->loaded || !git->repo_ok) return;
+    axyne_git_panel_layout(state, &layout);
+    if (PtInRect(&layout.changes_list, point)) {
+        size_t row = (size_t)git->changes_scroll +
+                     (size_t)((y - layout.changes_list.top) / AXYNE_GIT_ROW);
+        if (row >= git->changes.count) return;
+        if (x >= 4 && x < 28) {
+            axyne_git_panel_toggle_stage(window, state, row);
+        } else {
+            free(git->selected_path);
+            git->selected_path = _strdup(git->changes.items[row].path);
+            InvalidateRect(window, NULL, FALSE);
+        }
+    }
+}
+
+/* Mouse wheel over the Git panel; point is in client coordinates. */
+static int axyne_git_panel_wheel(HWND window, AxyneWindowState *state, POINT point,
+                                 int delta)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    AxyneGitLayout layout;
+    int steps, rows;
+    if (state->explorer.root == NULL || !git->loaded || !git->repo_ok) return 0;
+    axyne_git_panel_layout(state, &layout);
+    if (!PtInRect(&layout.changes_list, point)) return 0;
+    rows = axyne_git_rows_in(&layout.changes_list);
+    git->wheel_remainder += delta;
+    steps = git->wheel_remainder / WHEEL_DELTA;
+    git->wheel_remainder %= WHEEL_DELTA;
+    git->changes_scroll -= steps * 3;
+    axyne_git_panel_clamp_scroll(state, rows);
+    InvalidateRect(window, NULL, FALSE);
+    return 1;
 }
 
 static void axyne_layout(HWND window, AxyneWindowState *state)
@@ -6022,6 +6629,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_palette_tick(window, state);
             return 0;
         }
+        if (state != NULL && w_param == AXYNE_GIT_REFRESH_TIMER) {
+            KillTimer(window, AXYNE_GIT_REFRESH_TIMER);
+            axyne_git_panel_refresh(window, state);
+            return 0;
+        }
         break;
     case AXYNE_WM_PALETTE_CLOSE:
         if (state != NULL && state->palette.active &&
@@ -6123,7 +6735,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (axyne_sidebar_header_click(window, state, x, y)) return 0;
         if (x >= 0 && x < axyne_sidebar_width(state) &&
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
-            if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER) return 0;
+            if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT) {
+                axyne_git_panel_click(window, state, x, y);
+                return 0;
+            }
             if (axyne_workspace_row_at(window, state, y) >= 0)
                 axyne_workspace_click(window, state, y, 0);
             else if (state->explorer.root == NULL &&
@@ -6248,6 +6863,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return 0;
         }
         if (message == WM_MOUSEHWHEEL) break;
+        if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT && !state->explorer_hidden &&
+            point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
+            point.y < client.bottom - AXYNE_STATUS) {
+            (void)axyne_git_panel_wheel(window, state, point, GET_WHEEL_DELTA_WPARAM(w_param));
+            return 0;
+        }
         if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER &&
             point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
             point.y < client.bottom - AXYNE_STATUS) {
@@ -6471,6 +7092,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                     (AxyneExplorerMessage *)queued.lParam);
             axyne_workspace_refresh(window, state);
             axyne_workspace_message_destroy(event_message);
+            axyne_git_panel_schedule_refresh(window, state);
         }
         return 0;
     }
@@ -6537,12 +7159,20 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_discover_runtimes(window, state);
         return 0;
     case AXYNE_WM_GIT_COMPLETE:
-        if (state->git_run == (AxyneGitUiRun *)l_param)
+        if (state->git_run == (AxyneGitUiRun *)l_param) {
             axyne_git_ui_complete(window, state, (AxyneGitUiRun *)l_param);
+            axyne_git_panel_after_git_operation(window, state);
+        }
         if (state->closing) DestroyWindow(window);
         return 0;
     case AXYNE_WM_GIT_BATCH_COMPLETE:
         axyne_git_batch_complete(window, state, (AxyneGitBatch *)l_param);
+        return 0;
+    case AXYNE_WM_GIT_PANEL_DONE:
+        if (l_param != 0) {
+            if (state != NULL) axyne_git_panel_done(window, state, (AxyneGitPanelJob *)l_param);
+            else axyne_git_panel_job_free((AxyneGitPanelJob *)l_param);
+        }
         return 0;
     case AXYNE_WM_LSP_STATUS: {
         AxyneLspStatusMessage *message = (AxyneLspStatusMessage *)l_param;
@@ -6673,6 +7303,16 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                         (AxyneLspStatusMessage *)pending_message.lParam);
                 }
             }
+            {
+                MSG pending_message;
+                while (PeekMessageW(&pending_message, window,
+                                    AXYNE_WM_GIT_PANEL_DONE,
+                                    AXYNE_WM_GIT_PANEL_DONE, PM_REMOVE)) {
+                    axyne_git_panel_job_free(
+                        (AxyneGitPanelJob *)pending_message.lParam);
+                }
+            }
+            axyne_git_panel_clear(&state->git_panel);
             axyne_palette_destroy_ui(state);
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
