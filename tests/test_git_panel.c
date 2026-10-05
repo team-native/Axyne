@@ -596,6 +596,202 @@ static int axyne_test_panel_graph(const char *root)
     return 1;
 }
 
+static const AxyneGitChange *axyne_test_find_kind(const AxyneGitChanges *changes,
+                                                  const char *path, char kind)
+{
+    const AxyneGitChange *c = axyne_test_find(changes, path);
+    return c != NULL && c->kind == kind ? c : NULL;
+}
+
+static int axyne_test_panel_details(const char *root)
+{
+    char repo[1024], plain[1024], fresh[1024], sub[1100], out[8192];
+    char merge[64], root_hash[64], second[64], hash[64];
+    AxyneGitChanges files = {0};
+    AxyneGitDiff diff = {0};
+    AxyneError error = {0};
+    const AxyneGitChange *c;
+    const char *bad[] = { "", "xyz", "--help", "abc", "HEAD", "-abcd",
+                          "abcd;touch x", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+                          NULL };
+    size_t i;
+
+    AXYNE_TEST_CHECK(axyne_test_path(repo, sizeof(repo), root, "d-repo"));
+    AXYNE_TEST_CHECK(axyne_test_path(plain, sizeof(plain), root, "d-plain"));
+    AXYNE_TEST_CHECK(axyne_test_path(fresh, sizeof(fresh), root, "d-fresh"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(repo));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(plain));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(fresh));
+
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && mkdir sub && "
+        "printf 'line1\\nline2\\n' > a.txt && printf 'k1\\nk2\\n' > '\xED\x95\x9C\xEA\xB8\x80 \xED\x8C\x8C\xEC\x9D\xBC.txt' && "
+        "seq 1 40 > old.txt && git add -A && git commit -q -m root && "
+        "printf 'line1\\nchanged\\n' > a.txt && git mv old.txt new.txt && printf '41\\n' >> new.txt && "
+        "printf 'x\\n' > sub/x.txt && git add -A && git commit -q -m second && "
+        "git checkout -q -b feature && printf 'f\\n' > f.txt && git add f.txt && git commit -q -m feat && "
+        "git checkout -q main && printf 'm\\n' > m.txt && git add m.txt && git commit -q -m mainside && "
+        "git merge -q --no-ff feature -m merge", repo), 0);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git -C '%s' rev-parse HEAD", repo), 0);
+    snprintf(merge, sizeof(merge), "%.63s", out);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git -C '%s' rev-parse HEAD~2", repo), 0);
+    snprintf(second, sizeof(second), "%.63s", out);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git -C '%s' rev-parse HEAD~3", repo), 0);
+    snprintf(root_hash, sizeof(root_hash), "%.63s", out);
+
+    /* Invalid hashes are rejected before Git runs. */
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        AXYNE_TEST_STATUS(axyne_git_commit_files(repo, bad[i], &files, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+        AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, bad[i], NULL, &diff, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+        AXYNE_TEST_CHECK(files.items == NULL && diff.text == NULL);
+    }
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, second, NULL, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, second, NULL, NULL, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "", NULL, 0, &diff, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, NULL, NULL, 0, &diff, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+    /* A valid but unknown object is a Git failure. */
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, "deadbeef", &files, &error), AXYNE_STATUS_IO_ERROR);
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, "deadbeef", NULL, &diff, &error), AXYNE_STATUS_IO_ERROR);
+    AXYNE_TEST_STATUS(axyne_git_commit_files(plain, second, &files, &error), AXYNE_STATUS_IO_ERROR);
+    AXYNE_TEST_CONTAINS(error.message, "not a Git repository");
+    AXYNE_TEST_STATUS(axyne_git_file_diff(plain, "x", NULL, 0, &diff, &error), AXYNE_STATUS_IO_ERROR);
+
+    /* Files of a root commit, an ordinary commit with a rename, and a merge
+     * (against its first parent). Upper-case hashes are accepted. */
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, root_hash, &files, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(files.count, 3);
+    AXYNE_TEST_CHECK(axyne_test_find_kind(&files, "a.txt", 'A'));
+    AXYNE_TEST_CHECK(axyne_test_find_kind(&files, "old.txt", 'A'));
+    AXYNE_TEST_CHECK(axyne_test_find_kind(&files, "\xED\x95\x9C\xEA\xB8\x80 \xED\x8C\x8C\xEC\x9D\xBC.txt", 'A'));
+    axyne_git_changes_free(&files);
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, second, &files, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(files.count, 3);
+    AXYNE_TEST_CHECK(axyne_test_find_kind(&files, "a.txt", 'M'));
+    AXYNE_TEST_CHECK(axyne_test_find_kind(&files, "sub/x.txt", 'A'));
+    c = axyne_test_find_kind(&files, "new.txt", 'R');
+    AXYNE_TEST_CHECK(c != NULL);
+    AXYNE_TEST_STREQ(c->orig_path, "old.txt");
+    AXYNE_TEST_EQ_INT(c->index_status, 'R');
+    AXYNE_TEST_EQ_INT(c->staged, 0);
+    axyne_git_changes_free(&files);
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, merge, &files, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(files.count, 1);
+    AXYNE_TEST_CHECK(axyne_test_find_kind(&files, "f.txt", 'A'));
+    axyne_git_changes_free(&files);
+    for (i = 0; second[i] != '\0'; ++i)
+        hash[i] = second[i] >= 'a' && second[i] <= 'f' ? (char)(second[i] - 32) : second[i];
+    hash[i] = '\0';
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, hash, &files, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(files.count, 3);
+    axyne_git_changes_free(&files);
+    /* Abbreviated hashes work too. */
+    snprintf(hash, sizeof(hash), "%.7s", second);
+    AXYNE_TEST_STATUS(axyne_git_commit_files(repo, hash, &files, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(files.count, 3);
+    axyne_git_changes_free(&files);
+
+    /* Commit diffs: whole commit, one file, Korean path unquoted. */
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, second, NULL, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.truncated, 0);
+    AXYNE_TEST_EQ_INT(diff.length, strlen(diff.text));
+    AXYNE_TEST_CONTAINS(diff.text, "diff --git a/a.txt b/a.txt");
+    AXYNE_TEST_CONTAINS(diff.text, "-line2\n+changed\n");
+    AXYNE_TEST_CONTAINS(diff.text, "rename from old.txt");
+    AXYNE_TEST_CONTAINS(diff.text, "+++ b/sub/x.txt");
+    AXYNE_TEST_CHECK(strstr(diff.text, "commit ") == NULL);
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, second, "a.txt", &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+changed");
+    AXYNE_TEST_CHECK(strstr(diff.text, "sub/x.txt") == NULL);
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, root_hash, "\xED\x95\x9C\xEA\xB8\x80 \xED\x8C\x8C\xEC\x9D\xBC.txt", &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+++ b/\xED\x95\x9C\xEA\xB8\x80 \xED\x8C\x8C\xEC\x9D\xBC.txt");
+    AXYNE_TEST_CHECK(strstr(diff.text, "a.txt") == NULL);
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, merge, "", &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+++ b/f.txt");
+    AXYNE_TEST_CHECK(strstr(diff.text, "m.txt") == NULL);
+    axyne_git_diff_free(&diff);
+    /* A path the commit did not touch gives an empty diff. */
+    AXYNE_TEST_STATUS(axyne_git_commit_diff(repo, root_hash, "nope.txt", &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.length, 0);
+    AXYNE_TEST_STREQ(diff.text, "");
+    axyne_git_diff_free(&diff);
+
+    /* Working tree and index diffs. */
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "a.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.length, 0);
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && printf 'line1\\nline2\\nmore\\n' > a.txt && printf 'u\\n' > u.txt && printf 'u2\\n' > sub/u2.txt && "
+        "printf '\\377\\000\\377' > bin.dat && git mv new.txt moved.txt", repo), 0);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "a.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+more");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "a.txt", NULL, 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.length, 0);
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_stage_paths(repo, (const char *const[]){ "a.txt" }, 1, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "a.txt", NULL, 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+more");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "a.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.length, 0);
+    axyne_git_diff_free(&diff);
+    /* Untracked: shown as added, also from a sub-directory workspace. */
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "u.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "new file mode");
+    AXYNE_TEST_CONTAINS(diff.text, "+++ b/u.txt");
+    AXYNE_TEST_CONTAINS(diff.text, "+u\n");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_CHECK(axyne_test_path(sub, sizeof(sub), repo, "sub"));
+    AXYNE_TEST_STATUS(axyne_git_file_diff(sub, "sub/u2.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+++ b/sub/u2.txt");
+    AXYNE_TEST_CONTAINS(diff.text, "+u2\n");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(sub, "a.txt", NULL, 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+more");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "bin.dat", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "Binary files");
+    axyne_git_diff_free(&diff);
+    /* Staged rename: with orig_path Git reports the rename. */
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "moved.txt", "new.txt", 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "rename from new.txt");
+    AXYNE_TEST_CONTAINS(diff.text, "rename to moved.txt");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(repo, "moved.txt", NULL, 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "new file mode");
+    axyne_git_diff_free(&diff);
+
+    /* Repository with no commit: staged and untracked diffs work. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && printf 'a\\n' > s.txt && printf 'b\\n' > t.txt && git add s.txt", fresh), 0);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(fresh, "s.txt", NULL, 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+a\n");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(fresh, "t.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(diff.text, "+b\n");
+    axyne_git_diff_free(&diff);
+
+    /* Truncation: a 3 MiB-ish new file is cut at 1 MiB on a line boundary. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && awk 'BEGIN{for(i=1;i<=300000;i++)print \"line number \" i \" of the big file\"}' > big.txt", fresh), 0);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(fresh, "big.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.truncated, 1);
+    AXYNE_TEST_CHECK(diff.length <= AXYNE_GIT_DIFF_LIMIT && diff.length > AXYNE_GIT_DIFF_LIMIT - 200);
+    AXYNE_TEST_EQ_INT(diff.length, strlen(diff.text));
+    AXYNE_TEST_EQ_INT(diff.text[diff.length - 1], '\n');
+    AXYNE_TEST_CONTAINS(diff.text, "diff --git a/big.txt b/big.txt");
+    axyne_git_diff_free(&diff);
+    AXYNE_TEST_STATUS(axyne_git_stage_paths(fresh, (const char *const[]){ "big.txt" }, 1, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_git_file_diff(fresh, "big.txt", NULL, 1, &diff, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(diff.truncated, 1);
+    AXYNE_TEST_CHECK(diff.length <= AXYNE_GIT_DIFF_LIMIT);
+    axyne_git_diff_free(&diff);
+    return 1;
+}
+
 static int axyne_test_git_panel_run(const char *root)
 {
     char out[256];
@@ -607,6 +803,7 @@ static int axyne_test_git_panel_run(const char *root)
     axyne_test_setup_environment(root);
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
+    AXYNE_TEST_CHECK(axyne_test_panel_details(root));
     return 1;
 }
 
