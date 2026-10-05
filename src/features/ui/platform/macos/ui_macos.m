@@ -28,6 +28,7 @@
 #include "popup_menu_macos.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
+#include "axyne/completion.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
@@ -1144,6 +1145,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)updateLineNumberMargin;
 - (void)updateBraceHighlight;
 - (void)autoIndentFromNotification:(SCNotification *)notification;
+- (void)showCompletion;
 - (BOOL)showPreferences:(BOOL)workspace;
 - (BOOL)savePreferences:(AxynePreferences *)edited workspace:(BOOL)workspace;
 - (void)showGitStatus:(id)sender;
@@ -2097,6 +2099,44 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     }
 }
 
+/* Word completion while typing: document words plus the language's keywords.
+ * Scintilla owns the list: Tab and Return accept the selected entry, Escape
+ * (or typing a character that matches nothing) closes it, and with no list
+ * open Tab keeps indenting. */
+- (void)showCompletion
+{
+    AxyneDocument *document = [self activeDocument];
+    const AxyneSyntaxLanguage *language;
+    const char *text;
+    NSInteger length;
+    NSInteger caret;
+    char *list = NULL;
+    size_t prefix = 0;
+    if (_editorView == nil || document == NULL || [self isEmptyState]) return;
+    language = axyne_syntax_for_path(document->path);
+    length = [self sendEditorMessage:SCI_GETLENGTH wParam:0 lParam:0];
+    caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    text = (const char *)(intptr_t)[self sendEditorMessage:SCI_GETCHARACTERPOINTER
+                                                    wParam:0 lParam:0];
+    if (text != NULL && length > 0 && caret > 0 && caret <= length)
+        list = axyne_completion_build(text, (size_t)length, (size_t)caret,
+                                      language->keywords,
+                                      AXYNE_SYNTAX_KEYWORD_SETS, &prefix);
+    if (list == NULL) {
+        if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
+            (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
+        return;
+    }
+    (void)[self sendEditorMessage:SCI_AUTOCSETIGNORECASE wParam:1 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETAUTOHIDE wParam:1 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETCHOOSESINGLE wParam:0 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETCANCELATSTART wParam:0 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETMAXHEIGHT wParam:8 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSHOW wParam:(uintptr_t)prefix
+                           lParam:(intptr_t)list];
+    free(list);
+}
+
 - (void)applyPreferences
 {
     [self applySystemAppearance];
@@ -2447,8 +2487,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 {
     AxyneDocument *doc = [self activeDocument];
     if (_loadingEditor || notification == NULL || doc == NULL) return;
-    if (notification->nmhdr.code == SCN_CHARADDED)
+    if (notification->nmhdr.code == SCN_CHARADDED) {
         [self autoIndentFromNotification:notification];
+        [self showCompletion];
+    }
     if (notification->nmhdr.code == SCN_UPDATEUI) {
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
