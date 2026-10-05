@@ -122,6 +122,7 @@ enum {
     AXYNE_GIT_PAD = 8,
     AXYNE_GIT_GAP = 6,
     AXYNE_GIT_MESSAGE = 5030, /* commit message EDIT control id */
+    AXYNE_GIT_MODE = 5031,
     AXYNE_GIT_REFRESH_TIMER = 5120,
     AXYNE_GIT_REFRESH_DELAY = 300,
     AXYNE_GIT_GRAPH_STEP = 200 /* commits added per "더 불러오기" */
@@ -134,6 +135,9 @@ typedef struct AxyneGitPanelUi {
     AxyneGitGraph graph; /* newest first, at most graph_loaded_limit commits */
     int graph_ok;        /* the graph could be read (zero commits is fine) */
     int graph_limit;     /* commits requested by refreshes; 0 = default, grown by "더 불러오기" */
+    AxyneGitGraphMode graph_mode;
+    unsigned graph_generation; /* mode request identity, independent of commits/workspace */
+    HWND graph_selector;
     int graph_loaded_limit; /* the request the shown graph answered (0 = none) */
     int graph_loading;   /* a larger graph was requested and has not arrived */
     int loaded;          /* a snapshot of the current workspace arrived */
@@ -5703,6 +5707,8 @@ typedef struct AxyneGitPanelJob {
     int have_graph;
     char *graph_error;   /* reported even when the changes snapshot succeeded */
     int graph_count;     /* refresh jobs: commits to read (set on the UI thread) */
+    AxyneGitGraphMode graph_mode;
+    unsigned graph_generation;
     /* Diff and commit-file jobs: they never touch the snapshot and run beside
      * other jobs; only the newest request (serial) is applied. */
     unsigned serial;
@@ -5760,8 +5766,8 @@ static void axyne_git_panel_job_snapshot(AxyneGitPanelJob *job)
     /* Staging does not move the history: only a refresh re-reads the graph. */
     if (job->kind == AXYNE_GITJOB_REFRESH) {
         memset(&error, 0, sizeof(error));
-        job->have_graph = axyne_git_graph(job->workspace,
-            job->graph_count, &job->graph, &error) == AXYNE_STATUS_OK;
+        job->have_graph = axyne_git_graph_with_mode(job->workspace,
+            job->graph_count, job->graph_mode, &job->graph, &error) == AXYNE_STATUS_OK;
         if (!job->have_graph) {
             job->graph_error = axyne_git_panel_message_copy(&error);
             axyne_git_graph_free(&job->graph);
@@ -6019,6 +6025,8 @@ static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state)
     if (job == NULL) return;
     job->kind = AXYNE_GITJOB_REFRESH;
     job->graph_count = axyne_git_graph_request(git);
+    job->graph_mode = git->graph_mode;
+    job->graph_generation = git->graph_generation;
     if (axyne_git_panel_start_job(window, state, job)) {
         git->job_busy = 1;
         InvalidateRect(window, NULL, FALSE);
@@ -6225,7 +6233,10 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
         return;
     }
     git->job_busy = 0;
-    if (job->generation == git->generation && state->explorer.root != NULL &&
+    if (job->generation == git->generation && axyne_git_panel_visible(state) &&
+        (job->kind != AXYNE_GITJOB_REFRESH ||
+         (job->graph_mode == git->graph_mode && job->graph_generation == git->graph_generation)) &&
+        state->explorer.root != NULL &&
         job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
         axyne_git_changes_free(&git->changes);
         if (job->have_changes && job->kind == AXYNE_GITJOB_REFRESH) {
@@ -6509,7 +6520,7 @@ static void axyne_git_panel_layout(const AxyneWindowState *state, AxyneGitLayout
     int bottom = state->client_height - AXYNE_STATUS;
     int fixed = AXYNE_GIT_LABEL + AXYNE_GIT_GAP + AXYNE_GIT_MESSAGE_LABEL +
                 AXYNE_GIT_MESSAGE_BOX + AXYNE_GIT_GAP + AXYNE_GIT_BUTTON +
-                AXYNE_GIT_PAD + AXYNE_GIT_LABEL;
+                AXYNE_GIT_PAD + AXYNE_GIT_LABEL + 18;
     int space, need, graph_need, half, limit, list_height, y, button_top, button_width;
     if (right < 0) right = 0;
     if (bottom < top) bottom = top;
@@ -6560,7 +6571,7 @@ static void axyne_git_panel_layout(const AxyneWindowState *state, AxyneGitLayout
     out->graph_label.left = 12;
     out->graph_label.right = right;
     out->graph_label.top = out->commit_button.bottom + AXYNE_GIT_PAD;
-    out->graph_label.bottom = out->graph_label.top + AXYNE_GIT_LABEL;
+    out->graph_label.bottom = out->graph_label.top + AXYNE_GIT_LABEL + 18;
     out->graph_list.left = 0;
     out->graph_list.right = right;
     out->graph_list.top = out->graph_label.bottom;
@@ -7058,7 +7069,15 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
     size_t i;
     axyne_fill(dc, 0, layout->separator_y, layout->graph_list.right,
                layout->separator_y + 1, AXYNE_BORDER);
-    axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, label, L"커밋 그래프", DT_LEFT);
+    label.right -= 154;
+    label.bottom = label.top + AXYNE_GIT_LABEL;
+    axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, label, L"그래프", DT_LEFT);
+    label = layout->graph_label;
+    label.top += AXYNE_GIT_LABEL;
+    axyne_text_rect(dc, state->font_tiny, AXYNE_SIDEBAR_MUTED, label,
+                    git->graph_mode == AXYNE_GIT_GRAPH_COMPACT
+                        ? L"HEAD first-parent only · side history omitted"
+                        : L"All branches · full merge ancestry", DT_LEFT);
     if (layout->graph_list.bottom <= layout->graph_list.top) return;
     saved_dc = SaveDC(dc);
     IntersectClipRect(dc, layout->graph_list.left, layout->graph_list.top,
@@ -7204,6 +7223,16 @@ static void axyne_git_panel_place_controls(AxyneWindowState *state)
     show = axyne_git_panel_visible(state) && state->explorer.root != NULL &&
            git->loaded && git->repo_ok && layout.fits &&
            layout.message_edit.right - layout.message_edit.left > 20;
+    if (git->graph_selector != NULL) {
+        if (show) {
+            SetWindowPos(git->graph_selector, NULL, layout.graph_label.right - 154,
+                         layout.graph_label.top, 146, 140,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        } else {
+            if (GetFocus() == git->graph_selector) SetFocus(GetParent(edit));
+            ShowWindow(git->graph_selector, SW_HIDE);
+        }
+    }
     if (show) {
         SetWindowPos(edit, NULL, layout.message_edit.left, layout.message_edit.top,
                      layout.message_edit.right - layout.message_edit.left,
@@ -7222,6 +7251,18 @@ static void axyne_git_panel_create_controls(HWND window, AxyneWindowState *state
         WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0, 0, 0,
         window, (HMENU)(INT_PTR)AXYNE_GIT_MESSAGE, instance, NULL);
     state->git_panel.message_edit = edit;
+    state->git_panel.graph_mode = AXYNE_GIT_GRAPH_COMPACT;
+    state->git_panel.graph_selector = CreateWindowExW(0, L"COMBOBOX", L"Commit history",
+        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST, 0, 0, 146, 140,
+        window, (HMENU)(INT_PTR)AXYNE_GIT_MODE, instance, NULL);
+    if (state->git_panel.graph_selector != NULL) {
+        HWND selector = state->git_panel.graph_selector;
+        SendMessageW(selector, WM_SETFONT, (WPARAM)state->font_small, TRUE);
+        SendMessageW(selector, CB_ADDSTRING, 0, (LPARAM)L"Compact: HEAD");
+        SendMessageW(selector, CB_ADDSTRING, 0, (LPARAM)L"Full: all branches");
+        SendMessageW(selector, CB_SETDROPPEDWIDTH, 220, 0);
+        SendMessageW(selector, CB_SETCURSEL, 0, 0);
+    }
     if (edit == NULL) return;
     SendMessageW(edit, WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     SendMessageW(edit, EM_SETLIMITTEXT, 20000, 0);
@@ -7871,6 +7912,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_MOVE:
         if (state != NULL && state->palette.active) axyne_palette_refresh(window, state);
         break;
+    case WM_ACTIVATEAPP:
+        if (state != NULL && w_param) axyne_git_panel_schedule_refresh(window, state);
+        break;
     case WM_TIMER:
         if (state != NULL && w_param == AXYNE_PALETTE_TIMER_ID) {
             axyne_palette_tick(window, state);
@@ -8138,6 +8182,26 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         break;
     }
     case WM_COMMAND: {
+        if (state != NULL && LOWORD(w_param) == AXYNE_GIT_MODE &&
+            HIWORD(w_param) == CBN_SELCHANGE) {
+            AxyneGitPanelUi *git = &state->git_panel;
+            AxyneGitGraphMode mode = SendMessageW(git->graph_selector, CB_GETCURSEL, 0, 0) == 0
+                ? AXYNE_GIT_GRAPH_COMPACT : AXYNE_GIT_GRAPH_FULL;
+            if (mode != git->graph_mode) {
+                git->graph_mode = mode;
+                ++git->graph_generation;
+                axyne_git_graph_free(&git->graph);
+                axyne_git_expansion_clear(git);
+                free(git->selected_hash);
+                git->selected_hash = NULL;
+                git->graph_ok = 0;
+                git->graph_limit = git->graph_loaded_limit = git->graph_loading = 0;
+                git->graph_scroll = 0;
+                axyne_git_panel_refresh(window, state);
+                InvalidateRect(window, NULL, FALSE);
+            }
+            return 0;
+        }
         UINT command = LOWORD(w_param);
         if (command == AXYNE_GIT_MESSAGE && state != NULL &&
             (HWND)l_param == state->git_panel.message_edit) {

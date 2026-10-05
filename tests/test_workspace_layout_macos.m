@@ -20,6 +20,7 @@
 - (void)openPaletteWithInput:(NSString *)input;
 - (void)paletteSyncInput;
 - (void)paletteDismiss;
+- (void)layoutParts;
 @end
 
 static id field(id view, const char *name)
@@ -184,6 +185,27 @@ int main(void)
         [field(view, "_outputTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
         CHECK(![output isHidden] && [field(view, "_terminalInput") isHidden]);
+        /* The Git selector must fit the minimum supported sidebar, and
+         * shrink safely below it instead of intercepting editor clicks. */
+        {
+            Class panelClass = NSClassFromString(@"AxyneGitPanelView");
+            CHECK(panelClass != Nil);
+            NSView *panel = [[panelClass alloc] initWithFrame:NSMakeRect(0, 0, 159, 600)];
+            CHECK(panel != nil);
+            const CGFloat widths[] = {159, 200, 320, 100};
+            for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); ++i) {
+                [panel setFrameSize:NSMakeSize(widths[i], 600)];
+                [panel layoutParts];
+                NSSegmentedControl *selector = field(panel, "_graphSelector");
+                CHECK(selector != nil && [selector segmentCount] == 2);
+                CHECK([[selector labelForSegment:0] isEqualToString:@"Compact"]);
+                CHECK([[selector labelForSegment:1] isEqualToString:@"Full"]);
+                CHECK(NSMinX([selector frame]) >= 0);
+                CHECK(NSMaxX([selector frame]) <= widths[i]);
+                CHECK(NSWidth([selector frame]) > 0);
+            }
+            [panel release];
+        }
         fprintf(stderr, "Preparing fixture\n");
         const char *debug[] = {"_debugStart", "_debugPause", "_debugContinue", "_debugNext", "_debugBreakpoint"};
         for (size_t i = 0; i < sizeof(debug) / sizeof(debug[0]); ++i)

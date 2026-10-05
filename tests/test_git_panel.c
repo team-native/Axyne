@@ -444,6 +444,10 @@ static int axyne_test_panel_graph(const char *root)
     AXYNE_TEST_EQ_INT(graph.count, 0);
     AXYNE_TEST_EQ_INT(graph.max_lanes, 0);
     axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph_with_mode(empty, 10, AXYNE_GIT_GRAPH_COMPACT,
+                                              &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 0);
+    axyne_git_graph_free(&graph);
 
     /* Linear history, with a tab and Korean text in the subject/author. */
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
@@ -565,6 +569,32 @@ static int axyne_test_panel_graph(const char *root)
 
     /* Branch tip not reachable from HEAD is still listed (--all), and the
      * stash is not. Detached HEAD is decorated as "HEAD". */
+    AXYNE_TEST_STATUS(axyne_git_graph_with_mode(merged, 100, AXYNE_GIT_GRAPH_COMPACT,
+                                              &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 4);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].subject, "F");
+    AXYNE_TEST_STREQ(graph.rows[1].subject, "E");
+    AXYNE_TEST_STREQ(graph.rows[2].subject, "B");
+    AXYNE_TEST_STREQ(graph.rows[3].subject, "A");
+    AXYNE_TEST_EQ_INT(graph.rows[0].parent_count, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].parents[0], graph.rows[1].hash);
+    AXYNE_TEST_CHECK(axyne_test_row(&graph, "C") == NULL);
+    AXYNE_TEST_CHECK(axyne_test_row(&graph, "D") == NULL);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph_with_mode(merged, 2, AXYNE_GIT_GRAPH_COMPACT,
+                                              &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 2);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 1);
+    AXYNE_TEST_CHECK(graph.rows[1].lanes[0].flags & LDOWN);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph_with_mode(merged, 100, AXYNE_GIT_GRAPH_FULL,
+                                              &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 6);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 2);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph_with_mode(merged, 100, (AxyneGitGraphMode)99,
+                                              &graph, &error), AXYNE_STATUS_INVALID_ARGUMENT);
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
         "cd '%s' && git init -q -b main . && printf 1 > a.txt && git add a.txt && git commit -q -m first && "
         "printf 2 > a.txt && git commit -q -am second && git branch topic && "
@@ -584,6 +614,13 @@ static int axyne_test_panel_graph(const char *root)
     axyne_git_graph_free(&graph);
 
     /* Large history: clamped to AXYNE_GIT_GRAPH_MAX_COUNT. */
+    AXYNE_TEST_STATUS(axyne_git_graph_with_mode(detached, 100, AXYNE_GIT_GRAPH_COMPACT,
+                                              &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].subject, "first");
+    AXYNE_TEST_CHECK(axyne_test_row(&graph, "second") == NULL);
+    AXYNE_TEST_CHECK(axyne_test_ref(&graph.rows[0], "HEAD") != NULL);
+    axyne_git_graph_free(&graph);
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
         "cd '%s' && git init -q -b main . && "
         "awk 'BEGIN{for(i=1;i<=1100;i++){printf \"commit refs/heads/main\\ncommitter T <t@example.invalid> %%d +0000\\ndata 2\\nx\\n\\n\", 1700000000+i}}' | git fast-import --quiet", bulk), 0);
@@ -998,7 +1035,12 @@ static int axyne_test_panel_details(const char *root)
     AXYNE_TEST_CONTAINS(diff.text, "+u\n");
     axyne_git_diff_free(&diff);
     AXYNE_TEST_CHECK(axyne_test_path(sub, sizeof(sub), repo, "sub"));
-    AXYNE_TEST_STATUS(axyne_git_file_diff(sub, "sub/u2.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    {
+        AxyneStatus status = axyne_git_file_diff(sub, "sub/u2.txt", NULL, 0, &diff, &error);
+        if (status != AXYNE_STATUS_OK)
+            fprintf(stderr, "Git subdirectory diff failed: %s\n", error.message);
+        AXYNE_TEST_STATUS(status, AXYNE_STATUS_OK);
+    }
     AXYNE_TEST_CONTAINS(diff.text, "+++ b/sub/u2.txt");
     AXYNE_TEST_CONTAINS(diff.text, "+u2\n");
     axyne_git_diff_free(&diff);
