@@ -836,7 +836,7 @@ static int axyne_test_graph_continuity(const char *root)
      * reject the partial result rather than presenting a false history end. */
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
         "cd '%s' && git init -q -b main . && "
-        "awk 'BEGIN { for(j=0;j<80000;j++) s=s \"x\"; for(i=1;i<=220;i++) "
+        "awk 'BEGIN { s=\"x\"; while(length(s)<80000) s=s s; s=substr(s,1,80000); for(i=1;i<=220;i++) "
         "printf \"commit refs/heads/main\\ncommitter T <t@example.invalid> %%d +0000\\ndata 80001\\n%%s\\n\\n\", 1700000000+i, s; }' "
         "| git fast-import --quiet", large), 0);
     AXYNE_TEST_STATUS(axyne_git_graph(large, 200, &graph, &error), AXYNE_STATUS_OK);
