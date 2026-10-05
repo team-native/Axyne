@@ -755,8 +755,9 @@ typedef struct GpItem {
         BOOL show = _loaded && !_noWorkspace && _notice == nil;
         [_messageScroll setFrame:NSInsetRect(g.message, 1, 1)];
         [_messageScroll setHidden:!show];
-        [_graphSelector setFrame:NSMakeRect(MAX(70, NSWidth([self bounds]) - 142),
-                                            NSMinY(g.graphHeader) + 2, 134, 22)];
+        CGFloat selectorWidth = MIN(134, MAX(0, NSWidth([self bounds]) - 16));
+        [_graphSelector setFrame:NSMakeRect(MAX(0, NSWidth([self bounds]) - selectorWidth - 8),
+                                            NSMinY(g.graphHeader) + 2, selectorWidth, 22)];
         [_graphSelector setHidden:!show];
     }
 }
@@ -1293,7 +1294,8 @@ static char *gp_diff_title(const char *prefix, const char *path)
     [self drawMessageAreaWithGeometry:&g];
     [gp_color(_theme.border) setFill];
     NSRectFill(NSMakeRect(0, NSMinY(g.graphHeader), NSWidth(bounds), 1));
-    gp_draw_text(@"그래프", NSMakeRect(12, NSMinY(g.graphHeader), NSWidth(bounds) - 24, kGpHeader),
+    gp_draw_text(@"그래프", NSMakeRect(12, NSMinY(g.graphHeader),
+                                      MAX(0, NSMinX([_graphSelector frame]) - 16), kGpHeader),
                  small, sectionColor, _leftStyle);
     gp_draw_text(_graphMode == AXYNE_GIT_GRAPH_COMPACT
                      ? @"HEAD first-parent only · side history omitted"
