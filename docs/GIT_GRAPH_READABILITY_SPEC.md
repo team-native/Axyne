@@ -38,8 +38,9 @@ CTest passed all five targeted suites: Git panel (14.34s), log, actions,
 repair, and macOS workspace layout (24.16s total). An initial parallel run
 passed panel/actions but failed log/repair with process-start status 4;
 both passed on sequential rerun, without changes to process code or CI.
-The final sequential run of all 30 CTests passed in 25.07s, including Git
-panel (14.31s), editor runtime and workspace layout.
+After independent review fixes, the rebuilt final sequential run of all 30
+CTests passed in 22.63s, including Git panel (14.22s), editor runtime and
+workspace layout. The narrow-selector regression also passed independently.
 `git diff --check` passed. Windows runtime/build verification requires Windows;
 the native combo box exposes the same two choices. The macOS selector tooltip
 and accessibility label explain first-parent filtering. Independent final
@@ -55,3 +56,13 @@ load results capture mode and reject hidden/outdated snapshots. Counts,
 load-more and error paths remain in the existing loaders. No other category
 or worktree was edited. Independent review and Windows CI remain external;
 publication is explicitly deferred to the parent.
+
+## Independent review fixes
+
+The macOS selector now fits the 159-point sidebar and shrinks for smaller
+panels; the section title stops before the selector. A production AppKit
+layout regression checks selector bounds at 159, 200, 320 and 100 points.
+Windows mode changes now increment a separate graph request generation,
+leaving workspace generation intact for successful commit message clearing.
+Loads capture that generation to reject a Compact/Full/Compact round trip's
+older response. Windows commit/message runtime coverage requires Windows CI.

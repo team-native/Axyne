@@ -136,6 +136,7 @@ typedef struct AxyneGitPanelUi {
     int graph_ok;        /* the graph could be read (zero commits is fine) */
     int graph_limit;     /* commits requested by refreshes; 0 = default, grown by "더 불러오기" */
     AxyneGitGraphMode graph_mode;
+    unsigned graph_generation; /* mode request identity, independent of commits/workspace */
     HWND graph_selector;
     int graph_loaded_limit; /* the request the shown graph answered (0 = none) */
     int graph_loading;   /* a larger graph was requested and has not arrived */
@@ -5707,6 +5708,7 @@ typedef struct AxyneGitPanelJob {
     char *graph_error;   /* reported even when the changes snapshot succeeded */
     int graph_count;     /* refresh jobs: commits to read (set on the UI thread) */
     AxyneGitGraphMode graph_mode;
+    unsigned graph_generation;
     /* Diff and commit-file jobs: they never touch the snapshot and run beside
      * other jobs; only the newest request (serial) is applied. */
     unsigned serial;
@@ -6024,6 +6026,7 @@ static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state)
     job->kind = AXYNE_GITJOB_REFRESH;
     job->graph_count = axyne_git_graph_request(git);
     job->graph_mode = git->graph_mode;
+    job->graph_generation = git->graph_generation;
     if (axyne_git_panel_start_job(window, state, job)) {
         git->job_busy = 1;
         InvalidateRect(window, NULL, FALSE);
@@ -6231,7 +6234,8 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
     }
     git->job_busy = 0;
     if (job->generation == git->generation && axyne_git_panel_visible(state) &&
-        (job->kind != AXYNE_GITJOB_REFRESH || job->graph_mode == git->graph_mode) &&
+        (job->kind != AXYNE_GITJOB_REFRESH ||
+         (job->graph_mode == git->graph_mode && job->graph_generation == git->graph_generation)) &&
         state->explorer.root != NULL &&
         job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
         axyne_git_changes_free(&git->changes);
@@ -8185,7 +8189,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 ? AXYNE_GIT_GRAPH_COMPACT : AXYNE_GIT_GRAPH_FULL;
             if (mode != git->graph_mode) {
                 git->graph_mode = mode;
-                ++git->generation;
+                ++git->graph_generation;
                 axyne_git_graph_free(&git->graph);
                 axyne_git_expansion_clear(git);
                 free(git->selected_hash);
