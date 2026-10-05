@@ -1,5 +1,6 @@
 add_library(axyne_git STATIC
     "${CMAKE_CURRENT_LIST_DIR}/git.c"
+    "${CMAKE_CURRENT_LIST_DIR}/git_panel.c"
 )
 target_include_directories(axyne_git PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(axyne_git PUBLIC axyne_process)

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "axyne/process.h"
+#include "git_internal.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +22,9 @@
 typedef struct AxyneGitRun {
     AxyneGitResult *result;
     AxyneGitCapture capture;
+    /* When split is set, stderr goes to errors instead of capture. */
+    AxyneGitCapture errors;
+    int split;
 #ifdef _WIN32
     HANDLE finished;
 #else
@@ -149,11 +153,11 @@ void axyne_git_capture_free(AxyneGitCapture *capture)
 static int axyne_git_capture_raw(AxyneGitCapture *capture, const char *bytes,
                                  size_t length)
 {
-    size_t accepted, required;
+    size_t accepted, required, limit;
     char *grown;
     if (length == 0) return 1;
-    accepted = capture->length < AXYNE_GIT_OUTPUT_LIMIT
-        ? AXYNE_GIT_OUTPUT_LIMIT - capture->length : 0;
+    limit = capture->limit != 0 ? capture->limit : AXYNE_GIT_OUTPUT_LIMIT;
+    accepted = capture->length < limit ? limit - capture->length : 0;
     if (length > accepted) {
         length = accepted;
         capture->truncated = 1;
@@ -313,6 +317,11 @@ static void axyne_git_output(AxyneProcess *process, AxyneProcessStream stream,
                              const char *bytes, size_t length, void *user_data)
 {
     AxyneGitRun *run = (AxyneGitRun *)user_data;
+    if (run != NULL && run->split && stream == AXYNE_PROCESS_STDERR) {
+        if (bytes != NULL)
+            (void)axyne_git_capture_append(&run->errors, stream, bytes, length);
+        return;
+    }
     if (run != NULL && bytes != NULL &&
         !axyne_git_capture_append(&run->capture, stream, bytes, length))
         (void)axyne_process_terminate(process, NULL);
@@ -354,6 +363,7 @@ static void axyne_git_run_cleanup(AxyneGitRun *run)
     (void)pthread_mutex_destroy(&run->lock);
 #endif
     axyne_git_capture_free(&run->capture);
+    axyne_git_capture_free(&run->errors);
 }
 
 /* Runs git once. environment (NAME=VALUE overrides) may be NULL; when
@@ -361,12 +371,15 @@ static void axyne_git_run_cleanup(AxyneGitRun *run)
  * with "[stderr] ". A nonzero git exit code yields AXYNE_STATUS_IO_ERROR with
  * result->exit_code and output filled; a launch failure leaves
  * result->exit_code at -1. */
-static AxyneStatus axyne_git_run_ex(const char *workspace,
-                                    const char *const *arguments,
-                                    size_t argument_count,
-                                    const char *const *environment,
-                                    size_t environment_count, int label_stderr,
-                                    AxyneGitResult *result, AxyneError *error)
+static AxyneStatus axyne_git_run_core(const char *workspace,
+                                      const char *const *arguments,
+                                      size_t argument_count,
+                                      const char *const *environment,
+                                      size_t environment_count,
+                                      int label_stderr, int split_stderr,
+                                      size_t limit, char **stderr_text,
+                                      AxyneGitResult *result,
+                                      AxyneError *error)
 {
     AxyneGitRun run;
     AxyneProcessSpec spec;
@@ -388,6 +401,11 @@ static AxyneStatus axyne_git_run_ex(const char *workspace,
     memset(&run, 0, sizeof(run));
     run.result = result;
     axyne_git_capture_init(&run.capture, label_stderr);
+    run.capture.limit = limit;
+    run.split = split_stderr;
+    axyne_git_capture_init(&run.errors, 0);
+    run.errors.limit = 4096;
+    if (stderr_text != NULL) *stderr_text = NULL;
 #ifdef _WIN32
     run.finished = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (run.finished == NULL)
@@ -450,6 +468,10 @@ static AxyneStatus axyne_git_run_ex(const char *workspace,
     result->length = run.capture.length;
     result->output_truncated = run.capture.truncated;
     run.capture.data = NULL;
+    if (stderr_text != NULL) {
+        *stderr_text = run.errors.data;
+        run.errors.data = NULL;
+    }
     axyne_git_run_cleanup(&run);
     if (result->output_truncated)
         return axyne_git_error(error, AXYNE_STATUS_OK, "");
@@ -468,6 +490,18 @@ static AxyneStatus axyne_git_run_ex(const char *workspace,
         return axyne_git_error(error, AXYNE_STATUS_IO_ERROR, message);
     }
     return axyne_git_error(error, AXYNE_STATUS_OK, "");
+}
+
+static AxyneStatus axyne_git_run_ex(const char *workspace,
+                                    const char *const *arguments,
+                                    size_t argument_count,
+                                    const char *const *environment,
+                                    size_t environment_count, int label_stderr,
+                                    AxyneGitResult *result, AxyneError *error)
+{
+    return axyne_git_run_core(workspace, arguments, argument_count,
+                              environment, environment_count, label_stderr, 0,
+                              0, NULL, result, error);
 }
 
 static AxyneStatus axyne_git_run(const char *workspace,
@@ -584,6 +618,7 @@ static const char *axyne_git_hint(AxyneGitHintKind kind,
 {
     if (kind == AXYNE_GIT_HINT_COMMIT) {
         if (axyne_git_view_contains(step, "nothing to commit") ||
+            axyne_git_view_contains(step, "nothing added to commit") ||
             axyne_git_view_contains(step, "no changes added to commit"))
             return "커밋할 변경 사항이 없습니다. 변경 사항을 스테이지하거나 "
                    "\"커밋 전에 모든 변경 사항 스테이지\"를 선택하세요.";
@@ -1072,6 +1107,39 @@ AxyneStatus axyne_git_log(const char *utf8_workspace, int max_count,
                               "아직 커밋이 없습니다.", AXYNE_GIT_HINT_NONE);
     axyne_git_result_free(&step);
     return axyne_git_sequence_finish(&sequence, result, error);
+}
+
+AxyneStatus axyne_git_exec(const char *workspace,
+                           const char *const *arguments, size_t argument_count,
+                           int read_only, size_t output_limit,
+                           AxyneGitResult *result, char **stderr_text,
+                           AxyneError *error)
+{
+    static const char *const optional_locks = "GIT_OPTIONAL_LOCKS=0";
+    const char *environment[AXYNE_GIT_BATCH_ENVIRONMENT_COUNT + 1];
+    size_t count = AXYNE_GIT_BATCH_ENVIRONMENT_COUNT, i;
+    AxyneStatus status;
+    if (result == NULL)
+        return axyne_git_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "Git result is required");
+    axyne_git_init_result(result);
+    if (stderr_text != NULL) *stderr_text = NULL;
+    for (i = 0; i < count; ++i) environment[i] = axyne_git_batch_environment[i];
+    if (read_only) environment[count++] = optional_locks;
+    status = axyne_git_run_core(workspace, arguments, argument_count,
+                                environment, count, 0, 1, output_limit,
+                                stderr_text, result, error);
+    if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_OUT_OF_MEMORY &&
+        result->exit_code >= 0)
+        return axyne_git_error(error, AXYNE_STATUS_OK, "");
+    if (status != AXYNE_STATUS_OK) {
+        axyne_git_result_free(result);
+        if (stderr_text != NULL) {
+            free(*stderr_text);
+            *stderr_text = NULL;
+        }
+    }
+    return status;
 }
 
 void axyne_git_result_free(AxyneGitResult *result)
