@@ -20,6 +20,7 @@ static const CGFloat kGpButton = 24;
 static const CGFloat kGpPushWidth = 56;
 static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
 static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
+static const int kGpGraphStep = 200;      /* commits added per "더 불러오기" */
 static const int kGpMaxLanes = 10;        /* lanes drawn; wider graphs are cut */
 static const unsigned kGpRefreshDelayMs = 500;
 
@@ -150,6 +151,8 @@ typedef struct AxyneGitPanelLoad {
     char message[160];        /* first line of Git's error, when it failed */
     int hasStaged;
     AxyneGitGraph graph;
+    int graphCount;           /* commits to read (set on the main thread) */
+    int graphOk;              /* the graph could be read (zero commits is fine) */
 } AxyneGitPanelLoad;
 
 static void gp_load_free(AxyneGitPanelLoad *load)
@@ -172,8 +175,10 @@ static void gp_load_run(AxyneGitPanelLoad *load)
     }
     if (axyne_git_has_staged(load->workspace, &load->hasStaged, &error) != AXYNE_STATUS_OK)
         load->hasStaged = 0;
-    if (axyne_git_graph(load->workspace, AXYNE_GIT_GRAPH_DEFAULT_COUNT,
-                        &load->graph, &error) != AXYNE_STATUS_OK)
+    if (axyne_git_graph(load->workspace, load->graphCount,
+                        &load->graph, &error) == AXYNE_STATUS_OK)
+        load->graphOk = 1;
+    else
         axyne_git_graph_free(&load->graph);
 }
 
@@ -399,9 +404,11 @@ typedef struct GpGeometry {
 /* The graph list is a sequence of virtual items: each commit is one item
  * (kGpGraphRow tall); the expanded commit is followed by one item per changed
  * file, or a single note item while loading, on failure or when the commit
- * changed no files (kGpRow tall). Scrolling (in pixels), hit testing and
- * drawing all walk this sequence. */
-typedef enum GpItemKind { GP_ITEM_COMMIT = 0, GP_ITEM_FILE, GP_ITEM_NOTE } GpItemKind;
+ * changed no files (kGpRow tall). While more history may exist the last item
+ * is the "더 불러오기" row (kGpRow tall). Scrolling (in pixels), hit testing
+ * and drawing all walk this sequence. */
+typedef enum GpItemKind { GP_ITEM_COMMIT = 0, GP_ITEM_FILE, GP_ITEM_NOTE,
+                          GP_ITEM_MORE } GpItemKind;
 
 typedef struct GpItem {
     int kind;
@@ -432,6 +439,9 @@ typedef struct GpItem {
     NSTextView *_messageView;
     AxyneGitGraph _graph;
     CGFloat _graphScroll;
+    int _graphLimit;              /* commits requested by reloads; 0 = default */
+    int _graphLoadedLimit;        /* the request the shown graph answered (0 = none) */
+    BOOL _graphLoadingMore;       /* a larger graph was requested and has not arrived */
     char *_selectedHash;
     unsigned long _outputSequence;
     /* The commit whose changed files are listed inline below its row (only
@@ -610,9 +620,25 @@ typedef struct GpItem {
     return 1;
 }
 
+/* The "더 불러오기" row: the shown graph filled its whole request (fewer rows
+ * means the history is complete) and the cap is not reached; it stays, dimmed,
+ * while loading. */
+- (BOOL)moreVisible
+{
+    if (_graph.count == 0) return NO;
+    if (_graphLoadingMore) return YES;
+    return _graphLoadedLimit > 0 && _graph.count >= (size_t)_graphLoadedLimit &&
+           _graphLoadedLimit < AXYNE_GIT_GRAPH_MAX_COUNT;
+}
+
+- (int)graphRequest
+{
+    return _graphLimit > 0 ? _graphLimit : AXYNE_GIT_GRAPH_DEFAULT_COUNT;
+}
+
 - (size_t)itemCount
 {
-    return _graph.count + [self expandedExtra];
+    return _graph.count + [self expandedExtra] + ([self moreVisible] ? 1 : 0);
 }
 
 - (GpItem)itemAtIndex:(size_t)i
@@ -620,7 +646,10 @@ typedef struct GpItem {
     GpItem item;
     size_t extra = [self expandedExtra];
     memset(&item, 0, sizeof(item));
-    if (extra == 0 || i <= _expandedRow) {
+    if (i >= _graph.count + extra) {
+        item.kind = GP_ITEM_MORE;
+        item.commit = _graph.count > 0 ? _graph.count - 1 : 0;
+    } else if (extra == 0 || i <= _expandedRow) {
         item.kind = GP_ITEM_COMMIT;
         item.commit = i;
     } else if (i <= _expandedRow + extra) {
@@ -645,7 +674,8 @@ typedef struct GpItem {
 
 - (CGFloat)graphContentHeight
 {
-    return (CGFloat)_graph.count * kGpGraphRow + (CGFloat)[self expandedExtra] * kGpRow;
+    return (CGFloat)_graph.count * kGpGraphRow + (CGFloat)[self expandedExtra] * kGpRow +
+           ([self moreVisible] ? kGpRow : 0);
 }
 
 /* The item under `offset` pixels from the top of the (unscrolled) graph
@@ -706,6 +736,26 @@ typedef struct GpItem {
 
 /* ---- loading ------------------------------------------------------------------ */
 
+/* "더 불러오기": raises the requested commit count by one step and reloads on
+ * the background queue; new rows only append below the old ones, so the scroll
+ * position and the expanded commit are kept. */
+- (void)loadMoreGraph
+{
+    int current = [self graphRequest];
+    int next = current + kGpGraphStep;
+    if (_graphLoadingMore || ![self moreVisible]) return;
+    if (next > AXYNE_GIT_GRAPH_MAX_COUNT) next = AXYNE_GIT_GRAPH_MAX_COUNT;
+    if (next <= current) return;
+    _graphLimit = next;
+    _graphLoadingMore = YES;
+    [self refresh];
+    if (!_loading && !_refreshAgain) { /* no reload could be started */
+        _graphLimit = current;
+        _graphLoadingMore = NO;
+    }
+    [self setNeedsDisplay:YES];
+}
+
 - (void)scheduleRefresh
 {
     AxyneGitPanelLife *life = _life;
@@ -732,6 +782,8 @@ typedef struct GpItem {
     axyne_git_changes_free(&_changes);
     _hasStaged = 0;
     axyne_git_graph_free(&_graph);
+    _graphLoadedLimit = 0;
+    _graphLoadingMore = NO;
 }
 
 /* Scroll positions survive reloads; they restart only for another folder, an
@@ -754,6 +806,7 @@ typedef struct GpItem {
         [self clearResults];
         [self clearExpansion];
         [self resetScrolls];
+        _graphLimit = 0;
         [_notice release];
         _notice = nil;
         _noWorkspace = YES;
@@ -766,6 +819,7 @@ typedef struct GpItem {
     if (load != NULL) load->workspace = strdup(workspace);
     if (load == NULL || load->workspace == NULL) { gp_load_free(load); return; }
     load->generation = _generation;
+    load->graphCount = [self graphRequest];
     _noWorkspace = NO;
     _loading = YES;
     ++life->references;
@@ -786,15 +840,32 @@ typedef struct GpItem {
     BOOL current = load->generation == _generation;
     _loading = NO;
     if (current) {
-        [self clearResults];
+        BOOL requested = load->graphCount == [self graphRequest];
+        axyne_git_changes_free(&_changes);
+        _hasStaged = 0;
+        if (load->changesStatus != AXYNE_STATUS_OK) {
+            axyne_git_graph_free(&_graph);
+            _graphLoadedLimit = 0;
+            _graphLoadingMore = NO;
+        }
         [_notice release];
         _notice = nil;
         if (load->changesStatus == AXYNE_STATUS_OK) {
             _changes = load->changes;
             memset(&load->changes, 0, sizeof(load->changes));
             _hasStaged = load->hasStaged;
-            _graph = load->graph;
-            memset(&load->graph, 0, sizeof(load->graph));
+            if (!load->graphOk && _graphLoadingMore && _graph.count > 0) {
+                /* Loading more failed: keep the graph that is shown. */
+                if (requested) _graphLimit = _graphLoadedLimit;
+            } else {
+                axyne_git_graph_free(&_graph);
+                _graph = load->graph; /* moved, never copied */
+                memset(&load->graph, 0, sizeof(load->graph));
+                _graphLoadedLimit = load->graphOk ? load->graphCount : 0;
+            }
+            /* An older load finishing while a larger request is queued keeps
+             * the loading state until that request arrives. */
+            if (requested) _graphLoadingMore = NO;
             [self syncExpansion];
         } else if (load->changesStatus == AXYNE_STATUS_IO_ERROR) {
             [self clearExpansion];
@@ -829,6 +900,7 @@ typedef struct GpItem {
     [self clearResults];
     [self clearExpansion];
     [self resetScrolls];
+    _graphLimit = 0; /* a new workspace starts at the default count again */
     gp_set_string(&_selectedPath, NULL);
     gp_set_string(&_selectedHash, NULL);
     [_notice release];
@@ -1096,6 +1168,8 @@ static char *gp_diff_title(const char *prefix, const char *path)
         if (![self itemAtOffset:point.y - NSMinY(g.graph) + _graphScroll item:&item]) return;
         if (item.kind == GP_ITEM_COMMIT) {
             [self toggleCommitAtRow:item.commit];
+        } else if (item.kind == GP_ITEM_MORE) {
+            [self loadMoreGraph];
         } else if (item.kind == GP_ITEM_FILE) {
             gp_set_string(&_selectedPath, NULL);
             gp_set_string(&_selectedHash, NULL);
@@ -1320,6 +1394,14 @@ static char *gp_diff_title(const char *prefix, const char *path)
                 NSRect row = NSMakeRect(0, y, NSWidth(rect), height);
                 if (item.kind == GP_ITEM_COMMIT)
                     [self drawGraphRow:&_graph.rows[item.commit] inRect:row];
+                else if (item.kind == GP_ITEM_MORE)
+                    gp_draw_text(_graphLoadingMore ? @"더 불러오는 중…" : @"더 불러오기",
+                        NSMakeRect(10 + MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes) * kGpLane + 8,
+                                   y, MAX(0, NSWidth(rect) - 16 -
+                                       (10 + MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes) * kGpLane + 8)),
+                                   kGpRow),
+                        [NSFont systemFontOfSize:11],
+                        gp_color(_graphLoadingMore ? _theme.muted : _theme.accent), _leftStyle);
                 else
                     [self drawCommitFileItem:&item inRect:row];
             }

@@ -123,15 +123,19 @@ enum {
     AXYNE_GIT_GAP = 6,
     AXYNE_GIT_MESSAGE = 5030, /* commit message EDIT control id */
     AXYNE_GIT_REFRESH_TIMER = 5120,
-    AXYNE_GIT_REFRESH_DELAY = 300
+    AXYNE_GIT_REFRESH_DELAY = 300,
+    AXYNE_GIT_GRAPH_STEP = 200 /* commits added per "더 불러오기" */
 };
 
 /* Snapshot of the Git panel's data. Written only on the UI thread: worker
  * jobs return their results by window message and are applied there. */
 typedef struct AxyneGitPanelUi {
     AxyneGitChanges changes;
-    AxyneGitGraph graph; /* newest first, at most AXYNE_GIT_GRAPH_DEFAULT_COUNT */
+    AxyneGitGraph graph; /* newest first, at most graph_loaded_limit commits */
     int graph_ok;        /* the graph could be read (zero commits is fine) */
+    int graph_limit;     /* commits requested by refreshes; 0 = default, grown by "더 불러오기" */
+    int graph_loaded_limit; /* the request the shown graph answered (0 = none) */
+    int graph_loading;   /* a larger graph was requested and has not arrived */
     int loaded;          /* a snapshot of the current workspace arrived */
     int repo_ok;         /* the change list could be read */
     char error[512];     /* Git's message when !repo_ok */
@@ -5697,6 +5701,7 @@ typedef struct AxyneGitPanelJob {
     int has_staged;
     AxyneGitGraph graph; /* refresh jobs only */
     int have_graph;
+    int graph_count;     /* refresh jobs: commits to read (set on the UI thread) */
     /* Diff and commit-file jobs: they never touch the snapshot and run beside
      * other jobs; only the newest request (serial) is applied. */
     unsigned serial;
@@ -5754,7 +5759,7 @@ static void axyne_git_panel_job_snapshot(AxyneGitPanelJob *job)
     if (job->kind == AXYNE_GITJOB_REFRESH) {
         memset(&error, 0, sizeof(error));
         job->have_graph = axyne_git_graph(job->workspace,
-            AXYNE_GIT_GRAPH_DEFAULT_COUNT, &job->graph, &error) == AXYNE_STATUS_OK;
+            job->graph_count, &job->graph, &error) == AXYNE_STATUS_OK;
         if (!job->have_graph) axyne_git_graph_free(&job->graph);
     }
 }
@@ -5960,6 +5965,9 @@ static void axyne_git_panel_clear(AxyneGitPanelUi *git)
     axyne_git_graph_free(&git->graph);
     axyne_git_expansion_clear(git);
     git->graph_ok = 0;
+    git->graph_limit = 0; /* a new workspace starts at the default count again */
+    git->graph_loaded_limit = 0;
+    git->graph_loading = 0;
     git->loaded = 0;
     git->repo_ok = 0;
     git->error[0] = '\0';
@@ -5982,6 +5990,12 @@ static void axyne_git_panel_reset(HWND window, AxyneWindowState *state)
     if (axyne_git_panel_visible(state)) axyne_git_panel_refresh(window, state);
 }
 
+/* Commits the next refresh reads: the default until "더 불러오기" raised it. */
+static int axyne_git_graph_request(const AxyneGitPanelUi *git)
+{
+    return git->graph_limit > 0 ? git->graph_limit : AXYNE_GIT_GRAPH_DEFAULT_COUNT;
+}
+
 static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state)
 {
     AxyneGitPanelUi *git = &state->git_panel;
@@ -5999,6 +6013,7 @@ static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state)
     job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
     if (job == NULL) return;
     job->kind = AXYNE_GITJOB_REFRESH;
+    job->graph_count = axyne_git_graph_request(git);
     if (axyne_git_panel_start_job(window, state, job)) {
         git->job_busy = 1;
         InvalidateRect(window, NULL, FALSE);
@@ -6023,7 +6038,20 @@ static void axyne_git_panel_after_git_operation(HWND window, AxyneWindowState *s
  * changed file, or a single note item while loading, on failure or when the
  * commit changed no files (AXYNE_GIT_ROW tall). Scrolling, painting and hit
  * testing all walk this sequence. */
-enum { AXYNE_GIT_ITEM_COMMIT = 0, AXYNE_GIT_ITEM_FILE, AXYNE_GIT_ITEM_NOTE };
+enum { AXYNE_GIT_ITEM_COMMIT = 0, AXYNE_GIT_ITEM_FILE, AXYNE_GIT_ITEM_NOTE,
+       AXYNE_GIT_ITEM_MORE };
+
+/* The last item is the "더 불러오기" row while more history may exist: the
+ * shown graph filled its whole request (fewer rows means the history is
+ * complete) and the cap is not reached; it stays, dimmed, while loading. */
+static int axyne_git_more_visible(const AxyneGitPanelUi *git)
+{
+    if (!git->graph_ok || git->graph.count == 0) return 0;
+    if (git->graph_loading) return 1;
+    return git->graph_loaded_limit > 0 &&
+           git->graph.count >= (size_t)git->graph_loaded_limit &&
+           git->graph_loaded_limit < AXYNE_GIT_GRAPH_MAX_COUNT;
+}
 
 typedef struct AxyneGitItem {
     int kind;
@@ -6041,7 +6069,8 @@ static size_t axyne_git_expanded_extra(const AxyneGitPanelUi *git)
 
 static size_t axyne_git_item_count(const AxyneGitPanelUi *git)
 {
-    return git->graph.count + axyne_git_expanded_extra(git);
+    return git->graph.count + axyne_git_expanded_extra(git) +
+           (axyne_git_more_visible(git) ? 1 : 0);
 }
 
 static AxyneGitItem axyne_git_item_at(const AxyneGitPanelUi *git, size_t i)
@@ -6049,7 +6078,10 @@ static AxyneGitItem axyne_git_item_at(const AxyneGitPanelUi *git, size_t i)
     AxyneGitItem item;
     size_t extra = axyne_git_expanded_extra(git);
     memset(&item, 0, sizeof(item));
-    if (extra == 0 || i <= git->expanded_row) {
+    if (i >= git->graph.count + extra) {
+        item.kind = AXYNE_GIT_ITEM_MORE;
+        item.commit = git->graph.count > 0 ? git->graph.count - 1 : 0;
+    } else if (extra == 0 || i <= git->expanded_row) {
         item.kind = AXYNE_GIT_ITEM_COMMIT;
         item.commit = i;
     } else if (i <= git->expanded_row + extra) {
@@ -6070,12 +6102,14 @@ static AxyneGitItem axyne_git_item_at(const AxyneGitPanelUi *git, size_t i)
 static int axyne_git_item_height(const AxyneGitItem *item)
 {
     return item->kind == AXYNE_GIT_ITEM_COMMIT ? AXYNE_GIT_GRAPH_ROW : AXYNE_GIT_ROW;
+    /* file, note and "더 불러오기" rows are AXYNE_GIT_ROW tall */
 }
 
 static int axyne_git_graph_content_height(const AxyneGitPanelUi *git)
 {
     return (int)git->graph.count * AXYNE_GIT_GRAPH_ROW +
-           (int)axyne_git_expanded_extra(git) * AXYNE_GIT_ROW;
+           (int)axyne_git_expanded_extra(git) * AXYNE_GIT_ROW +
+           (axyne_git_more_visible(git) ? AXYNE_GIT_ROW : 0);
 }
 
 /* Largest first-visible item index that still fills the list. */
@@ -6190,10 +6224,21 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
         job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
         axyne_git_changes_free(&git->changes);
         if (job->have_changes && job->kind == AXYNE_GITJOB_REFRESH) {
-            axyne_git_graph_free(&git->graph);
-            git->graph = job->graph;
-            memset(&job->graph, 0, sizeof(job->graph));
-            git->graph_ok = job->have_graph;
+            int current = job->graph_count == axyne_git_graph_request(git);
+            if (!job->have_graph && git->graph_loading && git->graph_ok &&
+                git->graph.count > 0) {
+                /* Loading more failed: keep the graph that is shown. */
+                if (current) git->graph_limit = git->graph_loaded_limit;
+            } else {
+                axyne_git_graph_free(&git->graph);
+                git->graph = job->graph; /* moved, never copied */
+                memset(&job->graph, 0, sizeof(job->graph));
+                git->graph_ok = job->have_graph;
+                git->graph_loaded_limit = job->have_graph ? job->graph_count : 0;
+            }
+            /* An older job finishing while a larger request is queued keeps
+             * the loading state until that request arrives. */
+            if (current) git->graph_loading = 0;
             axyne_git_expansion_sync(git);
             if (git->selected_hash != NULL) {
                 size_t i;
@@ -6208,6 +6253,8 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
         } else if (!job->have_changes) {
             axyne_git_graph_free(&git->graph);
             git->graph_ok = 0;
+            git->graph_loaded_limit = 0;
+            git->graph_loading = 0;
             axyne_git_expansion_clear(git);
             free(git->selected_hash);
             git->selected_hash = NULL;
@@ -6348,6 +6395,27 @@ static void axyne_git_panel_toggle_commit(HWND window, AxyneWindowState *state,
             axyne_git_panel_job_free(job);
             axyne_git_expansion_clear(git);
         }
+    }
+    InvalidateRect(window, NULL, FALSE);
+}
+
+/* "더 불러오기": raises the requested commit count by one step and refreshes
+ * (the refresh runs on a worker; scroll and the expanded commit are kept
+ * because the new rows only append below the old ones). */
+static void axyne_git_panel_load_more(HWND window, AxyneWindowState *state)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    int current = axyne_git_graph_request(git);
+    int next = current + AXYNE_GIT_GRAPH_STEP;
+    if (git->graph_loading || !axyne_git_more_visible(git)) return;
+    if (next > AXYNE_GIT_GRAPH_MAX_COUNT) next = AXYNE_GIT_GRAPH_MAX_COUNT;
+    if (next <= current) return;
+    git->graph_limit = next;
+    git->graph_loading = 1;
+    axyne_git_panel_refresh(window, state);
+    if (!git->job_busy && !git->refresh_pending) { /* no job could be started */
+        git->graph_limit = current;
+        git->graph_loading = 0;
     }
     InvalidateRect(window, NULL, FALSE);
 }
@@ -7001,7 +7069,15 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
         for (i = (size_t)git->graph_scroll; i < items && y < layout->graph_list.bottom; ++i) {
             AxyneGitItem item = axyne_git_item_at(git, i);
             const AxyneGitGraphRow *row = &git->graph.rows[item.commit];
-            if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
+            if (item.kind == AXYNE_GIT_ITEM_MORE) {
+                RECT more = {10 + strip + 8, y, layout->graph_list.right - 14,
+                             y + AXYNE_GIT_ROW};
+                if (more.right > more.left)
+                    axyne_text_rect(dc, state->font_small,
+                                    git->graph_loading ? AXYNE_SIDEBAR_MUTED : AXYNE_ACCENT,
+                                    more, git->graph_loading ? L"더 불러오는 중…"
+                                                             : L"더 불러오기", DT_LEFT);
+            } else if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
                 int selected = git->selected_hash != NULL && row->hash != NULL &&
                                strcmp(git->selected_hash, row->hash) == 0;
                 axyne_git_paint_graph_row(dc, state, row, selected,
@@ -7280,6 +7356,8 @@ static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, i
                                       &index, &item)) return;
         if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
             axyne_git_panel_toggle_commit(window, state, item.commit);
+        } else if (item.kind == AXYNE_GIT_ITEM_MORE) {
+            axyne_git_panel_load_more(window, state);
         } else if (item.kind == AXYNE_GIT_ITEM_FILE) {
             free(git->selected_path);
             git->selected_path = NULL;
