@@ -4178,8 +4178,10 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER) {
         NSInteger tab = [self sidebarTabAtPoint:point];
-        if (tab >= 0) [self selectSidebarTab:tab];
-        return;
+        if (tab >= 0) { [self selectSidebarTab:tab]; return; }
+        /* Elsewhere in the explorer header the explorer's own handling (open
+         * a folder when none is open) still applies. */
+        if (_sidebarTab != 0) return;
     }
     if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
