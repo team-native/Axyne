@@ -384,7 +384,7 @@ A left-sidebar "Git" tab that switches with the explorer. This section records t
 | Stage / unstage | `git add -A -- <paths>` (deletions included) and `git restore --staged -- <paths>`; a repository with no commit yet uses `git rm --cached -r --ignore-unmatch`. Paths are literal (`:(top,literal)`), never globbed, passed after `--` and never through a shell; an empty path list is rejected. No discard-changes action | ASSUMED | ASSUMED |
 | Commit button | Commits only what is staged (`axyne_git_commit` with stage_all 0); unstaged changes stay. Disabled when `axyne_git_has_staged` reports nothing staged or the message is blank. No trailers (same rule as the menu commit) | ASSUMED | ASSUMED |
 | Push button | Same `axyne_git_push` as the menu entry (no force, upstream set to `origin` when missing) | ASSUMED | ASSUMED |
-| Graph scope | `git log --all` in topological order, hash, parents, author name, `YYYY-MM-DD` date, decorations; the stash is not shown; UI default 200 commits, core clamp 1..1000, no paging | ASSUMED | ASSUMED |
+| Graph scope | `git log --all` in topological order, hash, parents, author name, `YYYY-MM-DD` date, decorations; the stash is not shown; UI default 200 commits, core clamp 1..5000; more commits are loaded through the "더 불러오기" row (see Git panel: load more graph commits) | ASSUMED | ASSUMED |
 | Lane layout | Computed in C so both UIs only draw: per row the dot column, cell count and per cell UP/DOWN/JOIN/FORK/DOT flags plus a color index (lane id modulo 8; first parent keeps the lane, a new lane starts for each other parent or branch tip). Documented next to `AxyneGitGraphRow` | ASSUMED | ASSUMED |
 | Refs | Local branches, remote branches (`origin/HEAD` hidden), tags and a detached HEAD as chips; the checked-out branch is marked current | ASSUMED | ASSUMED |
 | Commit files and diff | `git show --name-status -M` for the file list; a merge commit is shown against its first parent; a root commit against the empty tree | ASSUMED | ASSUMED |
@@ -418,3 +418,23 @@ Follow-up to the Git panel: file diffs leave the bottom output panel and open in
 Known gaps: the macOS panel and editor code was only syntax-checked against stub headers here (no AppKit), so CI is its first real compile; the shared virtual-document model is covered by `axyne-preview-tabs`, the diff language by `axyne-syntax`.
 
 Units: virtual read-only document model; diff syntax language; Windows panel; macOS panel; this record.
+
+## Git panel: load more graph commits
+
+The commit graph showed only the newest 200 commits, so lanes ran off the bottom without their join.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Load more | A "더 불러오기" row is the last item of the graph list; clicking it loads more commits | USER | CONFIRMED |
+| When shown | Only while more history may exist: the graph returned as many rows as were requested. Fewer rows means the history is complete and the row is not shown; at the cap it is not shown either. While loading it stays as a dim "더 불러오는 중…" and clicks are ignored | USER (rule, loading state) | CONFIRMED |
+| Step | 200 more commits per click | ASSUMED | ASSUMED |
+| Cap | Core `AXYNE_GIT_GRAPH_MAX_COUNT` raised from 1000 to 5000; `AXYNE_GIT_GRAPH_DEFAULT_COUNT` stays 200 | ASSUMED | ASSUMED |
+| Persistence | The loaded count survives refreshes (stage, commit, push, file watch) for the same workspace and resets to 200 when the workspace changes | ASSUMED | ASSUMED |
+| Position | New rows append at the bottom: scroll position, selection and the expanded commit are kept; lanes of the last row that run off the bottom stay as they are | ASSUMED | ASSUMED |
+| Row style | Part of the same virtual item list on both platforms (drawing, hit testing, scroll limit and thumb use one item sequence); a `kGpRow`-tall link-coloured text row (accent colour, muted while loading) | ASSUMED | ASSUMED |
+| Failure | A failed load keeps the graph already shown and the previous count; the row returns to "더 불러오기" | ASSUMED | ASSUMED |
+| Threading and memory | The larger graph is a normal refresh on the worker; results of an older workspace are dropped by the existing generation guard. The new graph is moved into the panel (never copied) and the old one is freed on swap | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the macOS part was only re-read against the existing patterns (no AppKit here), so CI is its first compile; the Windows panel was compile-checked with zig cc, not run. Each load re-reads the whole graph (`git log -n <count>`), not just the new commits.
+
+Units: core cap and tests; Windows row; macOS row; this record.
