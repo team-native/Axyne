@@ -1153,6 +1153,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)commitGitChanges:(id)sender;
 - (void)pushGitChanges:(id)sender;
 - (void)pullGitChanges:(id)sender;
+- (void)showGitLog:(id)sender;
 - (void)completeGitBatch:(AxyneMacGitBatch *)batch;
 - (void)completeGitOperation:(AxyneMacGitCompletion *)completion
                          run:(AxyneMacGitRun *)run;
@@ -1861,7 +1862,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         action == @selector(unstageAllGitChanges:) ||
         action == @selector(commitGitChanges:) ||
         action == @selector(pushGitChanges:) ||
-        action == @selector(pullGitChanges:))
+        action == @selector(pullGitChanges:) ||
+        action == @selector(showGitLog:))
         return _explorer.root != NULL && _gitProcess == NULL && !_gitBatchBusy;
     if (action == @selector(navigateLspReferences:)) return savedDocument;
     if (action == @selector(findInDocument:) ||
@@ -4383,8 +4385,9 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
                                      count:sizeof(arguments) / sizeof(arguments[0])];
 }
 
-/* Commit, push and pull run several Git steps (stage then commit; upstream
- * probe then push) through the blocking core functions, so they run on a
+/* Commit, push, pull and log run (several Git steps for the first three:
+ * stage then commit; upstream probe then push) through the blocking core
+ * functions, so they run on a
  * worker thread and hand the finished report to the main thread. The batch
  * owns a retain on the view until -completeGitBatch: runs, which keeps the
  * view alive however the workspace changes meanwhile. */
@@ -4392,7 +4395,7 @@ struct AxyneMacGitBatch {
     AxyneWorkspaceView *view;
     char *workspace;
     char *message;   /* commit only */
-    int kind;        /* 0 commit, 1 push, 2 pull */
+    int kind;        /* 0 commit, 1 push, 2 pull, 3 log */
     int stage_all;
     char *report;    /* malloc'd by the worker; never NULL after it ran */
 };
@@ -4418,6 +4421,8 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
                                   batch->stage_all, &result, &error);
     else if (batch->kind == 1)
         status = axyne_git_push(batch->workspace, &result, &error);
+    else if (batch->kind == 3)
+        status = axyne_git_log(batch->workspace, 100, &result, &error);
     else
         status = axyne_git_pull(batch->workspace, &result, &error);
     if (result.output != NULL) {
@@ -4439,9 +4444,11 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     static const char *const commitArguments[] = { "commit" };
     static const char *const pushArguments[] = { "push" };
     static const char *const pullArguments[] = { "pull", "--ff-only" };
+    static const char *const logArguments[] = { "log", "-n", "100" };
     const char *const *arguments = kind == 0 ? commitArguments
-        : (kind == 1 ? pushArguments : pullArguments);
-    size_t argumentCount = kind == 2 ? 2 : 1;
+        : (kind == 1 ? pushArguments
+        : (kind == 3 ? logArguments : pullArguments));
+    size_t argumentCount = kind == 2 ? 2 : (kind == 3 ? 3 : 1);
     AxyneMacGitBatch *batch;
     if (_explorer.root == NULL) {
         free(message);
@@ -4534,6 +4541,12 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 {
     (void)sender;
     [self startGitBatch:2 message:NULL stageAll:0];
+}
+
+- (void)showGitLog:(id)sender
+{
+    (void)sender;
+    [self startGitBatch:3 message:NULL stageAll:0];
 }
 
 - (void)findOrReplace:(BOOL)replace
@@ -6081,8 +6094,10 @@ static void axyne_install_menu(NSApplication *application,
         action:@selector(pushGitChanges:) keyEquivalent:@""];
     NSMenuItem *gitPull = [fileMenu addItemWithTitle:@"Git 풀"
         action:@selector(pullGitChanges:) keyEquivalent:@""];
+    NSMenuItem *gitLog = [fileMenu addItemWithTitle:@"Git 기록 보기"
+        action:@selector(showGitLog:) keyEquivalent:@""];
     [gitCommit setTarget:workspace]; [gitPush setTarget:workspace];
-    [gitPull setTarget:workspace];
+    [gitPull setTarget:workspace]; [gitLog setTarget:workspace];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"최근 항목"
         action:nil keyEquivalent:@""];
