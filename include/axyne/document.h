@@ -25,6 +25,12 @@ typedef struct AxyneDocument {
      * next Explorer open replaces this document in place. Any edit, save or
      * save-as clears it permanently (see axyne_documents_promote). */
     int preview;
+    /* Virtual read-only document (a Git diff tab): it has no file on disk, so
+     * path is NULL and is_untitled is 0. It is never dirty, never saved,
+     * watched or synchronised with an LSP server and is excluded from the
+     * recent list, file lists, search and session state. It lives in the
+     * preview slot (see axyne_documents_open_virtual). */
+    int is_virtual;
     /* Opaque, adapter-owned Scintilla document; the shared core ignores it. */
     void *native_editor_document;
     int owns_native_editor_document;
@@ -99,6 +105,24 @@ AxyneStatus axyne_documents_open_preview(AxyneDocumentSet *set,
                                          const char *utf8_path, size_t *index,
                                          AxyneDocument *evicted, int *replaced,
                                          AxyneError *error);
+/* Opens a virtual read-only document (is_virtual) with the given title and
+ * text, in the preview slot: when a preview document exists (a file preview or
+ * an earlier virtual document) it is replaced in place, exactly as
+ * axyne_documents_open_preview does (same `evicted`/`replaced` contract and
+ * revert with axyne_documents_revert_preview_open), otherwise the document is
+ * appended. The new document becomes active. It never joins the recent list.
+ * `title` must be non-empty; `contents` may be NULL only with length 0. */
+AxyneStatus axyne_documents_open_virtual(AxyneDocumentSet *set,
+                                         const char *title,
+                                         const char *contents, size_t length,
+                                         size_t *index, AxyneDocument *evicted,
+                                         int *replaced, AxyneError *error);
+/* True for a document backed by a file on disk (has a path, is neither
+ * untitled nor virtual): the only kind that feeds the recent list, palette
+ * file lists, LSP, the file watcher and the debugger. */
+int axyne_document_has_file(const AxyneDocument *document);
+/* True when Save and Save As apply: virtual documents have no file. */
+int axyne_document_can_save(const AxyneDocument *document);
 /* Undo axyne_documents_open_preview after a native load failure: with
  * `replaced` the old document is put back at `index` and the new one is
  * freed; otherwise the appended document is closed. Does not change the

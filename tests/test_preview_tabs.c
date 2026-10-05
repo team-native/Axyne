@@ -13,6 +13,123 @@ static size_t preview_count(const AxyneDocumentSet *set)
     return count;
 }
 
+/* Virtual read-only documents (Git diff tabs) in the preview slot. */
+static int check_virtual_documents(const char *a, const char *b)
+{
+    static const char diff1[] = "diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n";
+    static const char diff2[] = "diff --git a/y b/y\n+added\n";
+    AxyneDocumentSet set = {0};
+    AxyneDocument evicted;
+    AxyneError error = {0};
+    size_t index = 0;
+    int replaced = 0;
+    int marker = 7;
+    size_t path_count = 0;
+
+    AXYNE_TEST_STATUS(axyne_documents_initialize(&set, &error), AXYNE_STATUS_OK);
+    /* Opens appended (no preview yet), not dirty, not savable, never recent. */
+    AXYNE_TEST_STATUS(axyne_documents_open_virtual(&set, "변경: x", diff1,
+                                                   sizeof(diff1) - 1, &index,
+                                                   &evicted, &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 1 && set.count == 2 && replaced == 0 &&
+                     set.active_index == 1);
+    AXYNE_TEST_CHECK(set.documents[1].is_virtual && set.documents[1].preview &&
+                     !set.documents[1].is_dirty && !set.documents[1].is_untitled &&
+                     set.documents[1].path == NULL &&
+                     set.documents[1].length == sizeof(diff1) - 1 &&
+                     strcmp(set.documents[1].contents, diff1) == 0 &&
+                     strcmp(set.documents[1].title, "변경: x") == 0);
+    AXYNE_TEST_CHECK(set.recent_count == 0);
+    AXYNE_TEST_CHECK(!axyne_document_tab_hidden(&set.documents[1]));
+    AXYNE_TEST_CHECK(!axyne_document_can_save(&set.documents[1]) &&
+                     !axyne_document_has_file(&set.documents[1]) &&
+                     axyne_document_can_save(&set.documents[0]));
+    AXYNE_TEST_CHECK(!axyne_documents_empty_state(&set));
+
+    /* Saving, editing and dirtying are refused and leave it clean. */
+    AXYNE_TEST_CHECK(axyne_documents_save(&set, 1, &error) == AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(axyne_documents_save_as(&set, 1, a, &error) ==
+                     AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(axyne_documents_mark_dirty(&set, 1, &error) ==
+                     AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(axyne_documents_set_contents(&set, 1, "edited", 6, &error) ==
+                     AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(!set.documents[1].is_dirty && set.documents[1].preview &&
+                     set.documents[1].path == NULL &&
+                     strcmp(set.documents[1].contents, diff1) == 0);
+
+    /* Palette / file lists keep only documents backed by a file. */
+    for (size_t i = 0; i < set.count; ++i)
+        if (axyne_document_has_file(&set.documents[i]))
+            ++path_count;
+    AXYNE_TEST_CHECK(path_count == 0);
+
+    /* Another click replaces the virtual document in place and hands the old
+     * native handle back for release. */
+    set.documents[1].native_editor_document = &marker;
+    set.documents[1].owns_native_editor_document = 1;
+    AXYNE_TEST_STATUS(axyne_documents_open_virtual(&set, "abc1234: y", diff2,
+                                                   sizeof(diff2) - 1, &index,
+                                                   &evicted, &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 1 && set.count == 2 && replaced == 1 &&
+                     strcmp(set.documents[1].title, "abc1234: y") == 0 &&
+                     set.documents[1].native_editor_document == NULL &&
+                     evicted.is_virtual && evicted.native_editor_document == &marker &&
+                     strcmp(evicted.title, "변경: x") == 0);
+    /* A failed native load puts the previous diff back. */
+    axyne_documents_revert_preview_open(&set, index, &evicted, replaced);
+    AXYNE_TEST_CHECK(set.count == 2 && strcmp(set.documents[1].title, "변경: x") == 0 &&
+                     set.documents[1].native_editor_document == &marker &&
+                     set.documents[1].is_virtual);
+    set.documents[1].native_editor_document = NULL;
+    set.documents[1].owns_native_editor_document = 0;
+
+    /* An Explorer preview replaces the diff, and a diff replaces a file preview. */
+    AXYNE_TEST_STATUS(axyne_documents_open_preview(&set, a, &index, &evicted,
+                                                   &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 1 && replaced == 1 && evicted.is_virtual &&
+                     !set.documents[1].is_virtual && set.documents[1].path != NULL);
+    axyne_document_dispose(&evicted);
+    AXYNE_TEST_STATUS(axyne_documents_open_virtual(&set, "변경: z", "", 0, &index,
+                                                   &evicted, &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 1 && replaced == 1 && evicted.path != NULL &&
+                     strcmp(evicted.title, "a.txt") == 0 &&
+                     set.documents[1].is_virtual && set.documents[1].length == 0 &&
+                     set.documents[1].contents[0] == '\0');
+    axyne_document_dispose(&evicted);
+    /* A normal tab is never replaced; the diff keeps the preview slot. */
+    AXYNE_TEST_STATUS(axyne_documents_open(&set, b, &index, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 2 && set.documents[1].is_virtual &&
+                     set.documents[1].preview && !set.documents[2].preview);
+    AXYNE_TEST_STATUS(axyne_documents_open_virtual(&set, "abc1234: y", diff2,
+                                                   sizeof(diff2) - 1, &index, NULL,
+                                                   NULL, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(index == 1 && set.count == 3 &&
+                     strcmp(set.documents[1].title, "abc1234: y") == 0);
+
+    /* Closing needs no prompt state (never dirty) and leaves the rest. */
+    AXYNE_TEST_CHECK(!set.documents[1].is_dirty);
+    AXYNE_TEST_STATUS(axyne_documents_close(&set, 1, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(set.count == 2 && axyne_documents_preview_index(&set) == (size_t)-1);
+    AXYNE_TEST_CHECK(set.recent_count == 2); /* only a.txt and b.txt, the real opens */
+
+    AXYNE_TEST_CHECK(axyne_documents_open_virtual(&set, "", diff1, 1, &index, NULL,
+                                                  NULL, &error) ==
+                     AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_CHECK(axyne_documents_open_virtual(&set, "t", NULL, 3, &index, NULL,
+                                                  NULL, &error) ==
+                     AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_CHECK(axyne_documents_open_virtual(NULL, "t", "", 0, &index, NULL,
+                                                  NULL, &error) ==
+                     AXYNE_STATUS_INVALID_ARGUMENT);
+    axyne_documents_destroy(&set);
+    return 1;
+}
+
 int axyne_test_preview_tabs(const char *root)
 {
     char a[512], b[512], c[512], e[512], missing[512];
@@ -198,6 +315,8 @@ int axyne_test_preview_tabs(const char *root)
                      AXYNE_STATUS_INVALID_ARGUMENT);
     axyne_documents_promote(&set, 999);
     axyne_documents_promote(NULL, 0);
+
+    AXYNE_TEST_CHECK(check_virtual_documents(a, b));
 
     axyne_documents_destroy(&set);
     axyne_test_remove_tree(root);
