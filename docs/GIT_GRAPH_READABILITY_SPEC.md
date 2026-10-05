@@ -6,13 +6,14 @@
 | --- | --- | --- | --- |
 | intent | Simplify dense Git history and refresh when returning | USER | CONFIRMED |
 | compact | Default to Compact: HEAD first-parent history, with secondary parents omitted before lane layout | DELEGATED | ASSUMED |
-| full | Keep an explicitly selectable Full all-ref DAG and preserve the old graph API | USER | CONFIRMED |
+| full | Keep an explicitly selectable Full all-ref DAG and preserve the old graph API | DELEGATED | ASSUMED |
 | refresh | Preserve existing Git tab reentry refresh; add application activation refresh through existing coalescing | DELEGATED | ASSUMED |
-| stale | Suppress hidden and outdated mode/workspace snapshots | USER | CONFIRMED |
-| bounds | Preserve loading, counts, load-more, errors, geometry and read-only history access | USER | CONFIRMED |
+| stale | Suppress hidden and outdated mode/workspace snapshots | IMPLEMENTATION | ASSUMED |
+| bounds | Preserve loading, counts, load-more, errors, geometry and read-only history access | IMPLEMENTATION | ASSUMED |
 | selection | Keep the selected mode for the panel lifetime; reset history count, graph scroll and commit expansion on a mode change | DELEGATED | ASSUMED |
-| parity | Use native selectors on macOS and Windows | USER | CONFIRMED |
-| delivery | Local commits only; parent performs final independent review and publication | USER | CONFIRMED |
+| parity | Use native selectors on macOS and Windows | DELEGATED | ASSUMED |
+| delivery | Local commits only; parent performs final independent review and publishes a PR targeting dev | IMPLEMENTATION | CONFIRMED |
+| ci-budget | Give only the Git panel integration suite a 180-second CTest timeout | AGENT_PARAMETER | ASSUMED |
 
 Compact is a filtered history, not a representation of the full DAG. Full
 continues to use `--all`, excluding stash, with existing lane geometry.
@@ -26,7 +27,7 @@ and removes secondary parent hashes before layout. No Git history is changed.
 | core | Mode-aware query, compatible wrapper, merge-window fixtures | Existing parser/layout | compact, full, bounds | COMPLETE |
 | native | Native mode selectors, captured request mode, activation refresh and stale suppression | core, existing async loaders | refresh, stale, selection, parity | COMPLETE |
 | validation | Build and regression validation, report platform limits | core, native | delivery, bounds | COMPLETE (local scope) |
-| ci-budget | Give only the Git panel integration suite a 180-second CTest timeout | Existing common 60-second test group | USER, bounds | COMPLETE |
+| ci-budget | Give only the Git panel integration suite a 180-second CTest timeout | Existing common 60-second test group | ci-budget, bounds | COMPLETE |
 
 ## Validation and limits
 
@@ -56,7 +57,7 @@ behavior is preserved, application activation uses debounced refresh, and
 load results capture mode and reject hidden/outdated snapshots. Counts,
 load-more and error paths remain in the existing loaders. No other category
 or worktree was edited. Independent review and Windows CI remain external;
-publication is explicitly deferred to the parent.
+The parent will publish this category as a PR targeting `dev` after review.
 
 ## Independent review fixes
 
@@ -70,7 +71,7 @@ older response. Windows commit/message runtime coverage requires Windows CI.
 
 ## CI validation budget
 
-Source: USER; status: CONFIRMED. Only `axyne-git-panel` overrides the common
+Source: AGENT_PARAMETER; status: ASSUMED. Only `axyne-git-panel` overrides the common
 60-second timeout with 180 seconds. The graph suite exercises large-history,
 merge and bounded-output integration fixtures; CI process-launch variability
 has exceeded 60 seconds despite local runs around 14 seconds. This changes
