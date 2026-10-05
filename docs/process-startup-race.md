@@ -11,12 +11,12 @@ parent/child group setup also produced `EPERM` in local stress runs.
 
 | Decision | Source | Status |
 | --- | --- | --- |
-| Child must own a dedicated process group before exec | USER / existing API contract | CONFIRMED |
-| Preserve group cancellation, callback delivery and zombie-leader ownership | USER / existing API contract | CONFIRMED |
-| Use a bounded startup handshake; do not retry launches or ignore errors | USER | CONFIRMED |
+| Child must own a dedicated process group before exec | IMPLEMENTATION / existing API contract | CONFIRMED |
+| Preserve group cancellation, callback delivery and zombie-leader ownership | IMPLEMENTATION / existing API contract | CONFIRMED |
+| Use a bounded startup handshake; do not retry launches or ignore errors | DELEGATED / implementation | ASSUMED |
 | Child alone creates the group and sends an explicit acknowledgement | IMPLEMENTATION | CONFIRMED |
 | Startup handshake has a ten-second monotonic deadline | AGENT_PARAMETER | ASSUMED |
-| Separate category branch; parent coordinates final review/publication | USER | CONFIRMED |
+| Separate category branch; parent coordinates final review/publication | IMPLEMENTATION | CONFIRMED |
 
 The startup protocol and regression coverage are complete locally. Independent
 review and remote CI are coordinated by the parent task.
