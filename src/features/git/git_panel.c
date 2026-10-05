@@ -30,6 +30,21 @@ static char *panel_dup_n(const char *text, size_t length)
     return copy;
 }
 
+static int panel_is_hash(const char *hash)
+{
+    size_t n, i;
+    if (hash == NULL) return 0;
+    n = strlen(hash);
+    if (n < 4 || n > 64) return 0;
+    for (i = 0; i < n; ++i) {
+        char c = hash[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    return 1;
+}
+
 /* Length of the NUL-terminated token starting at text within limit bytes. */
 static size_t panel_token_length(const char *text, size_t limit)
 {
@@ -734,4 +749,277 @@ oom:
     axyne_git_graph_free(out);
     return panel_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
                        "Unable to allocate the commit graph");
+}
+
+/* ---- commit details and diffs ------------------------------------------- */
+
+AxyneStatus axyne_git_commit_files(const char *utf8_workspace, const char *hash,
+                                   AxyneGitChanges *out, AxyneError *error)
+{
+    const char *arguments[] = {
+        "--no-pager", "show", "--name-status", "--format=", "-M", "-z", "-m",
+        "--first-parent", hash
+    };
+    AxyneGitResult result;
+    AxyneStatus status;
+    size_t pos = 0, capacity = 0;
+    if (out == NULL)
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Changes output is required");
+    out->items = NULL;
+    out->count = 0;
+    if (!panel_is_hash(hash))
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Invalid commit hash");
+    status = panel_run(utf8_workspace, arguments, 9, 1, 0, 1, &result, NULL,
+                       error);
+    if (status != AXYNE_STATUS_OK) return status;
+    while (result.output != NULL && pos < result.length) {
+        AxyneGitChange change;
+        const char *token = result.output + pos;
+        size_t length = panel_token_length(token, result.length - pos);
+        int two_paths;
+        memset(&change, 0, sizeof(change));
+        pos += length + 1;
+        if (length == 0) continue;
+        change.index_status = token[0];
+        change.worktree_status = ' ';
+        two_paths = token[0] == 'R' || token[0] == 'C';
+        if (pos >= result.length) break;
+        if (two_paths) {
+            size_t first = panel_token_length(result.output + pos, result.length - pos);
+            change.orig_path = panel_dup_n(result.output + pos, first);
+            pos += first + 1;
+            if (change.orig_path == NULL || pos > result.length) {
+                free(change.orig_path);
+                goto oom;
+            }
+        }
+        {
+            size_t second = panel_token_length(result.output + pos, result.length - pos);
+            change.path = panel_dup_n(result.output + pos, second);
+            pos += second + 1;
+            if (change.path == NULL) {
+                free(change.orig_path);
+                goto oom;
+            }
+        }
+        change.kind = token[0] == 'T' ? 'M' : token[0];
+        if (!panel_changes_push(out, &capacity, &change)) {
+            free(change.path);
+            free(change.orig_path);
+            goto oom;
+        }
+    }
+    axyne_git_result_free(&result);
+    return panel_error(error, AXYNE_STATUS_OK, "");
+oom:
+    axyne_git_result_free(&result);
+    axyne_git_changes_free(out);
+    return panel_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                       "Unable to allocate the file list");
+}
+
+void axyne_git_diff_free(AxyneGitDiff *diff)
+{
+    if (diff == NULL) return;
+    free(diff->text);
+    diff->text = NULL;
+    diff->length = 0;
+    diff->truncated = 0;
+}
+
+/* Runs a diff-producing command and moves its capped stdout into diff.
+ * ok_exit is an additional exit code that means "differences found". */
+static AxyneStatus panel_diff_run(const char *workspace,
+                                  const char *const *arguments, size_t count,
+                                  int ok_exit, AxyneGitDiff *diff,
+                                  AxyneError *error)
+{
+    AxyneGitResult result;
+    char *message = NULL;
+    AxyneStatus status = panel_run(workspace, arguments, count, 1,
+                                   AXYNE_GIT_DIFF_LIMIT, 0, &result, &message,
+                                   error);
+    if (status != AXYNE_STATUS_OK) return status;
+    if (result.exit_code != 0 && result.exit_code != ok_exit &&
+        !result.output_truncated) {
+        status = panel_git_failure(error, &result, &message);
+        axyne_git_result_free(&result);
+        return status;
+    }
+    axyne_git_string_free(message);
+    if (result.output == NULL) {
+        diff->text = panel_dup_n("", 0);
+        if (diff->text == NULL) {
+            axyne_git_result_free(&result);
+            return panel_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                               "Unable to allocate the diff");
+        }
+        diff->length = 0;
+    } else {
+        diff->text = result.output;
+        diff->length = result.length;
+        result.output = NULL;
+        if (result.output_truncated) {
+            /* End at a line boundary so no line (or UTF-8 sequence) is cut. */
+            size_t n = diff->length;
+            while (n > 0 && diff->text[n - 1] != '\n') --n;
+            if (n > 0) diff->length = n;
+            diff->text[diff->length] = '\0';
+            diff->truncated = 1;
+        }
+    }
+    axyne_git_result_free(&result);
+    return panel_error(error, AXYNE_STATUS_OK, "");
+}
+
+AxyneStatus axyne_git_file_diff(const char *utf8_workspace, const char *path,
+                                const char *orig_path, int staged,
+                                AxyneGitDiff *out, AxyneError *error)
+{
+    const char *arguments[16];
+    size_t count = 0;
+    char *spec = NULL, *orig_spec = NULL;
+    AxyneStatus status;
+    if (out == NULL)
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Diff output is required");
+    out->text = NULL;
+    out->length = 0;
+    out->truncated = 0;
+    if (utf8_workspace == NULL || utf8_workspace[0] == '\0' || path == NULL ||
+        path[0] == '\0')
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Invalid diff request");
+    spec = panel_pathspec(path);
+    if (orig_path != NULL && orig_path[0] != '\0') orig_spec = panel_pathspec(orig_path);
+    if (spec == NULL || (orig_path != NULL && orig_path[0] != '\0' && orig_spec == NULL)) {
+        free(spec);
+        free(orig_spec);
+        return panel_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                           "Unable to allocate arguments");
+    }
+    arguments[count++] = "--no-pager";
+    arguments[count++] = "-c";
+    arguments[count++] = "core.quotepath=off";
+    arguments[count++] = "diff";
+    arguments[count++] = "--no-color";
+    arguments[count++] = "--no-ext-diff";
+    arguments[count++] = "--no-textconv";
+    arguments[count++] = "-M";
+    if (staged) arguments[count++] = "--cached";
+    arguments[count++] = "--";
+    arguments[count++] = spec;
+    if (orig_spec != NULL) arguments[count++] = orig_spec;
+    status = panel_diff_run(utf8_workspace, arguments, count, 0, out, error);
+    if (status == AXYNE_STATUS_OK && !staged && out->length == 0) {
+        /* Nothing against the index: an untracked file is shown as added. */
+        static const char *const tracked_args[] = {
+            "ls-files", "--error-unmatch", "--"
+        };
+        const char *tracked[4];
+        AxyneGitResult result;
+        tracked[0] = tracked_args[0];
+        tracked[1] = tracked_args[1];
+        tracked[2] = tracked_args[2];
+        tracked[3] = spec;
+        status = panel_run(utf8_workspace, tracked, 4, 1, 0, 0, &result, NULL,
+                           error);
+        if (status == AXYNE_STATUS_OK) {
+            int untracked = result.exit_code != 0;
+            axyne_git_result_free(&result);
+            if (untracked) {
+                static const char *const cdup_args[] = {
+                    "rev-parse", "--show-cdup"
+                };
+                status = panel_run(utf8_workspace, cdup_args, 2, 1, 0, 1,
+                                   &result, NULL, error);
+                if (status == AXYNE_STATUS_OK) {
+                    char *directory;
+                    const char *no_index[11];
+                    size_t cdup = result.output != NULL ? result.length : 0;
+                    size_t base = strlen(utf8_workspace);
+                    directory = (char *)malloc(base + cdup + 2);
+                    if (directory == NULL) {
+                        status = panel_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                                             "Unable to allocate a path");
+                    } else {
+                        memcpy(directory, utf8_workspace, base);
+                        directory[base] = '/';
+                        if (cdup > 0) memcpy(directory + base + 1, result.output, cdup);
+                        directory[base + 1 + cdup] = '\0';
+                        while (cdup > 0 &&
+                               (directory[base + cdup] == '\n' ||
+                                directory[base + cdup] == '\r')) {
+                            directory[base + cdup] = '\0';
+                            --cdup;
+                        }
+                        no_index[0] = "--no-pager";
+                        no_index[1] = "-c";
+                        no_index[2] = "core.quotepath=off";
+                        no_index[3] = "diff";
+                        no_index[4] = "--no-index";
+                        no_index[5] = "--no-color";
+                        no_index[6] = "--no-ext-diff";
+                        no_index[7] = "--no-textconv";
+                        no_index[8] = "--";
+                        no_index[9] = "/dev/null";
+                        no_index[10] = path;
+                        axyne_git_diff_free(out);
+                        status = panel_diff_run(directory, no_index, 11, 1, out,
+                                                error);
+                        free(directory);
+                    }
+                    axyne_git_result_free(&result);
+                }
+            }
+        }
+    }
+    free(spec);
+    free(orig_spec);
+    if (status != AXYNE_STATUS_OK) axyne_git_diff_free(out);
+    return status;
+}
+
+AxyneStatus axyne_git_commit_diff(const char *utf8_workspace, const char *hash,
+                                  const char *path, AxyneGitDiff *out,
+                                  AxyneError *error)
+{
+    const char *arguments[16];
+    size_t count = 0;
+    char *spec = NULL;
+    AxyneStatus status;
+    if (out == NULL)
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Diff output is required");
+    out->text = NULL;
+    out->length = 0;
+    out->truncated = 0;
+    if (!panel_is_hash(hash))
+        return panel_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                           "Invalid commit hash");
+    arguments[count++] = "--no-pager";
+    arguments[count++] = "-c";
+    arguments[count++] = "core.quotepath=off";
+    arguments[count++] = "show";
+    arguments[count++] = "--no-color";
+    arguments[count++] = "--no-ext-diff";
+    arguments[count++] = "--no-textconv";
+    arguments[count++] = "--format=";
+    arguments[count++] = "-M";
+    arguments[count++] = "-m";
+    arguments[count++] = "--first-parent";
+    arguments[count++] = hash;
+    if (path != NULL && path[0] != '\0') {
+        spec = panel_pathspec(path);
+        if (spec == NULL)
+            return panel_error(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                               "Unable to allocate arguments");
+        arguments[count++] = "--";
+        arguments[count++] = spec;
+    }
+    status = panel_diff_run(utf8_workspace, arguments, count, 0, out, error);
+    free(spec);
+    return status;
 }

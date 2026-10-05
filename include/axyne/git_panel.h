@@ -165,6 +165,43 @@ AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
                             AxyneGitGraph *out, AxyneError *error);
 void axyne_git_graph_free(AxyneGitGraph *graph);
 
+/* ---- commit details and diffs ------------------------------------------- */
+
+/* Files changed by a commit (`git show --name-status -M`; for a merge, against
+ * its first parent). hash must be 4..64 hex digits, otherwise
+ * AXYNE_STATUS_INVALID_ARGUMENT. Each entry has path, orig_path (renames and
+ * copies), index_status = Git's letter and kind; staged/partially/conflicted
+ * are 0. Free with axyne_git_changes_free. */
+AxyneStatus axyne_git_commit_files(const char *utf8_workspace, const char *hash,
+                                   AxyneGitChanges *out, AxyneError *error);
+
+#define AXYNE_GIT_DIFF_LIMIT (1024u * 1024u)
+
+typedef struct AxyneGitDiff {
+    char *text;        /* unified diff, NUL-terminated, "" when there is none */
+    size_t length;
+    /* Nonzero when the diff was cut at AXYNE_GIT_DIFF_LIMIT (1 MiB); the text
+     * then ends at a line boundary. Lines may contain arbitrary bytes from the
+     * file, so a UI must tolerate invalid UTF-8. Binary files appear as Git's
+     * "Binary files differ" line. */
+    int truncated;
+} AxyneGitDiff;
+
+/* Diff of one changed file. staged != 0: index against HEAD; otherwise working
+ * tree against index (an untracked file is shown as all-added). orig_path may
+ * be NULL; give it for a staged rename so Git reports the rename instead of an
+ * add. */
+AxyneStatus axyne_git_file_diff(const char *utf8_workspace, const char *path,
+                                const char *orig_path, int staged,
+                                AxyneGitDiff *out, AxyneError *error);
+/* Diff of a commit against its first parent (a root commit against the empty
+ * tree), optionally restricted to one repository path (NULL or "" for all
+ * files). hash is validated as for axyne_git_commit_files. */
+AxyneStatus axyne_git_commit_diff(const char *utf8_workspace, const char *hash,
+                                  const char *path, AxyneGitDiff *out,
+                                  AxyneError *error);
+void axyne_git_diff_free(AxyneGitDiff *diff);
+
 #ifdef __cplusplus
 }
 #endif
