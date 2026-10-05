@@ -311,7 +311,6 @@ The workspace's commit history can be viewed from the same Git menu group. Core:
 Known gaps: the macOS menu code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run; the real-repository tests run on POSIX only.
 
 Units: Git log core with tests; Git 기록 보기 menu actions (macOS, Windows); this record.
-
 ## Editor Tab auto-complete
 
 Typing in the code editor shows a completion list and Tab accepts the selected entry. Core: `axyne_completion_build` in `include/axyne/completion.h` (pure C), covered by `axyne-completion`. Both adapters only call it from the existing `SCN_CHARADDED` handler and issue `SCI_AUTOC*` messages.
