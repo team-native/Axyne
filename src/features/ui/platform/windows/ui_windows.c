@@ -15,6 +15,7 @@
 #include "axyne/ui_design.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
+#include "axyne/completion.h"
 #include "axyne/document.h"
 #include "axyne/empty_state.h"
 #include "axyne/search.h"
@@ -752,6 +753,50 @@ static void axyne_auto_indent(AxyneWindowState *state,
             SendMessageA(state->editor, SCI_SETLINEINDENTATION, (WPARAM)line,
                          indentation - (LRESULT)tab_width);
     }
+}
+
+/* Word completion while typing: document words plus the language's keywords.
+ * Scintilla owns the list: Tab and Return accept the selected entry, Escape
+ * (or typing a character that matches nothing) closes it, and with no list
+ * open Tab keeps indenting. */
+static void axyne_show_completion(AxyneWindowState *state)
+{
+    const AxyneDocument *document;
+    const AxyneSyntaxLanguage *language;
+    const char *text;
+    LRESULT length;
+    LRESULT caret;
+    char *list;
+    size_t prefix = 0;
+    if (state == NULL || state->editor == NULL || axyne_empty_state(state))
+        return;
+    document = axyne_active(state);
+    language = axyne_syntax_for_path(document == NULL ? NULL : document->path);
+    length = SendMessageA(state->editor, SCI_GETLENGTH, 0, 0);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    list = NULL;
+    if (length > 0 && caret > 0 && caret <= length) {
+        size_t begin, end;
+        axyne_completion_window((size_t)length, (size_t)caret, &begin, &end);
+        text = (const char *)SendMessageA(state->editor, SCI_GETRANGEPOINTER,
+                                          (WPARAM)begin, (LPARAM)(end - begin));
+        if (text != NULL)
+            list = axyne_completion_build_slice(text, end - begin,
+                (size_t)caret - begin, begin > 0, end < (size_t)length,
+                language->keywords, AXYNE_SYNTAX_KEYWORD_SETS, &prefix);
+    }
+    if (list == NULL) {
+        if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+            SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
+        return;
+    }
+    SendMessageA(state->editor, SCI_AUTOCSETIGNORECASE, 1, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETAUTOHIDE, 1, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETCHOOSESINGLE, 0, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETCANCELATSTART, 0, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
+    SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix, (LPARAM)list);
+    free(list);
 }
 
 /* Native scrollbars of the Scintilla window follow the editor theme: the
@@ -6357,6 +6402,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_CHARADDED &&
             !state->loading_editor)
             axyne_auto_indent(state, notification);
+        if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_CHARADDED &&
+            !state->loading_editor)
+            axyne_show_completion(state);
         if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_UPDATEUI &&
             !state->loading_editor) {
             axyne_update_line_number_margin(state);

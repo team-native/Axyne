@@ -311,3 +311,23 @@ The workspace's commit history can be viewed from the same Git menu group. Core:
 Known gaps: the macOS menu code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run; the real-repository tests run on POSIX only.
 
 Units: Git log core with tests; Git 기록 보기 menu actions (macOS, Windows); this record.
+
+## Editor Tab auto-complete
+
+Typing in the code editor shows a completion list and Tab accepts the selected entry. Core: `axyne_completion_build` in `include/axyne/completion.h` (pure C), covered by `axyne-completion`. Both adapters only call it from the existing `SCN_CHARADDED` handler and issue `SCI_AUTOC*` messages.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Goal | The editor suggests completions while typing and Tab accepts one | USER | CONFIRMED |
+| Candidates | Identifiers already in the current document plus the tokens of the language's existing Lexilla keyword sets (`syntax.h`), merged. No LSP, no new language data | ASSUMED | ASSUMED |
+| Trigger | After each typed character when the identifier before the caret has at least 2 characters and does not start with a digit | ASSUMED | ASSUMED |
+| Filtering | Prefix match, case-insensitive for ASCII; candidates must be longer than the prefix; the word being typed is excluded; exact duplicates collapse (names differing only in case stay separate); sorted case-insensitively; no list when nothing matches (an open list is cancelled) | ASSUMED | ASSUMED |
+| Limits | At most 200 entries; words over 128 bytes ignored; only 1 MiB of text around the caret is scanned in very large documents | ASSUMED | ASSUMED |
+| List behaviour | `SCI_AUTOCSETIGNORECASE` on, auto-hide on, a single candidate is not inserted automatically, deleting back to the start does not cancel, 8 visible rows | ASSUMED | ASSUMED |
+| Keys | Tab accepts the selected entry (Scintilla's own handling); Return also accepts; Esc cancels. With no list open Tab still indents (`SCI_TAB`) and Shift+Tab is unchanged | ASSUMED | ASSUMED |
+| Where | Only in the source editor: nothing in the empty state (binary files are never opened in the editor) | ASSUMED | ASSUMED |
+| Not included | Manual trigger shortcut, snippets, signature help, candidates from other files, a preference to turn it off | ASSUMED | ASSUMED |
+
+Known gaps: the macOS code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run, so the popup keys were not exercised in a real editor.
+
+Units: shared completion core with tests; Windows adapter; macOS adapter; this record.
