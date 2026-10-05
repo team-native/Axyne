@@ -104,7 +104,8 @@ static size_t prefix_characters(const char *prefix, size_t length)
 
 static void scan_words(CandidateList *list, const char *text, size_t begin,
                        size_t end, size_t caret_word_start,
-                       const char *prefix, size_t prefix_length)
+                       const char *prefix, size_t prefix_length,
+                       int skip_head, int skip_tail)
 {
     size_t i = begin;
     while (i < end) {
@@ -113,6 +114,8 @@ static void scan_words(CandidateList *list, const char *text, size_t begin,
         start = i;
         while (i < end && is_word_byte((unsigned char)text[i])) ++i;
         if (start == caret_word_start) continue; /* the word being typed */
+        if ((skip_head && start == begin) || (skip_tail && i == end))
+            continue; /* cut by the slice edge */
         if (!is_start_byte((unsigned char)text[start])) continue;
         if (i - start > AXYNE_COMPLETION_MAX_WORD) continue;
         if (has_prefix(text + start, i - start, prefix, prefix_length))
@@ -145,15 +148,30 @@ static void scan_keywords(CandidateList *list, const char *keywords,
     }
 }
 
-char *axyne_completion_build(const char *text, size_t length, size_t caret,
-                             const char *const *keyword_sets,
-                             size_t keyword_set_count, size_t *prefix_bytes)
+void axyne_completion_window(size_t length, size_t caret, size_t *begin,
+                             size_t *end)
+{
+    size_t half = AXYNE_COMPLETION_MAX_SCAN / 2;
+    size_t b = 0;
+    size_t e = length;
+    if (length > AXYNE_COMPLETION_MAX_SCAN) {
+        b = caret > half ? caret - half : 0;
+        e = b + AXYNE_COMPLETION_MAX_SCAN;
+        if (e > length) { e = length; b = length - AXYNE_COMPLETION_MAX_SCAN; }
+    }
+    if (begin != NULL) *begin = b;
+    if (end != NULL) *end = e;
+}
+
+char *axyne_completion_build_slice(const char *text, size_t length,
+                                   size_t caret, int cut_head, int cut_tail,
+                                   const char *const *keyword_sets,
+                                   size_t keyword_set_count,
+                                   size_t *prefix_bytes)
 {
     CandidateList list = {NULL, 0, 0, 0};
     size_t prefix_length;
     size_t caret_word_start;
-    size_t begin = 0;
-    size_t end = length;
     size_t i, kept = 0, total = 0;
     const char *prefix;
     char *result = NULL;
@@ -171,22 +189,8 @@ char *axyne_completion_build(const char *text, size_t length, size_t caret,
     if (prefix_length > AXYNE_COMPLETION_MAX_WORD) return NULL;
     caret_word_start = caret - prefix_length;
 
-    if (length > AXYNE_COMPLETION_MAX_SCAN) {
-        size_t half = AXYNE_COMPLETION_MAX_SCAN / 2;
-        begin = caret > half ? caret - half : 0;
-        end = begin + AXYNE_COMPLETION_MAX_SCAN;
-        if (end > length) { end = length; begin = length - AXYNE_COMPLETION_MAX_SCAN; }
-        /* Start on a word boundary so a cut word is not suggested. */
-        while (begin > 0 && begin < caret_word_start &&
-               is_word_byte((unsigned char)text[begin - 1]) &&
-               is_word_byte((unsigned char)text[begin]))
-            ++begin;
-        while (end < length && end > caret &&
-               is_word_byte((unsigned char)text[end - 1]) &&
-               is_word_byte((unsigned char)text[end]))
-            --end;
-    }
-    scan_words(&list, text, begin, end, caret_word_start, prefix, prefix_length);
+    scan_words(&list, text, 0, length, caret_word_start, prefix, prefix_length,
+               cut_head, cut_tail);
     for (i = 0; keyword_sets != NULL && i < keyword_set_count; ++i)
         scan_keywords(&list, keyword_sets[i], prefix, prefix_length);
     if (list.failed || list.count == 0) { free(list.items); return NULL; }
@@ -214,4 +218,17 @@ char *axyne_completion_build(const char *text, size_t length, size_t caret,
     }
     free(list.items);
     return result;
+}
+
+char *axyne_completion_build(const char *text, size_t length, size_t caret,
+                             const char *const *keyword_sets,
+                             size_t keyword_set_count, size_t *prefix_bytes)
+{
+    size_t begin, end;
+    if (prefix_bytes != NULL) *prefix_bytes = 0;
+    if (text == NULL || caret > length) return NULL;
+    axyne_completion_window(length, caret, &begin, &end);
+    return axyne_completion_build_slice(text + begin, end - begin, caret - begin,
+                                        begin > 0, end < length, keyword_sets,
+                                        keyword_set_count, prefix_bytes);
 }
