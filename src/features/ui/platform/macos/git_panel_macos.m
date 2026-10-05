@@ -766,6 +766,7 @@ typedef struct GpGeometry {
     _notice = nil;
     _loaded = NO;
     _noWorkspace = NO;
+    [self layoutParts]; /* hides the commit message box */
     gp_set_string(&_selectedPath, NULL);
     gp_set_string(&_selectedHash, NULL);
 }
@@ -809,7 +810,7 @@ typedef struct GpGeometry {
     if (task->kind == GP_TASK_STAGE || task->kind == GP_TASK_UNSTAGE) {
         _stageBusy = NO;
         [self deliverText:task->text];
-        [self refresh];
+        if (![self isHidden]) [self refresh];
     } else if (task->sequence == _outputSequence) {
         [self deliverText:task->text];
     }
