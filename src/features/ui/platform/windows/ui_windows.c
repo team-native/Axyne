@@ -6311,6 +6311,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case AXYNE_WM_EXPLORER_EVENT: {
         AxyneExplorerMessage *event_message = (AxyneExplorerMessage *)l_param;
         if (event_message != NULL) {
+            MSG queued;
+            /* A build or `git status` can post thousands of events in a
+             * burst; each used to rebuild the whole explorer list. Drop the
+             * ones already queued and reload once for all of them. */
+            while (PeekMessageW(&queued, window, AXYNE_WM_EXPLORER_EVENT,
+                                AXYNE_WM_EXPLORER_EVENT, PM_REMOVE))
+                axyne_workspace_message_destroy(
+                    (AxyneExplorerMessage *)queued.lParam);
             axyne_workspace_refresh(window, state);
             axyne_workspace_message_destroy(event_message);
         }
