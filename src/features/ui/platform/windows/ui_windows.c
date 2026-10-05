@@ -1001,23 +1001,21 @@ static void axyne_load_workspace_preferences(AxyneWindowState *state,
 static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
                                   AxyneProcessStream stream)
 {
-    int old_length;
-    char *old_text;
+    int old_length, copied;
     char *combined;
     size_t prefix_length = stream == AXYNE_PROCESS_STDERR ? 9 : 0;
     size_t keep;
     if (output == NULL || bytes == NULL || length == 0) return;
     old_length = GetWindowTextLengthA(output);
     if (old_length < 0) old_length = 0;
-    old_text = (char *)malloc((size_t)old_length + 1);
-    if (old_text == NULL) return;
-    GetWindowTextA(output, old_text, old_length + 1);
-    if (length > SIZE_MAX - (size_t)old_length - prefix_length - 1) {
-        free(old_text); return;
-    }
+    if (length > SIZE_MAX - (size_t)old_length - prefix_length - 1) return;
+    /* One buffer: the existing text is read straight into the front of the
+     * combined text instead of through a second copy of up to 1 MiB. */
     combined = (char *)malloc((size_t)old_length + prefix_length + length + 1);
-    if (combined == NULL) { free(old_text); return; }
-    memcpy(combined, old_text, (size_t)old_length);
+    if (combined == NULL) return;
+    copied = GetWindowTextA(output, combined, old_length + 1);
+    if (copied < 0 || copied > old_length) copied = 0;
+    old_length = copied;
     if (prefix_length != 0) memcpy(combined + old_length, "[stderr] ", prefix_length);
     memcpy(combined + old_length + prefix_length, bytes, length);
     combined[old_length + prefix_length + length] = '\0';
@@ -1029,7 +1027,6 @@ static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
     SetWindowTextA(output, combined);
     SendMessageA(output, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
     free(combined);
-    free(old_text);
 }
 
 static void axyne_refresh_action_controls(AxyneWindowState *state)

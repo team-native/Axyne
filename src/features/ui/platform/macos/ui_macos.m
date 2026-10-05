@@ -1482,6 +1482,10 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [_terminalOutput setAutoresizingMask:NSViewWidthSizable];
         [[_terminalOutput textContainer] setWidthTracksTextView:YES];
         [_terminalOutput setTextContainerInset:NSMakeSize(0, 6)];
+        /* The log can hold up to 1 MiB of text. Contiguous layout keeps glyph
+         * and line-fragment data for all of it; non-contiguous layout lays out
+         * only what is scrolled into view. */
+        [[_terminalOutput layoutManager] setAllowsNonContiguousLayout:YES];
         [self addSubview:_terminalScroll];
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
