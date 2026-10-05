@@ -31,6 +31,9 @@ typedef struct AxyneGitPanelTheme {
 - (BOOL)gitPanelBusy:(AxyneGitPanelView *)panel;
 /* Shows text in the output panel (diffs, commit details, errors). */
 - (void)gitPanel:(AxyneGitPanelView *)panel showText:(NSString *)text;
+/* Commit exactly what is staged with this message (stage_all = 0). */
+- (void)gitPanel:(AxyneGitPanelView *)panel commitMessage:(NSString *)message;
+- (void)gitPanelPush:(AxyneGitPanelView *)panel;
 /* The "folder open" empty state was clicked. */
 - (void)gitPanelOpenWorkspace:(AxyneGitPanelView *)panel;
 @end
@@ -50,6 +53,9 @@ typedef struct AxyneGitPanelTheme {
 - (void)workspaceChanged;
 /* Frees the loaded results (the panel was hidden). Safe to call repeatedly. */
 - (void)unload;
+/* A commit/push/pull/menu Git operation finished: redraws the buttons,
+ * reloads when visible and, after a successful commit, clears the message. */
+- (void)operationFinishedWithSuccessfulCommit:(BOOL)commitSucceeded;
 @end
 
 #endif

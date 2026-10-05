@@ -807,6 +807,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneMacGitRun *_gitRun;
     /* A commit, push or pull is running on a worker thread. */
     BOOL _gitBatchBusy;
+    /* The running batch is a commit started from the Git panel. */
+    BOOL _gitBatchFromPanel;
     /* Left sidebar tab: 0 explorer, 1 Git. The Git panel is created the first
      * time its tab is shown and freed with the view. */
     NSInteger _sidebarTab;
@@ -3612,6 +3614,25 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return _gitProcess != NULL || _gitBatchBusy;
 }
 
+/* Commit button: commits exactly what is staged (stage_all = 0). */
+- (void)gitPanel:(AxyneGitPanelView *)panel commitMessage:(NSString *)message
+{
+    const char *utf8 = [message UTF8String];
+    BOOL idle = _gitProcess == NULL && !_gitBatchBusy;
+    char *copy;
+    (void)panel;
+    if (utf8 == NULL || (copy = strdup(utf8)) == NULL) return;
+    [self startGitBatch:0 message:copy stageAll:0];
+    if (idle && _gitBatchBusy) _gitBatchFromPanel = YES;
+}
+
+/* Push button: the same push as File > Git Push. */
+- (void)gitPanelPush:(AxyneGitPanelView *)panel
+{
+    (void)panel;
+    [self startGitBatch:1 message:NULL stageAll:0];
+}
+
 /* Diffs, commit details and stage errors go to the output panel, which is
  * shown if it was hidden. */
 - (void)gitPanel:(AxyneGitPanelView *)panel showText:(NSString *)text
@@ -4500,6 +4521,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     }
     _gitProcess = run->process;
     _gitRun = run;
+    [_gitPanel setNeedsDisplay:YES];
     /* Output and Problems share the same area; show the Git output as soon
      * as the operation starts. */
     [self selectOutputPanel];
@@ -4551,6 +4573,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         _gitRun = NULL;
         _gitProcess = NULL;
     }
+    [_gitPanel operationFinishedWithSuccessfulCommit:NO];
     process = axyne_macos_git_take_process(run);
     if (process != NULL) axyne_process_release(process);
     /* Drop the completion reference taken in the exit callback and the
@@ -4617,6 +4640,7 @@ struct AxyneMacGitBatch {
     char *message;   /* commit only */
     int kind;        /* 0 commit, 1 push, 2 pull, 3 log */
     int stage_all;
+    int ok;          /* the core call returned AXYNE_STATUS_OK */
     char *report;    /* malloc'd by the worker; never NULL after it ran */
 };
 
@@ -4645,6 +4669,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
         status = axyne_git_log(batch->workspace, 100, &result, &error);
     else
         status = axyne_git_pull(batch->workspace, &result, &error);
+    batch->ok = status == AXYNE_STATUS_OK;
     if (result.output != NULL) {
         batch->report = result.output; /* ownership moves to the batch */
         result.output = NULL;
@@ -4693,6 +4718,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     batch->stage_all = stageAll;
     batch->view = [self retain];
     _gitBatchBusy = YES;
+    [_gitPanel setNeedsDisplay:YES]; /* commit and push buttons dim */
     /* Output and Problems share the same area; show the operation at once. */
     [self selectOutputPanel];
     [_terminalOutput setString:@""];
@@ -4721,6 +4747,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
  * batch's retain on the view. */
 - (void)completeGitBatch:(AxyneMacGitBatch *)batch
 {
+    BOOL commitFromPanel;
     const char *text = batch->report != NULL
         ? batch->report : "Unable to allocate Git output.\n";
     /* The Problems or Terminal panel may have been selected while Git ran. */
@@ -4729,7 +4756,12 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     [self terminalAppend:text length:strlen(text) stream:AXYNE_PROCESS_STDOUT];
     [_terminalOutput scrollRangeToVisible:NSMakeRange(0, 0)];
     _gitBatchBusy = NO;
+    /* A commit from the Git panel clears its message; every finished Git
+     * operation reloads the panel. */
+    commitFromPanel = _gitBatchFromPanel && batch->kind == 0 && batch->ok;
+    _gitBatchFromPanel = NO;
     axyne_macos_git_batch_free(batch);
+    [_gitPanel operationFinishedWithSuccessfulCommit:commitFromPanel];
     [self setNeedsDisplay:YES];
     [self release];
 }
