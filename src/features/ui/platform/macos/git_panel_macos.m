@@ -13,6 +13,11 @@
  * downwards) like AxyneWorkspaceView, so rows are laid out top to bottom. */
 static const CGFloat kGpHeader = 26;      /* section title row */
 static const CGFloat kGpRow = AXYNE_UI_ROW;
+static const CGFloat kGpGap = 6;
+static const CGFloat kGpPad = 8;
+static const CGFloat kGpMessage = 56;     /* commit message box */
+static const CGFloat kGpButton = 24;
+static const CGFloat kGpPushWidth = 56;
 static const unsigned kGpRefreshDelayMs = 300;
 
 /* ---- lifetime box ----------------------------------------------------------
@@ -269,6 +274,7 @@ static uint32_t gp_kind_color(char kind)
 /* Rectangles of the panel's parts, from the bounds and the change count. */
 typedef struct GpGeometry {
     NSRect refresh, changes;
+    NSRect message, commit, push;
 } GpGeometry;
 
 @interface AxyneGitPanelView () <NSTextViewDelegate>
@@ -290,6 +296,8 @@ typedef struct GpGeometry {
     CGFloat _changesScroll;
     char *_selectedPath;
     BOOL _stageBusy;
+    NSScrollView *_messageScroll;
+    NSTextView *_messageView;
 }
 @end
 
@@ -311,6 +319,33 @@ typedef struct GpGeometry {
         [self setAccessibilityElement:YES];
         [self setAccessibilityRole:NSAccessibilityGroupRole];
         [self setAccessibilityLabel:@"Git 패널"];
+        _messageView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 100, kGpMessage)];
+        [_messageView setMinSize:NSMakeSize(0, kGpMessage)];
+        [_messageView setMaxSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+        [_messageView setVerticallyResizable:YES];
+        [_messageView setHorizontallyResizable:NO];
+        [_messageView setAutoresizingMask:NSViewWidthSizable];
+        [[_messageView textContainer] setContainerSize:NSMakeSize(100, CGFLOAT_MAX)];
+        [[_messageView textContainer] setWidthTracksTextView:YES];
+        [_messageView setRichText:NO];
+        [_messageView setAllowsUndo:YES];
+        [_messageView setDrawsBackground:NO];
+        [_messageView setAutomaticQuoteSubstitutionEnabled:NO];
+        [_messageView setAutomaticDashSubstitutionEnabled:NO];
+        [_messageView setAutomaticTextReplacementEnabled:NO];
+        [_messageView setAutomaticSpellingCorrectionEnabled:NO];
+        [_messageView setTextContainerInset:NSMakeSize(3, 4)];
+        [_messageView setFont:[NSFont systemFontOfSize:12]];
+        [_messageView setDelegate:self];
+        [_messageView setAccessibilityLabel:@"커밋 메시지"];
+        _messageScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+        [_messageScroll setBorderType:NSNoBorder];
+        [_messageScroll setHasVerticalScroller:YES];
+        [_messageScroll setAutohidesScrollers:YES];
+        [_messageScroll setDrawsBackground:NO];
+        [_messageScroll setDocumentView:_messageView];
+        [_messageScroll setHidden:YES];
+        [self addSubview:_messageScroll];
     }
     return self;
 }
@@ -322,6 +357,10 @@ typedef struct GpGeometry {
         gp_life_release(_life);
         _life = NULL;
     }
+    [_messageView setDelegate:nil];
+    [_messageScroll removeFromSuperview];
+    [_messageView release];
+    [_messageScroll release];
     axyne_git_changes_free(&_changes);
     free(_selectedPath);
     [_notice release];
@@ -355,6 +394,13 @@ typedef struct GpGeometry {
     if (_hasTheme && memcmp(&_theme, theme, sizeof(_theme)) == 0) return;
     _theme = *theme;
     _hasTheme = YES;
+    {
+        NSColor *text = gp_color(_theme.text);
+        [_messageView setTextColor:text];
+        [_messageView setInsertionPointColor:text];
+        [_messageView setTypingAttributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12],
+                                            NSForegroundColorAttributeName: text}];
+    }
     [self setNeedsDisplay:YES];
 }
 
@@ -367,7 +413,9 @@ typedef struct GpGeometry {
     CGFloat width = NSWidth(bounds), height = NSHeight(bounds);
     CGFloat fixed = kGpHeader;
     CGFloat available, wanted, limit, listHeight;
+    CGFloat y;
     memset(&g, 0, sizeof(g));
+    fixed += kGpGap + kGpMessage + kGpGap + kGpButton + kGpGap;
     available = MAX(0, height - fixed);
     wanted = (CGFloat)_changes.count * kGpRow;
     /* The change list takes what it needs up to half of the free height, but
@@ -376,6 +424,16 @@ typedef struct GpGeometry {
     listHeight = MIN(MAX(wanted, 2 * kGpRow), MIN(limit, available));
     g.refresh = NSMakeRect(width - 30, 2, 24, 22);
     g.changes = NSMakeRect(0, kGpHeader, width, listHeight);
+    y = NSMaxY(g.changes);
+    {
+        CGFloat inner = MAX(0, width - 2 * kGpPad);
+        CGFloat commitWidth = MAX(0, inner - kGpGap - kGpPushWidth);
+        g.message = NSMakeRect(kGpPad, y + kGpGap, inner, kGpMessage);
+        y = NSMaxY(g.message) + kGpGap;
+        g.commit = NSMakeRect(kGpPad, y, commitWidth, kGpButton);
+        g.push = NSMakeRect(kGpPad + commitWidth + kGpGap, y, MIN(kGpPushWidth, inner), kGpButton);
+        y = NSMaxY(g.commit) + kGpGap;
+    }
     return g;
 }
 
@@ -390,6 +448,12 @@ typedef struct GpGeometry {
 - (void)layoutParts
 {
     [self clampScrolls];
+    {
+        GpGeometry g = [self geometry];
+        BOOL show = _loaded && !_noWorkspace && _notice == nil;
+        [_messageScroll setFrame:NSInsetRect(g.message, 1, 1)];
+        [_messageScroll setHidden:!show];
+    }
 }
 
 /* ---- loading ------------------------------------------------------------------ */
@@ -529,6 +593,12 @@ typedef struct GpGeometry {
     gp_set_string(&_selectedPath, NULL);
 }
 
+- (void)operationFinishedWithSuccessfulCommit:(BOOL)commitSucceeded
+{
+    if (commitSucceeded) [_messageView setString:@""];
+    [self setNeedsDisplay:YES];
+    if (![self isHidden]) [self refresh];
+}
 
 /* ---- actions --------------------------------------------------------------------- */
 
@@ -594,6 +664,18 @@ typedef struct GpGeometry {
 
 
 
+- (BOOL)canCommit
+{
+    NSString *trimmed = [[_messageView string] stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return _hasStaged != 0 && [trimmed length] > 0 && ![_delegate gitPanelBusy:self];
+}
+
+- (void)textDidChange:(NSNotification *)notification
+{
+    (void)notification;
+    [self setNeedsDisplay:YES];
+}
 
 /* ---- mouse ------------------------------------------------------------------------- */
 
@@ -614,6 +696,14 @@ typedef struct GpGeometry {
         if (point.x < 28) { [self toggleStageForChange:&_changes.items[row]]; return; }
         gp_set_string(&_selectedPath, _changes.items[row].path);
         [self setNeedsDisplay:YES];
+        return;
+    }
+    if (NSPointInRect(point, g.commit)) {
+        if ([self canCommit]) [_delegate gitPanel:self commitMessage:[_messageView string]];
+        return;
+    }
+    if (NSPointInRect(point, g.push)) {
+        if (![_delegate gitPanelBusy:self]) [_delegate gitPanelPush:self];
         return;
     }
 }
@@ -667,6 +757,7 @@ typedef struct GpGeometry {
                  NSMakeRect(12, 0, MAX(0, NSMinX(g.refresh) - 12), kGpHeader),
                  small, sectionColor, _leftStyle);
     [self drawChangesInRect:g.changes];
+    [self drawMessageAreaWithGeometry:&g];
 }
 
 - (void)drawChangesInRect:(NSRect)rect
@@ -758,6 +849,50 @@ typedef struct GpGeometry {
 }
 
 
+/* Message box border, placeholder and the two buttons. The text view itself
+ * is a subview drawn over the box. */
+- (void)drawMessageAreaWithGeometry:(const GpGeometry *)g
+{
+    NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(g->message, 0.5, 0.5)
+                                                         xRadius:4 yRadius:4];
+    [gp_color(_theme.background) setFill];
+    [box fill];
+    [gp_color(_theme.reference ? 0x3a3d44 : _theme.border) setStroke];
+    [box setLineWidth:1];
+    [box stroke];
+    if ([[_messageView string] length] == 0)
+        gp_draw_text(@"메시지 (스테이지된 변경 사항을 커밋)",
+                     NSMakeRect(NSMinX(g->message) + 8, NSMinY(g->message) + 4,
+                                NSWidth(g->message) - 16, 16),
+                     [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
+    [self drawButton:g->commit title:@"커밋" enabled:[self canCommit] primary:YES];
+    [self drawButton:g->push title:@"푸시" enabled:![_delegate gitPanelBusy:self] primary:NO];
+}
+
+- (void)drawButton:(NSRect)rect title:(NSString *)title enabled:(BOOL)enabled
+           primary:(BOOL)primary
+{
+    NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(rect, 0.5, 0.5)
+                                                           xRadius:4 yRadius:4];
+    NSColor *fill, *label;
+    if (primary) {
+        fill = gp_color(enabled ? _theme.accent : _theme.border);
+        label = gp_color(enabled ? _theme.background : _theme.muted);
+    } else {
+        fill = gp_color(_theme.toolbar);
+        label = gp_color(enabled ? _theme.text : _theme.muted);
+    }
+    [fill setFill];
+    [shape fill];
+    if (!primary) {
+        [gp_color(_theme.reference ? 0x3a3d44 : _theme.border) setStroke];
+        [shape setLineWidth:1];
+        [shape stroke];
+    }
+    gp_draw_text(title, rect, primary ? [NSFont boldSystemFontOfSize:12]
+                                      : [NSFont systemFontOfSize:12],
+                 label, _centerStyle);
+}
 
 
 @end
