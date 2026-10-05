@@ -1001,23 +1001,21 @@ static void axyne_load_workspace_preferences(AxyneWindowState *state,
 static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
                                   AxyneProcessStream stream)
 {
-    int old_length;
-    char *old_text;
+    int old_length, copied;
     char *combined;
     size_t prefix_length = stream == AXYNE_PROCESS_STDERR ? 9 : 0;
     size_t keep;
     if (output == NULL || bytes == NULL || length == 0) return;
     old_length = GetWindowTextLengthA(output);
     if (old_length < 0) old_length = 0;
-    old_text = (char *)malloc((size_t)old_length + 1);
-    if (old_text == NULL) return;
-    GetWindowTextA(output, old_text, old_length + 1);
-    if (length > SIZE_MAX - (size_t)old_length - prefix_length - 1) {
-        free(old_text); return;
-    }
+    if (length > SIZE_MAX - (size_t)old_length - prefix_length - 1) return;
+    /* One buffer: the existing text is read straight into the front of the
+     * combined text instead of through a second copy of up to 1 MiB. */
     combined = (char *)malloc((size_t)old_length + prefix_length + length + 1);
-    if (combined == NULL) { free(old_text); return; }
-    memcpy(combined, old_text, (size_t)old_length);
+    if (combined == NULL) return;
+    copied = GetWindowTextA(output, combined, old_length + 1);
+    if (copied < 0 || copied > old_length) copied = 0;
+    old_length = copied;
     if (prefix_length != 0) memcpy(combined + old_length, "[stderr] ", prefix_length);
     memcpy(combined + old_length + prefix_length, bytes, length);
     combined[old_length + prefix_length + length] = '\0';
@@ -1029,7 +1027,6 @@ static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
     SetWindowTextA(output, combined);
     SendMessageA(output, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
     free(combined);
-    free(old_text);
 }
 
 static void axyne_refresh_action_controls(AxyneWindowState *state)
@@ -2484,17 +2481,18 @@ static int axyne_capture_editor_internal(AxyneWindowState *state, int force)
     if (doc->native_editor_document == NULL) return 1;
     LRESULT length = SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
     if (length < 0 || (uint64_t)length >= SIZE_MAX) return 0;
-    char *text = (char *)malloc((size_t)length + 1);
+    /* Borrow Scintilla's contiguous buffer instead of copying the whole
+     * document on every capture; it stays valid until the editor changes,
+     * and set_contents copies it only when the text differs. */
+    const char *text = (const char *)(uintptr_t)SendMessageA(
+        state->editor, SCI_GETCHARACTERPOINTER, 0, 0);
     if (text == NULL) return 0;
-    SendMessageA(state->editor, SCI_GETTEXT, (WPARAM)((size_t)length + 1),
-                 (LPARAM)text);
     AxyneError error;
     int changed = doc->length != (size_t)length ||
         memcmp(doc->contents, text, (size_t)length) != 0;
     int modified = SendMessageA(state->editor, SCI_GETMODIFY, 0, 0) != 0;
     AxyneStatus status = changed ? axyne_documents_set_contents(&state->documents,
         state->documents.active_index, text, (size_t)length, &error) : AXYNE_STATUS_OK;
-    free(text);
     if (status == AXYNE_STATUS_OK) {
         if (modified) (void)axyne_documents_mark_dirty(&state->documents,
             state->documents.active_index, NULL);
@@ -6310,6 +6308,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case AXYNE_WM_EXPLORER_EVENT: {
         AxyneExplorerMessage *event_message = (AxyneExplorerMessage *)l_param;
         if (event_message != NULL) {
+            MSG queued;
+            /* A build or `git status` can post thousands of events in a
+             * burst; each used to rebuild the whole explorer list. Drop the
+             * ones already queued and reload once for all of them. */
+            while (PeekMessageW(&queued, window, AXYNE_WM_EXPLORER_EVENT,
+                                AXYNE_WM_EXPLORER_EVENT, PM_REMOVE))
+                axyne_workspace_message_destroy(
+                    (AxyneExplorerMessage *)queued.lParam);
             axyne_workspace_refresh(window, state);
             axyne_workspace_message_destroy(event_message);
         }
