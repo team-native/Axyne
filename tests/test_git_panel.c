@@ -1035,7 +1035,12 @@ static int axyne_test_panel_details(const char *root)
     AXYNE_TEST_CONTAINS(diff.text, "+u\n");
     axyne_git_diff_free(&diff);
     AXYNE_TEST_CHECK(axyne_test_path(sub, sizeof(sub), repo, "sub"));
-    AXYNE_TEST_STATUS(axyne_git_file_diff(sub, "sub/u2.txt", NULL, 0, &diff, &error), AXYNE_STATUS_OK);
+    {
+        AxyneStatus status = axyne_git_file_diff(sub, "sub/u2.txt", NULL, 0, &diff, &error);
+        if (status != AXYNE_STATUS_OK)
+            fprintf(stderr, "Git subdirectory diff failed: %s\n", error.message);
+        AXYNE_TEST_STATUS(status, AXYNE_STATUS_OK);
+    }
     AXYNE_TEST_CONTAINS(diff.text, "+++ b/sub/u2.txt");
     AXYNE_TEST_CONTAINS(diff.text, "+u2\n");
     axyne_git_diff_free(&diff);
