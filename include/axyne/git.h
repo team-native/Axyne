@@ -96,6 +96,8 @@ typedef struct AxyneGitCapture {
     int truncated;
     int last_stream;
     int line_start;
+    /* Payload byte limit; 0 means AXYNE_GIT_OUTPUT_LIMIT. */
+    size_t limit;
 } AxyneGitCapture;
 
 void axyne_git_capture_init(AxyneGitCapture *capture, int label_stderr);

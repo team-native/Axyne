@@ -311,7 +311,6 @@ The workspace's commit history can be viewed from the same Git menu group. Core:
 Known gaps: the macOS menu code was reviewed by eye only (not compiled off a Mac); the Windows code was compile-checked with zig cc and not run; the real-repository tests run on POSIX only.
 
 Units: Git log core with tests; Git 기록 보기 menu actions (macOS, Windows); this record.
-
 ## Editor Tab auto-complete
 
 Typing in the code editor shows a completion list and Tab accepts the selected entry. Core: `axyne_completion_build` in `include/axyne/completion.h` (pure C), covered by `axyne-completion`. Both adapters only call it from the existing `SCN_CHARADDED` handler and issue `SCI_AUTOC*` messages.
@@ -368,3 +367,33 @@ Proposals that need your decision (not implemented, they change behavior or are 
 8. The output panels cap at 1 MiB; a smaller cap lowers the macOS `NSTextView` and Windows edit-control cost but cuts visible history.
 
 Not verified: no Windows or macOS binary was built or run for this record, so no real RSS before/after is available. The Windows file was compile-checked with zig cc; `ui_macos.m` was reviewed by eye and never compiled.
+## Git panel (VS Code style)
+
+A left-sidebar "Git" tab that switches with the explorer. This section records the shared core only (`include/axyne/git_panel.h`, `src/features/git/git_panel.c`, covered by `axyne-git-panel` against real temporary repositories); the Windows and macOS panels that draw it are a separate step and are not part of this record yet.
+
+| Item | Rule | Source | Status |
+|---|---|---|---|
+| Sidebar tab | A "Git" tab in the left sidebar that switches with the explorer | USER | CONFIRMED |
+| Top area | Changed-file list with a checkbox per file (checked = included in the commit = staged, unchecked = unstaged), a commit message input, and commit and push buttons | USER | CONFIRMED |
+| Lower area | Commit graph like VS Code: lanes, dots, subject, author, date, refs, all branches | USER | CONFIRMED |
+| Details | Clicking a commit shows its changed files and diff; clicking a file shows its diff | USER | CONFIRMED |
+| Simplicity | Keep it simple and clear | USER | CONFIRMED |
+| Change list source | `git status --porcelain=v1 -z -uall`: every untracked file is listed individually, ignored files are not, names with spaces, Korean or newlines are exact. Paths are repository-root relative with `/` | ASSUMED | ASSUMED |
+| Checkbox meaning | Checked only when fully staged (index changed, working tree equal to index). Untracked, conflicted and partially staged files are unchecked; partially staged ("MM", "AM", "MD") may be drawn indeterminate. Checking stages the whole file, unchecking unstages the whole file; there is no per-hunk staging | ASSUMED | ASSUMED |
+| Display kind | Letter per file: M modified, A added, D deleted, R renamed, C copied, U conflict, ? untracked. A rename shows its old name; unstaging a rename passes both paths | ASSUMED | ASSUMED |
+| Stage / unstage | `git add -A -- <paths>` (deletions included) and `git restore --staged -- <paths>`; a repository with no commit yet uses `git rm --cached -r --ignore-unmatch`. Paths are literal (`:(top,literal)`), never globbed, passed after `--` and never through a shell; an empty path list is rejected. No discard-changes action | ASSUMED | ASSUMED |
+| Commit button | Commits only what is staged (`axyne_git_commit` with stage_all 0); unstaged changes stay. Disabled when `axyne_git_has_staged` reports nothing staged or the message is blank. No trailers (same rule as the menu commit) | ASSUMED | ASSUMED |
+| Push button | Same `axyne_git_push` as the menu entry (no force, upstream set to `origin` when missing) | ASSUMED | ASSUMED |
+| Graph scope | `git log --all` in topological order, hash, parents, author name, `YYYY-MM-DD` date, decorations; the stash is not shown; UI default 200 commits, core clamp 1..1000, no paging | ASSUMED | ASSUMED |
+| Lane layout | Computed in C so both UIs only draw: per row the dot column, cell count and per cell UP/DOWN/JOIN/FORK/DOT flags plus a color index (lane id modulo 8; first parent keeps the lane, a new lane starts for each other parent or branch tip). Documented next to `AxyneGitGraphRow` | ASSUMED | ASSUMED |
+| Refs | Local branches, remote branches (`origin/HEAD` hidden), tags and a detached HEAD as chips; the checked-out branch is marked current | ASSUMED | ASSUMED |
+| Commit files and diff | `git show --name-status -M` for the file list; a merge commit is shown against its first parent; a root commit against the empty tree | ASSUMED | ASSUMED |
+| File diff | Unstaged: working tree against index (untracked files shown as all added); staged: index against HEAD. Rename detection on, external diff drivers and textconv off, names shown unquoted | ASSUMED | ASSUMED |
+| Diff size | Text capped at 1 MiB, cut at a line boundary and flagged `truncated`; binary files show Git's "Binary files differ" line | ASSUMED | ASSUMED |
+| Hash safety | A commit hash must be 4..64 hex digits before it reaches Git | ASSUMED | ASSUMED |
+| Non-interactive | `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `LC_MESSAGES=C`, `--no-pager`; read-only queries also `GIT_OPTIONAL_LOCKS=0` so they never take the index lock | ASSUMED | ASSUMED |
+| Threading | All calls block; the UI runs them on a worker thread | IMPLEMENTATION | CONFIRMED |
+
+Known gaps: the real-repository tests run on POSIX only (the Windows and macOS builds were compile-checked with zig cc, not run); the Windows untracked-file diff relies on Git for Windows accepting `/dev/null` for `git diff --no-index`; the panels themselves are not built yet.
+
+Units: change list with stage/unstage core; commit graph with lane layout; commit files and diff core; this record.
