@@ -3605,6 +3605,29 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [self openWorkspace:nil];
 }
 
+/* A Git operation started elsewhere (menu entries, commit, push) is running. */
+- (BOOL)gitPanelBusy:(AxyneGitPanelView *)panel
+{
+    (void)panel;
+    return _gitProcess != NULL || _gitBatchBusy;
+}
+
+/* Diffs, commit details and stage errors go to the output panel, which is
+ * shown if it was hidden. */
+- (void)gitPanel:(AxyneGitPanelView *)panel showText:(NSString *)text
+{
+    const char *bytes;
+    (void)panel;
+    if (text == nil) return;
+    _panelHidden = NO;
+    [self selectOutputPanel];
+    [_terminalOutput setString:@""];
+    bytes = [text UTF8String];
+    if (bytes != NULL && bytes[0] != '\0')
+        [self terminalAppend:bytes length:strlen(bytes) stream:AXYNE_PROCESS_STDOUT];
+    [_terminalOutput scrollRangeToVisible:NSMakeRange(0, 0)];
+}
+
 - (void)togglePanel:(id)sender
 {
     (void)sender;

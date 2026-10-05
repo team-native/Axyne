@@ -27,6 +27,10 @@ typedef struct AxyneGitPanelTheme {
 /* Workspace folder (UTF-8) or NULL when none is open. Valid only for the
  * duration of the call; the panel copies it. */
 - (const char *)gitPanelWorkspace:(AxyneGitPanelView *)panel;
+/* A commit, push, pull or other Git menu operation is running. */
+- (BOOL)gitPanelBusy:(AxyneGitPanelView *)panel;
+/* Shows text in the output panel (diffs, commit details, errors). */
+- (void)gitPanel:(AxyneGitPanelView *)panel showText:(NSString *)text;
 /* The "folder open" empty state was clicked. */
 - (void)gitPanelOpenWorkspace:(AxyneGitPanelView *)panel;
 @end
