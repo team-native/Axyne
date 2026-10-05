@@ -92,7 +92,7 @@ AxyneStatus axyne_git_has_staged(const char *utf8_workspace, int *has_staged,
  * (lane id modulo this). A UI maps the index to its own palette. */
 #define AXYNE_GIT_GRAPH_PALETTE 8
 #define AXYNE_GIT_GRAPH_DEFAULT_COUNT 200
-#define AXYNE_GIT_GRAPH_MAX_COUNT 1000
+#define AXYNE_GIT_GRAPH_MAX_COUNT 5000
 
 typedef enum AxyneGitRefKind {
     AXYNE_GIT_REF_LOCAL_BRANCH = 0,
@@ -157,7 +157,8 @@ typedef struct AxyneGitGraph {
 
 /* All branches, remotes and tags (`git log --all`, the stash is excluded),
  * newest first in topological order, at most max_count commits (clamped to
- * 1..AXYNE_GIT_GRAPH_MAX_COUNT; UIs use AXYNE_GIT_GRAPH_DEFAULT_COUNT). The
+ * 1..AXYNE_GIT_GRAPH_MAX_COUNT = 5000; UIs start at
+ * AXYNE_GIT_GRAPH_DEFAULT_COUNT and raise it in steps to load more). The
  * lane layout is computed here. A repository without commits yields zero rows
  * and AXYNE_STATUS_OK. Parents beyond the requested window simply leave their
  * lanes running off the bottom. */

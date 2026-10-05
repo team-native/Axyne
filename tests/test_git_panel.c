@@ -586,9 +586,19 @@ static int axyne_test_panel_graph(const char *root)
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
         "cd '%s' && git init -q -b main . && "
         "awk 'BEGIN{for(i=1;i<=1100;i++){printf \"commit refs/heads/main\\ncommitter T <t@example.invalid> %%d +0000\\ndata 2\\nx\\n\\n\", 1700000000+i}}' | git fast-import --quiet", bulk), 0);
+    /* A 1100-commit history is returned whole (above the old 1000 cap) and a
+     * request beyond the cap is clamped to AXYNE_GIT_GRAPH_MAX_COUNT. */
+    AXYNE_TEST_EQ_INT(AXYNE_GIT_GRAPH_MAX_COUNT, 5000);
     AXYNE_TEST_STATUS(axyne_git_graph(bulk, 1000000, &graph, &error), AXYNE_STATUS_OK);
-    AXYNE_TEST_EQ_INT(graph.count, AXYNE_GIT_GRAPH_MAX_COUNT);
+    AXYNE_TEST_EQ_INT(graph.count, 1100);
+    AXYNE_TEST_CHECK(graph.count <= AXYNE_GIT_GRAPH_MAX_COUNT);
     AXYNE_TEST_EQ_INT(graph.max_lanes, 1);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph(bulk, 1100, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 1100);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph(bulk, 1050, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 1050);
     axyne_git_graph_free(&graph);
     AXYNE_TEST_STATUS(axyne_git_graph(bulk, 200, &graph, &error), AXYNE_STATUS_OK);
     AXYNE_TEST_EQ_INT(graph.count, 200);
