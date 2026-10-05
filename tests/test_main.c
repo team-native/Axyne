@@ -50,7 +50,7 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "exit-with") == 0)
         return atoi(argv[2]);
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|git-actions|preview-tabs|palette-problems|palette-controller|problems-feed|outline|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu|completion|memory-limits> <fixture-root> [source-root]\n", argv[0]);
+        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|git-actions|git-log|preview-tabs|palette-problems|palette-controller|problems-feed|outline|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu|completion|memory-limits> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
     }
     written = snprintf(root, sizeof(root), "%s-%lu", argv[2],
