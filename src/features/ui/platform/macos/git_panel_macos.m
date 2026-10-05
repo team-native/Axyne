@@ -41,6 +41,12 @@ static void gp_life_release(AxyneGitPanelLife *life)
 
 /* ---- small C helpers ------------------------------------------------------- */
 
+static void gp_set_string(char **slot, const char *value)
+{
+    char *copy = value != NULL ? strdup(value) : NULL;
+    free(*slot);
+    *slot = copy;
+}
 
 static CGFloat gp_clamp(CGFloat value, CGFloat low, CGFloat high)
 {
@@ -58,6 +64,43 @@ static void gp_first_line(const char *text, char *out, size_t capacity)
 }
 
 
+/* Copy of `in` with every byte that is not part of valid UTF-8 (and every NUL)
+ * replaced by '?', so one bad byte in a diff cannot blank the whole output. */
+static char *gp_utf8_clean(const char *in, size_t length)
+{
+    char *out = (char *)malloc(length + 1);
+    size_t i = 0, o = 0;
+    if (out == NULL) return NULL;
+    while (i < length) {
+        unsigned char c = (unsigned char)in[i];
+        size_t need = 0, k;
+        int valid = 0;
+        if (c < 0x80) { out[o++] = c != 0 ? (char)c : '?'; ++i; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c >= 0xE0 && c <= 0xEF) need = 2;
+        else if (c >= 0xF0 && c <= 0xF4) need = 3;
+        if (need != 0 && i + need < length) {
+            unsigned char second = (unsigned char)in[i + 1];
+            valid = 1;
+            for (k = 1; k <= need; ++k)
+                if (((unsigned char)in[i + k] & 0xC0) != 0x80) valid = 0;
+            if (c == 0xE0 && second < 0xA0) valid = 0;
+            if (c == 0xED && second > 0x9F) valid = 0;
+            if (c == 0xF0 && second < 0x90) valid = 0;
+            if (c == 0xF4 && second > 0x8F) valid = 0;
+        }
+        if (valid) {
+            memcpy(out + o, in + i, need + 1);
+            o += need + 1;
+            i += need + 1;
+        } else {
+            out[o++] = '?';
+            ++i;
+        }
+    }
+    out[o] = '\0';
+    return out;
+}
 
 /* ---- background work ------------------------------------------------------- */
 
@@ -91,6 +134,72 @@ static void gp_load_run(AxyneGitPanelLoad *load)
     }
     if (axyne_git_has_staged(load->workspace, &load->hasStaged, &error) != AXYNE_STATUS_OK)
         load->hasStaged = 0;
+}
+
+/* One short Git action started by a click. */
+typedef enum AxyneGitPanelTaskKind {
+    GP_TASK_STAGE = 0,
+    GP_TASK_UNSTAGE,
+    GP_TASK_FILE_DIFF,
+    GP_TASK_COMMIT_DIFF
+} AxyneGitPanelTaskKind;
+
+typedef struct AxyneGitPanelTask {
+    int kind;
+    unsigned long sequence;   /* output requests: newest one wins */
+    char *workspace;
+    char **paths;             /* stage / unstage */
+    size_t pathCount;
+    char *text;               /* result for the output panel (valid UTF-8) or NULL */
+} AxyneGitPanelTask;
+
+static AxyneGitPanelTask *gp_task_create(int kind, const char *workspace)
+{
+    AxyneGitPanelTask *task = (AxyneGitPanelTask *)calloc(1, sizeof(*task));
+    if (task == NULL) return NULL;
+    task->kind = kind;
+    task->workspace = strdup(workspace);
+    if (task->workspace == NULL) { free(task); return NULL; }
+    return task;
+}
+
+static void gp_task_free(AxyneGitPanelTask *task)
+{
+    size_t i;
+    if (task == NULL) return;
+    for (i = 0; i < task->pathCount; ++i) free(task->paths[i]);
+    free(task->paths);
+    free(task->text);
+    free(task->workspace);
+    free(task);
+}
+
+/* "<title>: <Git message>\n" for a failed action. */
+static char *gp_error_text(const char *title, const AxyneError *error)
+{
+    char line[768];
+    (void)snprintf(line, sizeof(line), "%s: %s\n", title,
+                   error->message[0] != '\0' ? error->message : "Git 실행 실패");
+    return gp_utf8_clean(line, strlen(line));
+}
+
+
+static void gp_task_run(AxyneGitPanelTask *task)
+{
+    AxyneError error;
+    AxyneStatus status;
+    memset(&error, 0, sizeof(error));
+    if (task->kind == GP_TASK_STAGE || task->kind == GP_TASK_UNSTAGE) {
+        status = task->kind == GP_TASK_STAGE
+            ? axyne_git_stage_paths(task->workspace, (const char *const *)task->paths,
+                                    task->pathCount, &error)
+            : axyne_git_unstage_paths(task->workspace, (const char *const *)task->paths,
+                                      task->pathCount, &error);
+        if (status != AXYNE_STATUS_OK)
+            task->text = gp_error_text(task->kind == GP_TASK_STAGE
+                ? "스테이지 실패" : "스테이지 해제 실패", &error);
+        return;
+    }
 }
 
 
@@ -127,6 +236,34 @@ static void gp_draw_text(NSString *text, NSRect rect, NSFont *font, NSColor *col
         withAttributes:attributes];
 }
 
+/* Chip shared with the explorer badges: rounded rect in `rgb` at low alpha (or
+ * solid) with a bold label centred in it. */
+static void gp_draw_chip(NSString *label, NSRect chip, NSColor *fill, NSColor *textColor,
+                         NSFont *font)
+{
+    NSDictionary *attributes = @{NSFontAttributeName: font,
+                                 NSForegroundColorAttributeName: textColor};
+    NSSize size = [label sizeWithAttributes:attributes];
+    [fill setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:chip xRadius:AXYNE_UI_BADGE_RADIUS
+                                     yRadius:AXYNE_UI_BADGE_RADIUS] fill];
+    [label drawAtPoint:NSMakePoint(NSMinX(chip) + floor((NSWidth(chip) - size.width) / 2),
+                                   NSMinY(chip) + floor((NSHeight(chip) - size.height) / 2))
+        withAttributes:attributes];
+}
+
+/* Badge colour of the Git kind letter (see AxyneGitChange.kind). */
+static uint32_t gp_kind_color(char kind)
+{
+    switch (kind) {
+    case 'A': return 0xa3c98a;
+    case 'D': return 0xe0707a;
+    case 'R': case 'C': return 0x7db5e3;
+    case 'U': return 0xe5a445;
+    case '?': return 0x8b919b;
+    default: return 0xd9b36c; /* M */
+    }
+}
 
 
 /* Rectangles of the panel's parts, from the bounds and the change count. */
@@ -151,6 +288,8 @@ typedef struct GpGeometry {
     NSMutableParagraphStyle *_leftStyle;
     NSMutableParagraphStyle *_centerStyle;
     CGFloat _changesScroll;
+    char *_selectedPath;
+    BOOL _stageBusy;
 }
 @end
 
@@ -184,6 +323,7 @@ typedef struct GpGeometry {
         _life = NULL;
     }
     axyne_git_changes_free(&_changes);
+    free(_selectedPath);
     [_notice release];
     [_leftStyle release];
     [_centerStyle release];
@@ -367,6 +507,7 @@ typedef struct GpGeometry {
     ++_generation;
     [self clearResults];
     [self resetScrolls];
+    gp_set_string(&_selectedPath, NULL);
     [_notice release];
     _notice = nil;
     _loaded = NO;
@@ -385,10 +526,71 @@ typedef struct GpGeometry {
     _notice = nil;
     _loaded = NO;
     _noWorkspace = NO;
+    gp_set_string(&_selectedPath, NULL);
 }
 
 
 /* ---- actions --------------------------------------------------------------------- */
+
+/* Runs `task` on a background queue and hands it back to -finishTask:. Takes
+ * ownership of `task`. */
+- (void)startTask:(AxyneGitPanelTask *)task
+{
+    AxyneGitPanelLife *life = _life;
+    if (life == NULL) { gp_task_free(task); return; }
+    ++life->references;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        gp_task_run(task);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AxyneGitPanelView *panel = life->panel;
+            if (panel != nil) [panel finishTask:task];
+            else gp_task_free(task);
+            gp_life_release(life);
+        });
+    });
+}
+
+- (void)deliverText:(const char *)text
+{
+    NSString *string = text != NULL ? [NSString stringWithUTF8String:text] : nil;
+    if (string != nil) [_delegate gitPanel:self showText:string];
+}
+
+/* Main thread; takes ownership of `task`. */
+- (void)finishTask:(AxyneGitPanelTask *)task
+{
+    if (task->kind == GP_TASK_STAGE || task->kind == GP_TASK_UNSTAGE) {
+        _stageBusy = NO;
+        [self deliverText:task->text];
+        [self refresh];
+    }
+    gp_task_free(task);
+}
+
+- (void)toggleStageForChange:(const AxyneGitChange *)change
+{
+    BOOL unstage = change->staged != 0;
+    const char *workspace;
+    AxyneGitPanelTask *task;
+    if (_stageBusy || [_delegate gitPanelBusy:self]) return;
+    workspace = [_delegate gitPanelWorkspace:self];
+    if (workspace == NULL) return;
+    task = gp_task_create(unstage ? GP_TASK_UNSTAGE : GP_TASK_STAGE, workspace);
+    if (task == NULL) return;
+    task->paths = (char **)calloc(2, sizeof(char *));
+    if (task->paths != NULL) {
+        task->paths[0] = strdup(change->path);
+        if (task->paths[0] != NULL) task->pathCount = 1;
+        /* A staged rename is unstaged completely with both of its paths. */
+        if (task->pathCount == 1 && unstage && change->orig_path != NULL) {
+            task->paths[1] = strdup(change->orig_path);
+            if (task->paths[1] != NULL) task->pathCount = 2;
+        }
+    }
+    if (task->pathCount == 0) { gp_task_free(task); return; }
+    _stageBusy = YES;
+    [self startTask:task];
+}
 
 
 
@@ -399,12 +601,21 @@ typedef struct GpGeometry {
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     GpGeometry g;
+    NSInteger row;
     [[self window] makeFirstResponder:self];
     if (_noWorkspace) { [_delegate gitPanelOpenWorkspace:self]; return; }
     if (!_loaded) return;
     g = [self geometry];
     if (NSPointInRect(point, g.refresh)) { [self refresh]; return; }
     if (_notice != nil) return;
+    if (NSPointInRect(point, g.changes)) {
+        row = (NSInteger)floor((point.y - NSMinY(g.changes) + _changesScroll) / kGpRow);
+        if (row < 0 || (size_t)row >= _changes.count) return;
+        if (point.x < 28) { [self toggleStageForChange:&_changes.items[row]]; return; }
+        gp_set_string(&_selectedPath, _changes.items[row].path);
+        [self setNeedsDisplay:YES];
+        return;
+    }
 }
 
 - (void)scrollWheel:(NSEvent *)event
@@ -455,6 +666,95 @@ typedef struct GpGeometry {
     gp_draw_text([NSString stringWithFormat:@"변경 사항  %zu", _changes.count],
                  NSMakeRect(12, 0, MAX(0, NSMinX(g.refresh) - 12), kGpHeader),
                  small, sectionColor, _leftStyle);
+    [self drawChangesInRect:g.changes];
+}
+
+- (void)drawChangesInRect:(NSRect)rect
+{
+    size_t first, i;
+    CGFloat y;
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(rect);
+    if (_changes.count == 0) {
+        gp_draw_text(@"변경 사항 없음", NSMakeRect(16, NSMinY(rect), NSWidth(rect) - 24, kGpRow),
+                     [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
+    } else {
+        first = (size_t)floor(_changesScroll / kGpRow);
+        for (i = first; i < _changes.count; ++i) {
+            y = NSMinY(rect) + (CGFloat)i * kGpRow - _changesScroll;
+            if (y >= NSMaxY(rect)) break;
+            [self drawChange:&_changes.items[i]
+                      inRect:NSMakeRect(0, y, NSWidth(rect), kGpRow)];
+        }
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+/* Checkbox (staged / indeterminate / empty), kind chip, file name and the dim
+ * directory of one changed file. */
+- (void)drawChange:(const AxyneGitChange *)change inRect:(NSRect)row
+{
+    BOOL selected = _selectedPath != NULL && strcmp(_selectedPath, change->path) == 0;
+    NSRect box = NSMakeRect(NSMinX(row) + 10, NSMinY(row) + floor((kGpRow - 12) / 2), 12, 12);
+    NSBezierPath *outline = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(box, 0.5, 0.5)
+                                                             xRadius:3 yRadius:3];
+    NSRect chip = NSMakeRect(NSMinX(row) + 28, NSMinY(row) + floor((kGpRow - 14) / 2), 14, 14);
+    NSString *kind = [NSString stringWithFormat:@"%c", change->kind];
+    uint32_t kindRgb = gp_kind_color(change->kind);
+    const char *slash = strrchr(change->path, '/');
+    NSString *name = gp_string(slash != NULL ? slash + 1 : change->path);
+    NSFont *nameFont = [NSFont systemFontOfSize:12];
+    NSFont *directoryFont = [NSFont systemFontOfSize:11];
+    CGFloat nameX = NSMinX(row) + 48;
+    CGFloat available = MAX(0, NSWidth(row) - nameX - 8);
+    CGFloat nameWidth;
+    if (selected) {
+        [gp_color(_theme.reference ? 0x2f343c : _theme.border) setFill];
+        NSRectFill(row);
+    }
+    if (change->staged || change->partially) {
+        [gp_color(_theme.accent) setFill];
+        [outline fill];
+        [gp_color(_theme.background) setStroke];
+        {
+            NSBezierPath *mark = [NSBezierPath bezierPath];
+            if (change->staged) {
+                [mark moveToPoint:NSMakePoint(NSMinX(box) + 3, NSMinY(box) + 6.5)];
+                [mark lineToPoint:NSMakePoint(NSMinX(box) + 5.2, NSMinY(box) + 8.7)];
+                [mark lineToPoint:NSMakePoint(NSMinX(box) + 9, NSMinY(box) + 3.8)];
+            } else {
+                [mark moveToPoint:NSMakePoint(NSMinX(box) + 3, NSMidY(box))];
+                [mark lineToPoint:NSMakePoint(NSMaxX(box) - 3, NSMidY(box))];
+            }
+            [mark setLineWidth:1.6];
+            [mark setLineCapStyle:NSLineCapStyleRound];
+            [mark setLineJoinStyle:NSLineJoinStyleRound];
+            [mark stroke];
+        }
+    } else {
+        [[gp_color(_theme.muted) colorWithAlphaComponent:0.8] setStroke];
+        [outline setLineWidth:1];
+        [outline stroke];
+    }
+    gp_draw_chip(kind, chip, [gp_color(kindRgb) colorWithAlphaComponent:
+        AXYNE_UI_BADGE_ALPHA_PERCENT / 100.0], gp_color(kindRgb),
+        [NSFont monospacedSystemFontOfSize:AXYNE_UI_BADGE_FONT_PT weight:NSFontWeightBold]);
+    nameWidth = ceil([name sizeWithAttributes:@{NSFontAttributeName: nameFont}].width);
+    gp_draw_text(name, NSMakeRect(nameX, NSMinY(row), MIN(available, nameWidth), kGpRow),
+                 nameFont, selected ? gp_color(_theme.text)
+                     : gp_color(_theme.light ? 0x24272d : 0xc4c8ce), _leftStyle);
+    if (slash != NULL && available - nameWidth > 24) {
+        char *directoryText = (char *)malloc((size_t)(slash - change->path) + 1);
+        if (directoryText != NULL) {
+            memcpy(directoryText, change->path, (size_t)(slash - change->path));
+            directoryText[slash - change->path] = '\0';
+            gp_draw_text(gp_string(directoryText),
+                         NSMakeRect(nameX + nameWidth + 6, NSMinY(row),
+                                    available - nameWidth - 6, kGpRow),
+                         directoryFont, gp_color(_theme.muted), _leftStyle);
+            free(directoryText);
+        }
+    }
 }
 
 
