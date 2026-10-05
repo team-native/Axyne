@@ -142,6 +142,7 @@ typedef struct AxyneGitPanelUi {
     int changes_scroll;  /* first visible change row */
     int graph_scroll;    /* first visible graph row */
     int wheel_remainder;
+    unsigned diff_serial; /* newest diff request; older results are dropped */
     char *selected_path; /* selected change (repository path) or NULL */
     char *selected_hash; /* selected commit or NULL (never both selected) */
     HWND message_edit;   /* multi-line commit message */
@@ -5605,7 +5606,8 @@ static void axyne_git_panel_toggle_view(HWND window, AxyneWindowState *state)
 
 /* ---- Git panel: worker jobs ---------------------------------------------- */
 
-enum { AXYNE_GITJOB_REFRESH = 1, AXYNE_GITJOB_STAGE, AXYNE_GITJOB_UNSTAGE };
+enum { AXYNE_GITJOB_REFRESH = 1, AXYNE_GITJOB_STAGE, AXYNE_GITJOB_UNSTAGE,
+       AXYNE_GITJOB_FILE_DIFF, AXYNE_GITJOB_COMMIT_DIFF };
 
 /* One unit of Git work. The UI thread fills it, a worker thread runs the
  * blocking core calls and posts it back as AXYNE_WM_GIT_PANEL_DONE; whoever
@@ -5625,6 +5627,15 @@ typedef struct AxyneGitPanelJob {
     int has_staged;
     AxyneGitGraph graph; /* refresh jobs only */
     int have_graph;
+    /* Diff jobs: they never touch the snapshot and run beside other jobs;
+     * only the newest request (serial) is shown. */
+    unsigned serial;
+    char *path;          /* file diff */
+    char *orig_path;     /* staged rename source or NULL */
+    int staged;
+    char *hash;          /* commit diff */
+    char *header;        /* commit diff: the heading shown above the files */
+    char *report;        /* text for the Output panel */
 } AxyneGitPanelJob;
 
 static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
@@ -5636,6 +5647,11 @@ static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
     free(job->workspace);
     free(job->op_error);
     free(job->error);
+    free(job->path);
+    free(job->orig_path);
+    free(job->hash);
+    free(job->header);
+    free(job->report);
     axyne_git_changes_free(&job->changes);
     axyne_git_graph_free(&job->graph);
     free(job);
@@ -5673,20 +5689,138 @@ static void axyne_git_panel_job_snapshot(AxyneGitPanelJob *job)
     }
 }
 
+/* Growing text buffer for the Output panel report. */
+typedef struct AxyneGitText {
+    char *data;
+    size_t length;
+    size_t capacity;
+    int failed;
+} AxyneGitText;
+
+static void axyne_git_text_append(AxyneGitText *text, const char *bytes, size_t length)
+{
+    if (text->failed || length == 0) return;
+    if (text->length + length + 1 > text->capacity) {
+        size_t capacity = text->capacity != 0 ? text->capacity : 4096;
+        char *grown;
+        while (text->length + length + 1 > capacity) capacity *= 2;
+        grown = (char *)realloc(text->data, capacity);
+        if (grown == NULL) {
+            text->failed = 1;
+            return;
+        }
+        text->data = grown;
+        text->capacity = capacity;
+    }
+    memcpy(text->data + text->length, bytes, length);
+    text->length += length;
+    text->data[text->length] = '\0';
+}
+
+static void axyne_git_text_puts(AxyneGitText *text, const char *bytes)
+{
+    axyne_git_text_append(text, bytes, strlen(bytes));
+}
+
+static void axyne_git_text_diff(AxyneGitText *text, const AxyneGitDiff *diff)
+{
+    if (diff->length == 0 || diff->text == NULL)
+        axyne_git_text_puts(text, "(변경 내용 없음)\n");
+    else
+        axyne_git_text_append(text, diff->text, diff->length);
+    if (diff->truncated)
+        axyne_git_text_puts(text, "\n[diff가 1 MiB에서 잘렸습니다]\n");
+}
+
+/* Builds the Output panel text of a file or commit diff. Failures become
+ * part of the text so the user sees Git's own message. */
+static void axyne_git_panel_job_diff(AxyneGitPanelJob *job)
+{
+    AxyneGitText text;
+    AxyneGitDiff diff;
+    AxyneError error;
+    memset(&text, 0, sizeof(text));
+    memset(&diff, 0, sizeof(diff));
+    memset(&error, 0, sizeof(error));
+    if (job->kind == AXYNE_GITJOB_FILE_DIFF) {
+        axyne_git_text_puts(&text, "$ git diff ");
+        if (job->staged) axyne_git_text_puts(&text, "--cached ");
+        axyne_git_text_puts(&text, "-- ");
+        axyne_git_text_puts(&text, job->path);
+        axyne_git_text_puts(&text, "\n");
+        if (axyne_git_file_diff(job->workspace, job->path, job->orig_path,
+                                job->staged, &diff, &error) == AXYNE_STATUS_OK)
+            axyne_git_text_diff(&text, &diff);
+        else {
+            axyne_git_text_puts(&text, error.message);
+            axyne_git_text_puts(&text, "\n");
+        }
+    } else {
+        AxyneGitChanges files;
+        memset(&files, 0, sizeof(files));
+        axyne_git_text_puts(&text, job->header != NULL ? job->header : "");
+        axyne_git_text_puts(&text, "\n");
+        if (axyne_git_commit_files(job->workspace, job->hash, &files, &error) == AXYNE_STATUS_OK) {
+            char line[64];
+            size_t i;
+            (void)snprintf(line, sizeof(line), "변경된 파일 (%zu):\n", files.count);
+            axyne_git_text_puts(&text, line);
+            for (i = 0; i < files.count; ++i) {
+                const AxyneGitChange *file = &files.items[i];
+                line[0] = ' ';
+                line[1] = ' ';
+                line[2] = file->kind != '\0' ? file->kind : '?';
+                line[3] = ' ';
+                line[4] = ' ';
+                axyne_git_text_append(&text, line, 5);
+                if (file->orig_path != NULL) {
+                    axyne_git_text_puts(&text, file->orig_path);
+                    axyne_git_text_puts(&text, " -> ");
+                }
+                axyne_git_text_puts(&text, file->path);
+                axyne_git_text_puts(&text, "\n");
+            }
+        } else {
+            axyne_git_text_puts(&text, error.message);
+            axyne_git_text_puts(&text, "\n");
+        }
+        axyne_git_changes_free(&files);
+        axyne_git_text_puts(&text, "\n");
+        memset(&error, 0, sizeof(error));
+        if (axyne_git_commit_diff(job->workspace, job->hash, NULL, &diff, &error) ==
+            AXYNE_STATUS_OK)
+            axyne_git_text_diff(&text, &diff);
+        else {
+            axyne_git_text_puts(&text, error.message);
+            axyne_git_text_puts(&text, "\n");
+        }
+    }
+    axyne_git_diff_free(&diff);
+    if (text.failed) {
+        free(text.data);
+        text.data = NULL;
+    }
+    job->report = text.data != NULL ? text.data : _strdup("Unable to allocate Git output.\n");
+}
+
 static DWORD WINAPI axyne_git_panel_thread(LPVOID opaque)
 {
     AxyneGitPanelJob *job = (AxyneGitPanelJob *)opaque;
     AxyneError error;
     memset(&error, 0, sizeof(error));
-    if (job->kind == AXYNE_GITJOB_STAGE || job->kind == AXYNE_GITJOB_UNSTAGE) {
-        AxyneStatus status = job->kind == AXYNE_GITJOB_STAGE
-            ? axyne_git_stage_paths(job->workspace, (const char *const *)job->paths,
-                                    job->path_count, &error)
-            : axyne_git_unstage_paths(job->workspace, (const char *const *)job->paths,
-                                      job->path_count, &error);
-        if (status != AXYNE_STATUS_OK) job->op_error = axyne_git_panel_message_copy(&error);
+    if (job->kind == AXYNE_GITJOB_FILE_DIFF || job->kind == AXYNE_GITJOB_COMMIT_DIFF) {
+        axyne_git_panel_job_diff(job);
+    } else {
+        if (job->kind == AXYNE_GITJOB_STAGE || job->kind == AXYNE_GITJOB_UNSTAGE) {
+            AxyneStatus status = job->kind == AXYNE_GITJOB_STAGE
+                ? axyne_git_stage_paths(job->workspace, (const char *const *)job->paths,
+                                        job->path_count, &error)
+                : axyne_git_unstage_paths(job->workspace, (const char *const *)job->paths,
+                                          job->path_count, &error);
+            if (status != AXYNE_STATUS_OK) job->op_error = axyne_git_panel_message_copy(&error);
+        }
+        axyne_git_panel_job_snapshot(job);
     }
-    axyne_git_panel_job_snapshot(job);
     if (!PostMessageW(job->window, AXYNE_WM_GIT_PANEL_DONE, 0, (LPARAM)job))
         axyne_git_panel_job_free(job);
     return 0;
@@ -5833,6 +5967,15 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
 {
     AxyneGitPanelUi *git = &state->git_panel;
     int pending;
+    if (job->kind == AXYNE_GITJOB_FILE_DIFF || job->kind == AXYNE_GITJOB_COMMIT_DIFF) {
+        /* Only the newest request is shown, and never over the report of a
+         * running commit, push or pull. */
+        if (job->serial == git->diff_serial && job->generation == git->generation &&
+            job->report != NULL && !state->git_batch_busy && state->git_process == NULL)
+            axyne_git_panel_show_report(window, state, job->report);
+        axyne_git_panel_job_free(job);
+        return;
+    }
     git->job_busy = 0;
     if (job->generation == git->generation && state->explorer.root != NULL &&
         job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
@@ -5891,6 +6034,60 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
     axyne_git_panel_job_free(job);
     InvalidateRect(window, NULL, FALSE);
     if (pending) axyne_git_panel_refresh(window, state);
+}
+
+/* Clicking a changed file shows its diff (index against HEAD for a staged
+ * row, working tree against index otherwise) in the Output panel. */
+static void axyne_git_panel_show_file_diff(HWND window, AxyneWindowState *state,
+                                           size_t index)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    const AxyneGitChange *change;
+    AxyneGitPanelJob *job;
+    if (index >= git->changes.count) return;
+    change = &git->changes.items[index];
+    job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
+    if (job == NULL) return;
+    job->kind = AXYNE_GITJOB_FILE_DIFF;
+    job->staged = change->staged != 0;
+    job->path = _strdup(change->path);
+    if (job->staged && change->orig_path != NULL) job->orig_path = _strdup(change->orig_path);
+    if (job->path == NULL || (job->staged && change->orig_path != NULL && job->orig_path == NULL)) {
+        axyne_git_panel_job_free(job);
+        return;
+    }
+    job->serial = ++git->diff_serial;
+    (void)axyne_git_panel_start_job(window, state, job);
+}
+
+/* Clicking a commit shows its files and diff in the Output panel. */
+static void axyne_git_panel_show_commit(HWND window, AxyneWindowState *state,
+                                        size_t index)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    const AxyneGitGraphRow *row;
+    AxyneGitPanelJob *job;
+    size_t size;
+    if (index >= git->graph.count || git->graph.rows[index].hash == NULL) return;
+    row = &git->graph.rows[index];
+    job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
+    if (job == NULL) return;
+    job->kind = AXYNE_GITJOB_COMMIT_DIFF;
+    job->hash = _strdup(row->hash);
+    size = strlen(row->hash) + (row->author != NULL ? strlen(row->author) : 0) +
+           (row->date != NULL ? strlen(row->date) : 0) +
+           (row->subject != NULL ? strlen(row->subject) : 0) + 32;
+    job->header = (char *)malloc(size);
+    if (job->hash == NULL || job->header == NULL) {
+        axyne_git_panel_job_free(job);
+        return;
+    }
+    (void)snprintf(job->header, size, "commit %s\n%s \xc2\xb7 %s\n%s\n", row->hash,
+                   row->author != NULL ? row->author : "",
+                   row->date != NULL ? row->date : "",
+                   row->subject != NULL ? row->subject : "");
+    job->serial = ++git->diff_serial;
+    (void)axyne_git_panel_start_job(window, state, job);
 }
 
 /* No mutating Git work (menu command, commit, push, stage) is running. */
@@ -6696,6 +6893,7 @@ static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, i
             git->selected_hash = NULL;
             git->selected_path = _strdup(git->changes.items[row].path);
             InvalidateRect(window, NULL, FALSE);
+            axyne_git_panel_show_file_diff(window, state, row);
         }
         return;
     }
@@ -6708,6 +6906,7 @@ static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, i
         git->selected_path = NULL;
         git->selected_hash = _strdup(git->graph.rows[row].hash);
         InvalidateRect(window, NULL, FALSE);
+        axyne_git_panel_show_commit(window, state, row);
     }
 }
 
