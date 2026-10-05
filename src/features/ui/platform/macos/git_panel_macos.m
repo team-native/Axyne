@@ -18,6 +18,9 @@ static const CGFloat kGpPad = 8;
 static const CGFloat kGpMessage = 56;     /* commit message box */
 static const CGFloat kGpButton = 24;
 static const CGFloat kGpPushWidth = 56;
+static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
+static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
+static const int kGpMaxLanes = 10;        /* lanes drawn; wider graphs are cut */
 static const unsigned kGpRefreshDelayMs = 300;
 
 /* ---- lifetime box ----------------------------------------------------------
@@ -118,12 +121,14 @@ typedef struct AxyneGitPanelLoad {
     AxyneStatus changesStatus;
     char message[160];        /* first line of Git's error, when it failed */
     int hasStaged;
+    AxyneGitGraph graph;
 } AxyneGitPanelLoad;
 
 static void gp_load_free(AxyneGitPanelLoad *load)
 {
     if (load == NULL) return;
     axyne_git_changes_free(&load->changes);
+    axyne_git_graph_free(&load->graph);
     free(load->workspace);
     free(load);
 }
@@ -139,6 +144,9 @@ static void gp_load_run(AxyneGitPanelLoad *load)
     }
     if (axyne_git_has_staged(load->workspace, &load->hasStaged, &error) != AXYNE_STATUS_OK)
         load->hasStaged = 0;
+    if (axyne_git_graph(load->workspace, AXYNE_GIT_GRAPH_DEFAULT_COUNT,
+                        &load->graph, &error) != AXYNE_STATUS_OK)
+        axyne_git_graph_free(&load->graph);
 }
 
 /* One short Git action started by a click. */
@@ -270,11 +278,27 @@ static uint32_t gp_kind_color(char kind)
     }
 }
 
+/* Lane colours, indexed by AxyneGitGraphLane.color (0..7). */
+static const uint32_t kGpLanePalette[AXYNE_GIT_GRAPH_PALETTE] = {
+    0x7db5e3, 0xc79ad9, 0xa3c98a, 0xd9b36c, 0xd98e73, 0x8cc7c0, 0xb48ae0, 0xe5a445
+};
+
+static uint32_t gp_ref_color(const AxyneGitRef *ref)
+{
+    switch (ref->kind) {
+    case AXYNE_GIT_REF_LOCAL_BRANCH: return 0x7db5e3;
+    case AXYNE_GIT_REF_REMOTE_BRANCH: return 0xc79ad9;
+    case AXYNE_GIT_REF_TAG: return 0xd9b36c;
+    case AXYNE_GIT_REF_HEAD: return 0xe5a445;
+    default: return 0x8b919b;
+    }
+}
 
 /* Rectangles of the panel's parts, from the bounds and the change count. */
 typedef struct GpGeometry {
     NSRect refresh, changes;
     NSRect message, commit, push;
+    NSRect graphHeader, graph;
 } GpGeometry;
 
 @interface AxyneGitPanelView () <NSTextViewDelegate>
@@ -298,6 +322,9 @@ typedef struct GpGeometry {
     BOOL _stageBusy;
     NSScrollView *_messageScroll;
     NSTextView *_messageView;
+    AxyneGitGraph _graph;
+    CGFloat _graphScroll;
+    char *_selectedHash;
 }
 @end
 
@@ -362,6 +389,8 @@ typedef struct GpGeometry {
     [_messageView release];
     [_messageScroll release];
     axyne_git_changes_free(&_changes);
+    axyne_git_graph_free(&_graph);
+    free(_selectedHash);
     free(_selectedPath);
     [_notice release];
     [_leftStyle release];
@@ -416,6 +445,7 @@ typedef struct GpGeometry {
     CGFloat y;
     memset(&g, 0, sizeof(g));
     fixed += kGpGap + kGpMessage + kGpGap + kGpButton + kGpGap;
+    fixed += kGpHeader;
     available = MAX(0, height - fixed);
     wanted = (CGFloat)_changes.count * kGpRow;
     /* The change list takes what it needs up to half of the free height, but
@@ -434,6 +464,9 @@ typedef struct GpGeometry {
         g.push = NSMakeRect(kGpPad + commitWidth + kGpGap, y, MIN(kGpPushWidth, inner), kGpButton);
         y = NSMaxY(g.commit) + kGpGap;
     }
+    g.graphHeader = NSMakeRect(0, y, width, kGpHeader);
+    g.graph = NSMakeRect(0, NSMaxY(g.graphHeader), width,
+                         MAX(0, height - NSMaxY(g.graphHeader)));
     return g;
 }
 
@@ -443,6 +476,8 @@ typedef struct GpGeometry {
     GpGeometry g = [self geometry];
     _changesScroll = gp_clamp(_changesScroll, 0,
         MAX(0, (CGFloat)_changes.count * kGpRow - NSHeight(g.changes)));
+    _graphScroll = gp_clamp(_graphScroll, 0,
+        MAX(0, (CGFloat)_graph.count * kGpGraphRow - NSHeight(g.graph)));
 }
 
 - (void)layoutParts
@@ -483,6 +518,7 @@ typedef struct GpGeometry {
 {
     axyne_git_changes_free(&_changes);
     _hasStaged = 0;
+    axyne_git_graph_free(&_graph);
 }
 
 /* Scroll positions survive reloads; they restart only for another folder, an
@@ -490,6 +526,7 @@ typedef struct GpGeometry {
 - (void)resetScrolls
 {
     _changesScroll = 0;
+    _graphScroll = 0;
 }
 
 - (void)refresh
@@ -542,6 +579,8 @@ typedef struct GpGeometry {
             _changes = load->changes;
             memset(&load->changes, 0, sizeof(load->changes));
             _hasStaged = load->hasStaged;
+            _graph = load->graph;
+            memset(&load->graph, 0, sizeof(load->graph));
         } else if (load->changesStatus == AXYNE_STATUS_IO_ERROR) {
             _notice = [@"Git 저장소가 아닙니다." retain];
         } else if (load->changesStatus == AXYNE_STATUS_NOT_FOUND) {
@@ -572,6 +611,7 @@ typedef struct GpGeometry {
     [self clearResults];
     [self resetScrolls];
     gp_set_string(&_selectedPath, NULL);
+    gp_set_string(&_selectedHash, NULL);
     [_notice release];
     _notice = nil;
     _loaded = NO;
@@ -591,6 +631,7 @@ typedef struct GpGeometry {
     _loaded = NO;
     _noWorkspace = NO;
     gp_set_string(&_selectedPath, NULL);
+    gp_set_string(&_selectedHash, NULL);
 }
 
 - (void)operationFinishedWithSuccessfulCommit:(BOOL)commitSucceeded
@@ -706,6 +747,13 @@ typedef struct GpGeometry {
         if (![_delegate gitPanelBusy:self]) [_delegate gitPanelPush:self];
         return;
     }
+    if (NSPointInRect(point, g.graph)) {
+        row = (NSInteger)floor((point.y - NSMinY(g.graph) + _graphScroll) / kGpGraphRow);
+        if (row < 0 || (size_t)row >= _graph.count) return;
+        gp_set_string(&_selectedHash, _graph.rows[row].hash);
+        [self setNeedsDisplay:YES];
+        return;
+    }
 }
 
 - (void)scrollWheel:(NSEvent *)event
@@ -716,6 +764,8 @@ typedef struct GpGeometry {
     if (![event hasPreciseScrollingDeltas]) delta *= kGpRow;
     if (NSPointInRect(point, g.changes)) {
         _changesScroll -= delta;
+    } else if (NSPointInRect(point, g.graph)) {
+        _graphScroll -= delta;
     } else {
         [super scrollWheel:event];
         return;
@@ -758,6 +808,11 @@ typedef struct GpGeometry {
                  small, sectionColor, _leftStyle);
     [self drawChangesInRect:g.changes];
     [self drawMessageAreaWithGeometry:&g];
+    [gp_color(_theme.border) setFill];
+    NSRectFill(NSMakeRect(0, NSMinY(g.graphHeader), NSWidth(bounds), 1));
+    gp_draw_text(@"그래프", NSMakeRect(12, NSMinY(g.graphHeader), NSWidth(bounds) - 24, kGpHeader),
+                 small, sectionColor, _leftStyle);
+    [self drawGraphInRect:g.graph];
 }
 
 - (void)drawChangesInRect:(NSRect)rect
@@ -894,5 +949,128 @@ typedef struct GpGeometry {
                  label, _centerStyle);
 }
 
+- (void)drawGraphInRect:(NSRect)rect
+{
+    size_t first, i;
+    CGFloat y;
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(rect);
+    if (_graph.count == 0) {
+        gp_draw_text(@"커밋이 없습니다", NSMakeRect(16, NSMinY(rect), NSWidth(rect) - 24, kGpRow),
+                     [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
+    } else {
+        first = (size_t)floor(_graphScroll / kGpGraphRow);
+        for (i = first; i < _graph.count; ++i) {
+            y = NSMinY(rect) + (CGFloat)i * kGpGraphRow - _graphScroll;
+            if (y >= NSMaxY(rect)) break;
+            [self drawGraphRow:&_graph.rows[i]
+                        inRect:NSMakeRect(0, y, NSWidth(rect), kGpGraphRow)];
+        }
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+/* Lane cells (vertical lines, join/fork curves, the commit dot) followed by
+ * the ref chips, subject and the dim "author · date" line. */
+- (void)drawGraphRow:(const AxyneGitGraphRow *)row inRect:(NSRect)rect
+{
+    BOOL selected = _selectedHash != NULL && strcmp(_selectedHash, row->hash) == 0;
+    int cells = MIN(MAX(_graph.max_lanes, 1), kGpMaxLanes);
+    CGFloat left = 10;
+    CGFloat top = NSMinY(rect), bottom = NSMaxY(rect), middle = floor(top + NSHeight(rect) / 2) + 0.5;
+    CGFloat textX = left + cells * kGpLane + 8;
+    CGFloat textRight = NSMaxX(rect) - 8;
+    CGFloat dotX;
+    BOOL current = NO;
+    NSFont *subjectFont = [NSFont systemFontOfSize:12];
+    NSFont *detailFont = [NSFont systemFontOfSize:11];
+    NSColor *textColor = selected ? gp_color(_theme.text)
+        : gp_color(_theme.light ? 0x24272d : 0xc4c8ce);
+    CGFloat chipX;
+    size_t shown = 0, r;
+    int i;
+    if (selected) {
+        [gp_color(_theme.reference ? 0x2f343c : _theme.border) setFill];
+        NSRectFill(rect);
+    }
+    dotX = left + MIN(row->column, cells - 1) * kGpLane + kGpLane / 2 + 0.5;
+    for (i = 0; i < row->lane_count && i < cells; ++i) {
+        unsigned flags = row->lanes[i].flags;
+        CGFloat cx = left + i * kGpLane + kGpLane / 2 + 0.5;
+        NSColor *color = gp_color(kGpLanePalette[row->lanes[i].color % AXYNE_GIT_GRAPH_PALETTE]);
+        BOOL up, down;
+        NSBezierPath *path;
+        if (flags == 0) continue;
+        up = (flags & AXYNE_GIT_LANE_UP) != 0 && (flags & AXYNE_GIT_LANE_JOIN) == 0;
+        down = (flags & AXYNE_GIT_LANE_DOWN) != 0 &&
+            ((flags & AXYNE_GIT_LANE_FORK) == 0 || (flags & AXYNE_GIT_LANE_UP) != 0);
+        path = [NSBezierPath bezierPath];
+        [path setLineWidth:1.5];
+        if (up) { [path moveToPoint:NSMakePoint(cx, top)]; [path lineToPoint:NSMakePoint(cx, middle)]; }
+        if (down) { [path moveToPoint:NSMakePoint(cx, middle)]; [path lineToPoint:NSMakePoint(cx, bottom)]; }
+        if ((flags & AXYNE_GIT_LANE_JOIN) != 0) {
+            [path moveToPoint:NSMakePoint(cx, top)];
+            [path curveToPoint:NSMakePoint(dotX, middle)
+                 controlPoint1:NSMakePoint(cx, middle) controlPoint2:NSMakePoint(cx, middle)];
+        }
+        if ((flags & AXYNE_GIT_LANE_FORK) != 0) {
+            [path moveToPoint:NSMakePoint(dotX, middle)];
+            [path curveToPoint:NSMakePoint(cx, bottom)
+                 controlPoint1:NSMakePoint(cx, middle) controlPoint2:NSMakePoint(cx, middle)];
+        }
+        [color setStroke];
+        [path stroke];
+    }
+    for (r = 0; r < row->ref_count; ++r)
+        if (row->refs[r].is_current) current = YES;
+    {
+        NSColor *dotColor = gp_color(kGpLanePalette[row->color % AXYNE_GIT_GRAPH_PALETTE]);
+        if (current) {
+            /* HEAD: ring with a smaller solid centre. */
+            NSBezierPath *ring = [NSBezierPath bezierPathWithOvalInRect:
+                NSMakeRect(dotX - 5, middle - 5, 10, 10)];
+            [ring setLineWidth:1.5];
+            [dotColor setStroke];
+            [ring stroke];
+            [dotColor setFill];
+            [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(dotX - 2.5, middle - 2.5, 5, 5)] fill];
+        } else {
+            [dotColor setFill];
+            [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(dotX - 3.5, middle - 3.5, 7, 7)] fill];
+        }
+    }
+    /* Line 1: ref chips (the current branch solid), then the subject. */
+    chipX = textX;
+    for (r = 0; r < row->ref_count; ++r) {
+        const AxyneGitRef *ref = &row->refs[r];
+        NSString *label = gp_string(ref->name);
+        NSFont *chipFont = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+        CGFloat width = ceil([label sizeWithAttributes:@{NSFontAttributeName: chipFont}].width) + 10;
+        uint32_t rgb = gp_ref_color(ref);
+        NSRect chip;
+        if (shown == 3 || chipX + width > textRight - 40) {
+            if (chipX + 20 <= textRight - 20) {
+                NSString *more = [NSString stringWithFormat:@"+%zu", row->ref_count - r];
+                gp_draw_text(more, NSMakeRect(chipX, top + 3, 24, 16), chipFont,
+                             gp_color(_theme.muted), _leftStyle);
+                chipX += 26;
+            }
+            break;
+        }
+        chip = NSMakeRect(chipX, top + 5, width, 14);
+        gp_draw_chip(label, chip, ref->is_current ? gp_color(_theme.accent)
+                         : [gp_color(rgb) colorWithAlphaComponent:0.2],
+                     ref->is_current ? gp_color(_theme.background) : gp_color(rgb), chipFont);
+        chipX += width + 4;
+        ++shown;
+    }
+    gp_draw_text(gp_string(row->subject), NSMakeRect(chipX, top + 3, MAX(0, textRight - chipX), 16),
+                 subjectFont, textColor, _leftStyle);
+    /* Line 2: author and date, dim. */
+    gp_draw_text([NSString stringWithFormat:@"%@  ·  %@", gp_string(row->author),
+                     gp_string(row->date)],
+                 NSMakeRect(textX, top + 20, MAX(0, textRight - textX), 14),
+                 detailFont, gp_color(_theme.muted), _leftStyle);
+}
 
 @end
