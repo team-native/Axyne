@@ -41,6 +41,12 @@ AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
 AxyneStatus axyne_fs_read_head(const char *utf8_path, size_t max_bytes,
                                char **contents, size_t *length, int *truncated,
                                AxyneError *error);
+/* Streams the file through a small fixed buffer and sets *contains_nul to 1
+ * when any byte in it is NUL (0 otherwise). Nothing of the file is retained,
+ * so the cost does not grow with the file size; callers use it to reject
+ * binary files before deciding to read them whole. */
+AxyneStatus axyne_fs_file_contains_nul(const char *utf8_path,
+                                       int *contains_nul, AxyneError *error);
 /* Atomically replaces the destination with exactly length bytes, or creates
  * it if absent. A failed write preserves the previous destination. Concurrent
  * successful writes to the same existing file are last-writer-wins. On POSIX,
