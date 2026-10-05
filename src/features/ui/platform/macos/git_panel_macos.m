@@ -152,6 +152,7 @@ typedef struct AxyneGitPanelLoad {
     int hasStaged;
     AxyneGitGraph graph;
     int graphCount;           /* commits to read (set on the main thread) */
+    AxyneGitGraphMode graphMode;
     int graphOk;              /* the graph could be read (zero commits is fine) */
     char graphMessage[160];   /* graph failures are independent of changes */
 } AxyneGitPanelLoad;
@@ -176,7 +177,7 @@ static void gp_load_run(AxyneGitPanelLoad *load)
     }
     if (axyne_git_has_staged(load->workspace, &load->hasStaged, &error) != AXYNE_STATUS_OK)
         load->hasStaged = 0;
-    if (axyne_git_graph(load->workspace, load->graphCount,
+    if (axyne_git_graph_with_mode(load->workspace, load->graphCount, load->graphMode,
                         &load->graph, &error) == AXYNE_STATUS_OK)
         load->graphOk = 1;
     else {
@@ -444,6 +445,8 @@ typedef struct GpItem {
     char _graphError[160];
     CGFloat _graphScroll;
     int _graphLimit;              /* commits requested by reloads; 0 = default */
+    AxyneGitGraphMode _graphMode;
+    NSSegmentedControl *_graphSelector;
     int _graphLoadedLimit;        /* the request the shown graph answered (0 = none) */
     BOOL _graphLoadingMore;       /* a larger graph was requested and has not arrived */
     char *_selectedHash;
@@ -505,12 +508,29 @@ typedef struct GpItem {
         [_messageScroll setDocumentView:_messageView];
         [_messageScroll setHidden:YES];
         [self addSubview:_messageScroll];
+        _graphMode = AXYNE_GIT_GRAPH_COMPACT;
+        _graphSelector = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+        [_graphSelector setSegmentCount:2];
+        [_graphSelector setLabel:@"Compact" forSegment:0];
+        [_graphSelector setLabel:@"Full" forSegment:1];
+        [_graphSelector setSelectedSegment:0];
+        [_graphSelector setControlSize:NSControlSizeSmall];
+        [_graphSelector setTarget:self];
+        [_graphSelector setAction:@selector(graphModeChanged:)];
+        [_graphSelector setAccessibilityLabel:@"Commit history: Compact (HEAD first-parent) / Full (all branches)"];
+        [_graphSelector setToolTip:@"Compact: HEAD first-parent history. Full: all branches and merge edges."];
+        [self addSubview:_graphSelector];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+            selector:@selector(applicationActivated:)
+            name:NSApplicationDidBecomeActiveNotification object:nil];
     }
     return self;
 }
 
 - (void)dealloc
 {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_graphSelector release];
     if (_life != NULL) {
         _life->panel = nil;
         gp_life_release(_life);
@@ -580,7 +600,7 @@ typedef struct GpItem {
     CGFloat y;
     memset(&g, 0, sizeof(g));
     fixed += kGpGap + kGpMessage + kGpGap + kGpButton + kGpGap;
-    fixed += kGpHeader;
+    fixed += kGpHeader + 18;
     available = MAX(0, height - fixed);
     wanted = (CGFloat)_changes.count * kGpRow;
     /* The change list takes what it needs up to half of the free height, but
@@ -599,7 +619,7 @@ typedef struct GpItem {
         g.push = NSMakeRect(kGpPad + commitWidth + kGpGap, y, MIN(kGpPushWidth, inner), kGpButton);
         y = NSMaxY(g.commit) + kGpGap;
     }
-    g.graphHeader = NSMakeRect(0, y, width, kGpHeader);
+    g.graphHeader = NSMakeRect(0, y, width, kGpHeader + 18);
     g.graph = NSMakeRect(0, NSMaxY(g.graphHeader), width,
                          MAX(0, height - NSMaxY(g.graphHeader)));
     return g;
@@ -735,10 +755,36 @@ typedef struct GpItem {
         BOOL show = _loaded && !_noWorkspace && _notice == nil;
         [_messageScroll setFrame:NSInsetRect(g.message, 1, 1)];
         [_messageScroll setHidden:!show];
+        [_graphSelector setFrame:NSMakeRect(MAX(70, NSWidth([self bounds]) - 142),
+                                            NSMinY(g.graphHeader) + 2, 134, 22)];
+        [_graphSelector setHidden:!show];
     }
 }
 
 /* ---- loading ------------------------------------------------------------------ */
+
+- (void)applicationActivated:(NSNotification *)notification
+{
+    (void)notification;
+    if (![self isHidden]) [self scheduleRefresh];
+}
+
+- (void)graphModeChanged:(id)sender
+{
+    (void)sender;
+    AxyneGitGraphMode mode = [_graphSelector selectedSegment] == 0
+        ? AXYNE_GIT_GRAPH_COMPACT : AXYNE_GIT_GRAPH_FULL;
+    if (mode == _graphMode) return;
+    _graphMode = mode;
+    ++_generation;
+    [self clearResults];
+    [self clearExpansion];
+    _graphLimit = 0;
+    _graphScroll = 0;
+    gp_set_string(&_selectedHash, NULL);
+    [self refresh];
+    [self setNeedsDisplay:YES];
+}
 
 /* "더 불러오기": raises the requested commit count by one step and reloads on
  * the background queue; new rows only append below the old ones, so the scroll
@@ -804,7 +850,7 @@ typedef struct GpItem {
     const char *workspace;
     AxyneGitPanelLoad *load;
     AxyneGitPanelLife *life = _life;
-    if (life == NULL) return;
+    if (life == NULL || [self isHidden]) return;
     if (_loading) { _refreshAgain = YES; return; }
     workspace = [_delegate gitPanelWorkspace:self];
     if (workspace == NULL || workspace[0] == '\0') {
@@ -825,6 +871,7 @@ typedef struct GpItem {
     if (load == NULL || load->workspace == NULL) { gp_load_free(load); return; }
     load->generation = _generation;
     load->graphCount = [self graphRequest];
+    load->graphMode = _graphMode;
     _noWorkspace = NO;
     _loading = YES;
     ++life->references;
@@ -842,7 +889,8 @@ typedef struct GpItem {
 /* Main thread; takes ownership of `load`. */
 - (void)finishLoad:(AxyneGitPanelLoad *)load
 {
-    BOOL current = load->generation == _generation;
+    BOOL current = load->generation == _generation &&
+                   load->graphMode == _graphMode && ![self isHidden];
     _loading = NO;
     if (current) {
         BOOL requested = load->graphCount == [self graphRequest];
@@ -1247,6 +1295,11 @@ static char *gp_diff_title(const char *prefix, const char *path)
     NSRectFill(NSMakeRect(0, NSMinY(g.graphHeader), NSWidth(bounds), 1));
     gp_draw_text(@"그래프", NSMakeRect(12, NSMinY(g.graphHeader), NSWidth(bounds) - 24, kGpHeader),
                  small, sectionColor, _leftStyle);
+    gp_draw_text(_graphMode == AXYNE_GIT_GRAPH_COMPACT
+                     ? @"HEAD first-parent only · side history omitted"
+                     : @"All branches · full merge ancestry",
+                 NSMakeRect(12, NSMinY(g.graphHeader) + kGpHeader, NSWidth(bounds) - 24, 18),
+                 [NSFont systemFontOfSize:10], sectionColor, _leftStyle);
     [self drawGraphInRect:g.graph];
 }
 
