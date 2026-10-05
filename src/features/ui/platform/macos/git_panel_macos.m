@@ -153,6 +153,7 @@ typedef struct AxyneGitPanelLoad {
     AxyneGitGraph graph;
     int graphCount;           /* commits to read (set on the main thread) */
     int graphOk;              /* the graph could be read (zero commits is fine) */
+    char graphMessage[160];   /* graph failures are independent of changes */
 } AxyneGitPanelLoad;
 
 static void gp_load_free(AxyneGitPanelLoad *load)
@@ -178,8 +179,10 @@ static void gp_load_run(AxyneGitPanelLoad *load)
     if (axyne_git_graph(load->workspace, load->graphCount,
                         &load->graph, &error) == AXYNE_STATUS_OK)
         load->graphOk = 1;
-    else
+    else {
+        gp_first_line(error.message, load->graphMessage, sizeof(load->graphMessage));
         axyne_git_graph_free(&load->graph);
+    }
 }
 
 /* One short Git action started by a click. */
@@ -438,6 +441,7 @@ typedef struct GpItem {
     NSScrollView *_messageScroll;
     NSTextView *_messageView;
     AxyneGitGraph _graph;
+    char _graphError[160];
     CGFloat _graphScroll;
     int _graphLimit;              /* commits requested by reloads; 0 = default */
     int _graphLoadedLimit;        /* the request the shown graph answered (0 = none) */
@@ -784,6 +788,7 @@ typedef struct GpItem {
     axyne_git_graph_free(&_graph);
     _graphLoadedLimit = 0;
     _graphLoadingMore = NO;
+    _graphError[0] = '\0';
 }
 
 /* Scroll positions survive reloads; they restart only for another folder, an
@@ -862,7 +867,12 @@ typedef struct GpItem {
                 _graph = load->graph; /* moved, never copied */
                 memset(&load->graph, 0, sizeof(load->graph));
                 _graphLoadedLimit = load->graphOk ? load->graphCount : 0;
+                snprintf(_graphError, sizeof(_graphError), "%s",
+                         load->graphOk ? "" : load->graphMessage);
             }
+            if (requested && !load->graphOk)
+                [self deliverText:load->graphMessage[0] ? load->graphMessage
+                                                       : "Unable to load commit graph."];
             /* An older load finishing while a larger request is queued keeps
              * the loading state until that request arrives. */
             if (requested) _graphLoadingMore = NO;
@@ -1381,7 +1391,8 @@ static char *gp_diff_title(const char *prefix, const char *path)
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(rect);
     if (_graph.count == 0) {
-        gp_draw_text(@"커밋이 없습니다", NSMakeRect(16, NSMinY(rect), NSWidth(rect) - 24, kGpRow),
+        gp_draw_text(_graphError[0] ? gp_string(_graphError) : @"커밋이 없습니다",
+                     NSMakeRect(16, NSMinY(rect), NSWidth(rect) - 24, kGpRow),
                      [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
     } else {
         count = [self itemCount];

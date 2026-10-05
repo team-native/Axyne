@@ -5701,6 +5701,7 @@ typedef struct AxyneGitPanelJob {
     int has_staged;
     AxyneGitGraph graph; /* refresh jobs only */
     int have_graph;
+    char *graph_error;   /* reported even when the changes snapshot succeeded */
     int graph_count;     /* refresh jobs: commits to read (set on the UI thread) */
     /* Diff and commit-file jobs: they never touch the snapshot and run beside
      * other jobs; only the newest request (serial) is applied. */
@@ -5722,6 +5723,7 @@ static void axyne_git_panel_job_free(AxyneGitPanelJob *job)
     free(job->workspace);
     free(job->op_error);
     free(job->error);
+    free(job->graph_error);
     free(job->path);
     free(job->orig_path);
     free(job->hash);
@@ -5760,7 +5762,10 @@ static void axyne_git_panel_job_snapshot(AxyneGitPanelJob *job)
         memset(&error, 0, sizeof(error));
         job->have_graph = axyne_git_graph(job->workspace,
             job->graph_count, &job->graph, &error) == AXYNE_STATUS_OK;
-        if (!job->have_graph) axyne_git_graph_free(&job->graph);
+        if (!job->have_graph) {
+            job->graph_error = axyne_git_panel_message_copy(&error);
+            axyne_git_graph_free(&job->graph);
+        }
     }
 }
 
@@ -6239,6 +6244,8 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
             /* An older job finishing while a larger request is queued keeps
              * the loading state until that request arrives. */
             if (current) git->graph_loading = 0;
+            if (current && job->graph_error != NULL)
+                axyne_git_panel_show_report(window, state, job->graph_error);
             axyne_git_expansion_sync(git);
             if (git->selected_hash != NULL) {
                 size_t i;

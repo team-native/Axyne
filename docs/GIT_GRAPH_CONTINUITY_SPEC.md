@@ -19,6 +19,10 @@
   renderers, including expanded file rows. No column-9 dot clamping.
 - Capture completeness: COMPLETE. Truncated results return an I/O error
   before parsing and cannot masquerade as the end of history.
+- Error delivery: COMPLETE. Both native loaders preserve graph errors and
+  report them through the existing Output panel for the current request.
+  Failed load-more keeps the displayed graph; macOS initial failures display
+  the graph error instead of claiming there are no commits.
 - Regression validation: COMPLETE. 25 concurrent lanes over 625 rows,
   200/400/625-row windows with stable prefixes, 64-lane endpoint geometry,
   16 MB valid output and output exceeding the 16 MiB budget.
