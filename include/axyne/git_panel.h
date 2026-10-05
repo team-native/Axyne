@@ -86,6 +86,85 @@ AxyneStatus axyne_git_unstage_paths(const char *utf8_workspace,
 AxyneStatus axyne_git_has_staged(const char *utf8_workspace, int *has_staged,
                                  AxyneError *error);
 
+/* ---- commit graph -------------------------------------------------------- */
+
+/* Number of lane colors; lane color indices are 0..AXYNE_GIT_GRAPH_PALETTE-1
+ * (lane id modulo this). A UI maps the index to its own palette. */
+#define AXYNE_GIT_GRAPH_PALETTE 8
+#define AXYNE_GIT_GRAPH_DEFAULT_COUNT 200
+#define AXYNE_GIT_GRAPH_MAX_COUNT 1000
+
+typedef enum AxyneGitRefKind {
+    AXYNE_GIT_REF_LOCAL_BRANCH = 0,
+    AXYNE_GIT_REF_REMOTE_BRANCH,
+    AXYNE_GIT_REF_TAG,
+    AXYNE_GIT_REF_HEAD,   /* detached HEAD (name "HEAD") */
+    AXYNE_GIT_REF_OTHER
+} AxyneGitRefKind;
+
+typedef struct AxyneGitRef {
+    char *name;        /* short name: "main", "origin/main", "v1.0", "HEAD" */
+    int kind;          /* AxyneGitRefKind */
+    int is_current;    /* the checked-out branch, or the detached HEAD */
+} AxyneGitRef;
+
+/* Lane cell flags. A row is drawn as a strip of lane_count cells, each cell
+ * the full row height; the commit dot sits at the vertical middle of the cell
+ * in column `column`. In cell i of a row:
+ *   UP    a line enters from the top edge (lane i was active above the row);
+ *   DOWN  a line leaves through the bottom edge (lane i continues below);
+ *   JOIN  lane i ends at this commit: connect the top edge of cell i to the
+ *         dot (a branch tip merging into this commit's lane);
+ *   FORK  connect the dot to the bottom edge of cell i (this commit's second
+ *         or later parent lives in lane i);
+ *   DOT   cell i holds this commit's dot (exactly one cell per row).
+ * Plain pass-through lanes are UP|DOWN (a vertical line). The dot cell has UP
+ * unless the commit is a branch tip (nothing above waits for it) and DOWN
+ * unless it is a root commit. `color` is the lane's color index; JOIN and FORK
+ * connectors are drawn in the color of the cell they touch, the dot in the
+ * color of its own cell. Cells with flags 0 are empty. */
+#define AXYNE_GIT_LANE_UP   0x01u
+#define AXYNE_GIT_LANE_DOWN 0x02u
+#define AXYNE_GIT_LANE_JOIN 0x04u
+#define AXYNE_GIT_LANE_FORK 0x08u
+#define AXYNE_GIT_LANE_DOT  0x10u
+
+typedef struct AxyneGitGraphLane {
+    unsigned flags;    /* AXYNE_GIT_LANE_* */
+    int color;         /* 0..AXYNE_GIT_GRAPH_PALETTE-1, stable for the lane's life */
+} AxyneGitGraphLane;
+
+typedef struct AxyneGitGraphRow {
+    char *hash;        /* full hex object id */
+    char *subject;     /* first line of the message (UTF-8) */
+    char *author;      /* author name */
+    char *date;        /* author date, YYYY-MM-DD */
+    char **parents;    /* full hashes, first parent first */
+    size_t parent_count;
+    AxyneGitRef *refs; /* branches/tags/HEAD pointing at this commit */
+    size_t ref_count;
+    int column;        /* lane index of the dot, 0-based */
+    int color;         /* color index of the dot (lanes[column].color) */
+    int lane_count;    /* number of cells to draw in this row (>= column+1) */
+    AxyneGitGraphLane *lanes; /* lane_count cells */
+} AxyneGitGraphRow;
+
+typedef struct AxyneGitGraph {
+    AxyneGitGraphRow *rows;  /* newest first, parents always below children */
+    size_t count;
+    int max_lanes;           /* largest lane_count of any row (graph width) */
+} AxyneGitGraph;
+
+/* All branches, remotes and tags (`git log --all`, the stash is excluded),
+ * newest first in topological order, at most max_count commits (clamped to
+ * 1..AXYNE_GIT_GRAPH_MAX_COUNT; UIs use AXYNE_GIT_GRAPH_DEFAULT_COUNT). The
+ * lane layout is computed here. A repository without commits yields zero rows
+ * and AXYNE_STATUS_OK. Parents beyond the requested window simply leave their
+ * lanes running off the bottom. */
+AxyneStatus axyne_git_graph(const char *utf8_workspace, int max_count,
+                            AxyneGitGraph *out, AxyneError *error);
+void axyne_git_graph_free(AxyneGitGraph *graph);
+
 #ifdef __cplusplus
 }
 #endif

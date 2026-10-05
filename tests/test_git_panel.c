@@ -376,6 +376,226 @@ static int axyne_test_panel_changes(const char *root)
     return 1;
 }
 
+
+static const AxyneGitGraphRow *axyne_test_row(const AxyneGitGraph *graph,
+                                              const char *subject)
+{
+    size_t i;
+    for (i = 0; i < graph->count; ++i)
+        if (strcmp(graph->rows[i].subject, subject) == 0) return &graph->rows[i];
+    return NULL;
+}
+
+static const AxyneGitRef *axyne_test_ref(const AxyneGitGraphRow *row,
+                                         const char *name)
+{
+    size_t i;
+    for (i = 0; i < row->ref_count; ++i)
+        if (strcmp(row->refs[i].name, name) == 0) return &row->refs[i];
+    return NULL;
+}
+
+#define AXYNE_TEST_LANE(row, index, expected_flags, expected_color) \
+    do { \
+        AXYNE_TEST_CHECK((index) < (row)->lane_count); \
+        AXYNE_TEST_EQ_INT((row)->lanes[(index)].flags, (expected_flags)); \
+        AXYNE_TEST_EQ_INT((row)->lanes[(index)].color, (expected_color)); \
+    } while (0)
+
+enum {
+    LUP = AXYNE_GIT_LANE_UP, LDOWN = AXYNE_GIT_LANE_DOWN,
+    LJOIN = AXYNE_GIT_LANE_JOIN, LFORK = AXYNE_GIT_LANE_FORK,
+    LDOT = AXYNE_GIT_LANE_DOT
+};
+
+static int axyne_test_panel_graph(const char *root)
+{
+    char empty[1024], plain[1024], linear[1024], merged[1024], detached[1024],
+        bulk[1024], out[8192];
+    AxyneGitGraph graph = {0};
+    AxyneError error = {0};
+    const AxyneGitGraphRow *f, *e, *d, *c, *b, *a, *row;
+    const AxyneGitRef *ref;
+    size_t i;
+
+    AXYNE_TEST_CHECK(axyne_test_path(empty, sizeof(empty), root, "g-empty"));
+    AXYNE_TEST_CHECK(axyne_test_path(plain, sizeof(plain), root, "g-plain"));
+    AXYNE_TEST_CHECK(axyne_test_path(linear, sizeof(linear), root, "g-linear"));
+    AXYNE_TEST_CHECK(axyne_test_path(merged, sizeof(merged), root, "g-merged"));
+    AXYNE_TEST_CHECK(axyne_test_path(detached, sizeof(detached), root, "g-detached"));
+    AXYNE_TEST_CHECK(axyne_test_path(bulk, sizeof(bulk), root, "g-bulk"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(empty));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(plain));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(linear));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(merged));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(detached));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(bulk));
+
+    AXYNE_TEST_STATUS(axyne_git_graph(empty, 10, NULL, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STATUS(axyne_git_graph(NULL, 10, &graph, &error), AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STATUS(axyne_git_graph(plain, 10, &graph, &error), AXYNE_STATUS_IO_ERROR);
+    AXYNE_TEST_CONTAINS(error.message, "not a Git repository");
+    AXYNE_TEST_CHECK(graph.rows == NULL && graph.count == 0);
+
+    /* Empty repository: zero rows, OK. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "git init -q -b main '%s'", empty), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(empty, 10, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 0);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 0);
+    axyne_git_graph_free(&graph);
+
+    /* Linear history, with a tab and Korean text in the subject/author. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "GIT_AUTHOR_DATE='2024-03-01T12:00:00+0000' GIT_COMMITTER_DATE='2024-03-01T12:00:00+0000' git commit -q --allow-empty -m one && "
+        "GIT_AUTHOR_DATE='2024-03-02T12:00:00+0000' GIT_COMMITTER_DATE='2024-03-02T12:00:00+0000' GIT_AUTHOR_NAME='\xED\x99\x8D\xEA\xB8\xB8\xEB\x8F\x99' "
+        "git commit -q --allow-empty -m \"$(printf 'fix:\\t\xED\x95\x9C\xEA\xB8\x80 \xEC\xA0\x9C\xEB\xAA\xA9')\" && "
+        "GIT_AUTHOR_DATE='2024-03-03T12:00:00+0000' GIT_COMMITTER_DATE='2024-03-03T12:00:00+0000' git commit -q --allow-empty -m three", linear), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(linear, AXYNE_GIT_GRAPH_DEFAULT_COUNT, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 3);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].subject, "three");
+    AXYNE_TEST_STREQ(graph.rows[1].subject, "fix:\t\xED\x95\x9C\xEA\xB8\x80 \xEC\xA0\x9C\xEB\xAA\xA9");
+    AXYNE_TEST_STREQ(graph.rows[1].author, "\xED\x99\x8D\xEA\xB8\xB8\xEB\x8F\x99");
+    AXYNE_TEST_STREQ(graph.rows[1].date, "2024-03-02");
+    AXYNE_TEST_STREQ(graph.rows[0].author, "Axyne Test");
+    AXYNE_TEST_EQ_INT(strlen(graph.rows[0].hash), 40);
+    AXYNE_TEST_EQ_INT(graph.rows[0].parent_count, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].parents[0], graph.rows[1].hash);
+    AXYNE_TEST_STREQ(graph.rows[1].parents[0], graph.rows[2].hash);
+    AXYNE_TEST_EQ_INT(graph.rows[2].parent_count, 0);
+    for (i = 0; i < 3; ++i) {
+        AXYNE_TEST_EQ_INT(graph.rows[i].column, 0);
+        AXYNE_TEST_EQ_INT(graph.rows[i].color, 0);
+        AXYNE_TEST_EQ_INT(graph.rows[i].lane_count, 1);
+    }
+    AXYNE_TEST_LANE(&graph.rows[0], 0, LDOT | LDOWN, 0);
+    AXYNE_TEST_LANE(&graph.rows[1], 0, LUP | LDOT | LDOWN, 0);
+    AXYNE_TEST_LANE(&graph.rows[2], 0, LUP | LDOT, 0);
+    AXYNE_TEST_EQ_INT(graph.rows[0].ref_count, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].refs[0].name, "main");
+    AXYNE_TEST_EQ_INT(graph.rows[0].refs[0].kind, AXYNE_GIT_REF_LOCAL_BRANCH);
+    AXYNE_TEST_EQ_INT(graph.rows[0].refs[0].is_current, 1);
+    AXYNE_TEST_EQ_INT(graph.rows[1].ref_count, 0);
+    axyne_git_graph_free(&graph);
+    /* max_count clamps to at least 1; the cut parent leaves a lane running down. */
+    AXYNE_TEST_STATUS(axyne_git_graph(linear, 0, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 1);
+    AXYNE_TEST_STREQ(graph.rows[0].subject, "three");
+    AXYNE_TEST_LANE(&graph.rows[0], 0, LDOT | LDOWN, 0);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph(linear, -5, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 1);
+    axyne_git_graph_free(&graph);
+
+    /* Branch and merge:
+     *   A -- B -- E ------- F   (main; F merges feature, parents E, D)
+     *         \            /
+     *          C -- D -----     (feature)
+     * plus tag v1 and branch side on A, remote-tracking origin/main on E. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "mk() { GIT_AUTHOR_DATE=\"2024-03-0$1T12:00:00+0000\" GIT_COMMITTER_DATE=\"2024-03-0$1T12:00:00+0000\" git commit -q --allow-empty -m \"$2\"; } && "
+        "mk 1 A && git tag v1 && git branch side && mk 2 B && git checkout -q -b feature && mk 3 C && mk 4 D && "
+        "git checkout -q main && mk 5 E && git update-ref refs/remotes/origin/main HEAD && "
+        "GIT_AUTHOR_DATE='2024-03-06T12:00:00+0000' GIT_COMMITTER_DATE='2024-03-06T12:00:00+0000' git merge -q --no-ff feature -m F", merged), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(merged, 100, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 6);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 2);
+    f = axyne_test_row(&graph, "F");
+    e = axyne_test_row(&graph, "E");
+    d = axyne_test_row(&graph, "D");
+    c = axyne_test_row(&graph, "C");
+    b = axyne_test_row(&graph, "B");
+    a = axyne_test_row(&graph, "A");
+    AXYNE_TEST_CHECK(f && e && d && c && b && a);
+    AXYNE_TEST_CHECK(f == &graph.rows[0]);
+    AXYNE_TEST_CHECK(a == &graph.rows[5]);
+    /* Parents are always below children. */
+    AXYNE_TEST_CHECK(e > f && d > f && b > e && b > c && a > b && c > d);
+    AXYNE_TEST_EQ_INT(f->parent_count, 2);
+    AXYNE_TEST_STREQ(f->parents[0], e->hash);
+    AXYNE_TEST_STREQ(f->parents[1], d->hash);
+    AXYNE_TEST_EQ_INT(b->parent_count, 1);
+    AXYNE_TEST_STREQ(b->parents[0], a->hash);
+    AXYNE_TEST_EQ_INT(a->parent_count, 0);
+    /* Merge commit: dot in lane 0, second parent forks into new lane 1. */
+    AXYNE_TEST_EQ_INT(f->column, 0);
+    AXYNE_TEST_EQ_INT(f->lane_count, 2);
+    AXYNE_TEST_LANE(f, 0, LDOT | LDOWN, 0);
+    AXYNE_TEST_LANE(f, 1, LDOWN | LFORK, 1);
+    /* main line stays in lane 0, feature in lane 1. */
+    AXYNE_TEST_EQ_INT(e->column, 0);
+    AXYNE_TEST_EQ_INT(d->column, 1);
+    AXYNE_TEST_EQ_INT(c->column, 1);
+    AXYNE_TEST_EQ_INT(e->color, 0);
+    AXYNE_TEST_EQ_INT(d->color, 1);
+    AXYNE_TEST_EQ_INT(c->color, 1);
+    AXYNE_TEST_EQ_INT(e->lane_count, 2);
+    AXYNE_TEST_EQ_INT(d->lane_count, 2);
+    AXYNE_TEST_EQ_INT(c->lane_count, 2);
+    AXYNE_TEST_LANE(e, 0, LUP | LDOT | LDOWN, 0);
+    AXYNE_TEST_LANE(e, 1, LUP | LDOWN, 1);
+    AXYNE_TEST_LANE(d, 0, LUP | LDOWN, 0);
+    AXYNE_TEST_LANE(d, 1, LUP | LDOT | LDOWN, 1);
+    AXYNE_TEST_LANE(c, 0, LUP | LDOWN, 0);
+    AXYNE_TEST_LANE(c, 1, LUP | LDOT | LDOWN, 1);
+    /* B is where feature joins back: lane 1 ends in B's dot (lane 0). */
+    AXYNE_TEST_EQ_INT(b->column, 0);
+    AXYNE_TEST_EQ_INT(b->lane_count, 2);
+    AXYNE_TEST_LANE(b, 0, LUP | LDOT | LDOWN, 0);
+    AXYNE_TEST_LANE(b, 1, LUP | LJOIN, 1);
+    AXYNE_TEST_EQ_INT(a->column, 0);
+    AXYNE_TEST_EQ_INT(a->lane_count, 1);
+    AXYNE_TEST_LANE(a, 0, LUP | LDOT, 0);
+    /* Decorations. */
+    ref = axyne_test_ref(f, "main");
+    AXYNE_TEST_CHECK(ref != NULL && ref->kind == AXYNE_GIT_REF_LOCAL_BRANCH && ref->is_current);
+    ref = axyne_test_ref(d, "feature");
+    AXYNE_TEST_CHECK(ref != NULL && ref->kind == AXYNE_GIT_REF_LOCAL_BRANCH && !ref->is_current);
+    ref = axyne_test_ref(e, "origin/main");
+    AXYNE_TEST_CHECK(ref != NULL && ref->kind == AXYNE_GIT_REF_REMOTE_BRANCH && !ref->is_current);
+    ref = axyne_test_ref(a, "v1");
+    AXYNE_TEST_CHECK(ref != NULL && ref->kind == AXYNE_GIT_REF_TAG);
+    ref = axyne_test_ref(a, "side");
+    AXYNE_TEST_CHECK(ref != NULL && ref->kind == AXYNE_GIT_REF_LOCAL_BRANCH);
+    AXYNE_TEST_EQ_INT(a->ref_count, 2);
+    axyne_git_graph_free(&graph);
+
+    /* Branch tip not reachable from HEAD is still listed (--all), and the
+     * stash is not. Detached HEAD is decorated as "HEAD". */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && printf 1 > a.txt && git add a.txt && git commit -q -m first && "
+        "printf 2 > a.txt && git commit -q -am second && git branch topic && "
+        "printf 3 > a.txt && git stash -q && git checkout -q --detach HEAD~1", detached), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(detached, 100, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 2);
+    row = axyne_test_row(&graph, "first");
+    AXYNE_TEST_CHECK(row != NULL);
+    ref = axyne_test_ref(row, "HEAD");
+    AXYNE_TEST_CHECK(ref != NULL && ref->kind == AXYNE_GIT_REF_HEAD && ref->is_current);
+    row = axyne_test_row(&graph, "second");
+    AXYNE_TEST_CHECK(row != NULL);
+    ref = axyne_test_ref(row, "main");
+    AXYNE_TEST_CHECK(ref != NULL && !ref->is_current);
+    AXYNE_TEST_CHECK(axyne_test_ref(row, "topic") != NULL);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 1);
+    axyne_git_graph_free(&graph);
+
+    /* Large history: clamped to AXYNE_GIT_GRAPH_MAX_COUNT. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "awk 'BEGIN{for(i=1;i<=1100;i++){printf \"commit refs/heads/main\\ncommitter T <t@example.invalid> %%d +0000\\ndata 2\\nx\\n\\n\", 1700000000+i}}' | git fast-import --quiet", bulk), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(bulk, 1000000, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, AXYNE_GIT_GRAPH_MAX_COUNT);
+    AXYNE_TEST_EQ_INT(graph.max_lanes, 1);
+    axyne_git_graph_free(&graph);
+    AXYNE_TEST_STATUS(axyne_git_graph(bulk, 200, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 200);
+    axyne_git_graph_free(&graph);
+    return 1;
+}
+
 static int axyne_test_git_panel_run(const char *root)
 {
     char out[256];
@@ -386,6 +606,7 @@ static int axyne_test_git_panel_run(const char *root)
     }
     axyne_test_setup_environment(root);
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
+    AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
     return 1;
 }
 
