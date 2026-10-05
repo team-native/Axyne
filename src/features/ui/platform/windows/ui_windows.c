@@ -270,7 +270,7 @@ enum { AXYNE_CMD_GOTO_LINE = 1200, AXYNE_CMD_SELECT_LINE,
        AXYNE_CMD_DEBUG_STEP_OUT, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS,
        AXYNE_CMD_OPEN_PREFERENCES_FILE, AXYNE_CMD_SHORTCUTS,
        AXYNE_CMD_REPORT_ISSUE, AXYNE_CMD_BUILD_TARGET, AXYNE_CMD_GIT_COMMIT,
-       AXYNE_CMD_GIT_PUSH, AXYNE_CMD_GIT_PULL };
+       AXYNE_CMD_GIT_PUSH, AXYNE_CMD_GIT_PULL, AXYNE_CMD_GIT_LOG };
 
 enum { AXYNE_CMD_EXIT = 1090 };
 
@@ -1508,7 +1508,7 @@ static void axyne_git_start(HWND window, AxyneWindowState *state,
     }
 }
 
-/* Commit, push and pull run several Git steps through the blocking core
+/* Commit, push, pull and log run through the blocking core
  * functions, so they run on a worker thread that posts the finished report
  * back to the window. If the window is already gone the worker frees the
  * batch itself. */
@@ -1516,7 +1516,7 @@ typedef struct AxyneGitBatch {
     HWND window;
     char *workspace;
     char *message;   /* commit only */
-    int kind;        /* AXYNE_CMD_GIT_COMMIT, _PUSH or _PULL */
+    int kind;        /* AXYNE_CMD_GIT_COMMIT, _PUSH, _PULL or _LOG */
     int stage_all;
     char *report;    /* malloc'd by the worker */
 } AxyneGitBatch;
@@ -1543,6 +1543,8 @@ static DWORD WINAPI axyne_git_batch_thread(LPVOID opaque)
                                   batch->stage_all, &result, &error);
     else if (batch->kind == AXYNE_CMD_GIT_PUSH)
         status = axyne_git_push(batch->workspace, &result, &error);
+    else if (batch->kind == AXYNE_CMD_GIT_LOG)
+        status = axyne_git_log(batch->workspace, 100, &result, &error);
     else
         status = axyne_git_pull(batch->workspace, &result, &error);
     if (result.output != NULL) {
@@ -1583,9 +1585,12 @@ static void axyne_git_batch_start(HWND window, AxyneWindowState *state, int comm
     static const char *const commit_arguments[] = { "commit" };
     static const char *const push_arguments[] = { "push" };
     static const char *const pull_arguments[] = { "pull", "--ff-only" };
+    static const char *const log_arguments[] = { "log", "-n", "100" };
     const char *const *arguments = command == AXYNE_CMD_GIT_COMMIT ? commit_arguments
-        : (command == AXYNE_CMD_GIT_PUSH ? push_arguments : pull_arguments);
-    size_t argument_count = command == AXYNE_CMD_GIT_PULL ? 2 : 1;
+        : (command == AXYNE_CMD_GIT_PUSH ? push_arguments
+        : (command == AXYNE_CMD_GIT_LOG ? log_arguments : pull_arguments));
+    size_t argument_count = command == AXYNE_CMD_GIT_PULL ? 2
+        : (command == AXYNE_CMD_GIT_LOG ? 3 : 1);
     AxyneGitBatch *batch;
     HANDLE thread;
     if (state->explorer.root == NULL) {
@@ -3885,6 +3890,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_COMMIT, L"Git 커밋...", NULL, git_flags);
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_PUSH, L"Git 푸시", NULL, git_flags);
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_PULL, L"Git 풀", NULL, git_flags);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_LOG, L"Git 기록 보기", NULL, git_flags);
     } else {
         axyne_menu_add(menu, &pool, AXYNE_CMD_SHORTCUTS, L"키보드 단축키 참조", NULL,
                        MF_ENABLED);
@@ -6162,6 +6168,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_GIT_PUSH)
             axyne_git_batch_start(window, state, command, NULL, 0);
         else if (command == AXYNE_CMD_GIT_PULL)
+            axyne_git_batch_start(window, state, command, NULL, 0);
+        else if (command == AXYNE_CMD_GIT_LOG)
             axyne_git_batch_start(window, state, command, NULL, 0);
         else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
         else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);

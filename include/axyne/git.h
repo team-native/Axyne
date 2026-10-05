@@ -58,6 +58,17 @@ AxyneStatus axyne_git_push(const char *utf8_workspace, AxyneGitResult *result,
                            AxyneError *error);
 AxyneStatus axyne_git_pull(const char *utf8_workspace, AxyneGitResult *result,
                            AxyneError *error);
+/* Commit history of the workspace's repository, newest first, as a
+ * ready-to-display report in the same layout as the commit/push/pull reports
+ * above: a "$ git log ..." header followed by one line per commit with
+ * tab-separated abbreviated hash, short date (YYYY-MM-DD), author and subject.
+ * max_count is clamped to 1..AXYNE_GIT_LOG_MAX_COUNT. A repository without
+ * commits is not an error: the report says so and the status is OK. A
+ * workspace that is not a repository returns AXYNE_STATUS_IO_ERROR with the
+ * explanatory report filled. Blocks until Git finishes (use a worker thread). */
+#define AXYNE_GIT_LOG_MAX_COUNT 500
+AxyneStatus axyne_git_log(const char *utf8_workspace, int max_count,
+                          AxyneGitResult *result, AxyneError *error);
 void axyne_git_result_free(AxyneGitResult *result);
 
 /* Resolves the Git executable to pass as AxyneProcessSpec.executable. On

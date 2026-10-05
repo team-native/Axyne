@@ -1031,6 +1031,49 @@ AxyneStatus axyne_git_pull(const char *utf8_workspace, AxyneGitResult *result,
     return axyne_git_sequence_finish(&sequence, result, error);
 }
 
+/* Commit history, newest first. One tab-separated line per commit:
+ * abbreviated hash, short date, author, subject. */
+AxyneStatus axyne_git_log(const char *utf8_workspace, int max_count,
+                          AxyneGitResult *result, AxyneError *error)
+{
+    char count_text[16];
+    const char *arguments[] = {
+        "--no-pager", "log", "-n", count_text, "--date=short",
+        "--pretty=format:%h%x09%ad%x09%an%x09%s"
+    };
+    const size_t argument_count = sizeof(arguments) / sizeof(arguments[0]);
+    AxyneGitSequence sequence;
+    AxyneGitResult step;
+    AxyneStatus status;
+
+    if (result == NULL)
+        return axyne_git_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "Git result is required");
+    axyne_git_init_result(result);
+    if (utf8_workspace == NULL || utf8_workspace[0] == '\0')
+        return axyne_git_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                               "Invalid Git request");
+    if (max_count < 1) max_count = 1;
+    if (max_count > AXYNE_GIT_LOG_MAX_COUNT) max_count = AXYNE_GIT_LOG_MAX_COUNT;
+    (void)snprintf(count_text, sizeof(count_text), "%d", max_count);
+    memset(&sequence, 0, sizeof(sequence));
+    status = axyne_git_step(utf8_workspace, arguments, argument_count, &step,
+                            error);
+    if (status != AXYNE_STATUS_OK) return status;
+    if (step.exit_code != 0 &&
+        axyne_git_view_contains(&step, "does not have any commits yet")) {
+        /* A repository without commits is not an error. */
+        free(step.output);
+        step.output = NULL;
+        step.length = 0;
+        step.exit_code = 0;
+    }
+    axyne_git_sequence_record(&sequence, arguments, argument_count, &step,
+                              "아직 커밋이 없습니다.", AXYNE_GIT_HINT_NONE);
+    axyne_git_result_free(&step);
+    return axyne_git_sequence_finish(&sequence, result, error);
+}
+
 void axyne_git_result_free(AxyneGitResult *result)
 {
     if (result == NULL) return;
