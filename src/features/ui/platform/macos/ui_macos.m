@@ -26,6 +26,7 @@
 #include "axyne/ui_design.h"
 #include "axyne/popup_menu_layout.h"
 #include "popup_menu_macos.h"
+#include "git_panel_macos.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "axyne/completion.h"
@@ -806,6 +807,10 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneMacGitRun *_gitRun;
     /* A commit, push or pull is running on a worker thread. */
     BOOL _gitBatchBusy;
+    /* Left sidebar tab: 0 explorer, 1 Git. The Git panel is created the first
+     * time its tab is shown and freed with the view. */
+    NSInteger _sidebarTab;
+    AxyneGitPanelView *_gitPanel;
     NSTextView *_terminalOutput;
     NSTextField *_terminalInput;
     NSButton *_terminalStart;
@@ -1016,7 +1021,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
         isEqualToString:[key lowercaseString]];
 }
 
-@interface AxyneWorkspaceView (AxyneActions) <AxynePopupMenuDelegate>
+@interface AxyneWorkspaceView (AxyneActions) <AxynePopupMenuDelegate, AxyneGitPanelDelegate>
 - (void)newDocument:(id)sender;
 - (void)openDocument:(id)sender;
 - (void)saveDocument:(id)sender;
@@ -1080,6 +1085,11 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)zoomResetEditor:(id)sender;
 - (void)toggleWordWrap:(id)sender;
 - (void)toggleExplorer:(id)sender;
+- (void)showGitPanel:(id)sender;
+- (void)selectSidebarTab:(NSInteger)tab;
+- (NSRect)sidebarTabRect:(NSInteger)tab;
+- (NSInteger)sidebarTabAtPoint:(NSPoint)point;
+- (AxyneGitPanelTheme)gitPanelTheme;
 - (void)togglePanel:(id)sender;
 - (void)cancelBuild:(id)sender;
 - (void)stopDebugger:(id)sender;
@@ -1893,7 +1903,13 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         return _editorView != nil && !emptyState;
     }
     if (action == @selector(toggleExplorer:)) {
-        [menuItem setState:_explorerHidden ? NSControlStateValueOff : NSControlStateValueOn];
+        [menuItem setState:!_explorerHidden && _sidebarTab == 0
+            ? NSControlStateValueOn : NSControlStateValueOff];
+        return YES;
+    }
+    if (action == @selector(showGitPanel:)) {
+        [menuItem setState:!_explorerHidden && _sidebarTab == 1
+            ? NSControlStateValueOn : NSControlStateValueOff];
         return YES;
     }
     if (action == @selector(togglePanel:)) {
@@ -2269,6 +2285,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [self updateBraceHighlight];
         [self applyEditorLexer];
     }
+    [self setNeedsLayout:YES]; /* the Git panel follows the theme in -layout */
     [self setNeedsDisplay:YES];
 }
 
@@ -2785,6 +2802,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             [self applyPreferences];
         } else [self applyPreferences];
     }
+    [_gitPanel workspaceChanged];
     [self setNeedsDisplay:YES];
     return YES;
 }
@@ -2819,6 +2837,9 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
             view->_refreshBox = NULL;
             view->_workspaceRefreshPending = NO;
             [view refreshExplorer];
+            /* File-watch events refresh the Git tab too, coalesced by the panel. */
+            if (view->_gitPanel != nil && view->_sidebarTab == 1 && !view->_explorerHidden)
+                [view->_gitPanel scheduleRefresh];
         }
         free(box);
     });
@@ -2867,8 +2888,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     const CGFloat explorerTop = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
     NSInteger slot;
-    if (_explorer.root == NULL || point.x < 0 || point.x >= [self sidebarWidth] ||
-        point.y < explorerTop || point.y >= bottom) return -1;
+    if (_sidebarTab != 0 || _explorer.root == NULL || point.x < 0 ||
+        point.x >= [self sidebarWidth] || point.y < explorerTop || point.y >= bottom) return -1;
     slot = (NSInteger)((point.y - explorerTop) / AXYNE_UI_ROW);
     if (explorerTop + (slot + 1) * AXYNE_UI_ROW > bottom) return -1;
     return slot;
@@ -2907,7 +2928,7 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     }
     CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
-    if (point.x < [self sidebarWidth] && point.y >= top && point.y < bottom) {
+    if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= top && point.y < bottom) {
         NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
         NSInteger maximum = MAX(0, (NSInteger)_explorer.count - visible);
         NSInteger delta = (NSInteger)ceil(fabs([event scrollingDeltaY]) /
@@ -3483,11 +3504,105 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         wParam:_preferences.editor.word_wrap ? 1 : 0 lParam:0];
 }
 
+/* View > Explorer: shows the sidebar on its explorer tab; from the Git tab it
+ * switches back to the explorer, and from the explorer tab it hides the
+ * sidebar. */
 - (void)toggleExplorer:(id)sender
 {
     (void)sender;
-    _explorerHidden = !_explorerHidden;
+    if (_explorerHidden) {
+        _explorerHidden = NO;
+        [self selectSidebarTab:0];
+        return;
+    }
+    if (_sidebarTab != 0) {
+        [self selectSidebarTab:0];
+        return;
+    }
+    _explorerHidden = YES;
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
+}
+
+/* View > Git Panel: shows the sidebar on its Git tab (and reloads it). */
+- (void)showGitPanel:(id)sender
+{
+    (void)sender;
+    _explorerHidden = NO;
+    [self selectSidebarTab:1];
+}
+
+- (void)selectSidebarTab:(NSInteger)tab
+{
+    if (tab != 0 && tab != 1) return;
+    _sidebarTab = tab;
+    if (tab == 1) {
+        if (_gitPanel == nil) {
+            _gitPanel = [[AxyneGitPanelView alloc] initWithFrame:NSZeroRect];
+            [_gitPanel setDelegate:self];
+            [_gitPanel setHidden:YES];
+            [self addSubview:_gitPanel];
+        }
+        [_gitPanel setHidden:NO];
+        [_gitPanel refresh];
+    } else if (_gitPanel != nil) {
+        NSResponder *responder = [[self window] firstResponder];
+        if ([responder isKindOfClass:[NSView class]] &&
+            [(NSView *)responder isDescendantOf:_gitPanel])
+            [[self window] makeFirstResponder:[self isEmptyState]
+                ? (NSResponder *)_emptyView : (NSResponder *)[(id)_editorView content]];
+        [_gitPanel setHidden:YES];
+        [_gitPanel unload];
+    }
+    [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
+}
+
+/* Sidebar header tab `tab` (0 explorer, 1 Git), sized to its label. */
+- (NSRect)sidebarTabRect:(NSInteger)tab
+{
+    NSDictionary *attributes = @{NSFontAttributeName: [NSFont systemFontOfSize:11]};
+    CGFloat first = ceil([@"탐색기" sizeWithAttributes:attributes].width) + 8;
+    CGFloat second = ceil([@"Git" sizeWithAttributes:attributes].width) + 8;
+    CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS;
+    if (tab == 0) return NSMakeRect(8, top, first, AXYNE_UI_EXPLORER_HEADER);
+    return NSMakeRect(8 + first + 8, top, second, AXYNE_UI_EXPLORER_HEADER);
+}
+
+- (NSInteger)sidebarTabAtPoint:(NSPoint)point
+{
+    for (NSInteger tab = 0; tab < 2; ++tab)
+        if (NSPointInRect(point, [self sidebarTabRect:tab])) return tab;
+    return -1;
+}
+
+- (AxyneGitPanelTheme)gitPanelTheme
+{
+    AxyneGitPanelTheme theme;
+    BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
+    memset(&theme, 0, sizeof(theme));
+    theme.background = _preferences.theme.background;
+    theme.panel = _preferences.theme.panel;
+    theme.toolbar = _preferences.theme.toolbar;
+    theme.border = _preferences.theme.border;
+    theme.text = _preferences.theme.text;
+    theme.muted = _preferences.theme.muted;
+    theme.accent = reference ? 0xa66bf0 : _preferences.theme.accent;
+    theme.light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
+        (_preferences.theme.preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
+    theme.reference = reference;
+    return theme;
+}
+
+/* AxyneGitPanelDelegate */
+- (const char *)gitPanelWorkspace:(AxyneGitPanelView *)panel
+{
+    (void)panel;
+    return _explorer.root;
+}
+
+- (void)gitPanelOpenWorkspace:(AxyneGitPanelView *)panel
+{
+    (void)panel;
+    [self openWorkspace:nil];
 }
 
 - (void)togglePanel:(id)sender
@@ -4015,7 +4130,14 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
             return;
         }
     }
-    if (point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
+    if (!_explorerHidden && point.x < [self sidebarWidth] - 1 &&
+        point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
+        point.y < AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER) {
+        NSInteger tab = [self sidebarTabAtPoint:point];
+        if (tab >= 0) [self selectSidebarTab:tab];
+        return;
+    }
+    if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
@@ -4064,6 +4186,9 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     NSInteger row = [self explorerNodeAtPoint:point];
+    /* The explorer's context menu does not apply to the Git tab. */
+    if (_sidebarTab != 0 && !_explorerHidden && point.x < [self sidebarWidth] &&
+        point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS) return;
     if (point.x >= [self sidebarWidth] || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
         point.y >= NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         [super rightMouseDown:event];
@@ -5194,6 +5319,19 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
         MAX(0, width - [self sidebarWidth]), MAX(0, bottomTop - editorTop))];
     [_emptyView setFrame:[_editorView frame]];
+    if (_gitPanel != nil) {
+        /* The Git tab fills the sidebar below its header, down to the status
+         * bar; it is hidden (and its results freed) while the explorer tab is
+         * shown or the sidebar is collapsed. */
+        BOOL showGit = !_explorerHidden && _sidebarTab == 1;
+        CGFloat gitTop = editorTop + AXYNE_UI_EXPLORER_HEADER;
+        AxyneGitPanelTheme gitTheme = [self gitPanelTheme];
+        [_gitPanel setTheme:&gitTheme];
+        [_gitPanel setFrame:NSMakeRect(0, gitTop, MAX(0, [self sidebarWidth] - 1),
+            MAX(0, NSHeight(bounds) - AXYNE_STATUS - gitTop))];
+        if ([_gitPanel isHidden] == showGit) [_gitPanel setHidden:!showGit];
+        if (!showGit) [_gitPanel unload];
+    }
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
@@ -5494,8 +5632,23 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     }
     [NSGraphicsContext restoreGraphicsState];
     if (!_explorerHidden) {
-        [self drawLabel:@"탐색기" at:NSMakePoint(12, editorTop + 8)
-            size:11 color:axyne_preference_color(light ? 0x68707d : 0x8b919b) family:@"SF Pro Text"];
+        /* Two-tab header: 탐색기 | Git. The active tab is bright with an
+         * accent underline, like the active editor tab. */
+        for (NSInteger sidebarTab = 0; sidebarTab < 2; ++sidebarTab) {
+            NSRect tabRect = [self sidebarTabRect:sidebarTab];
+            BOOL activeSidebarTab = sidebarTab == _sidebarTab;
+            [self drawLabel:sidebarTab == 0 ? @"탐색기" : @"Git"
+                at:NSMakePoint(NSMinX(tabRect) + 4, editorTop + 8) size:11
+                color:axyne_preference_color(activeSidebarTab ? (light ? 0x24272d : 0xe6e7ea)
+                    : (light ? 0x68707d : 0x8b919b)) family:@"SF Pro Text"];
+            if (activeSidebarTab) {
+                [axyne_preference_color(reference ? 0xa66bf0 : _preferences.theme.accent) setFill];
+                NSRectFill(NSMakeRect(NSMinX(tabRect), editorTop + AXYNE_UI_EXPLORER_HEADER - 2,
+                                      NSWidth(tabRect), 2));
+            }
+        }
+    }
+    if (!_explorerHidden && _sidebarTab == 0) {
         CGFloat explorerY = editorTop + AXYNE_UI_EXPLORER_HEADER;
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(NSMakeRect(0, explorerY, [self sidebarWidth] - 1, MAX(0, bottomTop - explorerY)));
@@ -5618,6 +5771,10 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_emptyView removeFromSuperview];
     [_emptyView release];
     _emptyView = nil;
+    [_gitPanel setDelegate:nil];
+    [_gitPanel removeFromSuperview];
+    [_gitPanel release];
+    _gitPanel = nil;
     [_newButton release]; [_openButton release]; [_saveButton release];
     [_undoButton release]; [_redoButton release];
     [_buildButton release]; [_runButton release];
@@ -6293,6 +6450,8 @@ static void axyne_install_menu(NSApplication *application,
         } else if (menuIndex == 2) {
             axyne_macos_add_item(submenu, @"탐색기", @selector(toggleExplorer:),
                 workspace, @"e", NSEventModifierFlagCommand | NSEventModifierFlagShift);
+            axyne_macos_add_item(submenu, @"Git 패널", @selector(showGitPanel:),
+                workspace, @"", 0);
             axyne_macos_add_item(submenu, @"하단 패널", @selector(togglePanel:),
                 workspace, @"j", NSEventModifierFlagCommand);
             [submenu addItem:[NSMenuItem separatorItem]];
