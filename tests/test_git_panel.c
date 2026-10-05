@@ -596,6 +596,175 @@ static int axyne_test_panel_graph(const char *root)
     return 1;
 }
 
+/* Structural lane invariants of a whole graph, independent of how the layout
+ * picks columns: every lane that leaves a row enters the next one; a commit
+ * has lanes ending in it exactly when a commit above lists it as a parent
+ * (JOIN or the dot's own UP, never more than the number of such edges); and
+ * every parent outside the loaded window keeps a lane running off the bottom
+ * (at least one per distinct parent, at most one per edge: a later parent
+ * that an open lane already waits for shares that lane). Returns the number
+ * of open lanes, or -1. */
+static int axyne_test_graph_invariants(const AxyneGitGraph *graph)
+{
+    size_t i, j, k, outside = 0, distinct = 0;
+    int open = 0, c;
+    for (i = 0; i < graph->count; ++i) {
+        const AxyneGitGraphRow *row = &graph->rows[i];
+        size_t edges = 0;
+        int ended = 0, dots = 0;
+        for (j = 0; j < i; ++j)
+            for (k = 0; k < graph->rows[j].parent_count; ++k)
+                if (strcmp(graph->rows[j].parents[k], row->hash) == 0) ++edges;
+        for (c = 0; c < row->lane_count; ++c) {
+            unsigned flags = row->lanes[c].flags;
+            if (flags & AXYNE_GIT_LANE_DOT) ++dots;
+            if (flags & AXYNE_GIT_LANE_JOIN) ++ended;
+            if ((flags & AXYNE_GIT_LANE_DOT) && (flags & AXYNE_GIT_LANE_UP)) ++ended;
+        }
+        if (dots != 1 || row->column >= row->lane_count ||
+            !(row->lanes[row->column].flags & AXYNE_GIT_LANE_DOT)) return -1;
+        if ((edges > 0) != (ended > 0) || (size_t)ended > edges) return -1;
+        /* The lane count may not shrink past a lane that continues. */
+        if (i + 1 < graph->count) {
+            const AxyneGitGraphRow *next = &graph->rows[i + 1];
+            for (c = 0; c < row->lane_count; ++c) {
+                int down = (row->lanes[c].flags & AXYNE_GIT_LANE_DOWN) != 0;
+                int up = c < next->lane_count &&
+                         (next->lanes[c].flags & AXYNE_GIT_LANE_UP) != 0;
+                if (down != up) return -1;
+            }
+            for (c = row->lane_count; c < next->lane_count; ++c)
+                if (next->lanes[c].flags & AXYNE_GIT_LANE_UP) return -1;
+        }
+        for (k = 0; k < row->parent_count; ++k) {
+            int inside = 0;
+            for (j = i + 1; j < graph->count; ++j)
+                if (strcmp(graph->rows[j].hash, row->parents[k]) == 0) inside = 1;
+            if (!inside) {
+                int seen = 0;
+                size_t a, b;
+                ++outside;
+                for (a = 0; a <= i && !seen; ++a)
+                    for (b = 0; b < graph->rows[a].parent_count && !seen; ++b)
+                        if (strcmp(graph->rows[a].parents[b], row->parents[k]) == 0 &&
+                            (a < i || b < k)) seen = 1;
+                if (!seen) ++distinct;
+            }
+        }
+    }
+    if (graph->count > 0) {
+        const AxyneGitGraphRow *last = &graph->rows[graph->count - 1];
+        for (c = 0; c < last->lane_count; ++c)
+            if (last->lanes[c].flags & AXYNE_GIT_LANE_DOWN) ++open;
+    }
+    return (size_t)open >= distinct && (size_t)open <= outside ? open : -1;
+}
+
+/* A lane must stay a straight UP|DOWN line from the row below its branch tip
+ * until the row of the commit it waits for, where it ends in a JOIN. */
+static int axyne_test_lane_runs(const AxyneGitGraph *graph, const char *from,
+                                const char *to, int lane)
+{
+    const AxyneGitGraphRow *top = axyne_test_row(graph, from);
+    const AxyneGitGraphRow *bottom = axyne_test_row(graph, to);
+    const AxyneGitGraphRow *row;
+    if (top == NULL || bottom == NULL || top >= bottom) return 0;
+    for (row = top + 1; row < bottom; ++row) {
+        if (lane >= row->lane_count) return 0;
+        if (row->column != lane &&
+            row->lanes[lane].flags != (AXYNE_GIT_LANE_UP | AXYNE_GIT_LANE_DOWN))
+            return 0;
+    }
+    return lane < bottom->lane_count &&
+           bottom->lanes[lane].flags == (AXYNE_GIT_LANE_UP | AXYNE_GIT_LANE_JOIN);
+}
+
+/* Long-lived side branches forked from old commits of a squash-merged
+ * (linear) main, octopus and criss-cross merges, and a window that cuts the
+ * history before the branches reach their fork commits. */
+static int axyne_test_panel_graph_lanes(const char *root)
+{
+    char longlived[1024], tangled[1024], out[8192];
+    AxyneGitGraph graph = {0};
+    AxyneError error = {0};
+    const AxyneGitGraphRow *row, *join;
+    int c, joins;
+
+    AXYNE_TEST_CHECK(axyne_test_path(longlived, sizeof(longlived), root, "g-long"));
+    AXYNE_TEST_CHECK(axyne_test_path(tangled, sizeof(tangled), root, "g-tangled"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(longlived));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(tangled));
+#define AXYNE_TEST_MK_FUNCTIONS \
+    "T=$(git mktree </dev/null) && " \
+    "mk() { n=$1; d=$2; shift 2; h=$(GIT_AUTHOR_DATE=\"@$d +0000\" GIT_COMMITTER_DATE=\"@$d +0000\" git commit-tree \"$T\" \"$@\" -m \"$n\") && git update-ref refs/n/$n $h; } && " \
+    "r() { git rev-parse refs/n/$1; } && "
+
+    /* main M1..M30 is linear; side1 (6 commits) forks from M3 and side2
+     * (3 commits) from M5, both dated between later main commits, so each
+     * lane has to run past many main rows before it meets its fork commit. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && " AXYNE_TEST_MK_FUNCTIONS
+        "mk M1 1100 && for i in $(seq 2 30); do mk M$i $((1000+i*100)) -p $(r M$((i-1))); done && "
+        "mk S1 2050 -p $(r M3) && for i in 2 3 4 5 6; do mk S$i $((2000+i*100+50)) -p $(r S$((i-1))); done && "
+        "mk T1 2260 -p $(r M5) && mk T2 2360 -p $(r T1) && mk T3 2460 -p $(r T2) && "
+        "git update-ref refs/heads/main $(r M30) && git update-ref refs/heads/side1 $(r S6) && "
+        "git update-ref refs/heads/side2 $(r T3) && "
+        "git for-each-ref --format='delete %%(refname)' refs/n | git update-ref --stdin", longlived), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(longlived, AXYNE_GIT_GRAPH_DEFAULT_COUNT, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 39);
+    AXYNE_TEST_EQ_INT(axyne_test_graph_invariants(&graph), 0);
+    /* Each side lane ends in a JOIN at exactly its fork commit. */
+    row = axyne_test_row(&graph, "S1");
+    AXYNE_TEST_CHECK(row != NULL && row->column >= 1);
+    AXYNE_TEST_CHECK(axyne_test_lane_runs(&graph, "S1", "M3", row->column));
+    row = axyne_test_row(&graph, "T1");
+    AXYNE_TEST_CHECK(row != NULL && row->column >= 1);
+    AXYNE_TEST_CHECK(axyne_test_lane_runs(&graph, "T1", "M5", row->column));
+    joins = 0;
+    for (row = graph.rows; row < graph.rows + graph.count; ++row)
+        for (c = 0; c < row->lane_count; ++c)
+            if (row->lanes[c].flags & AXYNE_GIT_LANE_JOIN) ++joins;
+    AXYNE_TEST_EQ_INT(joins, 2);
+    join = axyne_test_row(&graph, "M3");
+    AXYNE_TEST_CHECK(join != NULL && join->column == 0);
+    axyne_git_graph_free(&graph);
+
+    /* A window that ends before the fork commits leaves both lanes running
+     * off the bottom (nothing is joined, nothing is dropped). */
+    AXYNE_TEST_STATUS(axyne_git_graph(longlived, 20, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 20);
+    AXYNE_TEST_CHECK(axyne_test_graph_invariants(&graph) >= 1);
+    axyne_git_graph_free(&graph);
+    for (c = 1; c <= 39; ++c) {
+        AXYNE_TEST_STATUS(axyne_git_graph(longlived, c, &graph, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(axyne_test_graph_invariants(&graph) >= 0);
+        axyne_git_graph_free(&graph);
+    }
+
+    /* Criss-cross merges (X2 = X1+Y1, Y2 = Y1+X1) and an octopus merge
+     * (O = X2, Y2, Z1, Y1) whose parents include an already running lane. */
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && " AXYNE_TEST_MK_FUNCTIONS
+        "mk A 1000 && mk X1 1100 -p $(r A) && mk Y1 1200 -p $(r A) && mk Z1 1300 -p $(r A) && "
+        "mk X2 1400 -p $(r X1) -p $(r Y1) && mk Y2 1500 -p $(r Y1) -p $(r X1) && "
+        "mk O 1600 -p $(r X2) -p $(r Y2) -p $(r Z1) -p $(r Y1) && "
+        "git update-ref refs/heads/main $(r O) && "
+        "git for-each-ref --format='delete %%(refname)' refs/n | git update-ref --stdin", tangled), 0);
+    AXYNE_TEST_STATUS(axyne_git_graph(tangled, 100, &graph, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(graph.count, 7);
+    AXYNE_TEST_EQ_INT(axyne_test_graph_invariants(&graph), 0);
+    row = axyne_test_row(&graph, "O");
+    AXYNE_TEST_CHECK(row != NULL && row == &graph.rows[0] && row->parent_count == 4);
+    axyne_git_graph_free(&graph);
+    for (c = 1; c <= 7; ++c) {
+        AXYNE_TEST_STATUS(axyne_git_graph(tangled, c, &graph, &error), AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(axyne_test_graph_invariants(&graph) >= 0);
+        axyne_git_graph_free(&graph);
+    }
+#undef AXYNE_TEST_MK_FUNCTIONS
+    return 1;
+}
+
 static const AxyneGitChange *axyne_test_find_kind(const AxyneGitChanges *changes,
                                                   const char *path, char kind)
 {
@@ -803,6 +972,7 @@ static int axyne_test_git_panel_run(const char *root)
     axyne_test_setup_environment(root);
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
+    AXYNE_TEST_CHECK(axyne_test_panel_graph_lanes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_details(root));
     return 1;
 }
