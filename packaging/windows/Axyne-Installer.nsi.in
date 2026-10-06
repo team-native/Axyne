@@ -30,6 +30,7 @@ Var AxyneLaunchCheckbox
 Var AxyneInstallPath
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "@CMAKE_CURRENT_SOURCE_DIR@\packaging\windows\Axyne.ico"
 !define MUI_HEADERIMAGE
 !define MUI_HEADERIMAGE_RIGHT
 !define MUI_WELCOMEPAGE_TITLE "Install Axyne"
@@ -44,19 +45,6 @@ Page custom AxyneFinishPage AxyneFinishLeave
 
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Korean"
-
-Function AxyneApplyPageColors
-    Pop $0
-    SetCtlColors $0 "${AXYNE_TEXT}" "${AXYNE_BG}"
-FunctionEnd
-
-Function AxyneCreateLabel
-    Exch $0
-    ${NSD_CreateLabel} $1 $2 $3 $4 $0
-    Pop $0
-    SetCtlColors $0 "${AXYNE_TEXT}" "${AXYNE_BG}"
-    Exch $0
-FunctionEnd
 
 Function AxyneWelcomePage
     nsDialogs::Create 1018
@@ -177,6 +165,7 @@ Section "Axyne" SecAxyne
     File "@CMAKE_CURRENT_BINARY_DIR@\axyne.exe"
     File "@CMAKE_CURRENT_BINARY_DIR@\Scintilla.dll"
     File "@CMAKE_CURRENT_BINARY_DIR@\Lexilla.dll"
+@AXYNE_MSVC_RUNTIME_NSIS_FILES@
     File "@CMAKE_CURRENT_BINARY_DIR@\version.json"
     File "@CMAKE_CURRENT_BINARY_DIR@\Scintilla-LICENSE.txt"
     File "@CMAKE_CURRENT_BINARY_DIR@\Lexilla-LICENSE.txt"

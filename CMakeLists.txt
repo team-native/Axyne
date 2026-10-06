@@ -348,6 +348,30 @@ if(WIN32 OR APPLE)
 endif()
 
 if(WIN32)
+    set(AXYNE_MSVC_RUNTIME_NSIS_FILES "")
+    if(MSVC)
+        foreach(AXYNE_MSVC_RUNTIME_NAME
+                msvcp140.dll
+                vcruntime140.dll
+                vcruntime140_1.dll)
+            find_file(AXYNE_MSVC_RUNTIME_FILE
+                NAMES "${AXYNE_MSVC_RUNTIME_NAME}"
+                PATHS
+                    "$ENV{VCToolsRedistDir}/x64/Microsoft.VC143.CRT"
+                    "$ENV{SystemRoot}/System32"
+                NO_DEFAULT_PATH)
+            if(AXYNE_MSVC_RUNTIME_FILE)
+                configure_file(
+                    "${AXYNE_MSVC_RUNTIME_FILE}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/${AXYNE_MSVC_RUNTIME_NAME}"
+                    COPYONLY
+                )
+                string(APPEND AXYNE_MSVC_RUNTIME_NSIS_FILES
+                    "    File \"${CMAKE_CURRENT_BINARY_DIR}\\${AXYNE_MSVC_RUNTIME_NAME}\"\n")
+            endif()
+            unset(AXYNE_MSVC_RUNTIME_FILE CACHE)
+        endforeach()
+    endif()
     find_program(AXYNE_NSIS_EXECUTABLE
         NAMES makensis.exe makensis
         DOC "NSIS compiler used for the custom Windows installer")
