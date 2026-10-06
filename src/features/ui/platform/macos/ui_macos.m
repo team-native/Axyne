@@ -751,6 +751,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
 @interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
     NSView *_editorView;
     AxyneEmptyEditorView *_emptyView;
+    NSImageView *_imagePreview;
     BOOL _emptyShown;
     BOOL _emptyGuideDirty;
     NSBundle *_scintillaBundle;
@@ -1428,6 +1429,20 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return [button retain];
 }
 
+/* Documents with these extensions are previewed as images instead of being
+ * shown as (binary) text in the editor. */
+static BOOL axyne_macos_is_image_path(const char *path)
+{
+    static const char *const extensions[] = {
+        ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff",
+        ".bmp", ".webp", ".svg", ".ico" };
+    const char *extension = path == NULL ? NULL : strrchr(path, '.');
+    if (extension == NULL || strchr(extension, '/') != NULL) return NO;
+    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i)
+        if (strcasecmp(extension, extensions[i]) == 0) return YES;
+    return NO;
+}
+
 @implementation AxyneWorkspaceView
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -1505,6 +1520,14 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         _emptyView = [[AxyneEmptyEditorView alloc] initWithFrame:NSZeroRect];
         [_emptyView setHidden:YES];
         [self addSubview:_emptyView];
+        _imagePreview = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        [_imagePreview setImageScaling:NSImageScaleProportionallyUpOrDown];
+        [_imagePreview setImageAlignment:NSImageAlignCenter];
+        [_imagePreview setImageFrameStyle:NSImageFrameNone];
+        [_imagePreview setEditable:NO];
+        [_imagePreview setWantsLayer:YES];
+        [_imagePreview setHidden:YES];
+        [self addSubview:_imagePreview];
         _emptyGuideDirty = YES;
         _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
         _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
@@ -1625,6 +1648,15 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     return axyne_documents_empty_state(&_documents) != 0;
 }
 
+/* An image document is previewed in place of the editor while its file
+ * decodes; otherwise its empty read-only buffer stays visible. */
+- (BOOL)imagePreviewShown
+{
+    AxyneDocument *doc = [self activeDocument];
+    return _imagePreview != nil && [_imagePreview image] != nil &&
+        doc != NULL && doc->is_image && ![self isEmptyState];
+}
+
 - (void)applyEmptyGuideTheme
 {
     BOOL reference = axyne_macos_reference_surfaces(&_preferences.theme);
@@ -1636,6 +1668,8 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         keyTextColor:axyne_preference_color(figma ? 0xd5d8dd : _preferences.theme.text)
         chipFillColor:axyne_preference_color(figma ? 0x1f2126 : _preferences.theme.panel)
         chipStrokeColor:axyne_preference_color(figma ? 0x2a2d33 : _preferences.theme.border)];
+    [[_imagePreview layer] setBackgroundColor:
+        [axyne_preference_color(_preferences.theme.editor_background) CGColor]];
     _emptyGuideDirty = YES;
     [self updateEmptyState];
 }
@@ -1667,16 +1701,24 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
         [_emptyView setGuideRows:rows];
         _emptyGuideDirty = NO;
     }
-    if (empty == _emptyShown && [_emptyView isHidden] == !empty) return;
+    BOOL preview = !empty && [self imagePreviewShown];
+    BOOL previewChanged = [_imagePreview isHidden] == preview;
+    if (!previewChanged && empty == _emptyShown && [_emptyView isHidden] == !empty) return;
     _emptyShown = empty;
     [_emptyView setHidden:!empty];
-    [_editorView setHidden:empty];
+    [_imagePreview setHidden:!preview];
+    [_editorView setHidden:empty || preview];
     if (empty) {
         /* A hidden Scintilla view must not keep the keyboard. */
         NSResponder *responder = [window firstResponder];
         if (window != nil && (responder == nil || ![responder isKindOfClass:[NSView class]] ||
             [(NSView *)responder isDescendantOf:_editorView]))
             (void)[window makeFirstResponder:_emptyView];
+    } else if (preview) {
+        NSResponder *responder = [window firstResponder];
+        if (window != nil && [responder isKindOfClass:[NSView class]] &&
+            [(NSView *)responder isDescendantOf:_editorView])
+            (void)[window makeFirstResponder:nil];
     }
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
@@ -2477,18 +2519,27 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     BOOL loaded = axyne_editor_load_document(doc, axyne_macos_editor_message, self);
     _loadingEditor = NO;
     if (!loaded) return NO;
+    NSImage *image = nil;
+    if (doc->is_image && doc->path != NULL) {
+        NSString *imagePath = [NSString stringWithUTF8String:doc->path];
+        if (imagePath != nil)
+            image = [[[NSImage alloc] initWithContentsOfFile:imagePath] autorelease];
+    }
+    [_imagePreview setImage:image];
     [self applyPreferences];
     [self applyEditorLexer];
-    /* Virtual (Git diff) documents are read-only; the flag belongs to the
-     * Scintilla document, so every other tab is explicitly writable. */
-    (void)[self sendEditorMessage:SCI_SETREADONLY wParam:doc->is_virtual ? 1 : 0 lParam:0];
+    /* Virtual (Git diff) and image documents are read-only; the flag belongs
+     * to the Scintilla document, so every other tab is explicitly writable. */
+    (void)[self sendEditorMessage:SCI_SETREADONLY
+                           wParam:doc->is_virtual || doc->is_image ? 1 : 0 lParam:0];
     [self updateLineNumberMargin];
     [self updateBraceHighlight];
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
-    /* In the empty state the editor stays hidden and keeps no focus. */
-    if ([self window] != nil && ![self isEmptyState])
+    /* In the empty state and behind an image preview the editor stays hidden
+     * and keeps no focus. */
+    if ([self window] != nil && ![self isEmptyState] && ![self imagePreviewShown])
         [[self window] makeFirstResponder:[(id)_editorView content]];
     return YES;
 }
@@ -2689,7 +2740,14 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     AxyneError error;
     memset(&evicted, 0, sizeof(evicted));
     memset(&error, 0, sizeof(error));
-    AxyneStatus status = preview
+    /* Image files that AppKit can decode open as image documents (previewed,
+     * never read as text); everything else goes through the text open. */
+    BOOL imageFile = axyne_macos_is_image_path([path UTF8String]) &&
+        [[[NSImage alloc] initWithContentsOfFile:path] autorelease] != nil;
+    AxyneStatus status = imageFile
+        ? axyne_documents_open_image(&_documents, [path UTF8String], preview ? 1 : 0,
+                                     &index, &evicted, &replaced, &error)
+        : preview
         ? axyne_documents_open_preview(&_documents, [path UTF8String], &index,
                                        &evicted, &replaced, &error)
         : axyne_documents_open(&_documents, [path UTF8String], &index, &error);
@@ -5428,6 +5486,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
         MAX(0, width - [self sidebarWidth]), MAX(0, bottomTop - editorTop))];
     [_emptyView setFrame:[_editorView frame]];
+    [_imagePreview setFrame:[_editorView frame]];
     if (_gitPanel != nil) {
         /* The Git tab fills the sidebar below its header, down to the status
          * bar; it is hidden (and its results freed) while the explorer tab is
@@ -5881,6 +5940,9 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_emptyView removeFromSuperview];
     [_emptyView release];
     _emptyView = nil;
+    [_imagePreview removeFromSuperview];
+    [_imagePreview release];
+    _imagePreview = nil;
     [_gitPanel setDelegate:nil];
     [_gitPanel removeFromSuperview];
     [_gitPanel release];
