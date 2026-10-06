@@ -1437,7 +1437,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff",
         ".bmp", ".webp", ".svg", ".ico" };
     const char *extension = path == NULL ? NULL : strrchr(path, '.');
-    if (extension == NULL || strchr(extension, '/') != NULL) return NO;
+    /* A dot inside a directory name or starting a dotfile is not an extension. */
+    if (extension == NULL || extension == path || extension[-1] == '/' ||
+        strchr(extension, '/') != NULL) return NO;
     for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i)
         if (strcasecmp(extension, extensions[i]) == 0) return YES;
     return NO;
@@ -3468,7 +3470,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (BOOL)editorActionable
 {
     return _editorView != nil && ![self isEmptyState] &&
-        [self activeDocument] != NULL && [self externalTextResponder] == nil;
+        [self activeDocument] != NULL && ![self activeDocument]->is_image &&
+        [self externalTextResponder] == nil;
 }
 
 - (void)goToLine:(id)sender
