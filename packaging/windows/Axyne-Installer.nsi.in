@@ -5,9 +5,9 @@ XPStyle on
 Name "Axyne"
 Caption "Install Axyne"
 OutFile "@AXYNE_WINDOWS_INSTALLER_OUTPUT@"
-InstallDir "$PROGRAMFILES64\Axyne"
-InstallDirRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation"
-RequestExecutionLevel admin
+InstallDir "$LOCALAPPDATA\Programs\Axyne"
+InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation"
+RequestExecutionLevel user
 ShowInstDetails show
 AutoCloseWindow false
 
@@ -176,10 +176,10 @@ Section "Axyne" SecAxyne
     CreateShortcut "$SMPROGRAMS\Axyne\Axyne.lnk" "$INSTDIR\axyne.exe"
     CreateShortcut "$DESKTOP\Axyne.lnk" "$INSTDIR\axyne.exe"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayName" "Axyne"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayVersion" "@PROJECT_VERSION@"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation" "$INSTDIR"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "UninstallString" "$INSTDIR\Uninstall.exe"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayName" "Axyne"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayVersion" "@PROJECT_VERSION@"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation" "$INSTDIR"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "UninstallString" "$INSTDIR\Uninstall.exe"
 SectionEnd
 
 Section "Uninstall"
@@ -187,6 +187,6 @@ Section "Uninstall"
     RMDir "$SMPROGRAMS\Axyne"
     Delete "$DESKTOP\Axyne.lnk"
     Delete "$INSTDIR\*.*"
-    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne"
+    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne"
     RMDir "$INSTDIR"
 SectionEnd
