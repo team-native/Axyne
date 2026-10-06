@@ -1075,6 +1075,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)closePopupMenu;
 - (void)setMenuHover:(NSInteger)index;
 - (BOOL)editorActionable;
+- (BOOL)activeIsImage;
 - (void)goToLine:(id)sender;
 - (void)selectLine:(id)sender;
 - (void)toggleLineComment:(id)sender;
@@ -1523,7 +1524,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_emptyView setHidden:YES];
         [self addSubview:_emptyView];
         _imagePreview = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        [_imagePreview setImageScaling:NSImageScaleProportionallyUpOrDown];
+        [_imagePreview setImageScaling:NSImageScaleProportionallyDown];
         [_imagePreview setImageAlignment:NSImageAlignCenter];
         [_imagePreview setImageFrameStyle:NSImageFrameNone];
         [_imagePreview setEditable:NO];
@@ -1648,6 +1649,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (BOOL)isEmptyState
 {
     return axyne_documents_empty_state(&_documents) != 0;
+}
+
+/* The active document is an image preview: it has no source text. */
+- (BOOL)activeIsImage
+{
+    AxyneDocument *doc = [self isEmptyState] ? NULL : [self activeDocument];
+    return doc != NULL && doc->is_image;
 }
 
 /* An image document is previewed in place of the editor while its file
@@ -1897,7 +1905,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
     BOOL emptyState = [self isEmptyState];
     AxyneDocument *document = emptyState ? NULL : [self activeDocument];
     BOOL hasDocument = document != NULL;
-    BOOL savedDocument = hasDocument && !document->is_untitled &&
+    /* An image preview has no source text to build, debug, analyse or search. */
+    BOOL textDocument = hasDocument && !document->is_image;
+    BOOL savedDocument = textDocument && !document->is_untitled &&
         document->path != NULL && !document->is_dirty;
     BOOL terminalActive = _terminalProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
@@ -1908,7 +1918,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return hasDocument;
     if (action == @selector(buildDocument:) ||
         action == @selector(runDocument:))
-        return hasDocument && !terminalActive && !debuggerActive;
+        return textDocument && !terminalActive && !debuggerActive;
     if (action == @selector(startDebugger:))
         return savedDocument && !terminalActive && !debuggerActive;
     if (action == @selector(debugCommand:))
@@ -1932,7 +1942,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (action == @selector(navigateLspReferences:)) return savedDocument;
     if (action == @selector(findInDocument:) ||
         action == @selector(replaceInDocument:))
-        return hasDocument && _editorView != nil;
+        return textDocument && _editorView != nil;
     if (action == @selector(goToLine:) || action == @selector(selectLine:) ||
         action == @selector(duplicateLine:) || action == @selector(moveLineUp:) ||
         action == @selector(moveLineDown:) || action == @selector(indentSelection:) ||
@@ -2483,7 +2493,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     uint64_t requestID = 0;
     NSInteger current, line, lineStart;
     BOOL references = [sender tag] != 0;
-    if (![self captureEditor] || ![self openLspForActive]) return;
+    if ([self activeIsImage] || ![self captureEditor] || ![self openLspForActive]) return;
     doc = [self activeDocument];
     current = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
     line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:(uintptr_t)current lParam:0];
@@ -4917,7 +4927,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 
 - (void)findOrReplace:(BOOL)replace
 {
-    if ([self isEmptyState]) return;
+    if ([self isEmptyState] || [self activeIsImage]) return;
     NSString *q = [self askForText:replace ? @"Replace" : @"Find" label:@"Find text"];
     if ([q length] == 0 || ![self captureEditor]) return;
     NSString *r = replace ? [self askForText:@"Replace" label:@"Replace with"] : nil;
@@ -5106,7 +5116,8 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     AxyneDocument *document;
     AxyneError error;
     (void)sender;
-    if (axyne_debugger_is_active(&_debugger) || ![self captureEditor]) return;
+    if (axyne_debugger_is_active(&_debugger) || [self activeIsImage] ||
+        ![self captureEditor]) return;
     if (_terminalProcess != NULL) {
         const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
         [self terminalAppend:message length:strlen(message)
@@ -5152,7 +5163,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     size_t position;
     size_t line;
     (void)sender;
-    if (document == NULL || document->path == NULL) return;
+    if (document == NULL || document->path == NULL || document->is_image) return;
     position = (size_t)[self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
     line = (size_t)[self sendEditorMessage:2166 wParam:position lParam:0] + 1;
     if (axyne_debugger_toggle_breakpoint(&_debugger, document->path, line,
@@ -5398,14 +5409,14 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
 - (void)buildDocument:(id)sender
 {
     (void)sender;
-    if ([self isEmptyState]) return;
+    if ([self isEmptyState] || [self activeIsImage]) return;
     [self startAction:NO];
 }
 
 - (void)runDocument:(id)sender
 {
     (void)sender;
-    if ([self isEmptyState]) return;
+    if ([self isEmptyState] || [self activeIsImage]) return;
     [self startAction:YES];
 }
 
