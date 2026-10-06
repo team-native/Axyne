@@ -102,6 +102,9 @@ static const AxyneSyntaxStyle diff_styles[] = {
     "size_t ssize_t ptrdiff_t intptr_t uintptr_t int8_t int16_t int32_t " \
     "int64_t uint8_t uint16_t uint32_t uint64_t FILE"
 
+/* SCE_MARKDOWN_HEADER1..6 draw bold so headings stand out from body text. */
+static const unsigned int markdown_bold[] = { 6, 7, 8, 9, 10, 11 };
+
 static const AxyneSyntaxLanguage languages[] = {
     { "cpp", "cpp",
       { C_KW " class namespace new delete template typename this public "
@@ -323,6 +326,16 @@ const AxyneSyntaxLanguage *axyne_syntax_by_id(const char *id)
     for (i = 0; i < sizeof(languages) / sizeof(languages[0]); ++i)
         if (strcmp(languages[i].id, id) == 0) return &languages[i];
     return NULL;
+}
+
+int axyne_syntax_style_bold(const AxyneSyntaxLanguage *language,
+                            unsigned int style)
+{
+    size_t i;
+    if (language == NULL || strcmp(language->id, "markdown") != 0) return 0;
+    for (i = 0; i < sizeof(markdown_bold) / sizeof(markdown_bold[0]); ++i)
+        if (markdown_bold[i] == style) return 1;
+    return 0;
 }
 
 /* Language id for the `length` characters at `extension` (no dot); NULL when

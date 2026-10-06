@@ -67,7 +67,13 @@ int main(void)
     expect(".h.in", "text", "null");
 
     {
+        const AxyneSyntaxLanguage *md = axyne_syntax_by_id("markdown");
         const AxyneSyntaxLanguage *cmake = axyne_syntax_by_id("cmake");
+        unsigned int style;
+        for (style = 0; style < 32; ++style)
+            CHECK(axyne_syntax_style_bold(md, style) == (style >= 6 && style <= 11));
+        CHECK(!axyne_syntax_style_bold(axyne_syntax_by_id("cpp"), 6));
+        CHECK(!axyne_syntax_style_bold(NULL, 6));
         CHECK(cmake != NULL && cmake->keywords[0] != NULL &&
               strstr(cmake->keywords[0], "target_link_options") != NULL);
         CHECK(cmake != NULL && cmake->keywords[2] != NULL &&

@@ -37,4 +37,10 @@ const AxyneSyntaxLanguage *axyne_syntax_for_path(const char *path);
 /* Looks a language up by its id; NULL when unknown. */
 const AxyneSyntaxLanguage *axyne_syntax_by_id(const char *id);
 
+/* Nonzero when `style` of `language` draws bold (SCI_STYLESETBOLD); adapters
+ * send 0 for every other lexer-owned style so a language switch cannot leak
+ * weight. Only Markdown headings are bold. */
+int axyne_syntax_style_bold(const AxyneSyntaxLanguage *language,
+                            unsigned int style);
+
 #endif

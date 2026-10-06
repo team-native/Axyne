@@ -2056,6 +2056,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
         if (style >= 32 && style < 40) continue;
         (void)[self sendEditorMessage:SCI_STYLESETFORE wParam:style
             lParam:axyne_editor_color(_preferences.theme.editor_text)];
+        (void)[self sendEditorMessage:SCI_STYLESETBOLD wParam:style
+            lParam:axyne_syntax_style_bold(language, style)];
     }
     for (unsigned int set = 0; set < AXYNE_SYNTAX_KEYWORD_SETS; ++set) {
         if (language->keywords[set] == NULL) continue;
