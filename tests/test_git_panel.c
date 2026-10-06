@@ -827,13 +827,14 @@ static int axyne_test_graph_text_position(void)
     row.lane_count = 4;
     row.lanes = lanes;
     /* The FORK stroke in cell 2 is the rightmost mark; empty cell 3 is not. */
-    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, ~0u, 1), 2);
-    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, AXYNE_GIT_LANE_DOWN, 0), 0);
-    lanes[2].flags = 0;
-    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, ~0u, 1), 1);
-    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, AXYNE_GIT_LANE_JOIN, 0), -1);
-    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 12, 1, 5, 6) == 10 + 18 + 5 + 6);
-    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 12, -1, 5, 6) == 16);
+    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, ~0u), 2);
+    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, AXYNE_GIT_LANE_DOWN), 0);
+    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, AXYNE_GIT_LANE_JOIN), -1);
+    /* Stroke in cell 2 beyond the dot in cell 1, then a narrow cell where the
+     * wide HEAD ring reaches past the stroke to its right. */
+    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 12, 2, 1, 1, 5, 6) == 10 + 30 + 1 + 6);
+    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 4, 2, 1, 1, 7, 6) == 10 + 6 + 7 + 6);
+    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 12, -1, 1, -1, 0, 6) == 16);
     return 1;
 }
 

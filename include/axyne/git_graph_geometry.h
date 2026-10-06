@@ -13,27 +13,32 @@ static inline double axyne_git_graph_lane_width(int lanes, double preferred,
     return preferred * lanes <= strip_limit ? preferred : strip_limit / lanes;
 }
 
-/* Rightmost cell a row actually draws in: the dot column (when `with_dot`)
- * or the last lane whose flags intersect `mask`. -1 when nothing is drawn. */
+/* Rightmost lane of a row whose flags intersect `mask`; -1 when none. */
 static inline int axyne_git_graph_last_cell(const AxyneGitGraphRow *row,
-                                           unsigned mask, int with_dot)
+                                           unsigned mask)
 {
-    int last = with_dot ? row->column : -1;
     int i;
-    for (i = row->lane_count - 1; i > last; --i)
+    for (i = row->lane_count - 1; i >= 0; --i)
         if ((row->lanes[i].flags & mask) != 0) return i;
-    return last;
+    return -1;
 }
 
 /* Row text starts right after the row's own rightmost mark rather than after
- * the whole graph strip: `reach` is how far that mark extends past its cell
- * centre (dot radius or half a stroke), `margin` the gap before the text. */
+ * the whole graph strip: whichever reaches further of the strokes up to
+ * `stroke_cell` (half a stroke past the centre) and the dot in `dot_cell`
+ * (its radius), then `margin`. A cell of -1 draws nothing. `left` is the
+ * centre offset of cell 0 minus half a cell. */
 static inline double axyne_git_graph_text_x(double left, double lane_width,
-                                           int last_cell, double reach,
+                                           int stroke_cell, double stroke_reach,
+                                           int dot_cell, double dot_reach,
                                            double margin)
 {
-    if (last_cell < 0) return left + margin;
-    return left + (last_cell + 0.5) * lane_width + reach + margin;
+    double edge = left;
+    double stroke = left + (stroke_cell + 0.5) * lane_width + stroke_reach;
+    double dot = left + (dot_cell + 0.5) * lane_width + dot_reach;
+    if (stroke_cell >= 0 && stroke > edge) edge = stroke;
+    if (dot_cell >= 0 && dot > edge) edge = dot;
+    return edge + margin;
 }
 
 #endif

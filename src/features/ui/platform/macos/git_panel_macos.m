@@ -1493,10 +1493,11 @@ static char *gp_diff_title(const char *prefix, const char *path)
     int cells = MAX(_graph.max_lanes, 1);
     CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
     CGFloat left = 10;
-    /* Text follows the rightmost lane continuing through this row. */
-    CGFloat textX = axyne_git_graph_text_x(left, laneWidth,
-        axyne_git_graph_last_cell(commit, AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK, 0),
-        0.75, kGpTextGap);
+    /* Text follows the rightmost lane continuing through this row (centres
+     * sit half a point right of the cell middle). */
+    CGFloat textX = axyne_git_graph_text_x(left + 0.5, laneWidth,
+        axyne_git_graph_last_cell(commit, AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK), 0.75,
+        -1, 0, kGpTextGap);
     CGFloat textRight = NSMaxX(rect) - 8;
     int i;
     if (selected) {
@@ -1569,7 +1570,6 @@ static char *gp_diff_title(const char *prefix, const char *path)
     CGFloat textRight = NSMaxX(rect) - 8;
     CGFloat dotX;
     BOOL current = NO;
-    int last = axyne_git_graph_last_cell(row, ~0u, 1);
     NSFont *subjectFont = [NSFont systemFontOfSize:12];
     NSFont *detailFont = [NSFont systemFontOfSize:11];
     NSColor *textColor = selected ? gp_color(_theme.text)
@@ -1613,9 +1613,9 @@ static char *gp_diff_title(const char *prefix, const char *path)
         if (row->refs[r].is_current) current = YES;
     /* Text follows this row's rightmost dot or stroke: the dot (ring on HEAD)
      * reaches 3.5 (5.75) pt past its centre, a 1.5pt stroke 0.75 pt. */
-    textX = axyne_git_graph_text_x(left, laneWidth, last,
-                                   last == row->column ? (current ? 5.75 : 3.5) : 0.75,
-                                   kGpTextGap);
+    textX = axyne_git_graph_text_x(left + 0.5, laneWidth,
+                                   axyne_git_graph_last_cell(row, ~0u), 0.75,
+                                   row->column, current ? 5.75 : 3.5, kGpTextGap);
     {
         NSColor *dotColor = gp_color(kGpLanePalette[row->color % AXYNE_GIT_GRAPH_PALETTE]);
         if (current) {
