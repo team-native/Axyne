@@ -1996,6 +1996,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return axyne_debugger_enabled_breakpoints(&_debugger) != 0;
     if (action == @selector(openPreferencesFile:)) return [self preferencesFileExists];
     if (action == @selector(undo:) || action == @selector(redo:)) {
+        NSResponder *field = [self externalTextResponder];
+        if (field != nil)
+            return action == @selector(undo:) ? [[field undoManager] canUndo]
+                                              : [[field undoManager] canRedo];
         if (_editorView == nil || emptyState) return NO;
         return [self sendEditorMessage:action == @selector(undo:)
             ? SCI_CANUNDO : SCI_CANREDO wParam:0 lParam:0] != 0;
@@ -2733,16 +2737,24 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
 }
 
+/* Undo and Redo go to a focused text field (terminal input, prompts) before
+ * the source editor, like Cut/Copy/Paste. The field's undo manager is used
+ * directly: forwarding undo: up the responder chain would reach this view
+ * again. */
 - (void)undo:(id)sender
 {
+    NSResponder *external = [self externalTextResponder];
     (void)sender;
+    if (external != nil) { [[external undoManager] undo]; return; }
     if ([self isEmptyState]) return;
     (void)[self sendEditorMessage:SCI_UNDO wParam:0 lParam:0];
 }
 
 - (void)redo:(id)sender
 {
+    NSResponder *external = [self externalTextResponder];
     (void)sender;
+    if (external != nil) { [[external undoManager] redo]; return; }
     if ([self isEmptyState]) return;
     (void)[self sendEditorMessage:SCI_REDO wParam:0 lParam:0];
 }
@@ -4701,6 +4713,8 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 - (void)selectOutputPanel
 {
     _panelMode = 0;
+    /* Output must be visible even if View > Bottom Panel hid the panel. */
+    _panelHidden = NO;
     [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
@@ -5151,6 +5165,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     (void)sender;
     if (axyne_debugger_is_active(&_debugger) || [self activeIsImage] ||
         ![self captureEditor]) return;
+    [self selectOutputPanel];
     if (_terminalProcess != NULL) {
         const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
         [self terminalAppend:message length:strlen(message)
@@ -5211,6 +5226,11 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     AxyneError error;
     AxyneStatus status;
     (void)sender;
+    /* Show the terminal even if the panel was hidden or on another tab. */
+    _panelMode = 2;
+    _panelHidden = NO;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
     if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
         const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\n";
         [self terminalAppend:message length:strlen(message)
@@ -5386,6 +5406,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     AxyneLanguagePlan plan;
     char message[256];
     AxyneStatus status;
+    [self selectOutputPanel];
     if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
         const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
         [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
