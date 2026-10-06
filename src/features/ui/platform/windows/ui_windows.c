@@ -7920,7 +7920,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
         axyne_git_panel_create_controls(window, state, instance);
-        axyne_refresh_action_controls(state);
+        if (state->documents.count != 0)
+            axyne_show_document(state, state->documents.active_index);
+        else
+            axyne_refresh_action_controls(state);
         axyne_update_title(window, state);
         axyne_layout(window, state);
         if (state->editor != NULL) SetFocus(state->editor);
