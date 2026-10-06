@@ -2971,6 +2971,11 @@ static int axyne_action_enabled(AxyneWindowState *state, UINT command)
     case AXYNE_CMD_ZOOM_IN: case AXYNE_CMD_ZOOM_OUT:
     case AXYNE_CMD_ZOOM_RESET: case AXYNE_CMD_WORD_WRAP:
         return state->editor != NULL && !axyne_empty_state(state);
+    case AXYNE_CMD_LSP_DEFINITION: case AXYNE_CMD_LSP_REFERENCES: {
+        /* The language server is asked about a file on disk. */
+        const AxyneDocument *document = axyne_active_visible(state);
+        return document != NULL && !document->is_untitled && document->path != NULL;
+    }
     case AXYNE_CMD_DEBUG_STOP:
         return axyne_debugger_is_active(&state->debugger);
     case AXYNE_CMD_DEBUG_STEP_INTO: case AXYNE_CMD_DEBUG_STEP_OUT:
@@ -3109,7 +3114,9 @@ static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
         {"기본 크기", "Ctrl+0"}, {"자동 줄 바꿈", "Alt+Z"},
         {"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)", "F11"},
         {"프로시저 나가기", "Shift+F11"}, {"디버깅 중지", "Shift+F5"},
-        {"모든 중단점 삭제", "Ctrl+Shift+F9"}
+        {"모든 중단점 삭제", "Ctrl+Shift+F9"},
+        {"다른 이름으로 저장", "Ctrl+Shift+S"},
+        {"정의로 이동", "Ctrl+Alt+D"}, {"참조 찾기", "Ctrl+Alt+R"}
     };
     AxyneShortcutRow bindings[AXYNE_ACTION_COUNT];
     char keys[AXYNE_ACTION_COUNT][64];
@@ -3260,8 +3267,14 @@ static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
         else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) command = AXYNE_CMD_ZOOM_OUT;
         else if (key == '0' || key == VK_NUMPAD0) command = AXYNE_CMD_ZOOM_RESET;
         else if (key == VK_OEM_3) command = AXYNE_CMD_PANEL_TERMINAL;
+    } else if (control && alt && !shift) {
+        /* Alt chords arrive as WM_SYSKEYDOWN, which the window procedure's
+         * WM_KEYDOWN never sees, so they are handled here. */
+        if (key == 'D') command = AXYNE_CMD_LSP_DEFINITION;
+        else if (key == 'R') command = AXYNE_CMD_LSP_REFERENCES;
     } else if (control && shift && !alt) {
-        if (key == 'O') command = AXYNE_CMD_WORKSPACE;
+        if (key == 'S') command = AXYNE_CMD_SAVE_AS;
+        else if (key == 'O') command = AXYNE_CMD_WORKSPACE;
         else if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
         else if (key == 'G') command = AXYNE_CMD_VIEW_GIT;
         else if (key == 'U') command = AXYNE_CMD_PANEL_OUTPUT;
@@ -4030,8 +4043,8 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", save_flags);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...", NULL,
-                   save_flags);
+    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...",
+                   L"Ctrl+Shift+S", save_flags);
     axyne_menu_separator(menu, &pool);
     axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
     axyne_menu_separator(menu, &pool);
@@ -4046,10 +4059,7 @@ static void axyne_edit_popup(HWND window, AxyneWindowState *state)
     HMENU menu = axyne_menu_create();
     UINT has_editor = state->editor != NULL && !axyne_empty_state(state)
         ? MF_ENABLED : MF_GRAYED;
-    UINT saved_document_flags = axyne_active_visible(state) != NULL &&
-        !axyne_active_visible(state)->is_untitled &&
-        axyne_active_visible(state)->path != NULL
-        ? MF_ENABLED : MF_GRAYED;
+    UINT saved_document_flags = axyne_action_flags(state, AXYNE_CMD_LSP_DEFINITION);
     if (menu == NULL) return;
     axyne_menu_add(menu, &pool, AXYNE_CMD_UNDO, L"실행 취소", L"Ctrl+Z",
                    axyne_edit_flags(state, AXYNE_CMD_UNDO));
@@ -8106,11 +8116,6 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
-            (GetKeyState(VK_MENU) & 0x8000) != 0) {
-            if (w_param == 'D') { axyne_lsp_navigate(window, state, 0); return 0; }
-            if (w_param == 'R') { axyne_lsp_navigate(window, state, 1); return 0; }
-        }
         if (axyne_handle_key(window, state, w_param)) return 0;
         break;
     case WM_LBUTTONDBLCLK: {
