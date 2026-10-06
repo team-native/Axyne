@@ -55,6 +55,11 @@ static const CGFloat AXYNE_CONTENT_TOP = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR;
 static const CGFloat AXYNE_TABS = AXYNE_UI_TABS;
 static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
 
+/* Top-level main-menu entries that the in-window bar mirrors carry
+ * AXYNE_MACOS_MENU_TAG_BASE + their bar position as the NSMenuItem tag
+ * (the application menu keeps tag 0 and has no bar item). */
+enum { AXYNE_MACOS_MENU_TAG_BASE = 100 };
+
 /* Title of the top-level menu at bar position index, from the table shared
  * with the Windows adapter. */
 static NSString *axyne_macos_menu_label(NSUInteger index)
@@ -1746,11 +1751,16 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [_terminalStart setEnabled:!terminalActive && !debuggerActive];
     [_terminalStop setEnabled:terminalActive];
     [_terminalSend setEnabled:terminalActive];
-    [_debugStart setEnabled:!terminalActive && !debuggerActive && savedDocument];
-    [_debugPause setEnabled:debuggerActive && savedDocument];
-    [_debugContinue setEnabled:debuggerActive && savedDocument];
-    [_debugNext setEnabled:debuggerActive && savedDocument];
-    [_debugBreakpoint setEnabled:savedDocument];
+    /* A breakpoint is keyed by path and line, so any source file with a path
+     * can carry one, saved or not. */
+    BOOL fileDocument = document != NULL && !document->is_image &&
+        !document->is_untitled && document->path != NULL;
+    [_debugStart setEnabled:axyne_debugger_can_start(debuggerActive, terminalActive,
+        savedDocument)];
+    [_debugPause setEnabled:axyne_debugger_can_control(debuggerActive)];
+    [_debugContinue setEnabled:axyne_debugger_can_control(debuggerActive)];
+    [_debugNext setEnabled:axyne_debugger_can_control(debuggerActive)];
+    [_debugBreakpoint setEnabled:axyne_debugger_can_toggle_breakpoint(fileDocument)];
     [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_saveButton setEnabled:document != NULL && axyne_document_can_save(document)];
@@ -1920,10 +1930,12 @@ static BOOL axyne_macos_is_image_path(const char *path)
         action == @selector(runDocument:))
         return textDocument && !terminalActive && !debuggerActive;
     if (action == @selector(startDebugger:))
-        return savedDocument && !terminalActive && !debuggerActive;
+        return axyne_debugger_can_start(debuggerActive, terminalActive, savedDocument);
     if (action == @selector(debugCommand:))
-        return debuggerActive && savedDocument;
-    if (action == @selector(toggleBreakpoint:)) return savedDocument;
+        return axyne_debugger_can_control(debuggerActive);
+    if (action == @selector(toggleBreakpoint:))
+        return axyne_debugger_can_toggle_breakpoint(textDocument &&
+            !document->is_untitled && document->path != NULL);
     if (action == @selector(startTerminal:))
         return !terminalActive && !debuggerActive;
     if (action == @selector(stopTerminal:) ||
@@ -1984,6 +1996,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return axyne_debugger_enabled_breakpoints(&_debugger) != 0;
     if (action == @selector(openPreferencesFile:)) return [self preferencesFileExists];
     if (action == @selector(undo:) || action == @selector(redo:)) {
+        NSResponder *field = [self externalTextResponder];
+        if (field != nil)
+            return action == @selector(undo:) ? [[field undoManager] canUndo]
+                                              : [[field undoManager] canRedo];
         if (_editorView == nil || emptyState) return NO;
         return [self sendEditorMessage:action == @selector(undo:)
             ? SCI_CANUNDO : SCI_CANREDO wParam:0 lParam:0] != 0;
@@ -2723,16 +2739,24 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
 }
 
+/* Undo and Redo go to a focused text field (terminal input, prompts) before
+ * the source editor, like Cut/Copy/Paste. The field's undo manager is used
+ * directly: forwarding undo: up the responder chain would reach this view
+ * again. */
 - (void)undo:(id)sender
 {
+    NSResponder *external = [self externalTextResponder];
     (void)sender;
+    if (external != nil) { [[external undoManager] undo]; return; }
     if ([self isEmptyState]) return;
     (void)[self sendEditorMessage:SCI_UNDO wParam:0 lParam:0];
 }
 
 - (void)redo:(id)sender
 {
+    NSResponder *external = [self externalTextResponder];
     (void)sender;
+    if (external != nil) { [[external undoManager] redo]; return; }
     if ([self isEmptyState]) return;
     (void)[self sendEditorMessage:SCI_REDO wParam:0 lParam:0];
 }
@@ -3367,9 +3391,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
     NSMenu *mainMenu = [NSApp mainMenu];
     NSMenu *submenu;
     NSRect item, anchor, onScreen;
-    if (mainMenu == nil || (NSInteger)index + 1 >= [mainMenu numberOfItems] ||
-        [self window] == nil) return;
-    submenu = [[mainMenu itemAtIndex:(NSInteger)index + 1] submenu];
+    if (mainMenu == nil || [self window] == nil) return;
+    /* Look the entry up by the bar position stored in its tag instead of by
+     * its place in the main menu, so a reordered or extended system menu
+     * (the application menu, Window/Help additions) cannot shift the bar
+     * onto a neighbouring submenu. */
+    submenu = [[mainMenu itemWithTag:(NSInteger)index + AXYNE_MACOS_MENU_TAG_BASE]
+        submenu];
     if (submenu == nil) return;
     /* The popup drops from the bottom edge of the whole bar strip. */
     item = [self menuBarItemRect:index];
@@ -4269,6 +4297,16 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     [self loadActiveDocument];
 }
 
+/* A click on the menu bar while the window is inactive opens the menu
+ * straight away instead of only activating the window. */
+- (BOOL)acceptsFirstMouse:(NSEvent *)event
+{
+    NSPoint point;
+    if (event == nil) return NO;
+    point = [self convertPoint:[event locationInWindow] fromView:nil];
+    return [self menuBarIndexAtPoint:point] >= 0;
+}
+
 - (void)mouseDown:(NSEvent *)event
 {
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -4677,6 +4715,8 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 - (void)selectOutputPanel
 {
     _panelMode = 0;
+    /* Output must be visible even if View > Bottom Panel hid the panel. */
+    _panelHidden = NO;
     [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
@@ -5127,6 +5167,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     (void)sender;
     if (axyne_debugger_is_active(&_debugger) || [self activeIsImage] ||
         ![self captureEditor]) return;
+    [self selectOutputPanel];
     if (_terminalProcess != NULL) {
         const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
         [self terminalAppend:message length:strlen(message)
@@ -5187,6 +5228,11 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     AxyneError error;
     AxyneStatus status;
     (void)sender;
+    /* Show the terminal even if the panel was hidden or on another tab. */
+    _panelMode = 2;
+    _panelHidden = NO;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
     if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
         const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\n";
         [self terminalAppend:message length:strlen(message)
@@ -5362,6 +5408,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     AxyneLanguagePlan plan;
     char message[256];
     AxyneStatus status;
+    [self selectOutputPanel];
     if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
         const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
         [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
@@ -6531,6 +6578,7 @@ static void axyne_install_menu(NSApplication *application,
     [fileMenu addItem:recentItem];
     [workspace setRecentMenu:recentMenu];
     [fileItem setSubmenu:fileMenu];
+    [fileItem setTag:AXYNE_MACOS_MENU_TAG_BASE];
     [mainMenu addItem:fileItem];
     [fileItem release]; [recentItem release];
     [recentMenu release]; [fileMenu release];
@@ -6674,6 +6722,18 @@ static void axyne_install_menu(NSApplication *application,
             axyne_macos_add_item(submenu, @"자동 줄 바꿈", @selector(toggleWordWrap:),
                 workspace, @"z", NSEventModifierFlagCommand | NSEventModifierFlagOption);
         } else if (menuIndex == 5) {
+            /* Figma Tools lists the terminal and settings; the application
+             * menu's Preferences is not reachable from the in-window bar. */
+            axyne_macos_add_item(submenu, @"새 터미널", @selector(startTerminal:),
+                workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
+            axyne_macos_add_item(submenu, @"설정…", @selector(showGlobalPreferences:),
+                workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"작업 영역 설정…",
+                @selector(showWorkspacePreferences:), workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"preferences.json 열기",
+                @selector(openPreferencesFile:), workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
             NSMenuItem *definition = [submenu addItemWithTitle:@"정의로 이동"
                 action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
             NSMenuItem *references = [submenu addItemWithTitle:@"참조 찾기"
@@ -6685,9 +6745,6 @@ static void axyne_install_menu(NSApplication *application,
             /* Cmd+R belongs to Build > Run, so References adds Shift. */
             [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
             [references setTag:1];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"preferences.json 열기",
-                @selector(openPreferencesFile:), workspace, @"", 0);
         } else if (menuIndex == 6) {
             NSMenuItem *help = [submenu addItemWithTitle:@"Axyne 도움말"
                 action:@selector(openHelp:) keyEquivalent:@"?"];
@@ -6698,9 +6755,16 @@ static void axyne_install_menu(NSApplication *application,
                 @selector(showKeyboardShortcuts:), workspace, @"", 0);
             axyne_macos_add_item(submenu, @"문제 보고…", @selector(reportIssue:),
                 workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
+            /* Figma Help ends with "Axyne 정보"; the application menu's copy
+             * is not reachable from the in-window bar. */
+            NSMenuItem *about = [submenu addItemWithTitle:@"Axyne 정보"
+                action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+            [about setTarget:application];
             [application setHelpMenu:submenu];
         }
         [item setSubmenu:submenu];
+        [item setTag:(NSInteger)(AXYNE_MACOS_MENU_TAG_BASE + menuIndex)];
         [submenu release];
         [mainMenu addItem:item];
         [item release];

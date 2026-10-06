@@ -315,3 +315,18 @@ else()
 endif()
 add_test(NAME axyne-ui-design COMMAND $<TARGET_FILE:axyne_ui_design_tests>)
 set_tests_properties(axyne-ui-design PROPERTIES TIMEOUT 30)
+
+# Static check of the macOS/Windows menu definitions against their handlers.
+# It reads both adapter sources as text, so it runs on every platform.
+add_executable(axyne_menu_consistency_tests test_menu_consistency.c)
+target_include_directories(axyne_menu_consistency_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_definitions(axyne_menu_consistency_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # The shared menu labels are UTF-8 Korean literals.
+    target_compile_options(axyne_menu_consistency_tests PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(axyne_menu_consistency_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME axyne-menu-consistency
+    COMMAND $<TARGET_FILE:axyne_menu_consistency_tests> "${PROJECT_SOURCE_DIR}")
+set_tests_properties(axyne-menu-consistency PROPERTIES TIMEOUT 30)
