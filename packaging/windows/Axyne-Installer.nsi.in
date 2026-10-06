@@ -31,6 +31,8 @@ Var AxyneInstallPath
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "@CMAKE_CURRENT_SOURCE_DIR@\packaging\windows\Axyne.ico"
+!define MUI_BGCOLOR "${AXYNE_BG}"
+!define MUI_TEXTCOLOR "${AXYNE_TEXT}"
 !define MUI_HEADERIMAGE
 !define MUI_HEADERIMAGE_RIGHT
 !define MUI_WELCOMEPAGE_TITLE "Install Axyne"
@@ -38,47 +40,13 @@ Var AxyneInstallPath
 !define MUI_FINISHPAGE_TITLE "Axyne is ready"
 !define MUI_FINISHPAGE_TEXT "Axyne has been installed on your computer."
 
-Page custom AxyneWelcomePage AxyneWelcomeLeave
+!insertmacro MUI_PAGE_WELCOME
 Page custom AxyneDirectoryPage AxyneDirectoryLeave
 !insertmacro MUI_PAGE_INSTFILES
 Page custom AxyneFinishPage AxyneFinishLeave
 
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Korean"
-
-Function AxyneWelcomePage
-    nsDialogs::Create 1018
-    Pop $AxynePage
-    ${If} $AxynePage == error
-        Abort
-    ${EndIf}
-    SetCtlColors $AxynePage "${AXYNE_TEXT}" "${AXYNE_BG}"
-
-    ${NSD_CreateLabel} 24u 24u 330u 28u "Axyne"
-    Pop $0
-    CreateFont $1 "Segoe UI" 18 700
-    SendMessage $0 ${WM_SETFONT} $1 0
-    SetCtlColors $0 "FFFFFF" "${AXYNE_BG}"
-
-    ${NSD_CreateLabel} 24u 58u 330u 18u "Native development, thoughtfully designed."
-    Pop $0
-    SetCtlColors $0 "${AXYNE_ACCENT}" "${AXYNE_BG}"
-
-    ${NSD_CreateLabel} 24u 94u 360u 42u "This wizard will install Axyne for Windows and create a Start Menu shortcut."
-    Pop $0
-    SetCtlColors $0 "${AXYNE_TEXT}" "${AXYNE_BG}"
-
-    ${NSD_CreateLabel} 24u 158u 360u 1u ""
-    Pop $0
-    SetCtlColors $0 "${AXYNE_ACCENT}" "${AXYNE_ACCENT}"
-
-    ${NSD_CreateLabel} 24u 176u 360u 18u "Version @PROJECT_VERSION@  ·  Windows x64"
-    Pop $0
-    SetCtlColors $0 "${AXYNE_MUTED}" "${AXYNE_BG}"
-FunctionEnd
-
-Function AxyneWelcomeLeave
-FunctionEnd
 
 Function AxyneDirectoryPage
     nsDialogs::Create 1018
