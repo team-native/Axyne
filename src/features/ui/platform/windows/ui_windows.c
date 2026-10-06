@@ -119,6 +119,7 @@ enum {
     AXYNE_GIT_BUTTON = 24,
     AXYNE_GIT_GRAPH_ROW = 36,
     AXYNE_GIT_LANE_WIDTH = 12,
+    AXYNE_GIT_TEXT_GAP = 6, /* graph mark to row text */
     AXYNE_GIT_PAD = 8,
     AXYNE_GIT_GAP = 6,
     AXYNE_GIT_MESSAGE = 5030, /* commit message EDIT control id */
@@ -6947,7 +6948,13 @@ static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
                                       int right, double lane_width, int strip, int y)
 {
     COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
-    int text_x = 10 + strip + 8;
+    int is_head = axyne_git_row_is_head(row);
+    /* Text follows this row's rightmost dot or stroke: the dot (ring on HEAD)
+     * reaches 5 (7) px past its centre, a 2px stroke 1 px. */
+    int text_x = (int)(axyne_git_graph_text_x(10, lane_width,
+                                              axyne_git_graph_last_cell(row, ~0u), 1,
+                                              row->column, is_head ? 7 : 5,
+                                              AXYNE_GIT_TEXT_GAP) + 0.5);
     int limit = right - 8;
     int ref_limit = text_x + (limit - text_x) * 6 / 10; /* chips leave room for the subject */
     int x = text_x;
@@ -6964,7 +6971,7 @@ static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
         IntersectClipRect(dc, 10 - 2, y - 1, 10 + strip + 2,
                           y + AXYNE_GIT_GRAPH_ROW + 1);
         axyne_git_paint_lanes(dc, row, 10, lane_width, y, AXYNE_GIT_GRAPH_ROW,
-                              axyne_git_row_is_head(row), behind);
+                              is_head, behind);
         RestoreDC(dc, saved_dc);
     }
     /* Current branch / HEAD first, then the other refs. */
@@ -7032,7 +7039,11 @@ static void axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
     int selected = change != NULL && git->selected_cfile != NULL &&
                    strcmp(git->selected_cfile, change->path) == 0;
     COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
-    int x = 10 + strip + 8;
+    /* Text follows the rightmost lane continuing through this row. */
+    int x = (int)(axyne_git_graph_text_x(
+        10, lane_width,
+        axyne_git_graph_last_cell(commit, AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK), 1,
+        -1, 0, AXYNE_GIT_TEXT_GAP) + 0.5);
     int limit = right - 14;
     RECT rect;
     if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_ROW, AXYNE_SELECTION_BG);

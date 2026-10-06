@@ -813,6 +813,31 @@ static int axyne_test_panel_graph_lanes(const char *root)
     return 1;
 }
 
+/* Row text hugs each row's own rightmost mark, not the widest row. */
+static int axyne_test_graph_text_position(void)
+{
+    AxyneGitGraphLane lanes[4] = {
+        {AXYNE_GIT_LANE_UP | AXYNE_GIT_LANE_DOWN, 0},
+        {AXYNE_GIT_LANE_DOT | AXYNE_GIT_LANE_UP, 1},
+        {AXYNE_GIT_LANE_FORK, 2},
+        {0, 3}
+    };
+    AxyneGitGraphRow row = {0};
+    row.column = 1;
+    row.lane_count = 4;
+    row.lanes = lanes;
+    /* The FORK stroke in cell 2 is the rightmost mark; empty cell 3 is not. */
+    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, ~0u), 2);
+    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, AXYNE_GIT_LANE_DOWN), 0);
+    AXYNE_TEST_EQ_INT(axyne_git_graph_last_cell(&row, AXYNE_GIT_LANE_JOIN), -1);
+    /* Stroke in cell 2 beyond the dot in cell 1, then a narrow cell where the
+     * wide HEAD ring reaches past the stroke to its right. */
+    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 12, 2, 1, 1, 5, 6) == 10 + 30 + 1 + 6);
+    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 4, 2, 1, 1, 7, 6) == 10 + 6 + 7 + 6);
+    AXYNE_TEST_CHECK(axyne_git_graph_text_x(10, 12, -1, 1, -1, 0, 6) == 16);
+    return 1;
+}
+
 /* Rewritten side tips can all wait for one far-away ancestor. Exercise both
  * the native renderers' shared geometry and repeated history-window growth. */
 static int axyne_test_graph_continuity(const char *root)
@@ -1099,6 +1124,7 @@ static int axyne_test_git_panel_run(const char *root)
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph_lanes(root));
+    AXYNE_TEST_CHECK(axyne_test_graph_text_position());
     AXYNE_TEST_CHECK(axyne_test_graph_continuity(root));
     AXYNE_TEST_CHECK(axyne_test_panel_details(root));
     return 1;

@@ -21,6 +21,7 @@ static const CGFloat kGpButton = 24;
 static const CGFloat kGpPushWidth = 56;
 static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
 static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
+static const CGFloat kGpTextGap = 6;      /* graph mark to row text */
 static const int kGpGraphStep = 200;      /* commits added per "더 불러오기" */
 static const unsigned kGpRefreshDelayMs = 500;
 
@@ -1492,7 +1493,11 @@ static char *gp_diff_title(const char *prefix, const char *path)
     int cells = MAX(_graph.max_lanes, 1);
     CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
     CGFloat left = 10;
-    CGFloat textX = left + cells * laneWidth + 8;
+    /* Text follows the rightmost lane continuing through this row (centres
+     * sit half a point right of the cell middle). */
+    CGFloat textX = axyne_git_graph_text_x(left + 0.5, laneWidth,
+        axyne_git_graph_last_cell(commit, AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK), 0.75,
+        -1, 0, kGpTextGap);
     CGFloat textRight = NSMaxX(rect) - 8;
     int i;
     if (selected) {
@@ -1561,7 +1566,7 @@ static char *gp_diff_title(const char *prefix, const char *path)
     CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
     CGFloat left = 10;
     CGFloat top = NSMinY(rect), bottom = NSMaxY(rect), middle = floor(top + NSHeight(rect) / 2) + 0.5;
-    CGFloat textX = left + cells * laneWidth + 8;
+    CGFloat textX;
     CGFloat textRight = NSMaxX(rect) - 8;
     CGFloat dotX;
     BOOL current = NO;
@@ -1606,6 +1611,11 @@ static char *gp_diff_title(const char *prefix, const char *path)
     }
     for (r = 0; r < row->ref_count; ++r)
         if (row->refs[r].is_current) current = YES;
+    /* Text follows this row's rightmost dot or stroke: the dot (ring on HEAD)
+     * reaches 3.5 (5.75) pt past its centre, a 1.5pt stroke 0.75 pt. */
+    textX = axyne_git_graph_text_x(left + 0.5, laneWidth,
+                                   axyne_git_graph_last_cell(row, ~0u), 0.75,
+                                   row->column, current ? 5.75 : 3.5, kGpTextGap);
     {
         NSColor *dotColor = gp_color(kGpLanePalette[row->color % AXYNE_GIT_GRAPH_PALETTE]);
         if (current) {
