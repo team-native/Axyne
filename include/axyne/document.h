@@ -51,6 +51,10 @@ typedef struct AxyneDocumentSet {
 
 AxyneStatus axyne_documents_initialize(AxyneDocumentSet *set,
                                         AxyneError *error);
+/* Initializes an empty document set for native shells that show a dedicated
+ * empty-state surface instead of an implicit Untitled buffer. */
+AxyneStatus axyne_documents_initialize_empty(AxyneDocumentSet *set,
+                                             AxyneError *error);
 void axyne_documents_destroy(AxyneDocumentSet *set);
 AxyneStatus axyne_documents_new(AxyneDocumentSet *set, size_t *index,
                                 AxyneError *error);

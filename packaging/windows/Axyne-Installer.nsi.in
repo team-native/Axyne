@@ -4,7 +4,7 @@ XPStyle on
 
 Name "Axyne"
 Caption "Install Axyne"
-OutFile "@AXYNE_WINDOWS_INSTALLER_OUTPUT@"
+OutFile "@AXYNE_WINDOWS_INSTALLER_BACKEND@"
 InstallDir "$LOCALAPPDATA\Programs\Axyne"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation"
 RequestExecutionLevel user
@@ -193,7 +193,8 @@ Section "Axyne" SecAxyne
     CreateDirectory "$SMPROGRAMS\Axyne"
     CreateShortcut "$SMPROGRAMS\Axyne\Axyne.lnk" "$INSTDIR\axyne.exe"
     CreateShortcut "$DESKTOP\Axyne.lnk" "$INSTDIR\axyne.exe"
-    WriteUninstaller "$INSTDIR\Uninstall.exe"
+    WriteUninstaller "$INSTDIR\Uninstall-Backend.exe"
+    File /oname=Uninstall.exe "@CMAKE_CURRENT_BINARY_DIR@\Axyne-Uninstaller.exe"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayName" "Axyne"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayVersion" "@PROJECT_VERSION@"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation" "$INSTDIR"

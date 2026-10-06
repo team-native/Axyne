@@ -367,6 +367,7 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
     ProcessState *state = NULL;
     wchar_t *exe = NULL, *cwd = NULL, *command = NULL, *environment = NULL;
     size_t used = 0, capacity = 0, i;
+    DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED;
     AxyneStatus result = AXYNE_STATUS_IO_ERROR;
     if (out != NULL) *out = NULL;
     if (out == NULL) return axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Output process pointer is null");
@@ -406,8 +407,17 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
                                      &limits, sizeof(limits))) goto os_error;
     }
+    /* Git is a console-subsystem executable.  Hide only Git's transient
+     * console; cmd.exe powers the interactive terminal and must keep its
+     * normal redirected-console lifetime for input to remain usable. */
+    {
+        const wchar_t *name = wcsrchr(exe, L'\\');
+        name = name != NULL ? name + 1 : exe;
+        if (_wcsicmp(name, L"git.exe") == 0)
+            creation_flags |= CREATE_NO_WINDOW;
+    }
     if (!CreateProcessW(exe, command, NULL, NULL, TRUE,
-                        CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                        creation_flags,
                         environment, cwd, &startup, &info)) goto os_error;
     if (!AssignProcessToJobObject(job, info.hProcess)) {
         TerminateProcess(info.hProcess, 1); WaitForSingleObject(info.hProcess, INFINITE);
