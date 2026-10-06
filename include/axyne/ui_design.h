@@ -107,10 +107,22 @@ static inline AxyneFileBadge axyne_ui_make_badge(const char *label, uint32_t col
     return badge;
 }
 
-/* Badge for a file name or path. Unknown extensions fall back to the
- * upper-cased extension truncated to three characters; names without an
- * extension get "TXT". The label is never empty. */
-static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
+/* Case-insensitive comparison of the first `length` characters of `text`
+ * against the whole of `word`. */
+static inline int axyne_ui_prefix_equal(const char *text, size_t length,
+                                        const char *word)
+{
+    size_t i;
+    for (i = 0; i < length; ++i) {
+        if (word[i] == '\0' ||
+            tolower((unsigned char)text[i]) != tolower((unsigned char)word[i]))
+            return 0;
+    }
+    return word[length] == '\0';
+}
+
+static inline const AxyneBadgeEntry *axyne_ui_badge_entry(const char *extension,
+                                                          size_t length)
 {
     static const AxyneBadgeEntry table[] = {
         { "c", "C", 0x7db5e3 }, { "h", "H", 0xc79ad9 }, { "hpp", "H", 0xc79ad9 },
@@ -130,9 +142,37 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
         { "htm", "HTM", 0xd98e73 }, { "css", "CSS", 0x7db5e3 },
         { "xml", "XML", 0xd98e73 }, { "plist", "XML", 0xd98e73 },
         { "yml", "YML", 0xc79ad9 }, { "yaml", "YML", 0xc79ad9 },
+        { "toml", "TML", 0xd9b36c },
         { "md", "MD", 0x8cc7c0 }, { "markdown", "MD", 0x8cc7c0 },
-        { "txt", "TXT", 0x8b919b }, { "cmake", "CM", 0xa3c98a }
+        { "txt", "TXT", 0x8b919b }, { "cmake", "CM", 0xa3c98a },
+        { "gitignore", "GIT", 0xc79ad9 }, { "gitattributes", "GIT", 0xc79ad9 },
+        { "gitmodules", "GIT", 0xc79ad9 },
+        { "png", "IMG", 0xd98e73 }, { "jpg", "IMG", 0xd98e73 },
+        { "jpeg", "IMG", 0xd98e73 }, { "gif", "IMG", 0xd98e73 },
+        { "svg", "IMG", 0xd98e73 }, { "tif", "IMG", 0xd98e73 },
+        { "tiff", "IMG", 0xd98e73 }, { "bmp", "IMG", 0xd98e73 },
+        { "webp", "IMG", 0xd98e73 }, { "ico", "IMG", 0xd98e73 },
+        { "pdf", "PDF", 0xd98e73 },
+        { "mp3", "AUD", 0xc79ad9 }, { "wav", "AUD", 0xc79ad9 },
+        { "m4a", "AUD", 0xc79ad9 }, { "flac", "AUD", 0xc79ad9 },
+        { "mp4", "VID", 0xa66bf0 }, { "mov", "VID", 0xa66bf0 },
+        { "mkv", "VID", 0xa66bf0 }, { "webm", "VID", 0xa66bf0 }
     };
+    size_t i;
+    for (i = 0; i < sizeof(table) / sizeof(table[0]); ++i)
+        if (axyne_ui_prefix_equal(extension, length, table[i].extension))
+            return &table[i];
+    return NULL;
+}
+
+/* Badge for a file name or path. A configure template such as "config.h.in"
+ * takes the badge of the extension it generates when that one is known.
+ * Unknown extensions fall back to the upper-cased extension truncated to
+ * three characters; names without an extension get "TXT". The label is never
+ * empty. */
+static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
+{
+    const AxyneBadgeEntry *entry;
     const char *base = axyne_ui_basename(name);
     const char *ext = strrchr(base, '.');
     size_t i;
@@ -142,10 +182,21 @@ static inline AxyneFileBadge axyne_ui_file_badge(const char *name)
         return axyne_ui_make_badge("CM", 0xa3c98a);
     if (axyne_ui_suffix_equal(base, "Makefile"))
         return axyne_ui_make_badge("MK", 0xd98e73);
+    if (axyne_ui_suffix_equal(base, "LICENSE"))
+        return axyne_ui_make_badge("LIC", 0xd5d8dd);
     if (ext == NULL || ext[1] == '\0') return axyne_ui_make_badge("TXT", 0x8b919b);
-    for (i = 0; i < sizeof(table) / sizeof(table[0]); ++i)
-        if (axyne_ui_suffix_equal(ext + 1, table[i].extension))
-            return axyne_ui_make_badge(table[i].label, table[i].color);
+    if (axyne_ui_suffix_equal(ext, ".in")) {
+        const char *inner = ext;
+        while (inner > base && inner[-1] != '.') --inner;
+        /* inner[-1] is the dot before the template's own extension; a
+         * leading dot only marks a hidden file. */
+        if (inner > base + 1) {
+            entry = axyne_ui_badge_entry(inner, (size_t)(ext - inner));
+            if (entry != NULL) return axyne_ui_make_badge(entry->label, entry->color);
+        }
+    }
+    entry = axyne_ui_badge_entry(ext + 1, strlen(ext + 1));
+    if (entry != NULL) return axyne_ui_make_badge(entry->label, entry->color);
     for (i = 1; ext[i] != '\0' && length < 3; ++i)
         if (isalnum((unsigned char)ext[i]))
             label[length++] = (char)toupper((unsigned char)ext[i]);

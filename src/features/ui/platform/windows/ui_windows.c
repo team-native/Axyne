@@ -671,6 +671,8 @@ static void axyne_apply_syntax_styles(AxyneWindowState *state,
         if (style >= 32 && style < 40) continue;
         SendMessageA(state->editor, SCI_STYLESETFORE, style,
                      (LPARAM)axyne_theme_color(theme->editor_text));
+        SendMessageA(state->editor, SCI_STYLESETBOLD, style,
+                     (LPARAM)axyne_syntax_style_bold(language, style));
     }
     for (i = 0; i < AXYNE_SYNTAX_KEYWORD_SETS; ++i) {
         if (language->keywords[i] == NULL) continue;

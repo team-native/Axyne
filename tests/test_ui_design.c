@@ -77,6 +77,30 @@ int main(void)
     expect("data.proto", "PRO");
     expect("a.ab", "AB");
     expect(".gitignore", "GIT");
+    CHECK(axyne_ui_file_badge(".gitignore").color == 0xc79ad9);
+    expect("/repo/LICENSE", "LIC");
+    expect("LICENSE.md", "MD");
+    expect("pyproject.toml", "TML");
+    /* configure templates take the generated file's badge */
+    expect("config.h.in", "H");
+    expect("/x/version.c.in", "C");
+    expect("gen.CPP.in", "C++");
+    expect("bridge.mm.in", "MM");
+    expect("Makefile.in", "IN");
+    expect("notes.zzz.in", "IN");
+    expect(".h.in", "IN");
+    /* media */
+    expect("logo.png", "IMG");
+    expect("photo.JPEG", "IMG");
+    expect("icon.svg", "IMG");
+    expect("scan.tiff", "IMG");
+    expect("app.ico", "IMG");
+    expect("pic.webp", "IMG");
+    expect("manual.pdf", "PDF");
+    expect("song.flac", "AUD");
+    expect("clip.m4a", "AUD");
+    expect("movie.mov", "VID");
+    expect("clip.webm", "VID");
     /* a dot in a directory must not become the extension */
     expect("/dir.v2/noext", "TXT");
     expect("C:\\dir.v2\\noext", "TXT");
