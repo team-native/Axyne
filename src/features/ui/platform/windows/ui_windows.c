@@ -1806,6 +1806,7 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
         WS_VSCROLL, 0, 0, 0, 0, window, (HMENU)AXYNE_TERMINAL_OUTPUT,
         instance, NULL);
+    axyne_theme_editor_scrollbars(state->terminal_output, AXYNE_OUTPUT_BG);
     state->terminal_input = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0,
         window, (HMENU)AXYNE_TERMINAL_INPUT, instance, NULL);
@@ -8696,6 +8697,8 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     window_class.lpfnWndProc = axyne_window_proc;
     window_class.lpszClassName = AXYNE_WINDOW_CLASS;
     window_class.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    window_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+    window_class.hIconSm = LoadIconW(instance, MAKEINTRESOURCEW(1));
     window_class.hbrBackground = CreateSolidBrush(AXYNE_BG);
     if (RegisterClassExW(&window_class) == 0) {
         DeleteObject(window_class.hbrBackground);
