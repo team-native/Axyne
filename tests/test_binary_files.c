@@ -184,5 +184,55 @@ int axyne_test_binary_files(const char *root)
     AXYNE_TEST_CHECK(axyne_documents_empty_state(NULL));
     axyne_documents_destroy(&set);
     AXYNE_TEST_CHECK(axyne_documents_empty_state(&set));
+
+    /* Image documents skip the binary check, read nothing and stay read-only. */
+    AXYNE_TEST_STATUS(axyne_documents_initialize(&set, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_documents_open_image(&set, png, 0, &index, NULL, NULL,
+                                                 &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(set.count == 2 && index == 1 && set.active_index == 1 &&
+                     set.documents[1].is_image && !set.documents[1].preview &&
+                     !set.documents[1].is_virtual && !set.documents[1].is_dirty &&
+                     set.documents[1].length == 0 &&
+                     set.documents[1].contents != NULL &&
+                     strcmp(set.documents[1].path, png) == 0 &&
+                     strcmp(set.documents[1].title, "i.png") == 0 &&
+                     set.recent_count == 1 && !axyne_documents_empty_state(&set));
+    AXYNE_TEST_CHECK(axyne_document_has_file(&set.documents[1]) &&
+                     !axyne_document_can_save(&set.documents[1]));
+    AXYNE_TEST_CHECK(axyne_documents_save(&set, 1, &error) == AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(axyne_documents_save_as(&set, 1, text, &error) ==
+                     AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(axyne_documents_mark_dirty(&set, 1, &error) ==
+                     AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(axyne_documents_set_contents(&set, 1, "x", 1, &error) ==
+                     AXYNE_STATUS_UNSUPPORTED);
+    AXYNE_TEST_CHECK(!set.documents[1].is_dirty && set.documents[1].length == 0 &&
+                     sniff(png) == 1);
+    /* An open path is only activated. */
+    AXYNE_TEST_STATUS(axyne_documents_set_active(&set, 0, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_documents_open_image(&set, png, 1, &index, &evicted,
+                                                 &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(set.count == 2 && index == 1 && set.active_index == 1 &&
+                     replaced == 0 && !set.documents[1].preview);
+    /* A preview image takes the preview slot like a text preview. */
+    AXYNE_TEST_STATUS(axyne_documents_open_preview(&set, text, &index, &evicted,
+                                                   &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(set.count == 3 && index == 2 && set.documents[2].preview);
+    AXYNE_TEST_STATUS(axyne_documents_open_image(&set, utf8_name, 1, &index,
+                                                 &evicted, &replaced, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(set.count == 3 && index == 2 && replaced == 1 &&
+                     set.documents[2].is_image && set.documents[2].preview &&
+                     strcmp(evicted.title, "a.txt") == 0);
+    axyne_documents_revert_preview_open(&set, index, &evicted, replaced);
+    AXYNE_TEST_CHECK(set.count == 3 && !set.documents[2].is_image &&
+                     strcmp(set.documents[2].title, "a.txt") == 0);
+    AXYNE_TEST_CHECK(axyne_documents_open_image(&set, "", 0, &index, NULL, NULL,
+                                                &error) ==
+                     AXYNE_STATUS_INVALID_ARGUMENT);
+    axyne_documents_destroy(&set);
     return 1;
 }

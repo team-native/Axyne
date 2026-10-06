@@ -343,7 +343,7 @@ int axyne_document_has_file(const AxyneDocument *document)
 
 int axyne_document_can_save(const AxyneDocument *document)
 {
-    return document != NULL && !document->is_virtual;
+    return document != NULL && !document->is_virtual && !document->is_image;
 }
 
 void axyne_document_dispose(AxyneDocument *document)
@@ -372,6 +372,40 @@ void axyne_documents_promote(AxyneDocumentSet *set, size_t index)
     set->documents[index].preview = 0;
 }
 
+/* Puts a new document in the preview slot: a clean preview document is
+ * replaced in place (handed to `evicted` when the caller keeps native state,
+ * disposed otherwise), a dirty one is demoted, and with no preview the
+ * document is appended. On failure the document is disposed. */
+static AxyneStatus axyne_place_preview(AxyneDocumentSet *set, AxyneDocument *doc,
+                                       size_t *index, AxyneDocument *evicted,
+                                       int *replaced, AxyneError *error)
+{
+    size_t old = axyne_documents_preview_index(set);
+    if (old != (size_t)-1 && set->documents[old].is_dirty) {
+        /* Defensive: a modified document is never a preview. */
+        set->documents[old].preview = 0;
+        old = (size_t)-1;
+    }
+    if (old == (size_t)-1) {
+        AxyneStatus status = axyne_append(set, doc, index, error);
+        if (status != AXYNE_STATUS_OK) axyne_document_dispose(doc);
+        return status;
+    }
+    AxyneDocument previous = set->documents[old];
+    set->documents[old] = *doc;
+    memset(doc, 0, sizeof(*doc));
+    set->active_index = old;
+    if (index != NULL) *index = old;
+    if (replaced != NULL && evicted != NULL) {
+        *evicted = previous;
+        *replaced = 1;
+    } else {
+        axyne_document_dispose(&previous);
+    }
+    axyne_success(error);
+    return AXYNE_STATUS_OK;
+}
+
 AxyneStatus axyne_documents_open_preview(AxyneDocumentSet *set,
                                          const char *path, size_t *index,
                                          AxyneDocument *evicted, int *replaced,
@@ -398,31 +432,8 @@ AxyneStatus axyne_documents_open_preview(AxyneDocumentSet *set,
     status = axyne_document_load(path, &doc, error);
     if (status != AXYNE_STATUS_OK) return status;
     doc.preview = 1;
-    size_t old = axyne_documents_preview_index(set);
-    if (old != (size_t)-1 && set->documents[old].is_dirty) {
-        /* Defensive: a modified document is never a preview. */
-        set->documents[old].preview = 0;
-        old = (size_t)-1;
-    }
-    if (old == (size_t)-1) {
-        status = axyne_append(set, &doc, index, error);
-        if (status != AXYNE_STATUS_OK) {
-            axyne_document_dispose(&doc);
-            return status;
-        }
-    } else {
-        AxyneDocument previous = set->documents[old];
-        set->documents[old] = doc;
-        set->active_index = old;
-        if (index != NULL) *index = old;
-        if (replaced != NULL && evicted != NULL) {
-            *evicted = previous;
-            *replaced = 1;
-        } else {
-            axyne_document_dispose(&previous);
-        }
-        axyne_success(error);
-    }
+    status = axyne_place_preview(set, &doc, index, evicted, replaced, error);
+    if (status != AXYNE_STATUS_OK) return status;
     (void)axyne_recent_add(set, path);
     return AXYNE_STATUS_OK;
 }
@@ -450,26 +461,48 @@ AxyneStatus axyne_documents_open_virtual(AxyneDocumentSet *set,
         return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
                           "Unable to allocate a virtual document");
     }
-    size_t old = axyne_documents_preview_index(set);
-    if (old != (size_t)-1 && set->documents[old].is_dirty) {
-        set->documents[old].preview = 0;
-        old = (size_t)-1;
+    return axyne_place_preview(set, &doc, index, evicted, replaced, error);
+}
+
+AxyneStatus axyne_documents_open_image(AxyneDocumentSet *set,
+                                       const char *path, int preview,
+                                       size_t *index, AxyneDocument *evicted,
+                                       int *replaced, AxyneError *error)
+{
+    if (replaced != NULL) *replaced = 0;
+    if (evicted != NULL) memset(evicted, 0, sizeof(*evicted));
+    if (set == NULL || path == NULL || path[0] == '\0')
+        return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                          "A non-empty file path is required");
+    for (size_t i = 0; i < set->count; ++i) {
+        if (set->documents[i].path != NULL &&
+            strcmp(set->documents[i].path, path) == 0) {
+            set->active_index = i;
+            if (index != NULL) *index = i;
+            (void)axyne_recent_add(set, path);
+            axyne_success(error);
+            return AXYNE_STATUS_OK;
+        }
     }
-    if (old == (size_t)-1) {
-        AxyneStatus status = axyne_append(set, &doc, index, error);
-        if (status != AXYNE_STATUS_OK) axyne_document_dispose(&doc);
+    AxyneDocument doc = {0};
+    doc.path = axyne_copy(path, strlen(path));
+    doc.title = axyne_title(path);
+    doc.contents = axyne_copy("", 0);
+    doc.is_image = 1;
+    doc.preview = preview ? 1 : 0;
+    if (doc.path == NULL || doc.title == NULL || doc.contents == NULL) {
+        axyne_document_dispose(&doc);
+        return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
+                          "Unable to allocate document metadata");
+    }
+    AxyneStatus status = preview
+        ? axyne_place_preview(set, &doc, index, evicted, replaced, error)
+        : axyne_append(set, &doc, index, error);
+    if (status != AXYNE_STATUS_OK) {
+        axyne_document_dispose(&doc);
         return status;
     }
-    AxyneDocument previous = set->documents[old];
-    set->documents[old] = doc;
-    set->active_index = old;
-    if (index != NULL) *index = old;
-    if (replaced != NULL && evicted != NULL) {
-        *evicted = previous;
-        *replaced = 1;
-    } else {
-        axyne_document_dispose(&previous);
-    }
+    (void)axyne_recent_add(set, path);
     axyne_success(error);
     return AXYNE_STATUS_OK;
 }
@@ -498,10 +531,11 @@ AxyneStatus axyne_documents_set_contents(AxyneDocumentSet *set, size_t index,
     if (copy == NULL) return axyne_fail(error, AXYNE_STATUS_OUT_OF_MEMORY,
                                         "Unable to copy document contents");
     AxyneDocument *doc = &set->documents[index];
-    if (doc->is_virtual) {
+    if (doc->is_virtual || doc->is_image) {
         free(copy);
         return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
-                          "Virtual documents are read-only");
+                          doc->is_image ? "Image documents are read-only"
+                                        : "Virtual documents are read-only");
     }
     free(doc->contents);
     doc->contents = copy;
@@ -521,6 +555,9 @@ AxyneStatus axyne_documents_mark_dirty(AxyneDocumentSet *set, size_t index,
     if (set->documents[index].is_virtual)
         return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
                           "Virtual documents are read-only");
+    if (set->documents[index].is_image)
+        return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
+                          "Image documents are read-only");
     set->documents[index].is_dirty = 1;
     set->documents[index].preview = 0;
     axyne_success(error);
@@ -548,6 +585,9 @@ AxyneStatus axyne_documents_save_as(AxyneDocumentSet *set, size_t index,
     if (doc->is_virtual)
         return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
                           "Virtual documents cannot be saved");
+    if (doc->is_image)
+        return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
+                          "Image documents cannot be saved");
     char *new_path = axyne_copy(path, strlen(path));
     char *new_title = axyne_title(path);
     if (new_path == NULL || new_title == NULL) {
@@ -581,6 +621,9 @@ AxyneStatus axyne_documents_save(AxyneDocumentSet *set, size_t index,
     if (doc->is_virtual)
         return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
                           "Virtual documents cannot be saved");
+    if (doc->is_image)
+        return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
+                          "Image documents cannot be saved");
     if (doc->is_untitled || doc->path == NULL)
         return axyne_fail(error, AXYNE_STATUS_UNSUPPORTED,
                           "Untitled documents require Save As");
