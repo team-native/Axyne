@@ -55,6 +55,11 @@ static const CGFloat AXYNE_CONTENT_TOP = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR;
 static const CGFloat AXYNE_TABS = AXYNE_UI_TABS;
 static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
 
+/* Top-level main-menu entries that the in-window bar mirrors carry
+ * AXYNE_MACOS_MENU_TAG_BASE + their bar position as the NSMenuItem tag
+ * (the application menu keeps tag 0 and has no bar item). */
+enum { AXYNE_MACOS_MENU_TAG_BASE = 100 };
+
 /* Title of the top-level menu at bar position index, from the table shared
  * with the Windows adapter. */
 static NSString *axyne_macos_menu_label(NSUInteger index)
@@ -3372,9 +3377,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
     NSMenu *mainMenu = [NSApp mainMenu];
     NSMenu *submenu;
     NSRect item, anchor, onScreen;
-    if (mainMenu == nil || (NSInteger)index + 1 >= [mainMenu numberOfItems] ||
-        [self window] == nil) return;
-    submenu = [[mainMenu itemAtIndex:(NSInteger)index + 1] submenu];
+    if (mainMenu == nil || [self window] == nil) return;
+    /* Look the entry up by the bar position stored in its tag instead of by
+     * its place in the main menu, so a reordered or extended system menu
+     * (the application menu, Window/Help additions) cannot shift the bar
+     * onto a neighbouring submenu. */
+    submenu = [[mainMenu itemWithTag:(NSInteger)index + AXYNE_MACOS_MENU_TAG_BASE]
+        submenu];
     if (submenu == nil) return;
     /* The popup drops from the bottom edge of the whole bar strip. */
     item = [self menuBarItemRect:index];
@@ -4272,6 +4281,16 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     [self loadScintillaView];
     [self applyPreferences];
     [self loadActiveDocument];
+}
+
+/* A click on the menu bar while the window is inactive opens the menu
+ * straight away instead of only activating the window. */
+- (BOOL)acceptsFirstMouse:(NSEvent *)event
+{
+    NSPoint point;
+    if (event == nil) return NO;
+    point = [self convertPoint:[event locationInWindow] fromView:nil];
+    return [self menuBarIndexAtPoint:point] >= 0;
 }
 
 - (void)mouseDown:(NSEvent *)event
@@ -6536,6 +6555,7 @@ static void axyne_install_menu(NSApplication *application,
     [fileMenu addItem:recentItem];
     [workspace setRecentMenu:recentMenu];
     [fileItem setSubmenu:fileMenu];
+    [fileItem setTag:AXYNE_MACOS_MENU_TAG_BASE];
     [mainMenu addItem:fileItem];
     [fileItem release]; [recentItem release];
     [recentMenu release]; [fileMenu release];
@@ -6706,6 +6726,7 @@ static void axyne_install_menu(NSApplication *application,
             [application setHelpMenu:submenu];
         }
         [item setSubmenu:submenu];
+        [item setTag:(NSInteger)(AXYNE_MACOS_MENU_TAG_BASE + menuIndex)];
         [submenu release];
         [mainMenu addItem:item];
         [item release];
