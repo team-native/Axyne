@@ -5495,7 +5495,8 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
         return;
     }
 
-    SetWindowTextW(state->editor, L"Source editor");
+    /* Scintilla treats WM_SETTEXT as document content, not a control label.
+     * Keep its initial buffer empty until an actual document is bound. */
     state->lexilla_module = LoadLibraryExW(
         L"Lexilla.dll", NULL,
         LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
