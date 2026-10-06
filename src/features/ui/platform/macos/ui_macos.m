@@ -1746,11 +1746,16 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [_terminalStart setEnabled:!terminalActive && !debuggerActive];
     [_terminalStop setEnabled:terminalActive];
     [_terminalSend setEnabled:terminalActive];
-    [_debugStart setEnabled:!terminalActive && !debuggerActive && savedDocument];
-    [_debugPause setEnabled:debuggerActive && savedDocument];
-    [_debugContinue setEnabled:debuggerActive && savedDocument];
-    [_debugNext setEnabled:debuggerActive && savedDocument];
-    [_debugBreakpoint setEnabled:savedDocument];
+    /* A breakpoint is keyed by path and line, so any source file with a path
+     * can carry one, saved or not. */
+    BOOL fileDocument = document != NULL && !document->is_image &&
+        !document->is_untitled && document->path != NULL;
+    [_debugStart setEnabled:axyne_debugger_can_start(debuggerActive, terminalActive,
+        savedDocument)];
+    [_debugPause setEnabled:axyne_debugger_can_control(debuggerActive)];
+    [_debugContinue setEnabled:axyne_debugger_can_control(debuggerActive)];
+    [_debugNext setEnabled:axyne_debugger_can_control(debuggerActive)];
+    [_debugBreakpoint setEnabled:axyne_debugger_can_toggle_breakpoint(fileDocument)];
     [_buildButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_runButton setEnabled:document != NULL && !terminalActive && !debuggerActive];
     [_saveButton setEnabled:document != NULL && axyne_document_can_save(document)];
@@ -1920,10 +1925,12 @@ static BOOL axyne_macos_is_image_path(const char *path)
         action == @selector(runDocument:))
         return textDocument && !terminalActive && !debuggerActive;
     if (action == @selector(startDebugger:))
-        return savedDocument && !terminalActive && !debuggerActive;
+        return axyne_debugger_can_start(debuggerActive, terminalActive, savedDocument);
     if (action == @selector(debugCommand:))
-        return debuggerActive && savedDocument;
-    if (action == @selector(toggleBreakpoint:)) return savedDocument;
+        return axyne_debugger_can_control(debuggerActive);
+    if (action == @selector(toggleBreakpoint:))
+        return axyne_debugger_can_toggle_breakpoint(textDocument &&
+            !document->is_untitled && document->path != NULL);
     if (action == @selector(startTerminal:))
         return !terminalActive && !debuggerActive;
     if (action == @selector(stopTerminal:) ||

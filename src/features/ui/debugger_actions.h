@@ -74,4 +74,26 @@ static inline AxyneStatus axyne_debugger_clear_breakpoints(AxyneDebugger *debugg
     return status;
 }
 
+/* Enabled-state rules for the Debug menu and debug controls, shared by both
+ * adapters. Controlling a running session depends only on the session, not on
+ * which document is shown: editing the debuggee (which makes it dirty) or
+ * switching tabs must not strand a paused session. Starting still needs a
+ * saved, clean file (axyne_debugger_start refuses anything else). A breakpoint
+ * is keyed by file path, so any document that has a path can carry one. */
+static inline int axyne_debugger_can_start(int session_active, int terminal_active,
+                                           int saved_clean_document)
+{
+    return !session_active && !terminal_active && saved_clean_document;
+}
+
+static inline int axyne_debugger_can_control(int session_active)
+{
+    return session_active != 0;
+}
+
+static inline int axyne_debugger_can_toggle_breakpoint(int has_path_document)
+{
+    return has_path_document != 0;
+}
+
 #endif
