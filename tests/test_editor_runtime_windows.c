@@ -104,6 +104,20 @@ int main(void)
     CHECK(DestroyWindow(window));
     /* The child hook sees releases before the child is destroyed. */
     CHECK(references_at_child_destroy == 0 && document_references == 0);
+    /* Normal startup has no document: binding preloaded contents must not
+     * reintroduce an Untitled tab for the empty workspace. */
+    state = (AxyneWindowState *)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*state));
+    CHECK(state != NULL);
+    CHECK(axyne_explorer_initialize(&state->explorer, NULL) == AXYNE_STATUS_OK);
+    CHECK(axyne_documents_initialize_empty(&state->documents, NULL) == AXYNE_STATUS_OK);
+    axyne_preferences_defaults(&state->preferences);
+    window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne empty editor test",
+        WS_OVERLAPPEDWINDOW, 0, 0, 1440, 900, NULL, NULL, instance, state);
+    CHECK(window != NULL && state->editor != NULL);
+    CHECK(state->documents.count == 0);
+    CHECK(editor_equals(state->editor, "", 0));
+    CHECK(DestroyWindow(window));
     CHECK(UnregisterClassW(AXYNE_WINDOW_CLASS, instance));
     puts("Native DLLs, exact bytes, preferences, binding/close rollback and live-child reference cleanup passed");
     return EXIT_SUCCESS;

@@ -269,8 +269,9 @@ static AxyneStatus axyne_windows_open_component(
     attributes.Attributes = AXYNE_OBJ_CASE_INSENSITIVE;
     memset(&io, 0, sizeof(io));
     native_status = create_file(child,
-        FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY |
-        FILE_DELETE_CHILD | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+        /* Path components are used by the watcher too; ordinary user
+         * folders must not require mutation rights just to be opened. */
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
         &attributes, &io, NULL, FILE_ATTRIBUTE_DIRECTORY,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, AXYNE_FILE_OPEN,
         AXYNE_FILE_DIRECTORY_FILE | AXYNE_FILE_SYNCHRONOUS_IO_NONALERT |
@@ -336,9 +337,13 @@ AxyneStatus axyne_workspace_open_directory_nofollow(const char *utf8_parent,
     if (root == NULL) { free(wide); return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory opening parent"); }
     memcpy(root, wide, root_length * sizeof(*root));
     root[root_length] = L'\0';
+    /* The watcher only needs to enumerate and receive directory changes. Do
+     * not request FILE_ADD_FILE/FILE_DELETE_CHILD on the drive root: those
+     * rights are routinely denied to normal users even when every selected
+     * descendant directory is readable and watchable. Child mutation callers
+     * still request their stronger rights when opening the actual component. */
     current = CreateFileW(root,
-        FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY |
-        FILE_DELETE_CHILD | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         NULL);

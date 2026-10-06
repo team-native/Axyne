@@ -1806,6 +1806,7 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
         WS_VSCROLL, 0, 0, 0, 0, window, (HMENU)AXYNE_TERMINAL_OUTPUT,
         instance, NULL);
+    axyne_theme_editor_scrollbars(state->terminal_output, AXYNE_OUTPUT_BG);
     state->terminal_input = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0,
         window, (HMENU)AXYNE_TERMINAL_INPUT, instance, NULL);
@@ -3894,6 +3895,29 @@ static void axyne_menu_track(HWND window, AxyneWindowState *state,
     axyne_menu_pool_free(pool);
 }
 
+static BOOL CALLBACK axyne_style_popup_menu_window(HWND menu, LPARAM unused)
+{
+    wchar_t class_name[32];
+    LONG_PTR style;
+    (void)unused;
+    if (GetClassNameW(menu, class_name, 32) <= 0 ||
+        lstrcmpW(class_name, L"#32768") != 0)
+        return TRUE;
+    style = GetWindowLongPtrW(menu, GWL_STYLE);
+    if ((style & WS_BORDER) != 0) {
+        SetWindowLongPtrW(menu, GWL_STYLE, style & ~((LONG_PTR)WS_BORDER));
+        SetWindowPos(menu, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                         SWP_FRAMECHANGED);
+    }
+    return TRUE;
+}
+
+static void axyne_style_popup_menu_windows(void)
+{
+    EnumWindows(axyne_style_popup_menu_window, 0);
+}
+
 static void axyne_file_popup(HWND window, AxyneWindowState *state)
 {
     AxyneMenuItem *pool = NULL;
@@ -4205,6 +4229,16 @@ static void axyne_menu_draw(AxyneWindowState *state, const DRAWITEMSTRUCT *draw)
     RECT cell;
     COLORREF text;
     axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom, AXYNE_POPUP_BG);
+    axyne_fill(dc, rect.left, rect.top, rect.left + 1, rect.bottom,
+               AXYNE_POPUP_SEPARATOR);
+    axyne_fill(dc, rect.right - 1, rect.top, rect.right, rect.bottom,
+               AXYNE_POPUP_SEPARATOR);
+    if (item != NULL && item->first)
+        axyne_fill(dc, rect.left, rect.top, rect.right, rect.top + 1,
+                   AXYNE_POPUP_SEPARATOR);
+    if (item != NULL && item->last)
+        axyne_fill(dc, rect.left, rect.bottom - 1, rect.right, rect.bottom,
+                   AXYNE_POPUP_SEPARATOR);
     if (item == NULL) return;
     if (item->separator) {
         int y = top + 4;
@@ -5461,7 +5495,8 @@ static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
         return;
     }
 
-    SetWindowTextW(state->editor, L"Source editor");
+    /* Scintilla treats WM_SETTEXT as document content, not a control label.
+     * Keep its initial buffer empty until an actual document is bound. */
     state->lexilla_module = LoadLibraryExW(
         L"Lexilla.dll", NULL,
         LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -6924,7 +6959,10 @@ static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
     if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_GRAPH_ROW, AXYNE_SELECTION_BG);
     {
         int saved_dc = SaveDC(dc);
-        IntersectClipRect(dc, 10 - 2, y, 10 + strip + 2, y + AXYNE_GIT_GRAPH_ROW);
+        /* Let the 2px connector overlap the adjacent row by one pixel. A
+         * strict per-row clip cuts merge/fork strokes exactly at row edges. */
+        IntersectClipRect(dc, 10 - 2, y - 1, 10 + strip + 2,
+                          y + AXYNE_GIT_GRAPH_ROW + 1);
         axyne_git_paint_lanes(dc, row, 10, lane_width, y, AXYNE_GIT_GRAPH_ROW,
                               axyne_git_row_is_head(row), behind);
         RestoreDC(dc, saved_dc);
@@ -7000,7 +7038,8 @@ static void axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
     if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_ROW, AXYNE_SELECTION_BG);
     {
         int saved_dc = SaveDC(dc);
-        IntersectClipRect(dc, 10 - 2, y, 10 + strip + 2, y + AXYNE_GIT_ROW);
+        IntersectClipRect(dc, 10 - 2, y - 1, 10 + strip + 2,
+                          y + AXYNE_GIT_ROW + 1);
         axyne_git_paint_lane_continuation(dc, commit, 10, lane_width, y, AXYNE_GIT_ROW);
         RestoreDC(dc, saved_dc);
     }
@@ -7224,14 +7263,10 @@ static void axyne_git_panel_place_controls(AxyneWindowState *state)
            git->loaded && git->repo_ok && layout.fits &&
            layout.message_edit.right - layout.message_edit.left > 20;
     if (git->graph_selector != NULL) {
-        if (show) {
-            SetWindowPos(git->graph_selector, NULL, layout.graph_label.right - 154,
-                         layout.graph_label.top, 146, 140,
-                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        } else {
-            if (GetFocus() == git->graph_selector) SetFocus(GetParent(edit));
-            ShowWindow(git->graph_selector, SW_HIDE);
-        }
+        /* The graph mode switch is an implementation detail, not part of the
+         * Figma panel. Keep the compact graph as the fixed design view. */
+        if (GetFocus() == git->graph_selector) SetFocus(GetParent(edit));
+        ShowWindow(git->graph_selector, SW_HIDE);
     }
     if (show) {
         SetWindowPos(edit, NULL, layout.message_edit.left, layout.message_edit.top,
@@ -7511,14 +7546,20 @@ static void axyne_paint_empty_guide(HDC dc, AxyneWindowState *state, int left,
         L"파일에서 찾기" };
     enum { ROW = 32, CHIP_HEIGHT = 20, CHIP_GAP = 4, CHIP_PAD = 7, COLUMN_GAP = 32 };
     AxyneGuideRow rows[AXYNE_GUIDE_COUNT];
-    size_t count = axyne_empty_guide_rows(&state->preferences, 0, rows,
-                                          AXYNE_GUIDE_COUNT);
+    size_t i, k;
+    size_t all_count = axyne_empty_guide_rows(&state->preferences, 0, rows,
+                                              AXYNE_GUIDE_COUNT);
+    size_t count = 0;
+    for (i = 0; i < all_count; ++i)
+        if (rows[i].id == AXYNE_GUIDE_NEW_FILE ||
+            rows[i].id == AXYNE_GUIDE_OPEN_FILE ||
+            rows[i].id == AXYNE_GUIDE_OPEN_FOLDER)
+            rows[count++] = rows[i];
     COLORREF label_color = AXYNE_REFERENCE ? axyne_theme_color(0x737780) : AXYNE_MUTED;
     COLORREF key_color = AXYNE_REFERENCE ? axyne_theme_color(0xd5d8dd) : AXYNE_TEXT;
     COLORREF chip_fill = AXYNE_REFERENCE ? axyne_theme_color(0x1f2126) : AXYNE_PANEL;
     COLORREF chip_border = AXYNE_REFERENCE ? axyne_theme_color(0x2a2d33) : AXYNE_BORDER;
     int label_width = 0, keys_width = 0, block_width, x0, y;
-    size_t i, k;
     int saved;
     if (right <= left || bottom <= top) return;
     saved = SaveDC(dc);
@@ -7576,7 +7617,11 @@ static void axyne_paint_empty_guide(HDC dc, AxyneWindowState *state, int left,
 static void axyne_paint_shell(HWND window, AxyneWindowState *state)
 {
     PAINTSTRUCT paint;
-    HDC dc = BeginPaint(window, &paint);
+    HDC window_dc = BeginPaint(window, &paint);
+    HDC dc = window_dc;
+    HDC buffer = NULL;
+    HBITMAP bitmap = NULL;
+    HBITMAP old_bitmap = NULL;
     RECT client;
     GetClientRect(window, &client);
     state->client_width = client.right;
@@ -7586,6 +7631,22 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     int status_top = height - AXYNE_STATUS;
     int bottom_top = status_top - axyne_panel_height(state);
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
+
+    /* Paint the shell as one frame while sidebar child controls are moved.
+     * This prevents the class background from flashing during tab switches. */
+    if (width > 0 && height > 0) {
+        buffer = CreateCompatibleDC(window_dc);
+        if (buffer != NULL) {
+            bitmap = CreateCompatibleBitmap(window_dc, width, height);
+            if (bitmap != NULL) {
+                old_bitmap = (HBITMAP)SelectObject(buffer, bitmap);
+                dc = buffer;
+            } else {
+                DeleteDC(buffer);
+                buffer = NULL;
+            }
+        }
+    }
 
     if (state->palette.active && state->palette_edit != NULL) {
         /* the palette's EDIT control paints its own pixels */
@@ -7806,6 +7867,12 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         axyne_text(dc, state->code_font, AXYNE_MUTED, axyne_sidebar_width(state) + 24,
                    editor_top + 24, L"Required Scintilla component failed to load");
     }
+    if (buffer != NULL) {
+        BitBlt(window_dc, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
+        SelectObject(buffer, old_bitmap);
+        DeleteObject(bitmap);
+        DeleteDC(buffer);
+    }
     EndPaint(window, &paint);
 }
 
@@ -7854,7 +7921,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
         axyne_git_panel_create_controls(window, state, instance);
-        axyne_show_document(state, state->documents.active_index);
+        if (state->documents.count != 0)
+            axyne_show_document(state, state->documents.active_index);
+        else
+            axyne_refresh_action_controls(state);
         axyne_update_title(window, state);
         axyne_layout(window, state);
         if (state->editor != NULL) SetFocus(state->editor);
@@ -8355,6 +8425,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
         }
         break;
+    case WM_ENTERMENULOOP:
+        axyne_style_popup_menu_windows();
+        break;
     case WM_MEASUREITEM: {
         MEASUREITEMSTRUCT *measure = (MEASUREITEMSTRUCT *)l_param;
         if (state != NULL && measure != NULL && measure->CtlType == ODT_MENU) {
@@ -8570,6 +8643,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_PAINT:
         axyne_paint_shell(window, state);
         return 0;
+    case WM_ERASEBKGND:
+        /* WM_PAINT covers the complete client area. */
+        return 1;
     case WM_DESTROY:
         /* Child controls still exist during the parent's WM_DESTROY. Their
          * handles are already invalid by WM_NCDESTROY, so release every tab's
@@ -8696,6 +8772,8 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     window_class.lpfnWndProc = axyne_window_proc;
     window_class.lpszClassName = AXYNE_WINDOW_CLASS;
     window_class.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    window_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+    window_class.hIconSm = LoadIconW(instance, MAKEINTRESOURCEW(1));
     window_class.hbrBackground = CreateSolidBrush(AXYNE_BG);
     if (RegisterClassExW(&window_class) == 0) {
         DeleteObject(window_class.hbrBackground);
@@ -8715,7 +8793,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
-    if (axyne_documents_initialize(&state->documents, NULL) != AXYNE_STATUS_OK) {
+    if (axyne_documents_initialize_empty(&state->documents, NULL) != AXYNE_STATUS_OK) {
         axyne_explorer_destroy(&state->explorer);
         HeapFree(GetProcessHeap(), 0, state);
         UnregisterClassW(AXYNE_WINDOW_CLASS, instance);

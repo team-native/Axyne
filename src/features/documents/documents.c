@@ -127,6 +127,16 @@ AxyneStatus axyne_documents_initialize(AxyneDocumentSet *set,
     return axyne_documents_new_placeholder(set, NULL, error);
 }
 
+AxyneStatus axyne_documents_initialize_empty(AxyneDocumentSet *set,
+                                             AxyneError *error)
+{
+    if (set == NULL) return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                                       "Document set is required");
+    memset(set, 0, sizeof(*set));
+    axyne_success(error);
+    return AXYNE_STATUS_OK;
+}
+
 void axyne_documents_destroy(AxyneDocumentSet *set)
 {
     if (set == NULL) return;

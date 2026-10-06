@@ -347,6 +347,120 @@ if(WIN32 OR APPLE)
     endif()
 endif()
 
+if(WIN32)
+    set(AXYNE_MSVC_RUNTIME_NSIS_FILES "")
+    if(MSVC)
+        foreach(AXYNE_MSVC_RUNTIME_NAME
+                msvcp140.dll
+                vcruntime140.dll
+                vcruntime140_1.dll)
+            find_file(AXYNE_MSVC_RUNTIME_FILE
+                NAMES "${AXYNE_MSVC_RUNTIME_NAME}"
+                PATHS
+                    "$ENV{VCToolsRedistDir}/x64/Microsoft.VC143.CRT"
+                    "$ENV{SystemRoot}/System32"
+                NO_DEFAULT_PATH)
+            if(AXYNE_MSVC_RUNTIME_FILE)
+                configure_file(
+                    "${AXYNE_MSVC_RUNTIME_FILE}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/${AXYNE_MSVC_RUNTIME_NAME}"
+                    COPYONLY
+                )
+                string(APPEND AXYNE_MSVC_RUNTIME_NSIS_FILES
+                    "    File \"${CMAKE_CURRENT_BINARY_DIR}\\${AXYNE_MSVC_RUNTIME_NAME}\"\n")
+            endif()
+            unset(AXYNE_MSVC_RUNTIME_FILE CACHE)
+        endforeach()
+    endif()
+    find_program(AXYNE_NSIS_EXECUTABLE
+        NAMES makensis.exe makensis
+        DOC "NSIS compiler used for the custom Windows installer")
+    if(AXYNE_NSIS_EXECUTABLE)
+        set(AXYNE_WINDOWS_INSTALLER_SCRIPT
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Installer.nsi")
+        set(AXYNE_WINDOWS_INSTALLER_BACKEND
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-${PROJECT_VERSION}-Windows-backend.exe")
+        set(AXYNE_WINDOWS_INSTALLER_OUTPUT
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-${PROJECT_VERSION}-Windows.exe")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/Axyne-Installer.nsi.in"
+            "${AXYNE_WINDOWS_INSTALLER_SCRIPT}"
+            @ONLY
+        )
+        add_custom_command(
+            OUTPUT "${AXYNE_WINDOWS_INSTALLER_BACKEND}"
+            COMMAND "${AXYNE_NSIS_EXECUTABLE}" /V2
+                "${AXYNE_WINDOWS_INSTALLER_SCRIPT}"
+            DEPENDS axyne
+                "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Uninstaller.exe"
+            COMMENT "Building Axyne installer backend"
+            VERBATIM
+        )
+        add_custom_target(axyne-windows-installer-backend
+            DEPENDS "${AXYNE_WINDOWS_INSTALLER_BACKEND}")
+        set(AXYNE_WINDOWS_UNINSTALLER_RESOURCE
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Uninstaller.rc")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/uninstaller_ui.rc.in"
+            "${AXYNE_WINDOWS_UNINSTALLER_RESOURCE}"
+            @ONLY
+        )
+        add_executable(axyne-windows-uninstaller WIN32 EXCLUDE_FROM_ALL
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/uninstaller_ui.c"
+            "${AXYNE_WINDOWS_UNINSTALLER_RESOURCE}")
+        target_compile_options(axyne-windows-uninstaller PRIVATE /utf-8)
+        set_target_properties(axyne-windows-uninstaller PROPERTIES
+            OUTPUT_NAME "Axyne-Uninstaller"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+        add_dependencies(axyne-windows-installer-backend
+            axyne-windows-uninstaller)
+        set(AXYNE_WINDOWS_INSTALLER_RESOURCE
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Installer.rc")
+        set(AXYNE_INSTALLER_CONFIG_DIR
+            "${CMAKE_CURRENT_BINARY_DIR}/generated-installer")
+        set(AXYNE_INSTALLER_CONFIG_HEADER
+            "${AXYNE_INSTALLER_CONFIG_DIR}/installer_ui_config.h")
+        add_custom_command(
+            OUTPUT "${AXYNE_INSTALLER_CONFIG_HEADER}"
+            COMMAND "${CMAKE_COMMAND}"
+                -DAXYNE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DAXYNE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -DAXYNE_OUTPUT=${AXYNE_INSTALLER_CONFIG_HEADER}
+                -DAXYNE_VERSION=${PROJECT_VERSION}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/generate-installer-config.cmake"
+            DEPENDS axyne
+            VERBATIM
+        )
+        add_custom_target(axyne-windows-installer-config
+            DEPENDS "${AXYNE_INSTALLER_CONFIG_HEADER}")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/installer_ui.rc.in"
+            "${AXYNE_WINDOWS_INSTALLER_RESOURCE}"
+            @ONLY
+        )
+        set_source_files_properties("${AXYNE_WINDOWS_INSTALLER_RESOURCE}"
+            PROPERTIES OBJECT_DEPENDS "${AXYNE_WINDOWS_INSTALLER_BACKEND}")
+        add_executable(axyne-windows-installer-ui WIN32 EXCLUDE_FROM_ALL
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/installer_ui.c"
+            "${AXYNE_WINDOWS_INSTALLER_RESOURCE}")
+        add_dependencies(axyne-windows-installer-ui
+            axyne axyne-windows-installer-backend axyne-windows-installer-config)
+        target_include_directories(axyne-windows-installer-ui PRIVATE
+            "${AXYNE_INSTALLER_CONFIG_DIR}")
+        add_custom_target(axyne-windows-installer
+            DEPENDS axyne-windows-installer-ui
+            COMMENT "Building custom Axyne Windows installer"
+        )
+        set_target_properties(axyne-windows-installer-ui PROPERTIES
+            OUTPUT_NAME "Axyne-${PROJECT_VERSION}-Windows"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+        target_compile_options(axyne-windows-installer-ui PRIVATE /utf-8)
+    else()
+        message(STATUS
+            "NSIS was not found; axyne-windows-installer target is unavailable")
+    endif()
+endif()
+
 # Each optional feature owns its CMakeLists.txt so feature branches can add
 # modules without editing the shared root build file.
 file(GLOB AXYNE_FEATURE_MODULES CONFIGURE_DEPENDS
