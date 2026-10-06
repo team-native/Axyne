@@ -31,6 +31,10 @@ typedef struct AxyneDocument {
      * recent list, file lists, search and session state. It lives in the
      * preview slot (see axyne_documents_open_virtual). */
     int is_virtual;
+    /* Image document (see axyne_documents_open_image): backed by a file on
+     * disk but shown by a native image preview, never as text. It has no
+     * contents, is never dirty and cannot be saved. */
+    int is_image;
     /* Opaque, adapter-owned Scintilla document; the shared core ignores it. */
     void *native_editor_document;
     int owns_native_editor_document;
@@ -121,11 +125,23 @@ AxyneStatus axyne_documents_open_virtual(AxyneDocumentSet *set,
                                          const char *contents, size_t length,
                                          size_t *index, AxyneDocument *evicted,
                                          int *replaced, AxyneError *error);
+/* Opens an image file that the native shell previews instead of showing it as
+ * text. Binary sniffing is skipped (the caller has decided it can display the
+ * file); nothing is read, so the document gets an empty buffer and is_image.
+ * An already-open path is only activated. With `preview` the document takes
+ * the preview slot exactly as axyne_documents_open_preview does (same
+ * `evicted`/`replaced` contract and revert), otherwise it is appended as for
+ * axyne_documents_open; `evicted` and `replaced` may then be NULL. */
+AxyneStatus axyne_documents_open_image(AxyneDocumentSet *set,
+                                       const char *utf8_path, int preview,
+                                       size_t *index, AxyneDocument *evicted,
+                                       int *replaced, AxyneError *error);
 /* True for a document backed by a file on disk (has a path, is neither
  * untitled nor virtual): the only kind that feeds the recent list, palette
  * file lists, LSP, the file watcher and the debugger. */
 int axyne_document_has_file(const AxyneDocument *document);
-/* True when Save and Save As apply: virtual documents have no file. */
+/* True when Save and Save As apply: virtual documents have no file and image
+ * documents have no text to write. */
 int axyne_document_can_save(const AxyneDocument *document);
 /* Undo axyne_documents_open_preview after a native load failure: with
  * `replaced` the old document is put back at `index` and the new one is
