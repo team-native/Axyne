@@ -3257,6 +3257,8 @@ static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
     int control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     int shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     int alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    /* AltGr reports as Ctrl+Alt; it types characters, never a shortcut. */
+    int altgr = (GetKeyState(VK_RMENU) & 0x8000) != 0;
     UINT command = 0;
     if (control && !alt && !shift) {
         if (key == 'G') command = AXYNE_CMD_GOTO_LINE;
@@ -3267,9 +3269,10 @@ static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
         else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) command = AXYNE_CMD_ZOOM_OUT;
         else if (key == '0' || key == VK_NUMPAD0) command = AXYNE_CMD_ZOOM_RESET;
         else if (key == VK_OEM_3) command = AXYNE_CMD_PANEL_TERMINAL;
-    } else if (control && alt && !shift) {
-        /* Alt chords arrive as WM_SYSKEYDOWN, which the window procedure's
-         * WM_KEYDOWN never sees, so they are handled here. */
+    } else if (control && alt && !shift && !altgr) {
+        /* Handled here rather than in the window procedure's WM_KEYDOWN,
+         * which only runs while the main window itself has focus, not the
+         * editor. */
         if (key == 'D') command = AXYNE_CMD_LSP_DEFINITION;
         else if (key == 'R') command = AXYNE_CMD_LSP_REFERENCES;
     } else if (control && shift && !alt) {
@@ -8186,8 +8189,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             for (i = 0; i < sizeof(AXYNE_TOOLBAR_COMMANDS) / sizeof(*AXYNE_TOOLBAR_COMMANDS); ++i) {
                 RECT rect = rects[i];
                 if (PtInRect(&rect, point)) {
-                    if (axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i]))
+                    if (axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i])) {
+                        /* Toolbar Undo/Redo are the editor's (that is what
+                         * enables them), not a focused text field's. */
+                        if ((AXYNE_TOOLBAR_COMMANDS[i] == AXYNE_CMD_UNDO ||
+                             AXYNE_TOOLBAR_COMMANDS[i] == AXYNE_CMD_REDO) &&
+                            state->editor != NULL)
+                            SetFocus(state->editor);
                         SendMessageW(window, WM_COMMAND, AXYNE_TOOLBAR_COMMANDS[i], 0);
+                    }
                     return 0;
                 }
             }
