@@ -233,18 +233,45 @@ static const AxyneSyntaxLanguage languages[] = {
       STYLES(bash_styles) },
     { "markdown", "markdown", { NULL, NULL, NULL, NULL }, STYLES(markdown_styles) },
     { "cmake", "cmake",
-      { "add_custom_command add_custom_target add_definitions add_executable "
-        "add_library add_subdirectory add_test cmake_minimum_required "
-        "configure_file enable_testing endfunction endif endforeach "
-        "endmacro endwhile else elseif foreach function if include "
-        "install list macro message option project set string target_compile_definitions "
-        "target_compile_options target_include_directories target_link_libraries "
-        "target_sources while find_package find_library file get_filename_component "
-        "set_target_properties set_tests_properties return unset",
-        "PUBLIC PRIVATE INTERFACE STATIC SHARED MODULE REQUIRED COMPONENTS "
-        "STATUS FATAL_ERROR WARNING ON OFF TRUE FALSE NOT AND OR DEFINED "
-        "EXISTS STREQUAL MATCHES COMMAND PROPERTIES DESTINATION",
-        NULL, NULL },
+      { "add_compile_definitions add_compile_options add_custom_command "
+        "add_custom_target add_definitions add_dependencies add_executable "
+        "add_library add_link_options add_subdirectory add_test "
+        "aux_source_directory build_command cmake_host_system_information "
+        "cmake_minimum_required cmake_parse_arguments cmake_path "
+        "cmake_policy configure_file define_property enable_language "
+        "enable_testing endfunction endif endforeach endmacro endwhile else "
+        "elseif execute_process export file find_file find_library "
+        "find_package find_path find_program foreach function "
+        "get_cmake_property get_directory_property get_filename_component "
+        "get_property get_source_file_property get_target_property "
+        "get_test_property if include include_directories include_guard "
+        "install link_directories link_libraries list macro "
+        "mark_as_advanced math message option project return "
+        "separate_arguments set set_directory_properties set_property "
+        "set_source_files_properties set_target_properties "
+        "set_tests_properties source_group string "
+        "target_compile_definitions target_compile_features "
+        "target_compile_options target_include_directories "
+        "target_link_directories target_link_libraries target_link_options "
+        "target_precompile_headers target_sources try_compile try_run unset "
+        "variable_watch while",
+        "PUBLIC PRIVATE INTERFACE STATIC SHARED MODULE OBJECT ALIAS IMPORTED "
+        "REQUIRED COMPONENTS QUIET CONFIG OPTIONAL STATUS FATAL_ERROR WARNING "
+        "ON OFF TRUE FALSE NOT AND OR DEFINED EXISTS STREQUAL MATCHES "
+        "VERSION_LESS VERSION_GREATER VERSION_EQUAL COMMAND PROPERTIES "
+        "DESTINATION ARCHIVE LIBRARY RUNTIME COMPONENT CONFIGURATIONS "
+        "EXCLUDE_FROM_ALL FILES FILES_MATCHING GLOB GLOB_RECURSE "
+        "CONFIGURE_DEPENDS INCLUDES PATTERN PERMISSIONS PROGRAMS RENAME "
+        "TARGETS USE_SOURCE_PERMISSIONS VERSION LANGUAGES BEFORE AFTER "
+        "SYSTEM BUILD_INTERFACE INSTALL_INTERFACE",
+        "CMAKE_BUILD_TYPE CMAKE_C_STANDARD CMAKE_CXX_STANDARD "
+        "CMAKE_C_STANDARD_REQUIRED CMAKE_CXX_STANDARD_REQUIRED "
+        "CMAKE_INSTALL_PREFIX CMAKE_OSX_ARCHITECTURES "
+        "CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_SOURCE_DIR CMAKE_BINARY_DIR "
+        "CMAKE_CURRENT_SOURCE_DIR CMAKE_CURRENT_BINARY_DIR "
+        "CMAKE_CURRENT_LIST_DIR CMAKE_MODULE_PATH CMAKE_PREFIX_PATH "
+        "PROJECT_SOURCE_DIR PROJECT_BINARY_DIR PROJECT_NAME",
+        NULL },
       STYLES(cmake_styles) },
     { "yaml", "yaml",
       { "true false yes no on off null", NULL, NULL, NULL }, STYLES(yaml_styles) },
@@ -298,20 +325,43 @@ const AxyneSyntaxLanguage *axyne_syntax_by_id(const char *id)
     return NULL;
 }
 
+/* Language id for the `length` characters at `extension` (no dot); NULL when
+ * the extension is unknown. */
+static const char *extension_language(const char *extension, size_t length)
+{
+    size_t i, k;
+    for (i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i) {
+        const char *known = extensions[i].extension;
+        for (k = 0; k < length && known[k] != '\0'; ++k)
+            if (tolower((unsigned char)extension[k]) != (unsigned char)known[k])
+                break;
+        if (k == length && known[k] == '\0') return extensions[i].id;
+    }
+    return NULL;
+}
+
 const AxyneSyntaxLanguage *axyne_syntax_for_path(const char *path)
 {
     const char *base = path;
     const char *p;
     const char *dot;
-    size_t i;
+    const char *id;
     if (path == NULL || path[0] == '\0') return axyne_syntax_by_id("cpp");
     for (p = path; *p != '\0'; ++p)
         if (*p == '/' || *p == '\\') base = p + 1;
     if (equal_nocase(base, "CMakeLists.txt")) return axyne_syntax_by_id("cmake");
     dot = strrchr(base, '.');
     if (dot == NULL || dot[1] == '\0') return axyne_syntax_by_id("text");
-    for (i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i)
-        if (equal_nocase(dot + 1, extensions[i].extension))
-            return axyne_syntax_by_id(extensions[i].id);
-    return axyne_syntax_by_id("text");
+    /* A configure template ("config.h.in") is written in the language of
+     * the file it generates when that extension is known. */
+    if (equal_nocase(dot, ".in")) {
+        const char *inner = dot;
+        while (inner > base && inner[-1] != '.') --inner;
+        if (inner > base + 1) {
+            id = extension_language(inner, (size_t)(dot - inner));
+            if (id != NULL) return axyne_syntax_by_id(id);
+        }
+    }
+    id = extension_language(dot + 1, strlen(dot + 1));
+    return axyne_syntax_by_id(id != NULL ? id : "text");
 }
