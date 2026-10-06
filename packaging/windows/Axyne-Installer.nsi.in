@@ -48,12 +48,23 @@ Page custom AxyneFinishPage AxyneFinishLeave
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Korean"
 
+Function AxyneStyleWizardChrome
+    SetCtlColors $HWNDPARENT "${AXYNE_TEXT}" "${AXYNE_BG}"
+    GetDlgItem $0 $HWNDPARENT 1
+    SetCtlColors $0 "FFFFFF" "${AXYNE_ACCENT_DARK}"
+    GetDlgItem $0 $HWNDPARENT 2
+    SetCtlColors $0 "${AXYNE_TEXT}" "${AXYNE_SURFACE}"
+    GetDlgItem $0 $HWNDPARENT 3
+    SetCtlColors $0 "${AXYNE_TEXT}" "${AXYNE_SURFACE}"
+FunctionEnd
+
 Function AxyneWelcomePage
     nsDialogs::Create 1044
     Pop $AxynePage
     ${If} $AxynePage == error
         Abort
     ${EndIf}
+    Call AxyneStyleWizardChrome
     SetCtlColors $AxynePage "${AXYNE_TEXT}" "${AXYNE_BG}"
 
     ${NSD_CreateLabel} 24u 24u 330u 28u "Axyne"
@@ -89,6 +100,7 @@ Function AxyneDirectoryPage
     ${If} $AxynePage == error
         Abort
     ${EndIf}
+    Call AxyneStyleWizardChrome
     SetCtlColors $AxynePage "${AXYNE_TEXT}" "${AXYNE_BG}"
 
     ${NSD_CreateLabel} 24u 24u 360u 24u "Choose install location"
@@ -138,6 +150,7 @@ Function AxyneFinishPage
     ${If} $AxynePage == error
         Abort
     ${EndIf}
+    Call AxyneStyleWizardChrome
     SetCtlColors $AxynePage "${AXYNE_TEXT}" "${AXYNE_BG}"
 
     ${NSD_CreateLabel} 24u 34u 360u 28u "Axyne is ready to use"
