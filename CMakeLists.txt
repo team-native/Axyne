@@ -347,6 +347,34 @@ if(WIN32 OR APPLE)
     endif()
 endif()
 
+if(WIN32)
+    find_program(AXYNE_NSIS_EXECUTABLE
+        NAMES makensis.exe makensis
+        DOC "NSIS compiler used for the custom Windows installer")
+    if(AXYNE_NSIS_EXECUTABLE)
+        set(AXYNE_WINDOWS_INSTALLER_SCRIPT
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-Installer.nsi")
+        set(AXYNE_WINDOWS_INSTALLER_OUTPUT
+            "${CMAKE_CURRENT_BINARY_DIR}/Axyne-${PROJECT_VERSION}-Windows.exe")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/Axyne-Installer.nsi.in"
+            "${AXYNE_WINDOWS_INSTALLER_SCRIPT}"
+            @ONLY
+        )
+        add_custom_target(axyne-windows-installer
+            COMMAND "${AXYNE_NSIS_EXECUTABLE}" /V2
+                "${AXYNE_WINDOWS_INSTALLER_SCRIPT}"
+            DEPENDS axyne
+            BYPRODUCTS "${AXYNE_WINDOWS_INSTALLER_OUTPUT}"
+            COMMENT "Building custom Axyne Windows installer"
+            VERBATIM
+        )
+    else()
+        message(STATUS
+            "NSIS was not found; axyne-windows-installer target is unavailable")
+    endif()
+endif()
+
 # Each optional feature owns its CMakeLists.txt so feature branches can add
 # modules without editing the shared root build file.
 file(GLOB AXYNE_FEATURE_MODULES CONFIGURE_DEPENDS
