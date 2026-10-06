@@ -1430,12 +1430,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
 }
 
 /* Documents with these extensions are previewed as images instead of being
- * shown as (binary) text in the editor. */
+ * shown as (binary) text in the editor. SVG is text and stays editable. */
 static BOOL axyne_macos_is_image_path(const char *path)
 {
     static const char *const extensions[] = {
         ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff",
-        ".bmp", ".webp", ".svg", ".ico" };
+        ".bmp", ".webp", ".ico" };
     const char *extension = path == NULL ? NULL : strrchr(path, '.');
     /* A dot inside a directory name or starting a dotfile is not an extension. */
     if (extension == NULL || extension == path || extension[-1] == '/' ||
