@@ -197,6 +197,15 @@ static int run_tests(NSString *pngPath)
         preferences->editor.tab_width = 6;
         preferences->editor.insert_spaces = 1;
         [workspace applyPreferences];
+        // Figma chrome: no focus ring around the editor or the terminal input,
+        // and the terminal input draws no field box of its own.
+        CHECK([editor focusRingType] == NSFocusRingTypeNone);
+        Ivar terminalInputIvar = class_getInstanceVariable(workspaceClass, "_terminalInput");
+        CHECK(terminalInputIvar != NULL);
+        NSTextField *terminalInput = object_getIvar(workspace, terminalInputIvar);
+        CHECK(terminalInput != nil);
+        CHECK(![terminalInput drawsBackground] && ![terminalInput isBezeled]);
+        CHECK([terminalInput focusRingType] == NSFocusRingTypeNone);
 
         // Load bytes on the very first bind, before the view moves to a window.
         // Includes UTF-8, CRLF and embedded text so NSString/strlen conversion

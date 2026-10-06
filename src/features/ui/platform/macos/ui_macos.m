@@ -2188,7 +2188,12 @@ static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
     [_problemSummary setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setBackgroundColor:axyne_preference_color(_preferences.theme.panel)];
-    [_terminalInput setDrawsBackground:YES];
+    /* Figma: the input line sits directly on the terminal surface as plain
+     * monospaced text, with no field box or focus ring. */
+    [_terminalInput setDrawsBackground:NO];
+    [_terminalInput setBezeled:NO];
+    [_terminalInput setFocusRingType:NSFocusRingTypeNone];
+    [_terminalInput setFont:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular]];
     for (NSButton *button in @[_terminalStart, _terminalStop, _terminalSend,
                                _debugStart, _debugPause, _debugContinue,
                                _debugNext, _debugBreakpoint]) {
@@ -4120,7 +4125,9 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         [_editorView setAccessibilityRole:NSAccessibilityTextAreaRole];
         [_editorView setAccessibilityLabel:@"Source editor"];
         [_editorView setAccessibilityRoleDescription:@"source editor"];
-        [_editorView setFocusRingType:NSFocusRingTypeExterior];
+        /* Figma draws no ring around the code area; the caret and caret-line
+         * band already mark focus. */
+        [_editorView setFocusRingType:NSFocusRingTypeNone];
         (void)[self sendEditorMessage:SCI_SETMARGINTYPEN wParam:0
                                  lParam:SC_MARGIN_NUMBER];
         (void)[self sendEditorMessage:SCI_SETMARGINMASKN wParam:0 lParam:0];
