@@ -2550,6 +2550,11 @@ static BOOL axyne_macos_is_image_path(const char *path)
 {
     AxyneDocument *doc = [self activeDocument];
     if (doc == NULL || _editorView == nil) return NO;
+    /* Scintilla's completion list owns a native popup window.  Close it
+     * before rebinding the editor document; otherwise AppKit can release the
+     * popup after its editor/window observers have already become invalid. */
+    if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
+        (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
     _loadingEditor = YES;
     BOOL loaded = axyne_editor_load_document(doc, axyne_macos_editor_message, self);
     _loadingEditor = NO;
@@ -5990,6 +5995,10 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_panelSplitterTracking release];
     [_recentMenu release];
     if (_editorView != nil) {
+        /* The autocomplete popup must be gone before releasing any document
+         * references or tearing down the Scintilla view. */
+        if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
+            (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
         for (size_t i = 0; i < _documents.count; ++i) {
             AxyneDocument *doc = &_documents.documents[i];
             if (doc->owns_native_editor_document)
