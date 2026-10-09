@@ -28,6 +28,7 @@ add_executable(axyne_tests
     test_app_state.c
     test_app_paths.c
     test_memory_usage.c
+    test_log.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -193,8 +194,14 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> memory-usage
             "${AXYNE_TEST_FIXTURE_DIR}/memory-usage"
 )
+add_test(
+    NAME axyne-log
+    COMMAND $<TARGET_FILE:axyne_tests> log
+            "${AXYNE_TEST_FIXTURE_DIR}/log"
+)
 set_tests_properties(
     axyne-memory-limits
+    axyne-log
     axyne-memory-usage
     axyne-app-paths
     axyne-app-state
