@@ -40,6 +40,9 @@ int axyne_test_commands(const char *root)
     size_t palette_count = 0;
     const AxynePaletteCommand *palette = axyne_palette_commands(&palette_count);
     (void)root;
+    /* Fixture helpers from test_support.h are not needed here. */
+    (void)axyne_test_path;
+    (void)axyne_test_make_directory;
 
     AXYNE_TEST_EQ_INT(count, AXYNE_COMMAND_COUNT - 1);
     AXYNE_TEST_CHECK(axyne_command_info(AXYNE_COMMAND_NONE) == NULL);
