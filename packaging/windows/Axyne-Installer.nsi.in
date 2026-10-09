@@ -14,6 +14,9 @@ AutoCloseWindow false
 !include "MUI2.nsh"
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
+
+!define AXYNE_UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne"
 
 !define AXYNE_BG "131417"
 !define AXYNE_SURFACE "1C1E22"
@@ -28,6 +31,10 @@ Var AxynePathText
 Var AxyneBrowseButton
 Var AxyneLaunchCheckbox
 Var AxyneInstallPath
+Var AxyneJournal
+Var AxyneBackupCount
+Var AxyneStartMenu
+Var AxyneDesktop
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "@CMAKE_CURRENT_SOURCE_DIR@\packaging\windows\Axyne.ico"
@@ -47,6 +54,116 @@ Page custom AxyneFinishPage AxyneFinishLeave
 
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Korean"
+
+; Command line used by the custom installer UI (installer_ui.c):
+;   /S [/ALLUSERS] [/NOSTARTMENU] [/NODESKTOP] [/JOURNAL="<file>"] /D=<dir>
+; /ALLUSERS switches $SMPROGRAMS/$DESKTOP and SHCTX to the all-users locations
+; (HKLM); the UI only passes it from an elevated process. Without /JOURNAL the
+; backend behaves as before (no backups, no journal).
+Function .onInit
+    SetRegView 64
+    StrCpy $AxyneStartMenu 1
+    StrCpy $AxyneDesktop 1
+    StrCpy $AxyneJournal ""
+    StrCpy $AxyneBackupCount 0
+    ${GetParameters} $R0
+    ClearErrors
+    ${GetOptions} $R0 "/ALLUSERS" $R1
+    ${IfNot} ${Errors}
+        SetShellVarContext all
+    ${EndIf}
+    ClearErrors
+    ${GetOptions} $R0 "/NOSTARTMENU" $R1
+    ${IfNot} ${Errors}
+        StrCpy $AxyneStartMenu 0
+    ${EndIf}
+    ClearErrors
+    ${GetOptions} $R0 "/NODESKTOP" $R1
+    ${IfNot} ${Errors}
+        StrCpy $AxyneDesktop 0
+    ${EndIf}
+    ClearErrors
+    ${GetOptions} $R0 "/JOURNAL=" $R1
+    ${IfNot} ${Errors}
+        StrCpy $AxyneJournal $R1
+    ${EndIf}
+FunctionEnd
+
+; Appends one UTF-16LE line to the rollback journal. The line is written
+; before the matching change is made, so a killed backend never leaves an
+; unrecorded change behind. If the journal cannot be written the install is
+; aborted rather than continuing without a rollback record.
+Function AxyneJournalWrite
+    Exch $R9
+    Push $R8
+    Push $R7
+    ${If} $AxyneJournal != ""
+        StrCpy $R7 0
+        ${Do}
+            ClearErrors
+            FileOpen $R8 $AxyneJournal a
+            ${IfNot} ${Errors}
+                ${Break}
+            ${EndIf}
+            IntOp $R7 $R7 + 1
+            ${If} $R7 >= 40
+                Abort
+            ${EndIf}
+            Sleep 50
+        ${Loop}
+        FileSeek $R8 0 END
+        FileWriteUTF16LE $R8 "$R9$\r$\n"
+        FileClose $R8
+    ${EndIf}
+    Pop $R7
+    Pop $R8
+    Pop $R9
+FunctionEnd
+
+!macro AxyneJournal LINE
+    Push `${LINE}`
+    Call AxyneJournalWrite
+!macroend
+
+; Records a file about to be written: "N<TAB>path" when it is new, or moves
+; the existing file into $INSTDIR\.axyne-backup and records
+; "B<TAB>path<TAB>backup" so a cancelled install can restore it.
+Function AxyneBeforeWrite
+    Exch $R0
+    Push $R1
+    ${If} $AxyneJournal != ""
+        ${If} ${FileExists} "$R0"
+            IntOp $AxyneBackupCount $AxyneBackupCount + 1
+            StrCpy $R1 "$INSTDIR\.axyne-backup\$AxyneBackupCount.bak"
+            CreateDirectory "$INSTDIR\.axyne-backup"
+            !insertmacro AxyneJournal "B$\t$R0$\t$R1"
+            ClearErrors
+            Rename "$R0" "$R1"
+            ${If} ${Errors}
+                Abort
+            ${EndIf}
+        ${Else}
+            !insertmacro AxyneJournal "N$\t$R0"
+        ${EndIf}
+    ${EndIf}
+    Pop $R1
+    Pop $R0
+FunctionEnd
+
+!macro AxyneFile SOURCE NAME
+    Push "$INSTDIR\${NAME}"
+    Call AxyneBeforeWrite
+    File "/oname=${NAME}" "${SOURCE}"
+!macroend
+
+; Records the previous value of an uninstall-key value ("V<TAB>name<TAB>old")
+; before it is overwritten.
+!macro AxyneRegValue NAME VALUE
+    ClearErrors
+    ReadRegStr $R1 SHCTX "${AXYNE_UNINSTALL_KEY}" "${NAME}"
+    !insertmacro AxyneJournal "V$\t${NAME}$\t$R1"
+    WriteRegStr SHCTX "${AXYNE_UNINSTALL_KEY}" "${NAME}" "${VALUE}"
+!macroend
 
 Function AxyneStyleWizardChrome
     SetCtlColors $HWNDPARENT "${AXYNE_TEXT}" "${AXYNE_BG}"
@@ -180,32 +297,70 @@ FunctionEnd
 Section "Axyne" SecAxyne
     SectionIn RO
     SetOutPath "$INSTDIR"
-    File "@CMAKE_CURRENT_BINARY_DIR@\axyne.exe"
-    File "@CMAKE_CURRENT_BINARY_DIR@\Scintilla.dll"
-    File "@CMAKE_CURRENT_BINARY_DIR@\Lexilla.dll"
+    ; Total payload size in KiB (compiler-computed), used by the UI for
+    ; byte-based progress. Index 0 is this section, the only install section.
+    SectionGetSize 0 $R0
+    !insertmacro AxyneJournal "T$\t$R0"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\axyne.exe" "axyne.exe"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\Scintilla.dll" "Scintilla.dll"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\Lexilla.dll" "Lexilla.dll"
 @AXYNE_MSVC_RUNTIME_NSIS_FILES@
-    File "@CMAKE_CURRENT_BINARY_DIR@\version.json"
-    File "@CMAKE_CURRENT_BINARY_DIR@\Scintilla-LICENSE.txt"
-    File "@CMAKE_CURRENT_BINARY_DIR@\Lexilla-LICENSE.txt"
-    File "@CMAKE_CURRENT_SOURCE_DIR@\LICENSE"
-    File "@CMAKE_CURRENT_SOURCE_DIR@\docs\RELEASE_NOTES.md"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\version.json" "version.json"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\Scintilla-LICENSE.txt" "Scintilla-LICENSE.txt"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\Lexilla-LICENSE.txt" "Lexilla-LICENSE.txt"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_SOURCE_DIR@\LICENSE" "LICENSE"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_SOURCE_DIR@\docs\RELEASE_NOTES.md" "RELEASE_NOTES.md"
 
-    CreateDirectory "$SMPROGRAMS\Axyne"
-    CreateShortcut "$SMPROGRAMS\Axyne\Axyne.lnk" "$INSTDIR\axyne.exe"
-    CreateShortcut "$DESKTOP\Axyne.lnk" "$INSTDIR\axyne.exe"
+    ${If} $AxyneStartMenu == 1
+        ${IfNot} ${FileExists} "$SMPROGRAMS\Axyne\*.*"
+            !insertmacro AxyneJournal "D$\t$SMPROGRAMS\Axyne"
+            CreateDirectory "$SMPROGRAMS\Axyne"
+        ${EndIf}
+        Push "$SMPROGRAMS\Axyne\Axyne.lnk"
+        Call AxyneBeforeWrite
+        CreateShortcut "$SMPROGRAMS\Axyne\Axyne.lnk" "$INSTDIR\axyne.exe"
+    ${EndIf}
+    ${If} $AxyneDesktop == 1
+        Push "$DESKTOP\Axyne.lnk"
+        Call AxyneBeforeWrite
+        CreateShortcut "$DESKTOP\Axyne.lnk" "$INSTDIR\axyne.exe"
+    ${EndIf}
+    Push "$INSTDIR\Uninstall-Backend.exe"
+    Call AxyneBeforeWrite
     WriteUninstaller "$INSTDIR\Uninstall-Backend.exe"
-    File /oname=Uninstall.exe "@CMAKE_CURRENT_BINARY_DIR@\Axyne-Uninstaller.exe"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayName" "Axyne"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "DisplayVersion" "@PROJECT_VERSION@"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "InstallLocation" "$INSTDIR"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne" "UninstallString" "$INSTDIR\Uninstall.exe"
+    !insertmacro AxyneFile "@CMAKE_CURRENT_BINARY_DIR@\Axyne-Uninstaller.exe" "Uninstall.exe"
+
+    ClearErrors
+    EnumRegValue $R1 SHCTX "${AXYNE_UNINSTALL_KEY}" 0
+    ${If} ${Errors}
+        !insertmacro AxyneJournal "K"
+    ${EndIf}
+    !insertmacro AxyneRegValue "DisplayName" "Axyne"
+    !insertmacro AxyneRegValue "DisplayVersion" "@PROJECT_VERSION@"
+    !insertmacro AxyneRegValue "InstallLocation" "$INSTDIR"
+    !insertmacro AxyneRegValue "UninstallString" "$INSTDIR\Uninstall.exe"
 SectionEnd
+
+; The uninstaller UI copies Uninstall-Backend.exe to %TEMP% and runs it as
+;   /S [/ALLUSERS] _?=<install dir>
+; so this process can delete everything in $INSTDIR, including the UI.
+Function un.onInit
+    SetRegView 64
+    ${GetParameters} $R0
+    ClearErrors
+    ${GetOptions} $R0 "/ALLUSERS" $R1
+    ${IfNot} ${Errors}
+        SetShellVarContext all
+    ${EndIf}
+FunctionEnd
 
 Section "Uninstall"
     Delete "$SMPROGRAMS\Axyne\Axyne.lnk"
     RMDir "$SMPROGRAMS\Axyne"
     Delete "$DESKTOP\Axyne.lnk"
     Delete "$INSTDIR\*.*"
-    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Axyne"
+    Delete "$INSTDIR\.axyne-backup\*.*"
+    RMDir "$INSTDIR\.axyne-backup"
+    DeleteRegKey SHCTX "${AXYNE_UNINSTALL_KEY}"
     RMDir "$INSTDIR"
 SectionEnd
