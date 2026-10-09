@@ -9,6 +9,7 @@
 #include "axyne/document.h"
 #include "axyne/palette_controller.h"
 #include "axyne/problems.h"
+#include "axyne/outline.h"
 #include "axyne/lsp.h"
 
 @interface NSView (AxyneWorkspaceLayoutTest)
@@ -37,6 +38,8 @@
 - (NSInteger)selectedRowIndex;
 - (void)moveSelectionBy:(NSInteger)delta;
 - (NSInteger)rowIndexAtPoint:(NSPoint)point;
+- (BOOL)pointIsInOutline:(NSPoint)point;
+- (NSInteger)outlineSymbolAtPoint:(NSPoint)point;
 @end
 
 static id field(id view, const char *name)
@@ -347,6 +350,52 @@ int main(void)
         CHECK_ROW(NSMakePoint(80, top - 1), NSNotFound);
         CHECK_ROW(NSMakePoint(80, bottom), NSNotFound);
         CHECK_ROW(NSMakePoint(80, 842 - AXYNE_UI_STATUS), NSNotFound);
+
+        /* The outline takes the bottom of the explorer column: the tree ends
+         * above it and an outline click is never a tree hit. */
+        fprintf(stderr, "Checking explorer outline\n");
+        {
+            AxyneOutline *outline = value_field(view, "_outline");
+            const char outlineText[] = "int a;\nint b;\nint f(void) { return 0; }\n"
+                "struct S { int x; };\n";
+            CGFloat explorerHeight = bottom - AXYNE_UI_MENU - AXYNE_UI_TOOLBAR - AXYNE_UI_TABS;
+            int section;
+            CGFloat treeBottom;
+            NSInteger lastRow;
+            CHECK(outline != NULL);
+            /* No document is open: the section is hidden. */
+            CHECK(outline->state == AXYNE_OUTLINE_HIDDEN);
+            CHECK(![view pointIsInOutline:NSMakePoint(80, bottom - 1)]);
+            CHECK(axyne_outline_prepare(outline, "main.c", sizeof(outlineText) - 1) != 0);
+            CHECK(axyne_outline_scan(outline, outlineText, sizeof(outlineText) - 1, NULL) ==
+                  AXYNE_STATUS_OK);
+            CHECK(outline->symbols.count >= 3);
+            [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
+            section = axyne_outline_height(outline, (int)explorerHeight);
+            CHECK(section == AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER +
+                  (int)outline->symbols.count * AXYNE_OUTLINE_ROW);
+            CHECK(section <= explorerHeight * 0.4);
+            treeBottom = bottom - section;
+            lastRow = (NSInteger)((treeBottom - top) / AXYNE_UI_ROW) - 1;
+            CHECK(lastRow > 0);
+            CHECK_ROW(NSMakePoint(80, top + lastRow * AXYNE_UI_ROW), lastRow);
+            CHECK_ROW(NSMakePoint(80, top + (lastRow + 1) * AXYNE_UI_ROW), NSNotFound);
+            CHECK_ROW(NSMakePoint(80, treeBottom), NSNotFound);
+            CHECK_ROW(NSMakePoint(80, bottom - 1), NSNotFound);
+            CHECK_ROW(NSMakePoint(80, top), 0);
+            CHECK([view pointIsInOutline:NSMakePoint(80, treeBottom)]);
+            CHECK(![view pointIsInOutline:NSMakePoint(80, treeBottom - 1)]);
+            CHECK(![view pointIsInOutline:NSMakePoint(AXYNE_UI_SIDEBAR, treeBottom)]);
+            /* separator and header rows are not symbols; rows follow them */
+            CHECK([view outlineSymbolAtPoint:NSMakePoint(80, treeBottom + 2)] == -1);
+            CHECK([view outlineSymbolAtPoint:NSMakePoint(80, treeBottom +
+                AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER + 1)] == 0);
+            CHECK([view outlineSymbolAtPoint:NSMakePoint(80, treeBottom +
+                AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER + AXYNE_OUTLINE_ROW + 1)] == 1);
+            axyne_outline_clear(outline);
+            [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
+            CHECK_ROW(NSMakePoint(80, top + (lastRow + 1) * AXYNE_UI_ROW), lastRow + 1);
+        }
 
         /* The command palette replaces the toolbar search field while open. */
         fprintf(stderr, "Checking command palette\n");
