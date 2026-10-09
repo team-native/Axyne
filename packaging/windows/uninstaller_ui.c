@@ -413,7 +413,7 @@ static void confirm_page(HDC dc) {
         box(dc, RGB(42, 35, 22), 28, 114, 532, 162); outline(dc, RGB(110, 85, 40), 28, 114, 532, 162);
         label(dc, L"⚠", 38, 114, 20, 48, WARNING, 13, 700, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         label(dc, L"Axyne가 실행 중입니다. 저장하지 않은 파일이 있으면 먼저 저장하세요.", 64, 114, 368, 48,
-              TEXT, 12, 400, DT_LEFT | DT_VCENTER | DT_WORDBREAK);
+              TEXT, 12, 400, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         button(dc, L"Axyne 닫기", 440, 123, 82, ACTIVE, TEXT);
     }
     label(dc, L"다음 위치에서 제거합니다", 28, 117 + y, 500, 20, MUTED, 12, 400, DT_LEFT | DT_TOP);
