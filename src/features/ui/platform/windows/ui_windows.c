@@ -20,6 +20,7 @@
 #include "axyne/empty_state.h"
 #include "axyne/search.h"
 #include "axyne/explorer.h"
+#include "axyne/outline.h"
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
@@ -61,7 +62,8 @@ enum {
     AXYNE_DEBUG_STEP_OVER,
     AXYNE_DEBUG_BREAKPOINT,
     AXYNE_PROBLEMS_FILTER = 5040, /* problems panel filter EDIT control id */
-    AXYNE_PROBLEMS_TIMER = 5121   /* coalesced problems list rebuild */
+    AXYNE_PROBLEMS_TIMER = 5121,  /* coalesced problems list rebuild */
+    AXYNE_OUTLINE_TIMER = 5122    /* debounced outline rescan after edits */
 };
 
 static const wchar_t AXYNE_WINDOW_CLASS[] = L"AxyneWindow";
@@ -206,6 +208,13 @@ typedef struct AxyneWindowState {
     int explorer_has_selection;
     size_t explorer_scroll;
     int explorer_wheel_remainder;
+    /* Outline (개요) section at the bottom of the explorer tab. It is scanned
+     * only while that tab is shown; otherwise it is marked stale and rescanned
+     * when the tab appears. */
+    AxyneOutline outline;
+    int outline_timer_active;
+    int outline_stale;
+    int outline_wheel_remainder;
     size_t first_visible_tab;
     size_t tab_reveal_index;
     int tab_wheel_remainder;
@@ -531,6 +540,7 @@ static void axyne_problems_refresh(AxyneWindowState *state);
 static void axyne_problems_begin_build(AxyneWindowState *state, const char *directory,
                                        int clear);
 static void axyne_problems_clear_lsp(AxyneWindowState *state, const char *path);
+static void axyne_refresh_outline(AxyneWindowState *state);
 static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_reset(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_after_git_operation(HWND window,
@@ -2725,6 +2735,7 @@ static int axyne_save_active(HWND window, AxyneWindowState *state)
         return 0;
     }
     SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
+    axyne_refresh_outline(state); /* Save As may change the file type */
     axyne_update_title(window, state);
     axyne_refresh_action_controls(state);
     return 1;
@@ -2785,6 +2796,7 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
     }
     axyne_refresh_action_controls(state);
     axyne_problems_refresh(state); /* the active file's problems come first */
+    axyne_refresh_outline(state);
     SetFocus(state->editor);
     return 1;
 }
@@ -3499,15 +3511,148 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
     return 1;
 }
 
+/* The outline section is part of the explorer tab only. */
+static int axyne_outline_visible(const AxyneWindowState *state)
+{
+    return !state->explorer_hidden && state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER;
+}
+
+/* Height of the outline section at the bottom of the explorer column.
+ * `bottom` is the bottom of the column (the top of the status bar); 0 means
+ * the section is hidden and the file tree owns the whole column. */
+static int axyne_outline_section_height(const AxyneWindowState *state, int bottom)
+{
+    int explorer = bottom - (AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS);
+    if (!axyne_outline_visible(state) || explorer <= 0) return 0;
+    return axyne_outline_height(&state->outline, explorer);
+}
+
 static size_t axyne_explorer_visible_rows(AxyneWindowState *state, int bottom)
 {
     const int top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS +
         AXYNE_UI_EXPLORER_HEADER;
-    size_t rows = bottom > top ? (size_t)((bottom - top) / AXYNE_UI_ROW) : 0;
-    size_t max_scroll = state->explorer.count > rows
-        ? state->explorer.count - rows : 0;
+    int section = axyne_outline_section_height(state, bottom);
+    size_t rows, max_scroll;
+    (void)axyne_outline_set_scroll(&state->outline, (long)state->outline.first_row, section);
+    bottom -= section; /* the tree ends where the outline begins */
+    rows = bottom > top ? (size_t)((bottom - top) / AXYNE_UI_ROW) : 0;
+    max_scroll = state->explorer.count > rows ? state->explorer.count - rows : 0;
     if (state->explorer_scroll > max_scroll) state->explorer_scroll = max_scroll;
     return rows;
+}
+
+static void axyne_cancel_outline_timer(AxyneWindowState *state)
+{
+    if (state->outline_timer_active && state->main_window != NULL)
+        KillTimer(state->main_window, AXYNE_OUTLINE_TIMER);
+    state->outline_timer_active = 0;
+}
+
+/* Repaints only the explorer column (the outline moves the tree's end). */
+static void axyne_invalidate_explorer_column(AxyneWindowState *state)
+{
+    RECT rect;
+    if (state->main_window == NULL) return;
+    rect.left = 0;
+    rect.right = axyne_sidebar_width(state);
+    rect.top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
+    rect.bottom = state->client_height - AXYNE_STATUS;
+    if (rect.right > rect.left && rect.bottom > rect.top)
+        InvalidateRect(state->main_window, &rect, FALSE);
+}
+
+/* Rescans the active document. Unsupported and oversized files are classified
+ * without reading any text; nothing is scanned while the section is hidden. */
+static void axyne_refresh_outline(AxyneWindowState *state)
+{
+    AxyneDocument *doc;
+    if (state == NULL) return;
+    axyne_cancel_outline_timer(state);
+    if (!axyne_outline_visible(state)) {
+        state->outline_stale = 1;
+        return;
+    }
+    state->outline_stale = 0;
+    doc = axyne_active_visible(state);
+    if (doc == NULL || state->editor == NULL) {
+        axyne_outline_clear(&state->outline);
+    } else {
+        const char *name = doc->is_untitled || doc->is_virtual ? NULL :
+            (doc->title != NULL ? doc->title : doc->path);
+        LRESULT length = SendMessageA(state->editor, SCI_GETTEXTLENGTH, 0, 0);
+        if (length < 0) length = 0;
+        if (axyne_outline_prepare(&state->outline, name, (size_t)length)) {
+            char *text = (char *)malloc((size_t)length + 1);
+            if (text == NULL) {
+                axyne_outline_clear(&state->outline);
+            } else {
+                SendMessageA(state->editor, SCI_GETTEXT, (WPARAM)((size_t)length + 1),
+                             (LPARAM)text);
+                (void)axyne_outline_scan(&state->outline, text, (size_t)length, NULL);
+                free(text);
+            }
+        }
+    }
+    if (state->client_height > 0)
+        (void)axyne_explorer_visible_rows(state, state->client_height - AXYNE_STATUS);
+    axyne_invalidate_explorer_column(state);
+}
+
+/* Debounced rescan after edits: every call restarts the 300 ms timer. */
+static void axyne_schedule_outline_refresh(AxyneWindowState *state)
+{
+    if (!axyne_outline_visible(state)) {
+        axyne_cancel_outline_timer(state);
+        state->outline_stale = 1;
+        return;
+    }
+    if (state->main_window != NULL &&
+        SetTimer(state->main_window, AXYNE_OUTLINE_TIMER, AXYNE_OUTLINE_DEBOUNCE_MS, NULL) != 0)
+        state->outline_timer_active = 1;
+    else
+        axyne_refresh_outline(state);
+}
+
+/* Puts the caret on the symbol name, scrolls it into view and focuses the
+ * editor. `y` is relative to the top of the outline section. */
+static void axyne_outline_click(AxyneWindowState *state, int section, int y)
+{
+    long index = axyne_outline_symbol_at(&state->outline, section, y);
+    const AxyneSymbol *symbol;
+    LRESULT line_count, start, end;
+    size_t line, column;
+    if (index < 0 || state->editor == NULL || axyne_active_visible(state) == NULL) return;
+    symbol = &state->outline.symbols.items[index];
+    line_count = SendMessageA(state->editor, SCI_GETLINECOUNT, 0, 0);
+    if (line_count < 1) return;
+    line = symbol->line > 0 ? symbol->line - 1 : 0;
+    if (line >= (size_t)line_count) line = (size_t)line_count - 1;
+    start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    end = SendMessageA(state->editor, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+    column = symbol->column > 0 ? symbol->column - 1 : 0;
+    if (end < start) end = start;
+    if (column > (size_t)(end - start)) column = (size_t)(end - start);
+    SendMessageA(state->editor, SCI_ENSUREVISIBLEENFORCEPOLICY, (WPARAM)line, 0);
+    SendMessageA(state->editor, SCI_SETSEL, (WPARAM)(start + (LRESULT)column),
+                 (LPARAM)(start + (LRESULT)column));
+    SendMessageA(state->editor, SCI_SCROLLCARET, 0, 0);
+    SetFocus(state->editor);
+    axyne_invalidate_explorer_column(state);
+}
+
+/* Handles a left click in the outline section. Returns 1 when (x, y) was in
+ * the section (never a file tree click). */
+static int axyne_outline_handle_click(AxyneWindowState *state, int x, int y)
+{
+    int status_top = state->client_height - AXYNE_STATUS;
+    int section;
+    if (x < 0 || x >= axyne_sidebar_width(state)) return 0;
+    /* A pending rescan is flushed first so the row maps to the text. */
+    if (state->outline_timer_active) axyne_refresh_outline(state);
+    section = axyne_outline_section_height(state, status_top);
+    if (section <= 0 || y < status_top - section || y >= status_top) return 0;
+    axyne_outline_click(state, section, y - (status_top - section));
+    return 1;
 }
 
 /* Sticky folder rows: fills `out` (room for AXYNE_EXPLORER_MAX_PINNED) with
@@ -5762,7 +5907,8 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
     size_t rows = axyne_explorer_visible_rows(state, bottom);
     size_t i;
     int saved_dc = SaveDC(dc);
-    IntersectClipRect(dc, 0, y, axyne_sidebar_width(state) - 1, bottom);
+    IntersectClipRect(dc, 0, y, axyne_sidebar_width(state) - 1,
+                      bottom - axyne_outline_section_height(state, bottom));
     if (state->explorer.root == NULL) {
         RECT rect = {8, y, axyne_sidebar_width(state) - 8, y + AXYNE_UI_ROW};
         axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect, L"폴더 열기...", DT_LEFT);
@@ -5789,6 +5935,80 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
                                          list_top + (int)p * AXYNE_UI_ROW);
             axyne_fill(dc, 0, pinned_bottom - 1, axyne_sidebar_width(state) - 1,
                        pinned_bottom, AXYNE_BORDER);
+        }
+    }
+    RestoreDC(dc, saved_dc);
+}
+
+/* Explorer outline (Figma 6:399): 9px separator band with a 1px line, a 30px
+ * header and 22px symbol rows; the symbol holding the caret is bright. */
+static void axyne_paint_outline(HDC dc, AxyneWindowState *state, int bottom)
+{
+    int section = axyne_outline_section_height(state, bottom);
+    int top = bottom - section;
+    int rows_top = top + AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER;
+    int right = axyne_sidebar_width(state) - 1;
+    char header_text[256];
+    wchar_t *header;
+    int saved_dc;
+    int light = GetRValue(AXYNE_PANEL) + GetGValue(AXYNE_PANEL) + GetBValue(AXYNE_PANEL) > 384;
+    COLORREF active = axyne_theme_color(light ? 0x111317 : 0xffffff);
+    if (section <= 0 || right <= 0) return;
+    saved_dc = SaveDC(dc);
+    IntersectClipRect(dc, 0, top, right, bottom);
+    axyne_fill(dc, 0, top, right, bottom, AXYNE_PANEL);
+    axyne_fill(dc, 0, top + 4, right, top + 5, AXYNE_BORDER);
+    axyne_outline_header(&state->outline, header_text, sizeof(header_text));
+    header = axyne_wide(header_text);
+    if (header != NULL) {
+        RECT rect = {12, top + AXYNE_OUTLINE_SEPARATOR, right - 8, rows_top};
+        axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, header, DT_LEFT);
+        free(header);
+    }
+    if (state->outline.state == AXYNE_OUTLINE_SYMBOLS) {
+        size_t visible = axyne_outline_visible_rows(section);
+        LRESULT caret = state->editor != NULL
+            ? SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0) : 0;
+        LRESULT caret_line = state->editor != NULL
+            ? SendMessageA(state->editor, SCI_LINEFROMPOSITION,
+                           (WPARAM)(caret < 0 ? 0 : caret), 0)
+            : 0;
+        long current = axyne_outline_symbol_for_line(&state->outline,
+            (size_t)(caret_line < 0 ? 0 : caret_line) + 1);
+        size_t k;
+        for (k = 0; k < visible; ++k) {
+            size_t i = state->outline.first_row + k;
+            const AxyneSymbol *symbol;
+            wchar_t glyph[2] = {0, 0};
+            wchar_t *name;
+            int y = rows_top + (int)k * AXYNE_OUTLINE_ROW;
+            RECT glyph_rect, label_rect;
+            if (i >= state->outline.symbols.count) break;
+            symbol = &state->outline.symbols.items[i];
+            glyph[0] = (wchar_t)axyne_outline_glyph(symbol->kind);
+            glyph_rect.left = AXYNE_OUTLINE_PAD_LEFT;
+            glyph_rect.right = glyph_rect.left + AXYNE_OUTLINE_GLYPH_WIDTH;
+            glyph_rect.top = y + 4; glyph_rect.bottom = y + 18;
+            axyne_text_rect(dc, state->badge_font,
+                axyne_theme_color(axyne_outline_glyph_color(symbol->kind)),
+                glyph_rect, glyph, DT_CENTER);
+            label_rect.left = glyph_rect.right + AXYNE_OUTLINE_GLYPH_GAP;
+            label_rect.right = right - 8;
+            label_rect.top = y; label_rect.bottom = y + AXYNE_OUTLINE_ROW;
+            name = axyne_wide(symbol->name);
+            axyne_text_rect(dc, state->ui_font,
+                (long)i == current ? active : AXYNE_SIDEBAR_TEXT,
+                label_rect, name != NULL ? name : L"(invalid name)", DT_LEFT);
+            free(name);
+        }
+    } else {
+        const char *message = axyne_outline_message(state->outline.state);
+        wchar_t *label = message != NULL ? axyne_wide(message) : NULL;
+        if (label != NULL) {
+            RECT rect = {AXYNE_OUTLINE_PAD_LEFT, rows_top, right - 8,
+                         rows_top + AXYNE_OUTLINE_ROW};
+            axyne_text_rect(dc, state->ui_font, AXYNE_SIDEBAR_MUTED, rect, label, DT_LEFT);
+            free(label);
         }
     }
     RestoreDC(dc, saved_dc);
@@ -8400,6 +8620,8 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     }
     state->tab_reveal_index = SIZE_MAX;
     (void)axyne_visible_tabs(state, width);
+    if (state->outline_stale && axyne_outline_visible(state))
+        axyne_refresh_outline(state); /* the section just appeared */
     (void)axyne_explorer_visible_rows(state, status_top);
     axyne_problems_update_filter(state);
     axyne_problems_clamp_scroll(state);
@@ -8678,8 +8900,10 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         axyne_paint_sidebar_header(dc, state);
         if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT)
             axyne_paint_git_panel(dc, state, status_top);
-        else
+        else {
             axyne_paint_explorer(dc, state, editor_top, status_top);
+            axyne_paint_outline(dc, state, status_top);
+        }
     }
     if (!state->panel_hidden) {
         size_t i;
@@ -8797,6 +9021,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         state->main_window = window;
         state->problem_selected = -1;
+        axyne_outline_init(&state->outline);
         axyne_open_scintilla(state, window, instance);
         axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
@@ -8872,6 +9097,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_palette_tick(window, state);
             return 0;
         }
+        if (state != NULL && w_param == AXYNE_OUTLINE_TIMER) {
+            axyne_refresh_outline(state); /* also stops the one-shot timer */
+            return 0;
+        }
         if (state != NULL && w_param == AXYNE_PROBLEMS_TIMER) {
             axyne_problems_refresh(state); /* also stops the one-shot timer */
             return 0;
@@ -8917,6 +9146,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             y >= AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS && y < client.bottom - AXYNE_STATUS) {
             if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER)
                 return axyne_window_proc(window, WM_LBUTTONDOWN, w_param, l_param);
+            if (axyne_outline_handle_click(state, x, y)) return 0;
             axyne_workspace_click(window, state, y, 1);
             return 0;
         }
@@ -8990,6 +9220,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 axyne_git_panel_click(window, state, x, y);
                 return 0;
             }
+            if (axyne_outline_handle_click(state, x, y)) return 0;
             if (axyne_workspace_row_at(window, state, y) >= 0)
                 axyne_workspace_click(window, state, y, 0);
             else if (state->explorer.root == NULL &&
@@ -9054,6 +9285,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             HMENU menu;
             POINT point;
             if (state->sidebar_tab != AXYNE_SIDEBAR_TAB_EXPLORER) return 0;
+            {
+                int status_top = client.bottom - AXYNE_STATUS;
+                int section = axyne_outline_section_height(state, status_top);
+                if (section > 0 && y >= status_top - section) return 0; /* no tree menu */
+            }
             row = axyne_workspace_row_at(window, state, y);
             menu = CreatePopupMenu();
             point.x = x;
@@ -9122,6 +9358,21 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             point.y < client.bottom - AXYNE_STATUS) {
             (void)axyne_git_panel_wheel(window, state, point, GET_WHEEL_DELTA_WPARAM(w_param));
             return 0;
+        }
+        if (axyne_outline_visible(state) && point.x >= 0 &&
+            point.x < axyne_sidebar_width(state)) {
+            int status_top = client.bottom - AXYNE_STATUS;
+            int section = axyne_outline_section_height(state, status_top);
+            if (section > 0 && point.y >= status_top - section && point.y < status_top) {
+                int steps;
+                state->outline_wheel_remainder += GET_WHEEL_DELTA_WPARAM(w_param);
+                steps = state->outline_wheel_remainder / WHEEL_DELTA;
+                state->outline_wheel_remainder %= WHEEL_DELTA;
+                if (steps != 0)
+                    (void)axyne_outline_scroll_by(&state->outline, -(long)steps * 3, section);
+                axyne_invalidate_explorer_column(state);
+                return 0;
+            }
         }
         if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER &&
             point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
@@ -9258,6 +9509,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 free(path);
                 if (status == AXYNE_STATUS_OK) {
                     SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
+                    axyne_refresh_outline(state);
                     axyne_update_title(window, state);
                     axyne_refresh_action_controls(state);
                 } else MessageBoxA(window, error.message, "Axyne - Save failed",
@@ -9517,7 +9769,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             !state->loading_editor) {
             axyne_update_line_number_margin(state);
             axyne_update_brace_highlight(state);
+            if (axyne_outline_section_height(state, state->client_height - AXYNE_STATUS) > 0)
+                axyne_invalidate_explorer_column(state); /* caret symbol highlight */
         }
+        if (header != NULL && header->code == SCN_MODIFIED && !state->loading_editor &&
+            (((const SCNotification *)l_param)->modificationType &
+             (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) != 0)
+            axyne_schedule_outline_refresh(state);
         if (header != NULL && header->code == SCN_MODIFIED &&
             !state->loading_editor) {
             AxyneDocument *doc = axyne_active(state);
@@ -9569,6 +9827,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         /* WM_PAINT covers the complete client area. */
         return 1;
     case WM_DESTROY:
+        if (state != NULL) axyne_cancel_outline_timer(state);
         /* Child controls still exist during the parent's WM_DESTROY. Their
          * handles are already invalid by WM_NCDESTROY, so release every tab's
          * independent Scintilla reference here while messages can reach it. */
@@ -9665,6 +9924,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 axyne_watcher_release(state->watcher);
             }
             axyne_explorer_destroy(&state->explorer);
+            axyne_outline_destroy(&state->outline);
             if (state->lexilla_module != NULL) {
                 FreeLibrary(state->lexilla_module);
             }
