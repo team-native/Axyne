@@ -39,6 +39,24 @@ static const COLORREF WARNING = RGB(229, 192, 123);
 enum { PAGE_WELCOME, PAGE_LICENSE, PAGE_LOCATION, PAGE_COMPONENTS, PAGE_INSTALL, PAGE_DONE };
 enum { SCOPE_USER, SCOPE_ALL };
 enum { BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_DISABLED };
+enum { RESULT_RUNNING, RESULT_FAILED, RESULT_CANCELLED };
+
+#define MAX_CREATED_DIRS 32
+#define MAX_JOURNAL_ENTRIES 256
+#define LOG_LINES 7
+
+/* One line of the backend's rollback journal (see Axyne-Installer.nsi.in):
+ *   T<TAB>kib          total payload size
+ *   N<TAB>path         new file about to be written
+ *   B<TAB>path<TAB>bak existing file moved to bak before being replaced
+ *   D<TAB>dir          directory created by the backend
+ *   K                  uninstall registry key created
+ *   V<TAB>name<TAB>old previous registry value (empty = did not exist) */
+typedef struct {
+    WCHAR kind;
+    const WCHAR *first;
+    const WCHAR *second;
+} JournalEntry;
 
 static HWND g_window;
 static int g_page;
@@ -47,8 +65,17 @@ static WCHAR g_install_path[MAX_PATH];
 static WCHAR g_user_default_path[MAX_PATH];
 static WCHAR g_all_default_path[MAX_PATH];
 static HANDLE g_install_process;
-static int g_progress;
+static int g_progress;      /* permille, monotonic while installing */
+static int g_install_result;
 static ULONGLONG g_install_started;
+static WCHAR g_backend_path[MAX_PATH];
+static WCHAR g_journal_path[MAX_PATH];
+static WCHAR g_created_dirs[MAX_CREATED_DIRS][MAX_PATH];
+static int g_created_dir_count;
+static WCHAR g_step[MAX_PATH];
+static WCHAR g_log[LOG_LINES][MAX_PATH];
+static int g_log_count;
+static WCHAR g_eta[64];
 static BOOL g_license_ok;
 static BOOL g_launch = TRUE;
 static BOOL g_start_menu = TRUE;
@@ -350,14 +377,34 @@ static void components_page(HDC dc) {
 
 static void install_page(HDC dc) {
     WCHAR percent[16];
+    if (g_install_result != RESULT_RUNNING) {
+        BOOL cancelled = g_install_result == RESULT_CANCELLED;
+        text(dc, cancelled ? L"설치를 취소했습니다" : L"설치하지 못했습니다", 219, 58, 430, 30,
+             RGB(255,255,255), 20, 700);
+        text(dc, L"이번 설치에서 만든 파일을 삭제하고, 덮어쓴 기존 파일을 원래대로 복원했습니다.",
+             219, 101, 433, 40, MUTED, 13, 400);
+        if (!cancelled)
+            text(dc, L"실행 중인 Axyne를 닫았는지, 설치 위치에 쓸 수 있는지 확인한 뒤 다시 시도하세요.",
+                 219, 147, 433, 40, MUTED, 12, 400);
+        fill(dc, FOOTER, 1, 403, 679, 459); line(dc, BORDER, 1, 403, 679, 403);
+        text(dc, L"설치 마법사 5 / 6", 16, 424, 360, 18, DISABLED_TEXT, 11, 400);
+        button(dc, L"닫기", 567, 417, 96, BUTTON_PRIMARY);
+        return;
+    }
     text(dc, L"설치하는 중...", 219, 58, 430, 30, RGB(255,255,255), 20, 700);
-    text(dc, L"파일을 복사하고 바로 가기를 만드는 중입니다.", 219, 101, 380, 20, MUTED, 13, 400);
-    StringCchPrintfW(percent, 16, L"%d%%", g_progress);
-    draw_text(dc, percent, 600, 101, 52, 18, TEXT, 12, 400, DT_RIGHT | DT_TOP | DT_SINGLELINE);
-    fill(dc, SIDEBAR, 219, 128, 652, 136); fill(dc, ACCENT, 219, 128, 219 + (433 * g_progress / 100), 136);
-    fill(dc, RGB(22,23,26), 219, 170, 652, 314); frame(dc, BORDER, 219, 170, 652, 314);
-    path_text(dc, g_install_path, 233, 184, 405, 20, MUTED, 12);
-    footer(dc, L"설치 마법사 5 / 6", FALSE, L"다음 >", FALSE);
+    path_text(dc, g_step[0] ? g_step : L"설치 준비 중", 219, 96, 370, 20, TEXT, 12);
+    StringCchPrintfW(percent, 16, L"%d%%", g_progress / 10);
+    draw_text(dc, percent, 600, 96, 52, 18, TEXT, 12, 400, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+    fill(dc, SIDEBAR, 219, 124, 652, 132); fill(dc, ACCENT, 219, 124, 219 + (433 * g_progress / 1000), 132);
+    text(dc, g_eta, 219, 140, 433, 18, MUTED, 11, 400);
+    fill(dc, RGB(22,23,26), 219, 168, 652, 314); frame(dc, BORDER, 219, 168, 652, 314);
+    for (int i = 0; i < g_log_count; ++i) {
+        BOOL current = i == g_log_count - 1;
+        WCHAR row[MAX_PATH + 4];
+        StringCchPrintfW(row, MAX_PATH + 4, L"%s %s", current ? L"→" : L"✓", g_log[i]);
+        path_text(dc, row, 233, 180 + i * 18, 405, 18, current ? WARNING : MUTED, 11);
+    }
+    footer(dc, L"취소하면 복사한 파일을 되돌립니다", FALSE, L"다음 >", FALSE);
 }
 
 static void done_page(HDC dc) {
@@ -492,23 +539,305 @@ static BOOL start_elevated_wizard(void) {
     return TRUE;
 }
 
+/* --- install backend, journal, progress and rollback --------------------- */
+
+static void remember_created_dir(const WCHAR *path) {
+    if (g_created_dir_count < MAX_CREATED_DIRS)
+        lstrcpynW(g_created_dirs[g_created_dir_count++], path, MAX_PATH);
+}
+
+/* Creates the install folder and every missing parent, remembering which
+ * ones this run created so a rollback can remove them again. */
+static BOOL create_install_directories(void) {
+    WCHAR path[MAX_PATH];
+    WCHAR *cursor;
+    lstrcpynW(path, g_install_path, MAX_PATH);
+    if (path[0] == L'\\' && path[1] == L'\\') {
+        cursor = wcschr(path + 2, L'\\');               /* after server */
+        if (cursor) cursor = wcschr(cursor + 1, L'\\'); /* after share */
+        if (cursor == NULL) return is_directory(path);
+        ++cursor;
+    } else if (path[0] != 0 && path[1] == L':' && path[2] == L'\\') {
+        cursor = path + 3;
+    } else {
+        return FALSE;
+    }
+    for (;; ++cursor) {
+        if (*cursor == L'\\' || *cursor == 0) {
+            WCHAR saved = *cursor;
+            *cursor = 0;
+            if (path[0] && !is_directory(path)) {
+                if (!CreateDirectoryW(path, NULL)) return FALSE;
+                remember_created_dir(path);
+            }
+            *cursor = saved;
+            if (saved == 0) break;
+        }
+    }
+    return TRUE;
+}
+
+/* Reads the journal into a NUL-terminated heap buffer (caller frees). */
+static WCHAR *read_journal(void) {
+    HANDLE file = CreateFileW(g_journal_path, GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    LARGE_INTEGER size;
+    WCHAR *buffer = NULL;
+    DWORD read = 0;
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    if (GetFileSizeEx(file, &size) && size.QuadPart < 4 * 1024 * 1024) {
+        DWORD bytes = (DWORD)size.QuadPart;
+        buffer = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytes + sizeof(WCHAR) * 2);
+        if (buffer && !ReadFile(file, buffer, bytes, &read, NULL)) read = 0;
+        if (buffer) buffer[read / sizeof(WCHAR)] = 0;
+    }
+    CloseHandle(file);
+    return buffer;
+}
+
+/* Splits the buffer in place. Only lines terminated by a newline count: the
+ * backend writes each line (with its CR LF) in one call before acting, so a
+ * partial last line means that action has not started. */
+static int parse_journal(WCHAR *buffer, JournalEntry *entries, int max) {
+    int count = 0;
+    WCHAR *cursor = buffer;
+    while (cursor && *cursor && count < max) {
+        WCHAR *end = wcschr(cursor, L'\n');
+        size_t length;
+        if (end == NULL) break;
+        *end = 0;
+        length = (size_t)lstrlenW(cursor);
+        if (length > 0 && cursor[length - 1] == L'\r') cursor[length - 1] = 0;
+        if (cursor[0]) {
+            JournalEntry entry = {cursor[0], L"", L""};
+            WCHAR *tab = wcschr(cursor, L'\t');
+            if (tab) {
+                WCHAR *second;
+                *tab = 0;
+                entry.first = tab + 1;
+                second = wcschr(tab + 1, L'\t');
+                if (second) { *second = 0; entry.second = second + 1; }
+            }
+            entries[count++] = entry;
+        }
+        cursor = end + 1;
+    }
+    return count;
+}
+
+static ULONGLONG file_size(const WCHAR *path) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &data) ||
+        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    return ((ULONGLONG)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+}
+
+static void entry_label(const JournalEntry *entry, WCHAR *out, size_t count) {
+    const WCHAR *name = wcsrchr(entry->first, L'\\');
+    size_t length = (size_t)lstrlenW(entry->first);
+    name = name ? name + 1 : entry->first;
+    if (entry->kind == L'K' || entry->kind == L'V')
+        StringCchCopyW(out, count, L"프로그램 등록 정보 기록");
+    else if (entry->kind == L'D')
+        StringCchCopyW(out, count, L"시작 메뉴 폴더 만들기");
+    else if (length > 4 && lstrcmpiW(entry->first + length - 4, L".lnk") == 0)
+        /* The start menu shortcut is <programs>\Axyne\Axyne.lnk; the desktop one is not in an Axyne folder. */
+        StringCchCopyW(out, count, length > 16 && lstrcmpiW(entry->first + length - 16, L"\\Axyne\\Axyne.lnk") == 0
+                       ? L"시작 메뉴 바로 가기 만들기" : L"바탕 화면 바로 가기 만들기");
+    else
+        StringCchPrintfW(out, count, L"%s 복사", name);
+}
+
+static void push_log(const WCHAR *label) {
+    if (g_log_count > 0 && lstrcmpW(g_log[g_log_count - 1], label) == 0) return;
+    if (g_log_count == LOG_LINES) {
+        MoveMemory(g_log[0], g_log[1], sizeof(g_log[0]) * (LOG_LINES - 1));
+        --g_log_count;
+    }
+    lstrcpynW(g_log[g_log_count++], label, MAX_PATH);
+}
+
+/* Progress = bytes present at the journaled targets / payload size reported
+ * by the backend. The file being extracted grows while NSIS writes it, so
+ * large files advance the bar smoothly. */
+static void update_progress(void) {
+    WCHAR *buffer = read_journal();
+    JournalEntry *entries;
+    ULONGLONG total = AXYNE_UI_INSTALL_BYTES, done = 0;
+    int count, permille;
+    if (buffer == NULL) return;
+    entries = (JournalEntry *)HeapAlloc(GetProcessHeap(), 0, sizeof(JournalEntry) * MAX_JOURNAL_ENTRIES);
+    if (entries == NULL) { HeapFree(GetProcessHeap(), 0, buffer); return; }
+    count = parse_journal(buffer, entries, MAX_JOURNAL_ENTRIES);
+    g_log_count = 0;
+    for (int i = 0; i < count; ++i) {
+        WCHAR label[MAX_PATH];
+        if (entries[i].kind == L'T') {
+            ULONGLONG kib = (ULONGLONG)_wtoi64(entries[i].first);
+            if (kib > 0) total = kib * 1024ULL;
+            continue;
+        }
+        if (entries[i].kind == L'N' || entries[i].kind == L'B') done += file_size(entries[i].first);
+        entry_label(&entries[i], label, MAX_PATH);
+        push_log(label);
+    }
+    if (g_log_count > 0) lstrcpynW(g_step, g_log[g_log_count - 1], MAX_PATH);
+    permille = total > 0 ? (int)(done >= total ? 990 : done * 990ULL / total) : 0;
+    if (permille > g_progress) g_progress = permille;
+    HeapFree(GetProcessHeap(), 0, entries);
+    HeapFree(GetProcessHeap(), 0, buffer);
+}
+
+/* Remaining time extrapolated from the measured rate so far. */
+static void update_eta(void) {
+    ULONGLONG elapsed = GetTickCount64() - g_install_started;
+    if (g_progress < 30 || elapsed < 700) {
+        StringCchCopyW(g_eta, 64, L"남은 시간 계산 중...");
+        return;
+    }
+    ULONGLONG remaining = elapsed * (ULONGLONG)(1000 - g_progress) / (ULONGLONG)g_progress;
+    ULONGLONG seconds = (remaining + 999ULL) / 1000ULL;
+    if (seconds == 0) seconds = 1;
+    if (seconds < 90) StringCchPrintfW(g_eta, 64, L"남은 시간 약 %llu초", seconds);
+    else StringCchPrintfW(g_eta, 64, L"남은 시간 약 %llu분", (seconds + 59ULL) / 60ULL);
+}
+
+static void delete_backup_folder(void) {
+    WCHAR folder[MAX_PATH], pattern[MAX_PATH], file[MAX_PATH];
+    WIN32_FIND_DATAW data;
+    HANDLE find;
+    StringCchPrintfW(folder, MAX_PATH, L"%s\\.axyne-backup", g_install_path);
+    StringCchPrintfW(pattern, MAX_PATH, L"%s\\*", folder);
+    find = FindFirstFileW(pattern, &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            StringCchPrintfW(file, MAX_PATH, L"%s\\%s", folder, data.cFileName);
+            SetFileAttributesW(file, FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(file);
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    RemoveDirectoryW(folder);
+}
+
+static void delete_temporary_files(void) {
+    if (g_journal_path[0]) DeleteFileW(g_journal_path);
+    if (g_backend_path[0]) DeleteFileW(g_backend_path);
+    g_journal_path[0] = g_backend_path[0] = 0;
+}
+
+static void restore_registry_value(const WCHAR *name, const WCHAR *old) {
+    HKEY key;
+    if (RegOpenKeyExW(g_scope == SCOPE_ALL ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
+                      UNINSTALL_KEY, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) return;
+    if (old[0])
+        RegSetValueExW(key, name, 0, REG_SZ, (const BYTE *)old,
+                       (DWORD)((lstrlenW(old) + 1) * sizeof(WCHAR)));
+    else
+        RegDeleteValueW(key, name);
+    RegCloseKey(key);
+}
+
+/* Undoes this run in reverse journal order: new files are deleted, replaced
+ * files are moved back from the backup folder, new folders and the uninstall
+ * key are removed and overwritten registry values get their old value. */
+static void rollback_install(void) {
+    WCHAR *buffer = read_journal();
+    JournalEntry *entries = (JournalEntry *)HeapAlloc(GetProcessHeap(), 0,
+                                                      sizeof(JournalEntry) * MAX_JOURNAL_ENTRIES);
+    if (buffer && entries) {
+        int count = parse_journal(buffer, entries, MAX_JOURNAL_ENTRIES);
+        for (int i = count - 1; i >= 0; --i) {
+            const JournalEntry *entry = &entries[i];
+            if (entry->kind == L'N' && entry->first[0]) {
+                SetFileAttributesW(entry->first, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(entry->first);
+            } else if (entry->kind == L'B' && entry->second[0] &&
+                       GetFileAttributesW(entry->second) != INVALID_FILE_ATTRIBUTES) {
+                SetFileAttributesW(entry->first, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(entry->first);
+                MoveFileExW(entry->second, entry->first,
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+            } else if (entry->kind == L'D' && entry->first[0]) {
+                RemoveDirectoryW(entry->first);
+            } else if (entry->kind == L'K') {
+                RegDeleteKeyW(g_scope == SCOPE_ALL ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
+                              UNINSTALL_KEY);
+            } else if (entry->kind == L'V' && entry->first[0]) {
+                restore_registry_value(entry->first, entry->second);
+            }
+        }
+    }
+    if (entries) HeapFree(GetProcessHeap(), 0, entries);
+    if (buffer) HeapFree(GetProcessHeap(), 0, buffer);
+    delete_backup_folder();
+    for (int i = g_created_dir_count - 1; i >= 0; --i) RemoveDirectoryW(g_created_dirs[i]);
+    g_created_dir_count = 0;
+    delete_temporary_files();
+}
+
+static void end_install(int result) {
+    KillTimer(g_window, TIMER_INSTALL);
+    if (g_install_process) { CloseHandle(g_install_process); g_install_process = NULL; }
+    g_install_result = result;
+    if (result == RESULT_RUNNING) {
+        /* Success: the backups of replaced files are no longer needed. */
+        delete_backup_folder();
+        delete_temporary_files();
+        g_progress = 1000;
+        g_page = PAGE_DONE;
+    } else {
+        rollback_install();
+    }
+    InvalidateRect(g_window, NULL, FALSE);
+}
+
+/* Cancel = stop the backend, then roll back everything it journaled. */
+static void cancel_install(void) {
+    if (g_page != PAGE_INSTALL || g_install_result != RESULT_RUNNING) return;
+    if (g_install_process) {
+        TerminateProcess(g_install_process, 1);
+        WaitForSingleObject(g_install_process, 10000);
+    }
+    end_install(RESULT_CANCELLED);
+}
+
 static void start_install(void) {
-    WCHAR temp[MAX_PATH], backend[MAX_PATH], cmd[MAX_PATH * 3];
+    WCHAR temp[MAX_PATH], cmd[MAX_PATH * 4];
+    HANDLE journal;
     STARTUPINFOW si; PROCESS_INFORMATION pi;
-    GetTempPathW(MAX_PATH, temp); GetTempFileNameW(temp, L"axy", 0, backend);
-    DeleteFileW(backend); StringCchCatW(backend, MAX_PATH, L".exe");
-    if (!write_backend(backend)) return;
+    g_install_result = RESULT_RUNNING;
+    g_progress = 0; g_log_count = 0; g_step[0] = 0;
+    StringCchCopyW(g_eta, 64, L"남은 시간 계산 중...");
+    g_install_started = GetTickCount64();
+    GetTempPathW(MAX_PATH, temp);
+    if (!GetTempFileNameW(temp, L"axy", 0, g_backend_path)) { end_install(RESULT_FAILED); return; }
+    DeleteFileW(g_backend_path);
+    StringCchCatW(g_backend_path, MAX_PATH, L".exe");
+    StringCchPrintfW(g_journal_path, MAX_PATH, L"%s.journal", g_backend_path);
+    journal = CreateFileW(g_journal_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                          FILE_ATTRIBUTE_NORMAL, NULL);
+    if (journal == INVALID_HANDLE_VALUE || !write_backend(g_backend_path) ||
+        !create_install_directories()) {
+        if (journal != INVALID_HANDLE_VALUE) CloseHandle(journal);
+        end_install(RESULT_FAILED);
+        return;
+    }
+    CloseHandle(journal);
     /* NSIS requires /D= last and unquoted, even when the path has spaces. */
-    StringCchPrintfW(cmd, MAX_PATH * 3, L"\"%s\" /S%s%s%s /D=%s", backend,
+    StringCchPrintfW(cmd, MAX_PATH * 4, L"\"%s\" /S%s%s%s /JOURNAL=\"%s\" /D=%s", g_backend_path,
                      g_scope == SCOPE_ALL ? L" /ALLUSERS" : L"",
                      g_start_menu ? L"" : L" /NOSTARTMENU",
-                     g_desktop ? L"" : L" /NODESKTOP", g_install_path);
+                     g_desktop ? L"" : L" /NODESKTOP", g_journal_path, g_install_path);
     ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); ZeroMemory(&pi, sizeof(pi));
-    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        g_install_process = pi.hProcess; CloseHandle(pi.hThread);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        end_install(RESULT_FAILED);
+        return;
     }
-    g_install_started = GetTickCount64();
-    SetTimer(g_window, TIMER_INSTALL, 50, NULL);
+    g_install_process = pi.hProcess; CloseHandle(pi.hThread);
+    SetTimer(g_window, TIMER_INSTALL, 100, NULL);
 }
 
 static void begin_install(void) {
@@ -548,12 +877,21 @@ static void on_back(void) {
 
 static void on_click(int x, int y) {
     if (y < 33) {
-        if (x > 625) DestroyWindow(g_window);
+        if (x > 625) { cancel_install(); DestroyWindow(g_window); }
         else if (x > 575) ShowWindow(g_window, SW_MINIMIZE);
         return;
     }
     if (y >= 403) {
         if (g_page == PAGE_DONE) { if (inside(x, y, 567, 417, 663, 447)) finish(); return; }
+        if (g_page == PAGE_INSTALL && g_install_result != RESULT_RUNNING) {
+            if (inside(x, y, 567, 417, 663, 447)) DestroyWindow(g_window);
+            return;
+        }
+        if (g_page == PAGE_INSTALL) {
+            if (inside(x, y, 579, 417, 663, 447)) cancel_install();
+            InvalidateRect(g_window, NULL, FALSE);
+            return;
+        }
         if (inside(x, y, 579, 417, 663, 447)) { DestroyWindow(g_window); return; }
         if (inside(x, y, 475, 417, 571, 447)) on_next();
         else if (inside(x, y, 383, 417, 469, 447) && g_page >= PAGE_LICENSE && g_page <= PAGE_COMPONENTS) on_back();
@@ -574,15 +912,11 @@ static void on_click(int x, int y) {
 
 static void on_install_timer(void) {
     DWORD code = STILL_ACTIVE;
-    ULONGLONG elapsed = GetTickCount64() - g_install_started;
-    if (g_install_process) GetExitCodeProcess(g_install_process, &code);
-    if (elapsed < 1500 && g_progress < 90) g_progress += 3;
-    if (code != STILL_ACTIVE && elapsed >= 1500) {
-        g_progress = 100; KillTimer(g_window, TIMER_INSTALL);
-        if (g_install_process) { CloseHandle(g_install_process); g_install_process = NULL; }
-        g_page = PAGE_DONE;
-    }
-    InvalidateRect(g_window, NULL, FALSE);
+    if (!g_install_process || !GetExitCodeProcess(g_install_process, &code)) code = 1;
+    update_progress();
+    update_eta();
+    if (code != STILL_ACTIVE) end_install(code == 0 ? RESULT_RUNNING : RESULT_FAILED);
+    else InvalidateRect(g_window, NULL, FALSE);
 }
 
 static void on_child_timer(void) {
@@ -603,6 +937,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) return 1;
     if (msg == WM_TIMER && wp == TIMER_INSTALL) { on_install_timer(); return 0; }
     if (msg == WM_TIMER && wp == TIMER_CHILD) { on_child_timer(); return 0; }
+    if (msg == WM_CLOSE) { cancel_install(); DestroyWindow(hwnd); return 0; }
     if (msg == WM_LBUTTONUP) { on_click((int)(short)LOWORD(lp), (int)(short)HIWORD(lp)); return 0; }
     if (msg == WM_PAINT) {
         PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps); RECT client; GetClientRect(hwnd, &client);
@@ -615,7 +950,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_DESTROY) {
-        if (g_install_process) TerminateProcess(g_install_process, 1);
+        cancel_install();
         if (g_elevated_child) CloseHandle(g_elevated_child);
         PostQuitMessage(g_exit_code);
         return 0;
@@ -641,6 +976,7 @@ static void parse_arguments(int *x, int *y) {
     LocalFree(argv);
     if (g_elevated_instance) {
         g_scope = SCOPE_ALL;
+        g_page = PAGE_COMPONENTS;
         g_license_ok = TRUE;
         strip_trailing_separator(g_install_path);
     }

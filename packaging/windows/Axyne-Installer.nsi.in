@@ -137,6 +137,8 @@ Function AxyneBeforeWrite
             StrCpy $R1 "$INSTDIR\.axyne-backup\$AxyneBackupCount.bak"
             CreateDirectory "$INSTDIR\.axyne-backup"
             !insertmacro AxyneJournal "B$\t$R0$\t$R1"
+            ; A stale backup left by an earlier run must not block the move.
+            Delete "$R1"
             ClearErrors
             Rename "$R0" "$R1"
             ${If} ${Errors}
