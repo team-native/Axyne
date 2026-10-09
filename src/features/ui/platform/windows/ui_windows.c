@@ -29,6 +29,8 @@
 #include "axyne/git_graph_geometry.h"
 #include "axyne/git_panel.h"
 #include "axyne/lsp.h"
+#include "axyne/problems.h"
+#include "axyne/problems_feed.h"
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
@@ -57,7 +59,9 @@ enum {
     AXYNE_DEBUG_PAUSE,
     AXYNE_DEBUG_CONTINUE,
     AXYNE_DEBUG_STEP_OVER,
-    AXYNE_DEBUG_BREAKPOINT
+    AXYNE_DEBUG_BREAKPOINT,
+    AXYNE_PROBLEMS_FILTER = 5040, /* problems panel filter EDIT control id */
+    AXYNE_PROBLEMS_TIMER = 5121   /* coalesced problems list rebuild */
 };
 
 static const wchar_t AXYNE_WINDOW_CLASS[] = L"AxyneWindow";
@@ -102,6 +106,14 @@ static COLORREF AXYNE_POPUP_SEPARATOR;
 static COLORREF AXYNE_POPUP_CHECK;
 static HBRUSH AXYNE_POPUP_BRUSH;
 static HBRUSH AXYNE_EDIT_BACKGROUND_BRUSH;
+/* Problems panel (Figma 24:14087) tones; custom palettes use theme colours. */
+static COLORREF AXYNE_PROBLEM_TEXT;
+static COLORREF AXYNE_PROBLEM_MUTED;
+static COLORREF AXYNE_PROBLEM_FAINT;
+static COLORREF AXYNE_PROBLEM_SELECTED;
+static COLORREF AXYNE_PROBLEM_FIELD;
+static COLORREF AXYNE_PROBLEM_FIELD_BORDER;
+static HBRUSH AXYNE_PROBLEM_FIELD_BRUSH;
 
 typedef struct AxyneGitUiRun AxyneGitUiRun;
 typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
@@ -185,6 +197,8 @@ typedef struct AxyneWindowState {
     HFONT font_glyph14; /* 14px: toolbar glyphs */
     HFONT font_dot;     /* 7px: dirty marker */
     HFONT font_output;  /* 12px mono: output and terminal panel text */
+    HFONT font_mono_small; /* 10px mono: problems file name and position */
+    HWND main_window;
     AxyneDocumentSet documents;
     AxyneExplorer explorer;
     AxyneWatcher *watcher;
@@ -237,6 +251,28 @@ typedef struct AxyneWindowState {
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
     char lsp_status[192];
+    /* Problems panel: the model (LSP diagnostics + build output), the rows
+     * built from it for painting and the panel's view state. */
+    AxyneProblemList problems;
+    AxyneProblemCollapsed problems_collapsed;
+    AxyneBuildFeed build_feed;
+    int build_feed_active;
+    AxyneProblemRow *problem_rows;
+    size_t problem_row_count;
+    AxyneProblemCounts problem_counts;
+    char problem_summary[160];
+    wchar_t problems_tab_label[32];
+    int problem_selected; /* row index or -1 */
+    int problem_scroll;   /* pixels */
+    int problem_wheel_remainder;
+    int problem_refresh_pending;
+    int problem_has_sel;  /* selection identity kept across rebuilds */
+    int problem_sel_kind;
+    size_t problem_sel_line;
+    size_t problem_sel_column;
+    char *problem_sel_path;
+    char *problem_sel_message;
+    HWND problems_filter;
     int menu_active; /* 1-based index of the menu bar item whose popup is open */
     int explorer_hidden; /* View > Explorer */
     int sidebar_tab;     /* AXYNE_SIDEBAR_TAB_*: what the sidebar shows */
@@ -349,7 +385,8 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_LSP_STATUS = WM_APP + 25,
        AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
-       AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31 };
+       AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31,
+       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -408,16 +445,43 @@ static void axyne_lsp_status(AxyneWindowState *state, const char *text)
     }
 }
 
+typedef struct AxyneLspDiagnosticsMessage {
+    char *path;
+    AxyneLspDiagnostic *items;
+    size_t count;
+} AxyneLspDiagnosticsMessage;
+
+static void axyne_free_lsp_diagnostics_message(AxyneLspDiagnosticsMessage *message)
+{
+    if (message == NULL) return;
+    axyne_problems_diagnostics_free(message->items, message->count);
+    free(message->path);
+    free(message);
+}
+
 static void axyne_lsp_diagnostics(AxyneLspClient *client, const char *path,
                                   const AxyneLspDiagnostic *diagnostics,
                                   size_t count, void *user_data)
 {
     char text[192];
     AxyneWindowState *state = (AxyneWindowState *)user_data;
-    (void)client; (void)diagnostics;
+    AxyneLspDiagnosticsMessage *message;
+    (void)client;
     (void)snprintf(text, sizeof(text), "LSP: %zu diagnostics%s%s",
                    count, path == NULL ? "" : " in ", path == NULL ? "" : path);
     axyne_lsp_status(state, text);
+    /* This runs on the LSP reader thread: hand a deep copy to the UI thread. */
+    if (state == NULL || state->main_window == NULL || path == NULL || path[0] == '\0')
+        return;
+    message = (AxyneLspDiagnosticsMessage *)calloc(1, sizeof(*message));
+    if (message == NULL) return;
+    message->path = _strdup(path);
+    message->count = count;
+    if (message->path == NULL ||
+        axyne_problems_diagnostics_copy(diagnostics, count, &message->items) !=
+            AXYNE_STATUS_OK ||
+        !PostMessageW(state->main_window, AXYNE_WM_LSP_DIAGNOSTICS, 0, (LPARAM)message))
+        axyne_free_lsp_diagnostics_message(message);
 }
 
 static void axyne_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
@@ -463,6 +527,10 @@ static void axyne_search_folder(HWND window, AxyneWindowState *state, int files)
 static void axyne_workspace_show_error(HWND window, const char *prefix,
                                        const AxyneError *error);
 static void axyne_layout(HWND window, AxyneWindowState *state);
+static void axyne_problems_refresh(AxyneWindowState *state);
+static void axyne_problems_begin_build(AxyneWindowState *state, const char *directory,
+                                       int clear);
+static void axyne_problems_clear_lsp(AxyneWindowState *state, const char *path);
 static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_reset(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_after_git_operation(HWND window,
@@ -585,6 +653,14 @@ static void axyne_apply_theme(const AxyneThemePreferences *theme)
         AXYNE_POPUP_SEPARATOR = axyne_theme_color(0x2b2e35);
         AXYNE_POPUP_CHECK = axyne_theme_color(0xa667e8);
     }
+    AXYNE_PROBLEM_TEXT = AXYNE_REFERENCE ? axyne_theme_color(0xd2d5db) : AXYNE_TEXT;
+    AXYNE_PROBLEM_MUTED = AXYNE_REFERENCE ? axyne_theme_color(0x969ba5) : AXYNE_MUTED;
+    AXYNE_PROBLEM_FAINT = AXYNE_REFERENCE ? axyne_theme_color(0x666c76) : AXYNE_MUTED;
+    AXYNE_PROBLEM_SELECTED = AXYNE_REFERENCE ? axyne_theme_color(0x302342) : AXYNE_SELECTION_BG;
+    AXYNE_PROBLEM_FIELD = AXYNE_REFERENCE ? axyne_theme_color(0x17191d) : AXYNE_PANEL;
+    AXYNE_PROBLEM_FIELD_BORDER = AXYNE_REFERENCE ? axyne_theme_color(0x2b2e35) : AXYNE_BORDER;
+    if (AXYNE_PROBLEM_FIELD_BRUSH != NULL) DeleteObject(AXYNE_PROBLEM_FIELD_BRUSH);
+    AXYNE_PROBLEM_FIELD_BRUSH = CreateSolidBrush(AXYNE_PROBLEM_FIELD);
     if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL)
         DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
     AXYNE_EDIT_BACKGROUND_BRUSH = CreateSolidBrush(AXYNE_OUTPUT_BG);
@@ -2121,6 +2197,7 @@ static int axyne_start_step(HWND window, AxyneWindowState *state,
     if (clear) SetWindowTextA(state->terminal_output, header);
     else axyne_terminal_append(state->terminal_output, header, strlen(header),
                                AXYNE_PROCESS_STDOUT);
+    axyne_problems_begin_build(state, plan->working_directory, clear);
     state->active_action = action;
     state->last_exit_failed = 0;
     EnableWindow(state->terminal_start, FALSE);
@@ -2707,6 +2784,7 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
         axyne_update_brace_highlight(state);
     }
     axyne_refresh_action_controls(state);
+    axyne_problems_refresh(state); /* the active file's problems come first */
     SetFocus(state->editor);
     return 1;
 }
@@ -2816,6 +2894,7 @@ static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
     }
     if (replaced) {
         if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
+        axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
             SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
                          (LPARAM)evicted.native_editor_document);
@@ -2856,6 +2935,7 @@ static int axyne_open_virtual_document(HWND window, AxyneWindowState *state,
     }
     if (replaced) {
         if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
+        axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
             SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
                          (LPARAM)evicted.native_editor_document);
@@ -2901,6 +2981,7 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
     }
     AxyneDocument *doc = &state->documents.documents[index];
     if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
+    axyne_problems_clear_lsp(state, doc->path);
     if (doc->owns_native_editor_document && state->editor != NULL)
         SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
                      (LPARAM)doc->native_editor_document);
@@ -4642,6 +4723,14 @@ static const wchar_t *const AXYNE_PANEL_LABELS[3] = {
     L"출력", L"문제", L"터미널"
 };
 
+/* The problems tab reads "문제  N" while there are problems. */
+static const wchar_t *axyne_panel_tab_label(const AxyneWindowState *state, int index)
+{
+    if (index == 1 && state->problems_tab_label[0] != L'\0')
+        return state->problems_tab_label;
+    return AXYNE_PANEL_LABELS[index];
+}
+
 /* Figma panel tabs: items start 8px past the explorer column, 6px padding
  * either side of the 11px label, 2px gaps. Paint and hit-test share this. */
 static RECT axyne_panel_tab_rect(AxyneWindowState *state, int index,
@@ -4651,7 +4740,8 @@ static RECT axyne_panel_tab_rect(AxyneWindowState *state, int index,
     int x = axyne_sidebar_width(state) + 8;
     int i;
     for (i = 0; i <= index && i < 3; ++i) {
-        int width = 12 + axyne_measure_text(state->font_small, AXYNE_PANEL_LABELS[i]);
+        int width = 12 + axyne_measure_text(state->font_small,
+                                            axyne_panel_tab_label(state, i));
         if (i == index) { rect.left = x; rect.right = x + width; }
         x += width + 2;
     }
@@ -7586,6 +7676,677 @@ static int axyne_git_panel_wheel(HWND window, AxyneWindowState *state, POINT poi
     return 1;
 }
 
+/* ---- problems panel (Figma 24:14087) ---------------------------------------
+ * Painted by the shell like the explorer and the tabs: a 36px summary/filter
+ * row and 30px problem/file-group rows below the panel header. The model
+ * lives in problems.h; this code only turns it into rows, paints them and
+ * routes mouse and keyboard input. */
+enum {
+    AXYNE_PROBLEMS_TOOLBAR = 36,
+    AXYNE_PROBLEMS_ROW = 30,
+    AXYNE_PROBLEMS_PAD = 18,
+    AXYNE_PROBLEMS_FIELD_WIDTH = 260,
+    AXYNE_PROBLEMS_FIELD_HEIGHT = 25,
+    AXYNE_PROBLEMS_FIELD_MIN = 120,  /* narrower boxes are not shown */
+    AXYNE_PROBLEMS_REFRESH_MS = 150
+};
+
+static int axyne_problems_visible(const AxyneWindowState *state)
+{
+    return !state->panel_hidden && state->problems_panel_selected;
+}
+
+/* The list area: the whole panel below its 32px tab header. */
+static RECT axyne_problems_list_rect(const AxyneWindowState *state)
+{
+    RECT list;
+    int status_top = state->client_height - AXYNE_STATUS;
+    list.left = axyne_sidebar_width(state);
+    list.right = state->client_width;
+    list.top = status_top - axyne_panel_height(state) + AXYNE_UI_PANEL_HEADER;
+    list.bottom = status_top;
+    if (list.bottom < list.top) list.bottom = list.top;
+    return list;
+}
+
+static RECT axyne_problems_field_rect(RECT list)
+{
+    RECT field;
+    int field_width = (list.right - list.left) - 2 * AXYNE_PROBLEMS_PAD - 220;
+    if (field_width > AXYNE_PROBLEMS_FIELD_WIDTH) field_width = AXYNE_PROBLEMS_FIELD_WIDTH;
+    if (field_width < 0) field_width = 0;
+    field.right = list.right - AXYNE_PROBLEMS_PAD;
+    field.left = field.right - field_width;
+    field.top = list.top + (AXYNE_PROBLEMS_TOOLBAR - AXYNE_PROBLEMS_FIELD_HEIGHT) / 2;
+    field.bottom = field.top + AXYNE_PROBLEMS_FIELD_HEIGHT;
+    return field;
+}
+
+static int axyne_problems_list_height(const AxyneWindowState *state)
+{
+    RECT list = axyne_problems_list_rect(state);
+    int visible = (list.bottom - list.top) - AXYNE_PROBLEMS_TOOLBAR;
+    return visible > 0 ? visible : 0;
+}
+
+static void axyne_problems_invalidate(AxyneWindowState *state)
+{
+    RECT area;
+    int status_top;
+    if (state == NULL || state->main_window == NULL) return;
+    status_top = state->client_height - AXYNE_STATUS;
+    /* The panel header too: the "문제  N" tab label changes with the list. */
+    area.left = axyne_sidebar_width(state);
+    area.right = state->client_width;
+    area.top = status_top - axyne_panel_height(state);
+    area.bottom = status_top;
+    if (area.right > area.left && area.bottom > area.top)
+        InvalidateRect(state->main_window, &area, FALSE);
+}
+
+static void axyne_problem_forget_selection(AxyneWindowState *state)
+{
+    free(state->problem_sel_path);
+    free(state->problem_sel_message);
+    state->problem_sel_path = NULL;
+    state->problem_sel_message = NULL;
+    state->problem_has_sel = 0;
+}
+
+/* The selection is kept by identity (kind, path, line, column, message) so
+ * the same problem stays selected while the list is rebuilt. */
+static void axyne_problem_remember_selection(AxyneWindowState *state,
+                                             const AxyneProblemRow *row)
+{
+    char *path = _strdup(row->path != NULL ? row->path : "");
+    char *message = _strdup(row->message != NULL ? row->message : "");
+    axyne_problem_forget_selection(state);
+    state->problem_sel_path = path;
+    state->problem_sel_message = message;
+    state->problem_sel_kind = (int)row->kind;
+    state->problem_sel_line = row->line;
+    state->problem_sel_column = row->column;
+    state->problem_has_sel = path != NULL && message != NULL;
+}
+
+static int axyne_problem_is_selection(const AxyneWindowState *state,
+                                      const AxyneProblemRow *row)
+{
+    return state->problem_has_sel && (int)row->kind == state->problem_sel_kind &&
+        row->line == state->problem_sel_line &&
+        row->column == state->problem_sel_column &&
+        strcmp(row->path != NULL ? row->path : "", state->problem_sel_path) == 0 &&
+        strcmp(row->message != NULL ? row->message : "", state->problem_sel_message) == 0;
+}
+
+static void axyne_problems_clamp_scroll(AxyneWindowState *state)
+{
+    long maximum = (long)state->problem_row_count * AXYNE_PROBLEMS_ROW -
+                   axyne_problems_list_height(state);
+    if (maximum < 0) maximum = 0;
+    if (state->problem_scroll > maximum) state->problem_scroll = (int)maximum;
+    if (state->problem_scroll < 0) state->problem_scroll = 0;
+}
+
+static void axyne_problems_update_tab_label(AxyneWindowState *state)
+{
+    char label[64];
+    wchar_t *wide;
+    (void)axyne_problems_tab_label(&state->problem_counts, label, sizeof(label));
+    wide = axyne_wide(label);
+    if (wide != NULL) {
+        wcsncpy_s(state->problems_tab_label, 32, wide, _TRUNCATE);
+        free(wide);
+    }
+}
+
+/* Rebuilds rows, summary and tab label from the model and the filter text. */
+static void axyne_problems_refresh(AxyneWindowState *state)
+{
+    AxyneProblemRow *rows = NULL;
+    size_t count = 0;
+    AxyneDocument *doc;
+    const char *active;
+    char *filter = NULL;
+    int selected = -1;
+    if (state == NULL || state->main_window == NULL) return;
+    if (state->problem_refresh_pending) {
+        KillTimer(state->main_window, AXYNE_PROBLEMS_TIMER);
+        state->problem_refresh_pending = 0;
+    }
+    if (state->problems_filter != NULL) {
+        wchar_t wide[256];
+        wide[0] = L'\0';
+        GetWindowTextW(state->problems_filter, wide, 256);
+        filter = axyne_utf8(wide);
+    }
+    doc = axyne_active_visible(state);
+    active = doc != NULL && !doc->is_untitled && !doc->is_virtual ? doc->path : NULL;
+    if (axyne_problems_rows(&state->problems, filter != NULL ? filter : "", active,
+                            &state->problems_collapsed, &rows, &count,
+                            NULL) != AXYNE_STATUS_OK) {
+        rows = NULL;
+        count = 0;
+    }
+    free(filter);
+    if (state->problem_has_sel) {
+        for (size_t i = 0; i < count; ++i) {
+            if (axyne_problem_is_selection(state, &rows[i])) { selected = (int)i; break; }
+        }
+        if (selected < 0) axyne_problem_forget_selection(state);
+    }
+    axyne_problems_rows_destroy(state->problem_rows, state->problem_row_count);
+    state->problem_rows = rows;
+    state->problem_row_count = count;
+    state->problem_selected = selected;
+    axyne_problems_counts(&state->problems, &state->problem_counts);
+    (void)axyne_problems_summary(&state->problems, state->problem_summary,
+                                 sizeof(state->problem_summary));
+    axyne_problems_update_tab_label(state);
+    axyne_problems_clamp_scroll(state);
+    axyne_problems_invalidate(state);
+}
+
+/* Coalesces rebuilds while build output or diagnostics stream in. */
+static void axyne_problems_schedule_refresh(AxyneWindowState *state)
+{
+    if (state == NULL || state->main_window == NULL || state->problem_refresh_pending) return;
+    if (SetTimer(state->main_window, AXYNE_PROBLEMS_TIMER, AXYNE_PROBLEMS_REFRESH_MS, NULL) != 0)
+        state->problem_refresh_pending = 1;
+    else
+        axyne_problems_refresh(state);
+}
+
+/* Rows must match the model before a hit test maps a row to a problem. */
+static void axyne_problems_flush(AxyneWindowState *state)
+{
+    if (state->problem_refresh_pending) axyne_problems_refresh(state);
+}
+
+/* A build or run step starts. `clear` is set for the first step of an action:
+ * it drops the previous BUILD problems. The run step that follows a
+ * successful build keeps them and keeps feeding. Relative paths resolve
+ * against the step's working directory, else the workspace root. */
+static void axyne_problems_begin_build(AxyneWindowState *state, const char *directory,
+                                       int clear)
+{
+    if (directory == NULL || directory[0] == '\0') directory = state->explorer.root;
+    (void)axyne_build_feed_begin(&state->build_feed, clear ? &state->problems : NULL,
+                                 directory);
+    state->build_feed_active = 1;
+    if (clear) axyne_problems_refresh(state);
+}
+
+static void axyne_problems_feed_build(AxyneWindowState *state, AxyneProcessStream stream,
+                                      const char *bytes, size_t length)
+{
+    if (!state->build_feed_active) return;
+    if (axyne_build_feed_push(&state->build_feed, &state->problems,
+                              stream == AXYNE_PROCESS_STDERR, bytes, length) != 0)
+        axyne_problems_schedule_refresh(state);
+}
+
+static void axyne_problems_finish_build(AxyneWindowState *state)
+{
+    if (!state->build_feed_active) return;
+    state->build_feed_active = 0;
+    if (axyne_build_feed_finish(&state->build_feed, &state->problems) != 0)
+        axyne_problems_refresh(state);
+    else
+        axyne_problems_flush(state);
+}
+
+static void axyne_problems_apply_lsp(AxyneWindowState *state, const char *path,
+                                     const AxyneLspDiagnostic *diagnostics, size_t count)
+{
+    if (axyne_problems_set_lsp(&state->problems, path, diagnostics, count, NULL) ==
+        AXYNE_STATUS_OK)
+        axyne_problems_schedule_refresh(state);
+}
+
+/* The document of `path` was closed: the server stops reporting on it. */
+static void axyne_problems_clear_lsp(AxyneWindowState *state, const char *path)
+{
+    size_t before;
+    if (state == NULL || path == NULL || path[0] == '\0') return;
+    before = state->problems.count;
+    axyne_problems_clear_source(&state->problems, AXYNE_PROBLEM_ORIGIN_LSP, path);
+    if (state->problems.count != before) axyne_problems_schedule_refresh(state);
+}
+
+/* Positions the filter EDIT inside the painted field box. It is shown only
+ * while it has text or focus; otherwise the shell paints the placeholder in
+ * its place (no cue banner without a comctl32 v6 manifest). */
+static void axyne_problems_update_filter(AxyneWindowState *state)
+{
+    RECT field;
+    int usable, show, text_width;
+    if (state == NULL || state->problems_filter == NULL) return;
+    field = axyne_problems_field_rect(axyne_problems_list_rect(state));
+    usable = field.right - field.left >= AXYNE_PROBLEMS_FIELD_MIN;
+    show = axyne_problems_visible(state) && usable &&
+        (GetWindowTextLengthW(state->problems_filter) > 0 ||
+         GetFocus() == state->problems_filter);
+    text_width = field.right - field.left - 34;
+    if (text_width < 0) text_width = 0;
+    SetWindowPos(state->problems_filter, NULL, field.left + 26, field.top + 5,
+                 text_width, 15, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (!show && GetFocus() == state->problems_filter && state->main_window != NULL)
+        SetFocus(state->main_window);
+    ShowWindow(state->problems_filter, show ? SW_SHOW : SW_HIDE);
+}
+
+static void axyne_problems_select(AxyneWindowState *state, int index)
+{
+    if (index < 0 || (size_t)index >= state->problem_row_count) {
+        state->problem_selected = -1;
+        axyne_problem_forget_selection(state);
+    } else {
+        int visible = axyne_problems_list_height(state);
+        int top = index * AXYNE_PROBLEMS_ROW;
+        state->problem_selected = index;
+        axyne_problem_remember_selection(state, &state->problem_rows[index]);
+        if (top < state->problem_scroll) state->problem_scroll = top;
+        else if (top + AXYNE_PROBLEMS_ROW > state->problem_scroll + visible)
+            state->problem_scroll = top + AXYNE_PROBLEMS_ROW - visible;
+        axyne_problems_clamp_scroll(state);
+    }
+    axyne_problems_invalidate(state);
+}
+
+static void axyne_problems_move(AxyneWindowState *state, int delta)
+{
+    int next;
+    axyne_problems_flush(state);
+    if (state->problem_row_count == 0) return;
+    if (state->problem_selected < 0)
+        next = delta > 0 ? 0 : (int)state->problem_row_count - 1;
+    else next = state->problem_selected + delta;
+    if (next < 0) next = 0;
+    if ((size_t)next >= state->problem_row_count) next = (int)state->problem_row_count - 1;
+    axyne_problems_select(state, next);
+}
+
+/* Moves the caret to a 1-based line/column and shows that line roughly in the
+ * middle of the editor. LSP columns are UTF-16 offsets; build columns are
+ * bytes. */
+static void axyne_problems_goto(AxyneWindowState *state, size_t line, size_t column,
+                                int utf16)
+{
+    LRESULT line_count, start, length, position, index;
+    if (state->editor == NULL || line == 0) return;
+    line_count = SendMessageA(state->editor, SCI_GETLINECOUNT, 0, 0);
+    if (line_count < 1) return;
+    index = line - 1 < (size_t)line_count ? (LRESULT)(line - 1) : line_count - 1;
+    start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, (WPARAM)index, 0);
+    length = SendMessageA(state->editor, SCI_LINELENGTH, (WPARAM)index, 0);
+    position = start;
+    if (length > 0) {
+        char *buffer = (char *)malloc((size_t)length + 1);
+        if (buffer != NULL) {
+            LRESULT copied = SendMessageA(state->editor, SCI_GETLINE, (WPARAM)index,
+                                          (LPARAM)buffer);
+            if (copied < 0) copied = 0;
+            if (copied > length) copied = length;
+            position = start + (LRESULT)axyne_problems_column_offset(
+                buffer, (size_t)copied, column, utf16);
+            free(buffer);
+        }
+    }
+    SendMessageA(state->editor, SCI_ENSUREVISIBLEENFORCEPOLICY, (WPARAM)index, 0);
+    SendMessageA(state->editor, SCI_SETEMPTYSELECTION, (WPARAM)position, 0);
+    SendMessageA(state->editor, SCI_SCROLLCARET, 0, 0);
+    {
+        LRESULT visible = SendMessageA(state->editor, SCI_VISIBLEFROMDOCLINE,
+                                       (WPARAM)index, 0);
+        LRESULT on_screen = SendMessageA(state->editor, SCI_LINESONSCREEN, 0, 0);
+        LRESULT first = visible - on_screen / 2;
+        SendMessageA(state->editor, SCI_SETFIRSTVISIBLELINE,
+                     (WPARAM)(first > 0 ? first : 0), 0);
+    }
+    SetFocus(state->editor);
+}
+
+/* Opens `path` (relative build paths resolve below the workspace root) unless
+ * it is already the active document, then moves the caret. */
+static void axyne_problems_show(HWND window, AxyneWindowState *state, const char *path,
+                                size_t line, size_t column, int utf16)
+{
+    AxyneDocument *doc = axyne_active_visible(state);
+    if (doc == NULL || doc->path == NULL || !axyne_problems_path_equal(doc->path, path)) {
+        char *resolved = state->explorer.root != NULL
+            ? axyne_problems_resolve_path(path, state->explorer.root) : NULL;
+        const char *target = resolved != NULL ? resolved : path;
+        size_t previous_count = state->documents.count;
+        size_t previous_index = state->documents.active_index;
+        axyne_open_document(window, state, target);
+        doc = axyne_active_visible(state);
+        /* axyne_open_document reports a failure itself and keeps the old tab. */
+        if (doc == NULL || (state->documents.count == previous_count &&
+            state->documents.active_index == previous_index &&
+            (doc->path == NULL || !axyne_problems_path_equal(doc->path, target)))) {
+            free(resolved);
+            return;
+        }
+        free(resolved);
+    }
+    axyne_problems_goto(state, line, column, utf16);
+}
+
+/* Group rows collapse or expand; problem rows open the file at the problem. */
+static void axyne_problems_activate(HWND window, AxyneWindowState *state, size_t index)
+{
+    const AxyneProblemRow *row;
+    char *path;
+    size_t line, column;
+    int utf16;
+    if (index >= state->problem_row_count) return;
+    row = &state->problem_rows[index];
+    if (row->kind == AXYNE_PROBLEM_ROW_GROUP) {
+        /* Refreshing replaces the rows: `row` is not used afterwards. */
+        (void)axyne_problems_collapsed_set(&state->problems_collapsed, row->path,
+                                           !row->expanded, NULL);
+        axyne_problems_refresh(state);
+        return;
+    }
+    path = _strdup(row->path != NULL ? row->path : "");
+    line = row->line;
+    column = row->column;
+    utf16 = row->problem_index < state->problems.count &&
+        state->problems.items[row->problem_index].origin == AXYNE_PROBLEM_ORIGIN_LSP;
+    if (path != NULL && path[0] != '\0')
+        axyne_problems_show(window, state, path, line, column, utf16);
+    free(path);
+}
+
+/* Up/Down/Enter in the list (window focus) and in the filter EDIT. Returns 1
+ * when the key was consumed. */
+static int axyne_problems_key(HWND window, AxyneWindowState *state, WPARAM key)
+{
+    if (!axyne_problems_visible(state)) return 0;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 || (GetKeyState(VK_MENU) & 0x8000) != 0)
+        return 0;
+    if (key == VK_DOWN) { axyne_problems_move(state, 1); return 1; }
+    if (key == VK_UP) { axyne_problems_move(state, -1); return 1; }
+    if (key == VK_RETURN) {
+        axyne_problems_flush(state);
+        if (state->problem_selected < 0 && state->problem_row_count != 0)
+            axyne_problems_select(state, 0);
+        if (state->problem_selected >= 0)
+            axyne_problems_activate(window, state, (size_t)state->problem_selected);
+        return 1;
+    }
+    return 0;
+}
+
+/* Returns 1 when a left click at (x, y) belonged to the problems list. */
+static int axyne_problems_click(HWND window, AxyneWindowState *state, int x, int y)
+{
+    RECT list = axyne_problems_list_rect(state);
+    RECT field = axyne_problems_field_rect(list);
+    POINT point = {x, y};
+    if (!axyne_problems_visible(state) || !PtInRect(&list, point)) return 0;
+    if (PtInRect(&field, point) && field.right - field.left >= AXYNE_PROBLEMS_FIELD_MIN) {
+        if (state->problems_filter != NULL) {
+            ShowWindow(state->problems_filter, SW_SHOW);
+            SetFocus(state->problems_filter);
+            axyne_problems_invalidate(state);
+        }
+        return 1;
+    }
+    SetFocus(window);
+    if (y >= list.top + AXYNE_PROBLEMS_TOOLBAR) {
+        int row;
+        axyne_problems_flush(state);
+        row = (y - list.top - AXYNE_PROBLEMS_TOOLBAR + state->problem_scroll) /
+              AXYNE_PROBLEMS_ROW;
+        if (row >= 0 && (size_t)row < state->problem_row_count) {
+            axyne_problems_select(state, row);
+            axyne_problems_activate(window, state, (size_t)row);
+        }
+    }
+    return 1;
+}
+
+static int axyne_problems_wheel(AxyneWindowState *state, POINT point, int delta)
+{
+    RECT list = axyne_problems_list_rect(state);
+    int steps;
+    if (!axyne_problems_visible(state) || !PtInRect(&list, point)) return 0;
+    state->problem_wheel_remainder += delta;
+    steps = state->problem_wheel_remainder / WHEEL_DELTA;
+    state->problem_wheel_remainder %= WHEEL_DELTA;
+    state->problem_scroll -= steps * AXYNE_PROBLEMS_ROW * 2;
+    axyne_problems_clamp_scroll(state);
+    axyne_problems_invalidate(state);
+    return 1;
+}
+
+/* ---- problems paint ---- */
+
+static void axyne_problems_line(HDC dc, int x0, int y0, int x1, int y1)
+{
+    MoveToEx(dc, x0, y0, NULL);
+    LineTo(dc, x1, y1);
+}
+
+static HPEN axyne_problems_pen_begin(HDC dc, COLORREF color, HGDIOBJ *previous_pen,
+                                     HGDIOBJ *previous_brush)
+{
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    *previous_pen = SelectObject(dc, pen != NULL ? (HGDIOBJ)pen : GetStockObject(BLACK_PEN));
+    *previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    return pen;
+}
+
+static void axyne_problems_pen_end(HDC dc, HPEN pen, HGDIOBJ previous_pen,
+                                   HGDIOBJ previous_brush)
+{
+    SelectObject(dc, previous_pen);
+    SelectObject(dc, previous_brush);
+    if (pen != NULL) DeleteObject(pen);
+}
+
+static COLORREF axyne_problems_severity_color(int severity)
+{
+    switch (severity) {
+    case AXYNE_PROBLEM_ERROR: return axyne_theme_color(0xec6a72);
+    case AXYNE_PROBLEM_WARNING: return axyne_theme_color(0xe5a445);
+    case AXYNE_PROBLEM_INFORMATION: return axyne_theme_color(0x7db5e3);
+    default: return axyne_theme_color(0x666c76);
+    }
+}
+
+/* Outline icons in a 14x14 box at (x, y): circle-x, triangle-alert, info. */
+static void axyne_problems_paint_severity(HDC dc, int severity, int x, int y)
+{
+    HGDIOBJ previous_pen, previous_brush;
+    HPEN pen = axyne_problems_pen_begin(dc, axyne_problems_severity_color(severity),
+                                        &previous_pen, &previous_brush);
+    if (severity == AXYNE_PROBLEM_WARNING) {
+        POINT points[4] = {{x + 7, y + 1}, {x + 13, y + 12}, {x + 1, y + 12}, {x + 7, y + 1}};
+        Polyline(dc, points, 4);
+        axyne_problems_line(dc, x + 7, y + 5, x + 7, y + 8);
+        axyne_problems_line(dc, x + 7, y + 10, x + 7, y + 11);
+    } else {
+        Ellipse(dc, x + 1, y + 1, x + 13, y + 13);
+        if (severity == AXYNE_PROBLEM_ERROR) {
+            axyne_problems_line(dc, x + 5, y + 5, x + 9, y + 9);
+            axyne_problems_line(dc, x + 9, y + 5, x + 5, y + 9);
+        } else {
+            axyne_problems_line(dc, x + 7, y + 6, x + 7, y + 10);
+            axyne_problems_line(dc, x + 7, y + 4, x + 7, y + 5);
+        }
+    }
+    axyne_problems_pen_end(dc, pen, previous_pen, previous_brush);
+}
+
+static void axyne_problems_paint_chevron(HDC dc, int expanded, int x, int y,
+                                         COLORREF color)
+{
+    HGDIOBJ previous_pen, previous_brush;
+    HPEN pen = axyne_problems_pen_begin(dc, color, &previous_pen, &previous_brush);
+    if (expanded) {
+        POINT points[3] = {{x + 2, y + 4}, {x + 6, y + 8}, {x + 11, y + 3}};
+        Polyline(dc, points, 3);
+    } else {
+        POINT points[3] = {{x + 4, y + 2}, {x + 8, y + 6}, {x + 3, y + 11}};
+        Polyline(dc, points, 3);
+    }
+    axyne_problems_pen_end(dc, pen, previous_pen, previous_brush);
+}
+
+static void axyne_problems_paint_filter_icon(HDC dc, int x, int y, COLORREF color)
+{
+    HGDIOBJ previous_pen, previous_brush;
+    POINT points[7] = {{x + 11, y + 1}, {x + 1, y + 1}, {x + 5, y + 5}, {x + 5, y + 9},
+                       {x + 7, y + 10}, {x + 7, y + 5}, {x + 11, y + 1}};
+    HPEN pen = axyne_problems_pen_begin(dc, color, &previous_pen, &previous_brush);
+    Polyline(dc, points, 7);
+    axyne_problems_pen_end(dc, pen, previous_pen, previous_brush);
+}
+
+static void axyne_problems_paint_row(HDC dc, AxyneWindowState *state,
+                                     const AxyneProblemRow *row, int left_edge,
+                                     int right, int top, int selected)
+{
+    RECT rect;
+    if (selected)
+        axyne_fill(dc, left_edge, top, right, top + AXYNE_PROBLEMS_ROW, AXYNE_PROBLEM_SELECTED);
+    rect.top = top;
+    rect.bottom = top + AXYNE_PROBLEMS_ROW;
+    if (row->kind == AXYNE_PROBLEM_ROW_GROUP) {
+        wchar_t *name = axyne_wide(row->file_name != NULL ? row->file_name : "");
+        wchar_t count[32];
+        int x = left_edge + AXYNE_PROBLEMS_PAD;
+        int count_width, name_width;
+        (void)swprintf_s(count, 32, L"[%llu]", (unsigned long long)row->count);
+        axyne_problems_paint_chevron(dc, row->expanded != 0, x,
+            top + (AXYNE_PROBLEMS_ROW - 12) / 2, AXYNE_PROBLEM_MUTED);
+        x += 12 + 8;
+        count_width = axyne_measure_text(state->font_mono_small, count);
+        name_width = name != NULL ? axyne_measure_text(state->font_small, name) : 0;
+        if (name_width > right - x - AXYNE_PROBLEMS_PAD - 8 - count_width)
+            name_width = right - x - AXYNE_PROBLEMS_PAD - 8 - count_width;
+        if (name_width < 0) name_width = 0;
+        rect.left = x; rect.right = x + name_width;
+        if (name != NULL)
+            axyne_text_rect(dc, state->font_small, AXYNE_PROBLEM_MUTED, rect, name, DT_LEFT);
+        rect.left = x + name_width + 8; rect.right = rect.left + count_width + 4;
+        axyne_text_rect(dc, state->font_mono_small, AXYNE_PROBLEM_FAINT, rect, count, DT_LEFT);
+        free(name);
+        return;
+    }
+    {
+        wchar_t *message = axyne_wide(row->message != NULL ? row->message : "");
+        wchar_t *file = axyne_wide(row->file_name != NULL ? row->file_name : "");
+        wchar_t location[64];
+        int left = left_edge + (row->indent != 0 ? 42 : AXYNE_PROBLEMS_PAD);
+        int message_x = left + 14 + 10;
+        int location_width, file_width, location_x, file_x;
+        (void)swprintf_s(location, 64, L"[%llu, %llu]", (unsigned long long)row->line,
+                         (unsigned long long)row->column);
+        location_width = axyne_measure_text(state->font_mono_small, location);
+        file_width = file != NULL ? axyne_measure_text(state->font_mono_small, file) : 0;
+        location_x = right - AXYNE_PROBLEMS_PAD - location_width;
+        file_x = location_x - 10 - file_width;
+        if (file_x < message_x + 40) { /* narrow panel: the file name gives way */
+            file_width = location_x - 10 - message_x - 40;
+            if (file_width < 0) file_width = 0;
+            file_x = location_x - 10 - file_width;
+        }
+        axyne_problems_paint_severity(dc, row->severity, left,
+                                      top + (AXYNE_PROBLEMS_ROW - 14) / 2);
+        rect.left = message_x; rect.right = file_x - 10;
+        axyne_text_rect(dc, state->ui_font, AXYNE_PROBLEM_TEXT, rect,
+                        message != NULL ? message : L"(invalid text)", DT_LEFT);
+        rect.left = file_x; rect.right = file_x + file_width;
+        if (file != NULL)
+            axyne_text_rect(dc, state->font_mono_small, AXYNE_PROBLEM_MUTED, rect, file, DT_LEFT);
+        rect.left = location_x; rect.right = location_x + location_width + 4;
+        axyne_text_rect(dc, state->font_mono_small, AXYNE_PROBLEM_FAINT, rect, location, DT_LEFT);
+        free(message);
+        free(file);
+    }
+}
+
+static void axyne_problems_paint(HDC dc, AxyneWindowState *state)
+{
+    RECT list = axyne_problems_list_rect(state);
+    RECT field = axyne_problems_field_rect(list);
+    RECT rect;
+    wchar_t *summary = axyne_wide(state->problem_summary);
+    int usable = field.right - field.left >= AXYNE_PROBLEMS_FIELD_MIN;
+    int saved_dc;
+    if (list.right <= list.left || list.bottom <= list.top) { free(summary); return; }
+    saved_dc = SaveDC(dc);
+    IntersectClipRect(dc, list.left, list.top, list.right, list.bottom);
+    axyne_fill(dc, list.left, list.top, list.right, list.bottom, AXYNE_OUTPUT_BG);
+    rect.left = list.left + AXYNE_PROBLEMS_PAD;
+    rect.right = usable ? field.left - 12 : list.right - AXYNE_PROBLEMS_PAD;
+    rect.top = list.top;
+    rect.bottom = list.top + AXYNE_PROBLEMS_TOOLBAR;
+    if (summary != NULL && summary[0] != L'\0')
+        axyne_text_rect(dc, state->font_small, AXYNE_PROBLEM_MUTED, rect, summary, DT_LEFT);
+    free(summary);
+    if (usable) {
+        axyne_fill(dc, field.left, field.top, field.right, field.bottom,
+                   AXYNE_PROBLEM_FIELD_BORDER);
+        axyne_fill(dc, field.left + 1, field.top + 1, field.right - 1, field.bottom - 1,
+                   AXYNE_PROBLEM_FIELD);
+        axyne_problems_paint_filter_icon(dc, field.left + 8,
+            field.top + (AXYNE_PROBLEMS_FIELD_HEIGHT - 12) / 2, AXYNE_PROBLEM_FAINT);
+        if (state->problems_filter == NULL || !IsWindowVisible(state->problems_filter)) {
+            rect.left = field.left + 26; rect.right = field.right - 8;
+            rect.top = field.top; rect.bottom = field.bottom;
+            axyne_text_rect(dc, state->font_tiny, AXYNE_PROBLEM_FAINT, rect,
+                            L"필터 (예: C4244, editor.c)", DT_LEFT);
+        }
+    }
+    IntersectClipRect(dc, list.left, list.top + AXYNE_PROBLEMS_TOOLBAR, list.right,
+                      list.bottom);
+    if (state->problem_row_count == 0) {
+        rect.left = list.left; rect.right = list.right;
+        rect.top = list.top + AXYNE_PROBLEMS_TOOLBAR; rect.bottom = list.bottom;
+        axyne_text_rect(dc, state->ui_font, AXYNE_PROBLEM_MUTED, rect,
+                        L"문제가 없습니다", DT_CENTER);
+    } else {
+        size_t first = (size_t)(state->problem_scroll / AXYNE_PROBLEMS_ROW);
+        for (size_t i = first; i < state->problem_row_count; ++i) {
+            int top = list.top + AXYNE_PROBLEMS_TOOLBAR +
+                (int)i * AXYNE_PROBLEMS_ROW - state->problem_scroll;
+            if (top >= list.bottom) break;
+            axyne_problems_paint_row(dc, state, &state->problem_rows[i], list.left,
+                                     list.right, top, (int)i == state->problem_selected);
+        }
+    }
+    RestoreDC(dc, saved_dc);
+}
+
+static void axyne_problems_create_filter(HWND window, AxyneWindowState *state,
+                                         HINSTANCE instance)
+{
+    state->problems_filter = CreateWindowExW(0, L"EDIT", L"",
+        WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, window,
+        (HMENU)(INT_PTR)AXYNE_PROBLEMS_FILTER, instance, NULL);
+    if (state->problems_filter == NULL) return;
+    SendMessageW(state->problems_filter, WM_SETFONT, (WPARAM)state->font_tiny, TRUE);
+    SendMessageW(state->problems_filter, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+    SendMessageW(state->problems_filter, EM_LIMITTEXT, 255, 0);
+}
+
+static void axyne_problems_destroy_ui(AxyneWindowState *state)
+{
+    axyne_problems_rows_destroy(state->problem_rows, state->problem_row_count);
+    state->problem_rows = NULL;
+    state->problem_row_count = 0;
+    axyne_problem_forget_selection(state);
+    axyne_problems_destroy(&state->problems);
+    axyne_problems_collapsed_destroy(&state->problems_collapsed);
+    axyne_build_feed_destroy(&state->build_feed);
+    state->build_feed_active = 0;
+}
+
 static void axyne_layout(HWND window, AxyneWindowState *state)
 {
     RECT client;
@@ -7640,6 +8401,8 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     state->tab_reveal_index = SIZE_MAX;
     (void)axyne_visible_tabs(state, width);
     (void)axyne_explorer_visible_rows(state, status_top);
+    axyne_problems_update_filter(state);
+    axyne_problems_clamp_scroll(state);
     axyne_git_panel_place_controls(state);
     axyne_palette_refresh(window, state);
     InvalidateRect(window, NULL, FALSE);
@@ -7763,6 +8526,14 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         RECT edit_rect = axyne_palette_edit_rect(window);
         ExcludeClipRect(dc, edit_rect.left, edit_rect.top, edit_rect.right,
                         edit_rect.bottom);
+    }
+    if (state->problems_filter != NULL && IsWindowVisible(state->problems_filter)) {
+        /* so does the problems filter */
+        RECT filter_rect;
+        GetWindowRect(state->problems_filter, &filter_rect);
+        MapWindowPoints(NULL, window, (POINT *)&filter_rect, 2);
+        ExcludeClipRect(dc, filter_rect.left, filter_rect.top, filter_rect.right,
+                        filter_rect.bottom);
     }
     axyne_fill(dc, 0, 0, width, height, AXYNE_BG);
     axyne_fill(dc, 0, 0, width, AXYNE_TOP_MENU, AXYNE_MENU_BG);
@@ -7922,19 +8693,13 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
              * selected tab. Custom palettes still brighten the selection. */
             axyne_text_rect(dc, state->font_small,
                            selected && !AXYNE_REFERENCE ? AXYNE_TEXT : AXYNE_MUTED,
-                           label, AXYNE_PANEL_LABELS[i], DT_LEFT);
+                           label, axyne_panel_tab_label(state, (int)i), DT_LEFT);
             if (selected) axyne_fill(dc, rect.left, rect.bottom - 3,
                                      rect.right, rect.bottom, AXYNE_INDICATOR);
         }
     }
-    if (!state->panel_hidden && state->problems_panel_selected) {
-        wchar_t *status = axyne_wide(state->lsp_status);
-        RECT rect = {axyne_sidebar_width(state) + 16, bottom_top + AXYNE_UI_PANEL_HEADER + 6,
-                     width - 16, bottom_top + AXYNE_UI_PANEL_HEADER + 28};
-        axyne_text_rect(dc, state->code_font, AXYNE_TEXT, rect,
-            status != NULL && status[0] != L'\0' ? status : L"진단 정보 없음", DT_LEFT);
-        free(status);
-    }
+    if (axyne_problems_visible(state))
+        axyne_problems_paint(dc, state);
     {
         wchar_t status[96];
         if (state->last_exit_failed) {
@@ -8027,10 +8792,17 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->font_output = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
+        state->font_mono_small = CreateFontW(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+            FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
+        state->main_window = window;
+        state->problem_selected = -1;
         axyne_open_scintilla(state, window, instance);
         axyne_apply_preferences(state);
         axyne_create_terminal_controls(window, state, instance);
         axyne_git_panel_create_controls(window, state, instance);
+        axyne_problems_create_filter(window, state, instance);
+        axyne_problems_refresh(state);
         if (state->documents.count != 0)
             axyne_show_document(state, state->documents.active_index);
         else
@@ -8100,6 +8872,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_palette_tick(window, state);
             return 0;
         }
+        if (state != NULL && w_param == AXYNE_PROBLEMS_TIMER) {
+            axyne_problems_refresh(state); /* also stops the one-shot timer */
+            return 0;
+        }
         if (state != NULL && w_param == AXYNE_GIT_REFRESH_TIMER) {
             KillTimer(window, AXYNE_GIT_REFRESH_TIMER);
             axyne_git_panel_refresh(window, state);
@@ -8121,6 +8897,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     case WM_KEYDOWN:
+        if (state != NULL && GetFocus() == window &&
+            axyne_problems_key(window, state, w_param)) return 0;
         if (axyne_handle_key(window, state, w_param)) return 0;
         break;
     case WM_LBUTTONDBLCLK: {
@@ -8238,6 +9016,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 return 0;
             }
         }
+        if (axyne_problems_click(window, state, x, y)) return 0;
         int tab_y = AXYNE_TOP_MENU + AXYNE_TOOLBAR;
         if (y >= tab_y && y < tab_y + AXYNE_TABS) {
             int left = axyne_sidebar_width(state);
@@ -8336,6 +9115,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return 0;
         }
         if (message == WM_MOUSEHWHEEL) break;
+        if (axyne_problems_wheel(state, point, GET_WHEEL_DELTA_WPARAM(w_param)))
+            return 0;
         if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT && !state->explorer_hidden &&
             point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
             point.y < client.bottom - AXYNE_STATUS) {
@@ -8390,6 +9171,19 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_git_panel_message_event(window, state, (int)HIWORD(w_param));
             return 0;
         }
+        if (command == AXYNE_PROBLEMS_FILTER && state != NULL &&
+            (HWND)l_param == state->problems_filter) {
+            if (HIWORD(w_param) == EN_CHANGE) {
+                state->problem_scroll = 0;
+                axyne_problems_refresh(state);
+            } else if (HIWORD(w_param) == EN_KILLFOCUS) {
+                /* An empty, unfocused filter gives way to the painted placeholder. */
+                if (GetWindowTextLengthW(state->problems_filter) == 0)
+                    ShowWindow(state->problems_filter, SW_HIDE);
+                axyne_problems_invalidate(state);
+            }
+            return 0;
+        }
         if (command == AXYNE_PALETTE_EDIT_ID && HIWORD(w_param) == EN_CHANGE &&
             (HWND)l_param == state->palette_edit) {
             axyne_palette_text_changed(window, state);
@@ -8410,6 +9204,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             state->panel_hidden = 0;
             axyne_layout(window, state);
             if (state->terminal_panel_selected) SetFocus(state->terminal_input);
+            else if (state->problems_panel_selected) SetFocus(window);
             else if (state->editor != NULL) SetFocus(state->editor);
         }
         else if (axyne_action_command(window, state, command)) { /* handled */ }
@@ -8508,6 +9303,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORSTATIC:
+        if (state->problems_filter != NULL && (HWND)l_param == state->problems_filter) {
+            HDC dc = (HDC)w_param;
+            SetTextColor(dc, AXYNE_PROBLEM_TEXT);
+            SetBkColor(dc, AXYNE_PROBLEM_FIELD);
+            return (LRESULT)AXYNE_PROBLEM_FIELD_BRUSH;
+        }
         if (state->palette_edit != NULL && (HWND)l_param == state->palette_edit) {
             HDC dc = (HDC)w_param;
             SetTextColor(dc, RGB(255, 255, 255));
@@ -8603,6 +9404,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         AxyneTerminalMessage *terminal_message =
             (AxyneTerminalMessage *)l_param;
         if (terminal_message != NULL) {
+            axyne_problems_feed_build(state, terminal_message->stream,
+                                      terminal_message->bytes, terminal_message->length);
             axyne_terminal_append(state->terminal_output,
                                   terminal_message->bytes,
                                   terminal_message->length,
@@ -8615,6 +9418,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         AxyneTerminalExitMessage *exit_message =
             (AxyneTerminalExitMessage *)l_param;
         if (exit_message == NULL) return 0;
+        axyne_problems_finish_build(state);
         state->last_exit_code = exit_message->exit_code;
         state->last_exit_failed = state->last_exit_code != 0;
         state->has_exit_status = 1;
@@ -8677,6 +9481,18 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             else axyne_git_panel_job_free((AxyneGitPanelJob *)l_param);
         }
         return 0;
+    case AXYNE_WM_LSP_DIAGNOSTICS: {
+        AxyneLspDiagnosticsMessage *diagnostics_message =
+            (AxyneLspDiagnosticsMessage *)l_param;
+        if (diagnostics_message != NULL) {
+            if (state != NULL)
+                axyne_problems_apply_lsp(state, diagnostics_message->path,
+                                         diagnostics_message->items,
+                                         diagnostics_message->count);
+            axyne_free_lsp_diagnostics_message(diagnostics_message);
+        }
+        return 0;
+    }
     case AXYNE_WM_LSP_STATUS: {
         AxyneLspStatusMessage *message = (AxyneLspStatusMessage *)l_param;
         if (message != NULL) {
@@ -8808,7 +9624,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                     axyne_free_lsp_status_message(
                         (AxyneLspStatusMessage *)pending_message.lParam);
                 }
+                while (PeekMessageW(&pending_message, window,
+                                    AXYNE_WM_LSP_DIAGNOSTICS,
+                                    AXYNE_WM_LSP_DIAGNOSTICS, PM_REMOVE)) {
+                    axyne_free_lsp_diagnostics_message(
+                        (AxyneLspDiagnosticsMessage *)pending_message.lParam);
+                }
             }
+            axyne_problems_destroy_ui(state);
+            state->main_window = NULL;
             {
                 MSG pending_message;
                 while (PeekMessageW(&pending_message, window,
@@ -8831,6 +9655,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (AXYNE_POPUP_BRUSH != NULL) {
                 DeleteObject(AXYNE_POPUP_BRUSH);
                 AXYNE_POPUP_BRUSH = NULL;
+            }
+            if (AXYNE_PROBLEM_FIELD_BRUSH != NULL) {
+                DeleteObject(AXYNE_PROBLEM_FIELD_BRUSH);
+                AXYNE_PROBLEM_FIELD_BRUSH = NULL;
             }
             if (state->watcher != NULL) {
                 axyne_watcher_stop(state->watcher);
@@ -8856,6 +9684,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->font_glyph14 != NULL) DeleteObject(state->font_glyph14);
             if (state->font_dot != NULL) DeleteObject(state->font_dot);
             if (state->font_output != NULL) DeleteObject(state->font_output);
+            if (state->font_mono_small != NULL) DeleteObject(state->font_mono_small);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
@@ -8952,6 +9781,22 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                     if (forward && axyne_handle_key(window, current, message.wParam))
                         continue;
                 }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+                continue;
+            }
+            if (current != NULL && current->problems_filter != NULL &&
+                message.hwnd == current->problems_filter) {
+                if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+                    SetWindowTextW(current->problems_filter, L"");
+                    SetFocus(window);
+                    continue;
+                }
+                if (message.message == WM_KEYDOWN &&
+                    (message.wParam == VK_UP || message.wParam == VK_DOWN ||
+                     message.wParam == VK_RETURN) &&
+                    axyne_problems_key(window, current, message.wParam)) continue;
+                /* Editor shortcuts must not consume typing in the filter. */
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
                 continue;
