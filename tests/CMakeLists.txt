@@ -23,6 +23,7 @@ add_executable(axyne_tests
     test_popup_menu.c
     test_completion.c
     test_memory_limits.c
+    test_commands.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -37,6 +38,7 @@ if(MSVC)
     set_source_files_properties(test_palette_problems.c test_palette_controller.c
         PROPERTIES COMPILE_OPTIONS "/utf-8")
     set_source_files_properties(test_languages.c PROPERTIES COMPILE_OPTIONS "/utf-8")
+    set_source_files_properties(test_commands.c PROPERTIES COMPILE_OPTIONS "/utf-8")
 else()
     target_compile_options(axyne_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -161,8 +163,14 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> memory-limits
             "${AXYNE_TEST_FIXTURE_DIR}/memory-limits"
 )
+add_test(
+    NAME axyne-commands
+    COMMAND $<TARGET_FILE:axyne_tests> commands
+            "${AXYNE_TEST_FIXTURE_DIR}/commands"
+)
 set_tests_properties(
     axyne-memory-limits
+    axyne-commands
     axyne-build-target
     axyne-languages
     axyne-build-selector
