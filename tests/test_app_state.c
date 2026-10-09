@@ -6,7 +6,7 @@
 
 int axyne_test_app_state(const char *root)
 {
-    char path[512], nested[512], launch[512], name[64];
+    char path[512], config[512], nested[512], launch[512], name[64];
     AxyneAppState state, loaded;
     AxyneRunConfiguration run, copy;
     AxyneSettings *document = NULL;
@@ -18,8 +18,8 @@ int axyne_test_app_state(const char *root)
     AXYNE_TEST_CHECK(axyne_test_register_cleanup(root));
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
     AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), root, "state.json"));
-    AXYNE_TEST_CHECK(axyne_test_path(nested, sizeof(nested), root, "config"));
-    AXYNE_TEST_CHECK(axyne_test_path(nested, sizeof(nested), nested, "state.json"));
+    AXYNE_TEST_CHECK(axyne_test_path(config, sizeof(config), root, "config"));
+    AXYNE_TEST_CHECK(axyne_test_path(nested, sizeof(nested), config, "state.json"));
     AXYNE_TEST_CHECK(axyne_test_path(launch, sizeof(launch), root, "launch.json"));
 
     axyne_app_state_init(&state);

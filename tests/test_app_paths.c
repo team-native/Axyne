@@ -12,7 +12,7 @@ static int ends_with(const char *text, const char *suffix)
 
 int axyne_test_app_paths(const char *root)
 {
-    char expected[512], deep[512], file[512];
+    char expected[512], level1[512], level2[512], deep[512], file[512];
     char *path;
     AxyneError error = {0};
     const char sep[2] = {AXYNE_TEST_SEPARATOR, '\0'};
@@ -70,9 +70,9 @@ int axyne_test_app_paths(const char *root)
     AXYNE_TEST_STREQ(path, expected);
     axyne_app_path_free(path);
 
-    AXYNE_TEST_CHECK(axyne_test_path(deep, sizeof(deep), root, "a"));
-    AXYNE_TEST_CHECK(axyne_test_path(deep, sizeof(deep), deep, "b"));
-    AXYNE_TEST_CHECK(axyne_test_path(deep, sizeof(deep), deep, "logs"));
+    AXYNE_TEST_CHECK(axyne_test_path(level1, sizeof(level1), root, "a"));
+    AXYNE_TEST_CHECK(axyne_test_path(level2, sizeof(level2), level1, "b"));
+    AXYNE_TEST_CHECK(axyne_test_path(deep, sizeof(deep), level2, "logs"));
     axyne_app_paths_set_override(AXYNE_APP_PATH_LOG_DIR, deep);
     AXYNE_TEST_CHECK(axyne_test_path(expected, sizeof(expected), deep, "axyne.log"));
     path = axyne_app_path(AXYNE_APP_PATH_LOG_FILE);
