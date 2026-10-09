@@ -2,11 +2,14 @@
 #import <objc/runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "axyne/explorer.h"
 #include "axyne/ui_design.h"
 #include "axyne/preferences.h"
 #include "axyne/document.h"
 #include "axyne/palette_controller.h"
+#include "axyne/problems.h"
+#include "axyne/lsp.h"
 
 @interface NSView (AxyneWorkspaceLayoutTest)
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
@@ -21,6 +24,19 @@
 - (void)paletteSyncInput;
 - (void)paletteDismiss;
 - (void)layoutParts;
+- (void)refreshProblems;
+- (void)beginBuildProblems;
+- (void)feedBuildProblems:(const char *)bytes length:(size_t)length stream:(int)stream;
+- (void)finishBuildProblems;
+- (void)applyLspDiagnostics:(const AxyneLspDiagnostic *)diagnostics
+                      count:(size_t)count path:(const char *)path;
+- (const AxyneProblemCounts *)problemCounts;
+- (void)problemsView:(id)problemsView activateRowAtIndex:(size_t)index;
+- (void)problemsViewFilterChanged:(id)problemsView;
+- (size_t)rowCount;
+- (NSInteger)selectedRowIndex;
+- (void)moveSelectionBy:(NSInteger)delta;
+- (NSInteger)rowIndexAtPoint:(NSPoint)point;
 @end
 
 static id field(id view, const char *name)
@@ -181,10 +197,103 @@ int main(void)
         CHECK([field(view, "_terminalInput") action] == NSSelectorFromString(@"sendTerminal:"));
         [field(view, "_problemsTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
-        CHECK([output isHidden] && ![field(view, "_problemSummary") isHidden]);
+        NSView *problemsView = field(view, "_problemsView");
+        CHECK(problemsView != nil);
+        CHECK([output isHidden] && ![problemsView isHidden]);
+        CHECK([field(view, "_terminalInput") isHidden] && [field(view, "_terminalSend") isHidden]);
+        {
+            /* The list fills the panel below its 32px tab header. */
+            NSRect list = [problemsView frame];
+            CGFloat panelTop = 842 - AXYNE_UI_STATUS - AXYNE_UI_PANEL;
+            CHECK(NSMinX(list) == AXYNE_UI_SIDEBAR && NSMaxX(list) == 1440);
+            CHECK(NSMinY(list) == panelTop + AXYNE_UI_PANEL_HEADER);
+            CHECK(NSMaxY(list) == 842 - AXYNE_UI_STATUS);
+        }
+        CHECK([[field(view, "_problemsTab") title] isEqualToString:@"문제"]);
+        CHECK([problemsView rowCount] == 0);
+        fprintf(stderr, "Checking problems panel\n");
+        {
+            AxyneProblemList *problems = value_field(view, "_problems");
+            AxyneProblem item = {0};
+            CHECK(problems != NULL);
+            item.severity = AXYNE_PROBLEM_ERROR; item.line = 40; item.column = 32;
+            item.path = (char *)"/tmp/axyne-problems/main.c"; item.message = (char *)"error one";
+            CHECK(axyne_problems_append(problems, AXYNE_PROBLEM_ORIGIN_BUILD, &item, NULL) == AXYNE_STATUS_OK);
+            item.severity = AXYNE_PROBLEM_WARNING; item.line = 27; item.column = 17;
+            item.message = (char *)"warning one";
+            CHECK(axyne_problems_append(problems, AXYNE_PROBLEM_ORIGIN_BUILD, &item, NULL) == AXYNE_STATUS_OK);
+            item.severity = AXYNE_PROBLEM_INFORMATION; item.line = 8; item.column = 1;
+            item.path = (char *)"/tmp/axyne-problems/CMakeLists.txt"; item.message = (char *)"info one";
+            CHECK(axyne_problems_append(problems, AXYNE_PROBLEM_ORIGIN_BUILD, &item, NULL) == AXYNE_STATUS_OK);
+            [view refreshProblems];
+            [view layoutSubtreeIfNeeded];
+            CHECK([[field(view, "_problemsTab") title] isEqualToString:@"문제  3"]);
+            CHECK([field(problemsView, "_summary") isEqualToString:@"오류 1개 · 경고 1개 · 정보 1개"]);
+            CHECK([view problemCounts]->errors == 1 && [view problemCounts]->warnings == 1 &&
+                  [view problemCounts]->total == 3);
+            /* No active file: two groups (main.c first, it holds the error)
+             * with three problems below them. */
+            CHECK([problemsView rowCount] == 5);
+            CHECK([problemsView rowIndexAtPoint:NSMakePoint(100, 36 + 30 + 1)] == 1);
+            CHECK([problemsView rowIndexAtPoint:NSMakePoint(100, 10)] == -1);
+            CHECK([problemsView rowIndexAtPoint:NSMakePoint(100, 36 + 30 * 5)] == -1);
+            /* The widened tab label keeps the tabs from overlapping. */
+            CHECK(NSMaxX([field(view, "_problemsTab") frame]) <=
+                  NSMinX([field(view, "_terminalTab") frame]));
+            /* Keyboard selection clamps at both ends. */
+            [problemsView moveSelectionBy:-1];
+            CHECK([problemsView selectedRowIndex] == 4);
+            [problemsView moveSelectionBy:1];
+            CHECK([problemsView selectedRowIndex] == 4);
+            for (int i = 0; i < 10; ++i) [problemsView moveSelectionBy:-1];
+            CHECK([problemsView selectedRowIndex] == 0);
+            /* Activating a group row collapses it and back. */
+            [view problemsView:problemsView activateRowAtIndex:0];
+            CHECK([problemsView rowCount] == 3);
+            [view problemsView:problemsView activateRowAtIndex:0];
+            CHECK([problemsView rowCount] == 5);
+            /* The filter narrows by path, message or code. */
+            NSTextField *filter = field(problemsView, "_filter");
+            CHECK(filter != nil);
+            [filter setStringValue:@"cmake"];
+            [view problemsViewFilterChanged:problemsView];
+            CHECK([problemsView rowCount] == 2);
+            [filter setStringValue:@""];
+            [view problemsViewFilterChanged:problemsView];
+            CHECK([problemsView rowCount] == 5);
+            axyne_problems_clear_all(problems);
+            [view refreshProblems];
+            CHECK([problemsView rowCount] == 0);
+            CHECK([[field(view, "_problemsTab") title] isEqualToString:@"문제"]);
+
+            /* Streamed build output becomes BUILD problems and never removes
+             * LSP ones. */
+            AxyneLspDiagnostic diagnostic;
+            memset(&diagnostic, 0, sizeof(diagnostic));
+            diagnostic.severity = AXYNE_LSP_DIAGNOSTIC_ERROR;
+            diagnostic.range.start.line = 2; diagnostic.range.start.character = 4;
+            diagnostic.message = (char *)"lsp problem";
+            [view applyLspDiagnostics:&diagnostic count:1 path:"/tmp/axyne-problems/lsp.c"];
+            CHECK(problems->count == 1 && problems->items[0].origin == AXYNE_PROBLEM_ORIGIN_LSP);
+            [view beginBuildProblems];
+            const char *chunk1 = "[build]\nsrc/a.c:3:5: err";
+            const char *chunk2 = "or: broken\n";
+            [view feedBuildProblems:chunk1 length:strlen(chunk1) stream:0];
+            [view feedBuildProblems:chunk2 length:strlen(chunk2) stream:0];
+            [view finishBuildProblems];
+            CHECK(problems->count == 2);
+            CHECK(problems->items[1].origin == AXYNE_PROBLEM_ORIGIN_BUILD &&
+                  problems->items[1].line == 3);
+            [view beginBuildProblems];
+            CHECK(problems->count == 1);
+            [view finishBuildProblems];
+            axyne_problems_clear_all(problems);
+            [view refreshProblems];
+        }
         [field(view, "_outputTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
         CHECK(![output isHidden] && [field(view, "_terminalInput") isHidden]);
+        CHECK([field(view, "_problemsView") isHidden]);
         /* The Git selector must fit the minimum supported sidebar, and
          * shrink safely below it instead of intercepting editor clicks. */
         {
@@ -319,7 +428,7 @@ int main(void)
         [view release];
         CHECK([[NSFileManager defaultManager] removeItemAtPath:root error:NULL]);
         method_setImplementation(alertMethod, originalAlert);
-        puts("Toolbar actions/geometry, panel controls, scrolling viewport and resize bounds passed");
+        puts("Toolbar actions/geometry, panel controls, problems panel, scrolling viewport and resize bounds passed");
     }
     return 0;
 }
