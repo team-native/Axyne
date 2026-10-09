@@ -213,6 +213,36 @@ size_t axyne_keymap_bindings(const AxyneKeymap *map, AxyneCommandId command,
 size_t axyne_keymap_display(const AxyneKeymap *map, AxyneCommandId command,
                             char *buffer, size_t capacity);
 
+/* ---- preferences -------------------------------------------------------- */
+
+struct AxynePreferences;
+
+/* Applies the user's keybindings on top of the map's current bindings: first
+ * every legacy action binding (AxynePreferences.bindings) that differs from
+ * its default (a disabled one unbinds the command), then every command-keyed
+ * entry (command_bindings, later wins). Entries naming unknown commands or
+ * commands unavailable on the platform are skipped; the first malformed key
+ * text is reported as INVALID_ARGUMENT after the rest were applied. */
+AxyneStatus axyne_keymap_apply_preferences(AxyneKeymap *map,
+                                           const struct AxynePreferences *preferences);
+/* axyne_keymap_init followed by axyne_keymap_apply_preferences (NULL
+ * preferences = defaults only). The map is initialised (and must be
+ * destroyed) whenever init succeeded, even if applying reports an error. */
+AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxynePlatform platform,
+                               const struct AxynePreferences *preferences);
+
+/* Conversions between a stroke and the legacy preference binding form
+ * (AXYNE_KEY_MODIFIER_* bits + key text such as "S" or "F5"). The legacy
+ * COMMAND bit is the primary modifier: Ctrl on Windows, Command on macOS.
+ * Return 1 on success, 0 when the value cannot be represented (e.g. Cmd on
+ * Windows, unknown key text, key text longer than key_capacity - 1). */
+int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
+                                    AxynePlatform platform,
+                                    AxyneKeyStroke *stroke);
+int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
+                                  unsigned int *modifiers, char *key,
+                                  size_t key_capacity);
+
 /* ---- conflicts ---------------------------------------------------------- */
 
 typedef struct AxyneKeymapConflict {

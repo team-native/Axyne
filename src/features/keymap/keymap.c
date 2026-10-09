@@ -1,5 +1,7 @@
 #include "axyne/keymap.h"
 
+#include "axyne/preferences.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -672,4 +674,121 @@ AxyneCommandId axyne_keymap_find_conflict(const AxyneKeymap *map,
             return entry->command;
     }
     return AXYNE_COMMAND_NONE;
+}
+
+/* ---- preferences -------------------------------------------------------- */
+
+int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
+                                    AxynePlatform platform, AxyneKeyStroke *stroke)
+{
+    AxyneKeyStroke parsed;
+    unsigned mods = 0;
+    if (key == NULL || key[0] == '\0' || strchr(key, '+') != NULL ||
+        axyne_key_stroke_parse(key, &parsed) != AXYNE_STATUS_OK || parsed.mods != 0)
+        return 0;
+    if (modifiers & AXYNE_KEY_MODIFIER_COMMAND)
+        mods |= platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEYMOD_CMD : AXYNE_KEYMOD_CTRL;
+    if (modifiers & AXYNE_KEY_MODIFIER_CONTROL) mods |= AXYNE_KEYMOD_CTRL;
+    if (modifiers & AXYNE_KEY_MODIFIER_SHIFT) mods |= AXYNE_KEYMOD_SHIFT;
+    if (modifiers & AXYNE_KEY_MODIFIER_ALT) mods |= AXYNE_KEYMOD_ALT;
+    parsed.mods = (uint16_t)mods;
+    if (stroke != NULL) *stroke = parsed;
+    return 1;
+}
+
+int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
+                                  unsigned int *modifiers, char *key, size_t key_capacity)
+{
+    AxyneKeyStroke bare;
+    unsigned legacy = 0;
+    char text[32];
+    if (stroke.key == AXYNE_KEY_NONE) return 0;
+    if (stroke.mods & AXYNE_KEYMOD_CMD) {
+        if (platform != AXYNE_PLATFORM_MACOS) return 0;
+        legacy |= AXYNE_KEY_MODIFIER_COMMAND;
+    }
+    if (stroke.mods & AXYNE_KEYMOD_CTRL)
+        legacy |= platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEY_MODIFIER_CONTROL
+                                                   : AXYNE_KEY_MODIFIER_COMMAND;
+    if (stroke.mods & AXYNE_KEYMOD_SHIFT) legacy |= AXYNE_KEY_MODIFIER_SHIFT;
+    if (stroke.mods & AXYNE_KEYMOD_ALT) legacy |= AXYNE_KEY_MODIFIER_ALT;
+    bare.key = stroke.key;
+    bare.mods = 0;
+    if (axyne_key_stroke_format(&bare, AXYNE_KEY_FORMAT_CANONICAL, text, sizeof(text)) >=
+            sizeof(text) || key == NULL || strlen(text) >= key_capacity)
+        return 0;
+    memcpy(key, text, strlen(text) + 1);
+    if (modifiers != NULL) *modifiers = legacy;
+    return 1;
+}
+
+static int legacy_binding_equal(const AxyneKeyBinding *a, const AxyneKeyBinding *b,
+                                AxynePlatform platform)
+{
+    AxyneKeyStroke x, y;
+    if (a->enabled != b->enabled) return 0;
+    if (!a->enabled) return 1;
+    if (axyne_keymap_stroke_from_legacy(a->modifiers, a->key, platform, &x) &&
+        axyne_keymap_stroke_from_legacy(b->modifiers, b->key, platform, &y))
+        return axyne_key_stroke_equal(x, y);
+    return a->modifiers == b->modifiers && strcmp(a->key, b->key) == 0;
+}
+
+AxyneStatus axyne_keymap_apply_preferences(AxyneKeymap *map,
+                                           const struct AxynePreferences *preferences)
+{
+    AxynePreferences *defaults;
+    AxyneStatus result = AXYNE_STATUS_OK;
+    if (map == NULL) return AXYNE_STATUS_INVALID_ARGUMENT;
+    if (preferences == NULL) return AXYNE_STATUS_OK;
+    defaults = (AxynePreferences *)malloc(sizeof(*defaults));
+    if (defaults == NULL) return AXYNE_STATUS_OUT_OF_MEMORY;
+    axyne_preferences_defaults(defaults);
+    for (size_t i = 0; i < preferences->binding_count && i < AXYNE_PREFERENCE_BINDING_MAX; ++i) {
+        const AxyneKeyBinding *binding = &preferences->bindings[i];
+        const AxyneKeyBinding *fallback = axyne_preferences_find_binding(defaults, binding->action);
+        AxyneCommandId command = axyne_command_from_legacy_action((int)binding->action);
+        AxyneKeySequence sequence;
+        if (command == AXYNE_COMMAND_NONE || !axyne_command_available(command, map->platform))
+            continue;
+        if (fallback != NULL ? legacy_binding_equal(binding, fallback, map->platform)
+                             : !binding->enabled)
+            continue;
+        if (!binding->enabled) {
+            (void)axyne_keymap_set_command(map, command, NULL, 0);
+            continue;
+        }
+        memset(&sequence, 0, sizeof(sequence));
+        if (!axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key, map->platform,
+                                             &sequence.strokes[0])) {
+            if (result == AXYNE_STATUS_OK) result = AXYNE_STATUS_INVALID_ARGUMENT;
+            continue;
+        }
+        sequence.count = 1;
+        (void)axyne_keymap_set_command(map, command, &sequence, 1);
+    }
+    free(defaults);
+    for (size_t i = 0; i < preferences->command_binding_count &&
+                       i < AXYNE_PREFERENCE_COMMAND_BINDING_MAX; ++i) {
+        const AxyneCommandBinding *entry = &preferences->command_bindings[i];
+        const char *keys[AXYNE_PREFERENCE_COMMAND_KEYS_MAX];
+        AxyneCommandId command = axyne_command_id(entry->command);
+        AxyneStatus status;
+        size_t count = entry->count < AXYNE_PREFERENCE_COMMAND_KEYS_MAX
+            ? entry->count : AXYNE_PREFERENCE_COMMAND_KEYS_MAX;
+        if (command == AXYNE_COMMAND_NONE || !axyne_command_available(command, map->platform))
+            continue;
+        for (size_t k = 0; k < count; ++k) keys[k] = entry->keys[k];
+        status = axyne_keymap_set_command_text(map, entry->command, keys, count);
+        if (status != AXYNE_STATUS_OK && result == AXYNE_STATUS_OK) result = status;
+    }
+    return result;
+}
+
+AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxynePlatform platform,
+                               const struct AxynePreferences *preferences)
+{
+    AxyneStatus status = axyne_keymap_init(map, platform);
+    if (status != AXYNE_STATUS_OK) return status;
+    return axyne_keymap_apply_preferences(map, preferences);
 }

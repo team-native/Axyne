@@ -422,3 +422,134 @@ AxyneStatus axyne_settings_remove(AxyneSettings *settings, const char *json_poin
 
 void axyne_settings_free_json(char *json_value) { free(json_value); }
 void axyne_settings_destroy(AxyneSettings *settings) { if (settings != NULL) { axyne_json_destroy(settings->root); free(settings); } }
+
+/* ---- typed access ------------------------------------------------------- */
+
+static AxyneJsonNode *axyne_settings_node(const AxyneSettings *settings,
+                                          const char *json_pointer,
+                                          AxyneError *error, AxyneStatus *status)
+{
+    AxyneJsonNode *node;
+    if (settings == NULL || settings->root == NULL || json_pointer == NULL) {
+        *status = axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "settings and pointer are required");
+        return NULL;
+    }
+    node = axyne_pointer_resolve(settings->root, json_pointer, NULL, NULL);
+    if (node == NULL) {
+        *status = axyne_error(error, AXYNE_STATUS_NOT_FOUND, "settings value was not found");
+        return NULL;
+    }
+    *status = AXYNE_STATUS_OK;
+    return node;
+}
+
+AxyneStatus axyne_settings_get_type(const AxyneSettings *settings, const char *json_pointer,
+                                    AxyneSettingsType *type, AxyneError *error)
+{
+    AxyneStatus status; AxyneJsonNode *node = axyne_settings_node(settings, json_pointer, error, &status);
+    if (node == NULL) return status;
+    if (type == NULL) return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "type output is required");
+    switch (node->type) {
+    case AXYNE_JSON_NULL: *type = AXYNE_SETTINGS_TYPE_NULL; break;
+    case AXYNE_JSON_BOOL: *type = AXYNE_SETTINGS_TYPE_BOOL; break;
+    case AXYNE_JSON_NUMBER: *type = AXYNE_SETTINGS_TYPE_NUMBER; break;
+    case AXYNE_JSON_STRING: *type = AXYNE_SETTINGS_TYPE_STRING; break;
+    case AXYNE_JSON_ARRAY: *type = AXYNE_SETTINGS_TYPE_ARRAY; break;
+    default: *type = AXYNE_SETTINGS_TYPE_OBJECT; break;
+    }
+    axyne_success(error); return AXYNE_STATUS_OK;
+}
+
+AxyneStatus axyne_settings_get_count(const AxyneSettings *settings, const char *json_pointer,
+                                     size_t *count, AxyneError *error)
+{
+    AxyneStatus status; AxyneJsonNode *node = axyne_settings_node(settings, json_pointer, error, &status);
+    if (node == NULL) return status;
+    if (count == NULL) return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "count output is required");
+    if (node->type == AXYNE_JSON_ARRAY) *count = node->value.array.count;
+    else if (node->type == AXYNE_JSON_OBJECT) *count = node->value.object.count;
+    else return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "settings value is not a container");
+    axyne_success(error); return AXYNE_STATUS_OK;
+}
+
+static char *axyne_settings_strdup(const char *text)
+{
+    size_t length = strlen(text);
+    char *copy = (char *)malloc(length + 1);
+    if (copy != NULL) memcpy(copy, text, length + 1);
+    return copy;
+}
+
+AxyneStatus axyne_settings_get_key(const AxyneSettings *settings, const char *json_pointer,
+                                   size_t index, char **key, AxyneError *error)
+{
+    AxyneStatus status; AxyneJsonNode *node = axyne_settings_node(settings, json_pointer, error, &status);
+    if (key != NULL) *key = NULL;
+    if (node == NULL) return status;
+    if (key == NULL || node->type != AXYNE_JSON_OBJECT) return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "settings value is not an object");
+    if (index >= node->value.object.count) return axyne_error(error, AXYNE_STATUS_NOT_FOUND, "object member index is out of range");
+    *key = axyne_settings_strdup(node->value.object.items[index].key);
+    if (*key == NULL) return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory copying key");
+    axyne_success(error); return AXYNE_STATUS_OK;
+}
+
+AxyneStatus axyne_settings_get_string(const AxyneSettings *settings, const char *json_pointer,
+                                      char **value, AxyneError *error)
+{
+    AxyneStatus status; AxyneJsonNode *node = axyne_settings_node(settings, json_pointer, error, &status);
+    if (value != NULL) *value = NULL;
+    if (node == NULL) return status;
+    if (value == NULL || node->type != AXYNE_JSON_STRING) return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "settings value is not a string");
+    *value = axyne_settings_strdup(node->value.text);
+    if (*value == NULL) return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory copying string");
+    axyne_success(error); return AXYNE_STATUS_OK;
+}
+
+AxyneStatus axyne_settings_set_string(AxyneSettings *settings, const char *json_pointer,
+                                      const char *utf8_value, AxyneError *error)
+{
+    char *json = NULL; size_t length = 0, capacity = 0; AxyneStatus status;
+    if (!axyne_serialize_string(utf8_value != NULL ? utf8_value : "", &json, &length, &capacity)) {
+        free(json);
+        return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory serializing string");
+    }
+    status = axyne_settings_set_json(settings, json_pointer, json, error);
+    free(json);
+    return status;
+}
+
+AxyneStatus axyne_settings_append_json(AxyneSettings *settings, const char *array_pointer,
+                                       const char *json_value, AxyneError *error)
+{
+    AxyneJsonParser parser; AxyneJsonNode *value; AxyneStatus status;
+    AxyneJsonNode *array = axyne_settings_node(settings, array_pointer, error, &status);
+    if (array == NULL) return status;
+    if (array->type != AXYNE_JSON_ARRAY || json_value == NULL) return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "settings value is not an array");
+    parser.cursor = json_value; parser.end = json_value + strlen(json_value);
+    axyne_skip_space(&parser); value = axyne_parse_value(&parser); axyne_skip_space(&parser);
+    if (value == NULL || parser.cursor != parser.end) { axyne_json_destroy(value); return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "setting value is not valid JSON"); }
+    if (!axyne_grow((void **)&array->value.array.items, &array->value.array.capacity, sizeof(*array->value.array.items), array->value.array.count + 1)) { axyne_json_destroy(value); return axyne_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory appending value"); }
+    array->value.array.items[array->value.array.count++] = value;
+    axyne_success(error); return AXYNE_STATUS_OK;
+}
+
+char *axyne_settings_pointer_join(const char *parent, const char *token)
+{
+    size_t parent_length = parent != NULL ? strlen(parent) : 0, extra = 0, at;
+    const char *cursor;
+    char *joined;
+    if (token == NULL) token = "";
+    for (cursor = token; *cursor != '\0'; ++cursor) extra += (*cursor == '~' || *cursor == '/') ? 2 : 1;
+    joined = (char *)malloc(parent_length + extra + 2);
+    if (joined == NULL) return NULL;
+    if (parent_length != 0) memcpy(joined, parent, parent_length);
+    at = parent_length;
+    joined[at++] = '/';
+    for (cursor = token; *cursor != '\0'; ++cursor) {
+        if (*cursor == '~') { joined[at++] = '~'; joined[at++] = '0'; }
+        else if (*cursor == '/') { joined[at++] = '~'; joined[at++] = '1'; }
+        else joined[at++] = *cursor;
+    }
+    joined[at] = '\0';
+    return joined;
+}
