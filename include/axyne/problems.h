@@ -119,6 +119,22 @@ size_t axyne_problems_format_summary(const AxyneProblemCounts *counts,
 size_t axyne_problems_summary(const AxyneProblemList *list, char *buffer,
                               size_t capacity);
 
+/* Counts of the problems of one file only (paths compared with
+ * axyne_problems_path_equal). A NULL or empty `path` yields zero counts. Used
+ * for per-file badges (e.g. explorer rows) and per-file status text. */
+void axyne_problems_counts_for_path(const AxyneProblemList *list,
+                                    const char *path, AxyneProblemCounts *out);
+
+/* The most severe severity present in `counts`: AXYNE_PROBLEM_ERROR, then
+ * WARNING, INFORMATION, HINT; 0 when there is none (or `counts` is NULL). */
+int axyne_problems_counts_worst(const AxyneProblemCounts *counts);
+
+/* Bottom-panel tab label: "문제" without problems, "문제  N" (two spaces, as
+ * in Figma) with N = counts->total. Same return convention as
+ * axyne_problems_format_summary. */
+size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
+                                size_t capacity);
+
 /* ---- path helpers --------------------------------------------------------- */
 
 /* Windows: case-insensitive and "/" equals "\". POSIX: exact. NULL equals
