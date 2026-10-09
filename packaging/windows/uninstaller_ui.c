@@ -16,6 +16,9 @@
 #define MAX_ITEMS 64
 #define MAX_LEFTOVERS 5
 #define LOG_LINES 7
+#define ID_FEEDBACK_EDIT 100
+#define FEEDBACK_LIMIT 300
+#define ISSUE_URL L"https://github.com/team-native/Axyne/issues/new"
 
 static const COLORREF BG = RGB(19, 20, 23), SURFACE = RGB(28, 30, 34), FOOTER = RGB(23, 25, 28),
                       BORDER = RGB(46, 49, 55), TEXT = RGB(213, 216, 221), MUTED = RGB(139, 145, 155),
@@ -59,6 +62,18 @@ static RemovalItem items[MAX_ITEMS];
 static int item_count;
 static Leftover leftovers[MAX_LEFTOVERS];
 static int leftover_count;
+static HWND feedback_edit;
+static HFONT feedback_font;
+static HBRUSH feedback_brush;
+static int feedback_reason = -1;
+
+/* Optional local survey on the completion page. Nothing is sent by the
+ * uninstaller: 보내기 only opens a prefilled GitHub issue in the browser. */
+static const WCHAR *const REASONS[] = {L"다른 IDE를 사용", L"필요한 기능이 없음", L"성능·메모리",
+                                       L"다시 설치할 예정", L"기타"};
+static const int REASON_WIDTHS[] = {96, 104, 78, 98, 46};
+#define REASON_COUNT 5
+#define REASON_TOP 278
 
 /* --- painting helpers --------------------------------------------------- */
 
@@ -312,6 +327,64 @@ static void open_folder(const WCHAR *path) {
     ShellExecuteW(window_handle, L"open", path, NULL, NULL, SW_SHOWNORMAL);
 }
 
+/* --- feedback survey -------------------------------------------------------- */
+
+static BOOL feedback_ready(void) {
+    return feedback_reason >= 0 || (feedback_edit && GetWindowTextLengthW(feedback_edit) > 0);
+}
+
+static void show_feedback_edit(void) {
+    feedback_font = CreateFontW(-12, 0, 0, 0, 400, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    feedback_brush = CreateSolidBrush(RGB(22, 23, 26));
+    feedback_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                    36, 332, 488, 18, window_handle, (HMENU)(INT_PTR)ID_FEEDBACK_EDIT,
+                                    (HINSTANCE)GetWindowLongPtrW(window_handle, GWLP_HINSTANCE), NULL);
+    if (feedback_edit) {
+        SendMessageW(feedback_edit, WM_SETFONT, (WPARAM)feedback_font, TRUE);
+        SendMessageW(feedback_edit, EM_LIMITTEXT, FEEDBACK_LIMIT, 0);
+    }
+}
+
+/* Appends `value` percent-encoded as UTF-8 (RFC 3986 unreserved kept). */
+static void append_encoded(WCHAR *out, size_t count, const WCHAR *value) {
+    char utf8[(FEEDBACK_LIMIT + 512) * 4];
+    int length = WideCharToMultiByte(CP_UTF8, 0, value, -1, utf8, (int)sizeof(utf8), NULL, NULL);
+    size_t used = (size_t)lstrlenW(out);
+    static const char HEX[] = "0123456789ABCDEF";
+    for (int i = 0; i + 1 < length && used + 4 < count; ++i) {
+        unsigned char c = (unsigned char)utf8[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out[used++] = (WCHAR)c;
+        } else {
+            out[used++] = L'%'; out[used++] = (WCHAR)HEX[c >> 4]; out[used++] = (WCHAR)HEX[c & 15];
+        }
+    }
+    out[used] = 0;
+}
+
+static void send_feedback(void) {
+    WCHAR comment[FEEDBACK_LIMIT + 1] = L"", title[128], body[FEEDBACK_LIMIT + 512];
+    size_t count = 16384;
+    WCHAR *url = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, count * sizeof(WCHAR));
+    if (url == NULL) return;
+    if (feedback_edit) GetWindowTextW(feedback_edit, comment, FEEDBACK_LIMIT + 1);
+    StringCchPrintfW(title, 128, L"제거 의견%s%s", feedback_reason >= 0 ? L": " : L"",
+                     feedback_reason >= 0 ? REASONS[feedback_reason] : L"");
+    StringCchPrintfW(body, FEEDBACK_LIMIT + 512,
+                     L"### 제거 이유\n%s\n\n### 의견\n%s\n\n### 환경\n- Axyne %s (Windows x64)\n\n"
+                     L"_Axyne 제거 프로그램에서 작성한 의견입니다. 제출하기 전에 내용을 고칠 수 있습니다._",
+                     feedback_reason >= 0 ? REASONS[feedback_reason] : L"(선택 안 함)",
+                     comment[0] ? comment : L"(없음)", version);
+    StringCchCopyW(url, count, ISSUE_URL L"?title=");
+    append_encoded(url, count, title);
+    StringCchCatW(url, count, L"&body=");
+    append_encoded(url, count, body);
+    ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+    HeapFree(GetProcessHeap(), 0, url);
+}
+
 /* --- pages ----------------------------------------------------------------- */
 
 static void header(HDC dc) {
@@ -397,8 +470,28 @@ static void done_page(HDC dc) {
               DT_LEFT | DT_TOP | DT_SINGLELINE | DT_PATH_ELLIPSIS);
         label(dc, L"폴더 열기", 452, y, 80, 18, ACCENT, 12, 400, DT_RIGHT | DT_TOP | DT_SINGLELINE);
     }
-    footer(dc, L"프로젝트 파일은 삭제되지 않았습니다");
-    button(dc, L"닫기", 447, 378, 96, ACCENT, BG);
+    if (!removal_ok) {
+        footer(dc, L"프로젝트 파일은 삭제되지 않았습니다");
+        button(dc, L"닫기", 447, 378, 96, ACCENT, BG);
+        return;
+    }
+    box(dc, BORDER, 28, 244, 532, 245);
+    label(dc, L"제거하는 이유를 알려주시겠어요? (선택)", 28, 252, 500, 18, MUTED, 12, 400, DT_LEFT | DT_TOP);
+    for (int i = 0, x = 28; i < REASON_COUNT; x += REASON_WIDTHS[i] + 8, ++i) {
+        BOOL selected = feedback_reason == i;
+        box(dc, selected ? RGB(36, 31, 46) : ACTIVE, x, REASON_TOP, x + REASON_WIDTHS[i], REASON_TOP + 26);
+        outline(dc, selected ? ACCENT : BORDER, x, REASON_TOP, x + REASON_WIDTHS[i], REASON_TOP + 26);
+        label(dc, REASONS[i], x, REASON_TOP, REASON_WIDTHS[i], 26, selected ? WHITE : TEXT, 11, 400,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    label(dc, L"추가 의견 (선택)", 28, 312, 300, 16, MUTED, 11, 400, DT_LEFT | DT_TOP);
+    box(dc, RGB(22, 23, 26), 28, 328, 532, 354); border(dc, 28, 328, 532, 354);
+    box(dc, FOOTER, 1, 363, 559, 419); border(dc, 1, 363, 559, 363);
+    label(dc, L"보내기를 누르면 브라우저에서 GitHub 이슈 작성 화면이 열립니다. 제거 프로그램은 아무것도 전송하지 않습니다.",
+          16, 370, 325, 44, DISABLED_TEXT, 11, 400, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    button(dc, L"건너뛰기", 355, 378, 84, ACTIVE, TEXT);
+    if (feedback_ready()) button(dc, L"보내기", 447, 378, 96, ACCENT, BG);
+    else button(dc, L"보내기", 447, 378, 96, ACTIVE, DISABLED_TEXT);
 }
 
 static void paint(HDC dc) {
@@ -422,6 +515,7 @@ static void finish_removal(DWORD code) {
     refresh_items();
     collect_leftovers();
     page = PAGE_DONE;
+    if (removal_ok) show_feedback_edit();
     InvalidateRect(window_handle, NULL, FALSE);
 }
 
@@ -511,7 +605,19 @@ static void on_click(int x, int y) {
     } else if (page == PAGE_DONE) {
         for (int i = 0; i < leftover_count; ++i)
             if (inside(x, y, 452, 128 + i * 22, 532, 146 + i * 22)) open_folder(leftovers[i].path);
-        if (inside(x, y, 447, 378, 543, 408)) { DestroyWindow(window_handle); return; }
+        if (!removal_ok) {
+            if (inside(x, y, 447, 378, 543, 408)) { DestroyWindow(window_handle); return; }
+        } else {
+            for (int i = 0, left = 28; i < REASON_COUNT; left += REASON_WIDTHS[i] + 8, ++i)
+                if (inside(x, y, left, REASON_TOP, left + REASON_WIDTHS[i], REASON_TOP + 26))
+                    feedback_reason = feedback_reason == i ? -1 : i;
+            if (inside(x, y, 355, 378, 439, 408)) { DestroyWindow(window_handle); return; }
+            if (inside(x, y, 447, 378, 543, 408) && feedback_ready()) {
+                send_feedback();
+                DestroyWindow(window_handle);
+                return;
+            }
+        }
     }
     InvalidateRect(window_handle, NULL, FALSE);
 }
@@ -536,6 +642,15 @@ static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
+    if (msg == WM_CTLCOLOREDIT && (HWND)lp == feedback_edit) {
+        SetTextColor((HDC)wp, TEXT); SetBkColor((HDC)wp, RGB(22, 23, 26));
+        return (LRESULT)feedback_brush;
+    }
+    if (msg == WM_COMMAND && LOWORD(wp) == ID_FEEDBACK_EDIT && HIWORD(wp) == EN_CHANGE) {
+        RECT footer_rect = {0, 363, 560, 420};
+        InvalidateRect(hwnd, &footer_rect, FALSE);
+        return 0;
+    }
     if (msg == WM_CLOSE) { if (page != PAGE_REMOVING) DestroyWindow(hwnd); return 0; }
     if (msg == WM_LBUTTONUP) { on_click((int)(short)LOWORD(lp), (int)(short)HIWORD(lp)); return 0; }
     if (msg == WM_PAINT) {
@@ -550,6 +665,8 @@ static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_DESTROY) {
         if (page != PAGE_CONFIRM || from_temp) schedule_self_delete();
+        if (feedback_font) DeleteObject(feedback_font);
+        if (feedback_brush) DeleteObject(feedback_brush);
         PostQuitMessage(0);
         return 0;
     }
