@@ -26,6 +26,7 @@ add_executable(axyne_tests
     test_commands.c
     test_keymap.c
     test_app_state.c
+    test_app_paths.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -181,8 +182,14 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> app-state
             "${AXYNE_TEST_FIXTURE_DIR}/app-state"
 )
+add_test(
+    NAME axyne-app-paths
+    COMMAND $<TARGET_FILE:axyne_tests> app-paths
+            "${AXYNE_TEST_FIXTURE_DIR}/app-paths"
+)
 set_tests_properties(
     axyne-memory-limits
+    axyne-app-paths
     axyne-app-state
     axyne-keymap
     axyne-commands

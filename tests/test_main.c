@@ -31,6 +31,7 @@ int axyne_test_shortcut_chips(const char *root);
 int axyne_test_popup_menu(const char *root);
 int axyne_test_completion(const char *root);
 int axyne_test_memory_limits(const char *root);
+int axyne_test_app_paths(const char *root);
 int axyne_test_app_state(const char *root);
 int axyne_test_keymap(const char *root);
 int axyne_test_commands(const char *root);
@@ -109,6 +110,8 @@ int main(int argc, char **argv)
         return axyne_test_completion(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "memory-limits") == 0)
         return axyne_test_memory_limits(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (strcmp(argv[1], "app-paths") == 0)
+        return axyne_test_app_paths(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "app-state") == 0)
         return axyne_test_app_state(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "keymap") == 0)
