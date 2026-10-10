@@ -61,9 +61,25 @@ static FILE *open_append(const char *path)
     /* Use the wide CRT entry point so UTF-8 paths work without relying on
      * the process code page.  _SH_DENYNO permits concurrent readers/writers;
      * rotation closes the stream before renaming the file. */
-    FILE *file = _wfsopen(wide, L"a+b", _SH_DENYNO);
-    if (file == NULL)
-        file = fopen(path, "a+b");
+    HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    FILE *file;
+    if (handle != INVALID_HANDLE_VALUE) {
+        int descriptor = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_BINARY);
+        if (descriptor != -1) {
+            file = _fdopen(descriptor, "a+b");
+            if (file != NULL) {
+                free(wide);
+                return file;
+            }
+            _close(descriptor);
+        } else {
+            CloseHandle(handle);
+        }
+    }
+    file = _wfsopen(wide, L"a+b", _SH_DENYNO);
+    if (file == NULL) file = fopen(path, "a+b");
     free(wide);
     return file;
 #else
