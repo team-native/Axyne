@@ -186,6 +186,10 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSButton *_outputTab;
     NSButton *_problemsTab;
     NSButton *_terminalTab;
+    NSButton *_debugConsoleTab;
+    /* Bottom panel tab model: hidden tabs (zero = shown) indexed by
+     * AxyneBottomPanelTab; DEBUG_CONSOLE starts hidden. */
+    BOOL _panelTabHidden[AXYNE_BOTTOM_PANEL_TAB_COUNT];
     NSButton *_clearOutput;
     NSScrollView *_terminalScroll;
     /* Problems panel: the model (LSP diagnostics + build output) and the
@@ -589,6 +593,14 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 @interface AxyneWorkspaceView (AxyneFoundation)
 /* Colours of the active theme for drawing hooks. */
 - (AxyneMacChromeColors)chromeColors;
+/* Bottom panel tab model. The strip lists the visible tabs in enum order;
+ * the selected tab is _panelMode. Hiding the selected tab selects Output
+ * (always visible); selecting reveals a hidden panel. */
+- (NSButton *)bottomPanelTabButton:(AxyneBottomPanelTab)tab;
+- (BOOL)bottomPanelTabVisible:(AxyneBottomPanelTab)tab;
+- (void)setBottomPanelTab:(AxyneBottomPanelTab)tab visible:(BOOL)visible;
+- (void)selectBottomPanelTab:(AxyneBottomPanelTab)tab;
+- (CGFloat)bottomPanelTabWidth:(AxyneBottomPanelTab)tab;
 @end
 
 /* ---- feature categories ----------------------------------------------------

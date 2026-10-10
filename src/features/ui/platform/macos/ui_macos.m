@@ -1745,11 +1745,21 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self addSubview:_redoButton]; [self addSubview:_buildButton];
         [self addSubview:_runButton];
         [self addSubview:_targetButton]; [self addSubview:_searchButton];
+        /* Bottom panel tab strip: one button per AxyneBottomPanelTab, tag =
+         * tab. The debug console tab exists from the start but stays hidden
+         * until the debug feature shows it. */
         _outputTab = axyne_macos_toolbar_button(@"출력", self, @selector(selectPanel:));
         _problemsTab = axyne_macos_toolbar_button(@"문제", self, @selector(selectPanel:));
         _terminalTab = axyne_macos_toolbar_button(@"터미널", self, @selector(selectPanel:));
-        [_outputTab setTag:0]; [_problemsTab setTag:1]; [_terminalTab setTag:2];
+        _debugConsoleTab = axyne_macos_toolbar_button(@"디버그 콘솔", self, @selector(selectPanel:));
+        [_outputTab setTag:AXYNE_BOTTOM_PANEL_OUTPUT];
+        [_problemsTab setTag:AXYNE_BOTTOM_PANEL_PROBLEMS];
+        [_terminalTab setTag:AXYNE_BOTTOM_PANEL_TERMINAL];
+        [_debugConsoleTab setTag:AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE];
+        _panelTabHidden[AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE] = YES;
+        [_debugConsoleTab setHidden:YES];
         [self addSubview:_outputTab]; [self addSubview:_problemsTab]; [self addSubview:_terminalTab];
+        [self addSubview:_debugConsoleTab];
         _clearOutput = axyne_macos_toolbar_button(@"⊘", self, @selector(clearOutput:));
         [_clearOutput setToolTip:@"출력 지우기"];
         [self addSubview:_clearOutput];
@@ -2100,13 +2110,62 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
 - (void)selectPanel:(id)sender
 {
-    _panelMode = [sender tag];
+    [self selectBottomPanelTab:(AxyneBottomPanelTab)[sender tag]];
+}
+
+/* ---- bottom panel tab model ----------------------------------------------- */
+
+- (NSButton *)bottomPanelTabButton:(AxyneBottomPanelTab)tab
+{
+    switch (tab) {
+    case AXYNE_BOTTOM_PANEL_OUTPUT: return _outputTab;
+    case AXYNE_BOTTOM_PANEL_PROBLEMS: return _problemsTab;
+    case AXYNE_BOTTOM_PANEL_TERMINAL: return _terminalTab;
+    case AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE: return _debugConsoleTab;
+    case AXYNE_BOTTOM_PANEL_TAB_COUNT: break;
+    }
+    return nil;
+}
+
+- (BOOL)bottomPanelTabVisible:(AxyneBottomPanelTab)tab
+{
+    return (int)tab >= 0 && tab < AXYNE_BOTTOM_PANEL_TAB_COUNT && !_panelTabHidden[tab];
+}
+
+/* Shows or hides a tab in the strip. Hiding the selected tab selects Output. */
+- (void)setBottomPanelTab:(AxyneBottomPanelTab)tab visible:(BOOL)visible
+{
+    if ((int)tab < 0 || tab >= AXYNE_BOTTOM_PANEL_TAB_COUNT) return;
+    if (tab == AXYNE_BOTTOM_PANEL_OUTPUT) visible = YES; /* always present */
+    _panelTabHidden[tab] = !visible;
+    if (!visible && _panelMode == (NSInteger)tab) _panelMode = AXYNE_BOTTOM_PANEL_OUTPUT;
+    [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
+}
+
+/* Selects a visible tab and reveals the panel. */
+- (void)selectBottomPanelTab:(AxyneBottomPanelTab)tab
+{
+    if (![self bottomPanelTabVisible:tab]) return;
+    _panelMode = tab;
     _panelHidden = NO;
-    [_problemsView setHidden:_panelMode != 1];
+    [_problemsView setHidden:_panelMode != AXYNE_BOTTOM_PANEL_PROBLEMS];
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
     /* The list takes the keyboard (Up/Down/Enter) when its tab is chosen. */
-    if (_panelMode == 1 && [self window] != nil)
+    if (_panelMode == AXYNE_BOTTOM_PANEL_PROBLEMS && [self window] != nil)
         [[self window] makeFirstResponder:_problemsView];
+}
+
+/* Width of a tab button: its title plus padding; the Figma sizes for the
+ * three base tabs (출력 38, 터미널 50, 문제 38 until it shows a count). */
+- (CGFloat)bottomPanelTabWidth:(AxyneBottomPanelTab)tab
+{
+    NSButton *button = [self bottomPanelTabButton:tab];
+    NSFont *font = [button font] != nil ? [button font] : [NSFont systemFontOfSize:11];
+    if (tab == AXYNE_BOTTOM_PANEL_OUTPUT) return 38;
+    if (tab == AXYNE_BOTTOM_PANEL_TERMINAL) return 50;
+    if (tab == AXYNE_BOTTOM_PANEL_PROBLEMS && [[button title] isEqualToString:@"문제"]) return 38;
+    return MAX(38, ceil([[button title] sizeWithAttributes:
+        @{NSFontAttributeName:font}].width) + 16);
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
@@ -2477,7 +2536,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     for (NSButton *button in @[_newButton, _openButton, _saveButton,
                                _undoButton, _redoButton, _buildButton,
                                _runButton, _targetButton, _searchButton,
-                               _outputTab, _problemsTab, _terminalTab,
+                               _outputTab, _problemsTab, _terminalTab, _debugConsoleTab,
                                _terminalStart, _terminalStop, _terminalSend, _clearOutput]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(_preferences.theme.muted)];
         [(AxyneChromeButton *)button setFillColor:nil];
@@ -5197,7 +5256,7 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
 
 - (void)selectOutputPanel
 {
-    _panelMode = 0;
+    _panelMode = AXYNE_BOTTOM_PANEL_OUTPUT;
     /* Output must be visible even if View > Bottom Panel hid the panel. */
     _panelHidden = NO;
     [self setNeedsLayout:YES];
@@ -5712,7 +5771,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     AxyneStatus status;
     (void)sender;
     /* Show the terminal even if the panel was hidden or on another tab. */
-    _panelMode = 2;
+    _panelMode = AXYNE_BOTTOM_PANEL_TERMINAL;
     _panelHidden = NO;
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
@@ -6348,32 +6407,33 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - outlineHeight - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
-    BOOL terminal = _panelMode == 2;
+    BOOL terminal = _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL;
     CGFloat inputTop = NSHeight(bounds) - AXYNE_STATUS - 28;
     [_terminalScroll setFrame:NSMakeRect([self sidebarWidth] + 16, bottomTop + 32,
         MAX(0, width - [self sidebarWidth] - 24),
         MAX(0, [self panelHeight] - 32 - (terminal ? 34 : 0)))];
-    [_terminalScroll setHidden:_panelMode == 1];
+    [_terminalScroll setHidden:_panelMode != AXYNE_BOTTOM_PANEL_OUTPUT && !terminal];
     [_problemsView setFrame:NSMakeRect([self sidebarWidth], bottomTop + 32,
         MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32))];
-    [_problemsView setHidden:_panelMode != 1];
+    [_problemsView setHidden:_panelMode != AXYNE_BOTTOM_PANEL_PROBLEMS];
     [_terminalInput setFrame:NSMakeRect([self sidebarWidth] + 16, inputTop,
         MAX(0, width - [self sidebarWidth] - 88), 22)];
     [_terminalSend setFrame:NSMakeRect(width - 64, inputTop, 52, 22)];
     [_terminalInput setHidden:!terminal]; [_terminalSend setHidden:!terminal];
     [_terminalInput setBezeled:NO];
-    [_outputTab setFrame:NSMakeRect([self sidebarWidth] + 8, bottomTop, 38, 32)];
     {
-        /* The "문제  N" label grows with the count; the terminal tab follows. */
-        CGFloat problemsWidth = 38;
-        if (![[_problemsTab title] isEqualToString:@"문제"])
-            problemsWidth = MAX(38, ceil([[_problemsTab title] sizeWithAttributes:
-                @{NSFontAttributeName:[_problemsTab font] != nil ? [_problemsTab font]
-                    : [NSFont systemFontOfSize:11]}].width) + 16);
-        [_problemsTab setFrame:NSMakeRect([self sidebarWidth] + 48, bottomTop,
-                                          problemsWidth, 32)];
-        [_terminalTab setFrame:NSMakeRect([self sidebarWidth] + 50 + problemsWidth,
-                                          bottomTop, 50, 32)];
+        /* Tab strip from the tab model: visible tabs left to right, 2px
+         * apart (the "문제  N" label grows with the count and pushes the
+         * following tabs). Hidden tabs keep their last frame. */
+        CGFloat tabX = [self sidebarWidth] + 8;
+        for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab) {
+            NSButton *button = [self bottomPanelTabButton:(AxyneBottomPanelTab)tab];
+            CGFloat tabWidth;
+            if (![self bottomPanelTabVisible:(AxyneBottomPanelTab)tab]) continue;
+            tabWidth = [self bottomPanelTabWidth:(AxyneBottomPanelTab)tab];
+            [button setFrame:NSMakeRect(tabX, bottomTop, tabWidth, 32)];
+            tabX += tabWidth + 2;
+        }
     }
     [_terminalStart setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
     [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
@@ -6400,7 +6460,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     CGFloat searchWidth = width - 8 - searchLeft;
     [_searchButton setHidden:searchWidth < 120];
     [_searchButton setFrame:NSMakeRect(searchLeft, AXYNE_MENU + 6, MAX(0, searchWidth), 26)];
-    for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab]) {
+    for (NSButton *button in @[_outputTab, _problemsTab, _terminalTab, _debugConsoleTab]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(
             [button tag] == _panelMode ? _preferences.theme.text : _preferences.theme.muted)];
         [button setNeedsDisplay:YES];
@@ -6414,12 +6474,28 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     /* A hidden bottom panel takes every panel control with it; the per-mode
      * visibility set above still applies when it is shown. */
-    for (NSView *panelView in @[_outputTab, _problemsTab, _terminalTab,
-                                _terminalStart, _clearOutput, _terminalStop])
+    for (NSView *panelView in @[_terminalStart, _clearOutput, _terminalStop])
         [panelView setHidden:_panelHidden];
-    if (_panelHidden) {
-        [_terminalScroll setHidden:YES]; [_terminalInput setHidden:YES];
-        [_terminalSend setHidden:YES]; [_problemsView setHidden:YES];
+    for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab)
+        [[self bottomPanelTabButton:(AxyneBottomPanelTab)tab] setHidden:_panelHidden ||
+            ![self bottomPanelTabVisible:(AxyneBottomPanelTab)tab]];
+    {
+        /* Feature categories lay out their own panel content; a category
+         * that shows its own view for the selected tab replaces the default
+         * output, terminal input and problems views. */
+        NSRect content = _panelHidden ? NSZeroRect :
+            NSMakeRect([self sidebarWidth], bottomTop + 32,
+                MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32));
+        AxyneBottomPanelTab selectedTab = (AxyneBottomPanelTab)_panelMode;
+        BOOL ownedTab = NO;
+#define AXYNE_MAC_HOOK(feature) \
+        if ([self feature##LayoutBottomPanelInRect:content tab:selectedTab]) ownedTab = YES;
+        AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
+        if (_panelHidden || ownedTab || selectedTab == AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE) {
+            [_terminalScroll setHidden:YES]; [_terminalInput setHidden:YES];
+            [_terminalSend setHidden:YES]; [_problemsView setHidden:YES];
+        }
     }
 #define AXYNE_MAC_HOOK(feature) [self feature##Layout];
     AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
@@ -6613,14 +6689,25 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
     }
     if (!_panelHidden) {
-        NSButton *selected = _panelMode == 0 ? _outputTab : (_panelMode == 1 ? _problemsTab : _terminalTab);
+        NSButton *selected = [self bottomPanelTabButton:(AxyneBottomPanelTab)_panelMode];
+        NSButton *lastTab = _outputTab;
+        AxyneMacChromeColors chrome = [self chromeColors];
+        for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab)
+            if ([self bottomPanelTabVisible:(AxyneBottomPanelTab)tab])
+                lastTab = [self bottomPanelTabButton:(AxyneBottomPanelTab)tab];
         [axyne_preference_color(reference ? 0xa66bf0 : _preferences.theme.accent) setFill];
-        NSRectFill(NSMakeRect(NSMinX([selected frame]), bottomTop + 29, NSWidth([selected frame]), 3));
+        if (selected != nil)
+            NSRectFill(NSMakeRect(NSMinX([selected frame]), bottomTop + 29, NSWidth([selected frame]), 3));
         NSString *shell = _terminalRunner.executable == NULL ? @"" :
             [[NSString stringWithUTF8String:_terminalRunner.executable] lastPathComponent];
         [self drawLabel:shell at:NSMakePoint(MAX([self sidebarWidth] + 148,
-                NSMaxX([_terminalTab frame]) + 10), bottomTop + 10)
+                NSMaxX([lastTab frame]) + 10), bottomTop + 10)
             size:11 color:muted family:@"SF Pro Text"];
+#define AXYNE_MAC_HOOK(feature) \
+        [self feature##DrawBottomPanelStripInRect:NSMakeRect([self sidebarWidth], bottomTop, \
+            MAX(0, width - [self sidebarWidth]), 32) colors:&chrome];
+        AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
     }
     if (_palette.active) [self drawPaletteFieldInRect:[_searchButton frame]];
 
@@ -6876,6 +6963,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_buildButton release]; [_runButton release];
     [_targetButton release]; [_searchButton release];
     [_outputTab release]; [_problemsTab release]; [_terminalTab release];
+    [_debugConsoleTab release];
     [_clearOutput release];
     [_problemsView setDelegate:nil];
     [_problemsView removeFromSuperview];
@@ -7238,8 +7326,9 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     case AXYNE_PALETTE_COMMAND_PANEL_OUTPUT:
     case AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS:
     case AXYNE_PALETTE_COMMAND_PANEL_TERMINAL:
-        _panelMode = command == AXYNE_PALETTE_COMMAND_PANEL_OUTPUT ? 0 :
-            (command == AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS ? 1 : 2);
+        _panelMode = command == AXYNE_PALETTE_COMMAND_PANEL_OUTPUT ? AXYNE_BOTTOM_PANEL_OUTPUT :
+            (command == AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS ? AXYNE_BOTTOM_PANEL_PROBLEMS
+                                                              : AXYNE_BOTTOM_PANEL_TERMINAL);
         [self setNeedsLayout:YES];
         [self setNeedsDisplay:YES];
         break;
