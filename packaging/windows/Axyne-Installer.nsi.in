@@ -35,6 +35,7 @@ Var AxyneJournal
 Var AxyneBackupCount
 Var AxyneStartMenu
 Var AxyneDesktop
+Var AxyneScopeArg
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "@CMAKE_CURRENT_SOURCE_DIR@\packaging\windows\Axyne.ico"
@@ -66,11 +67,15 @@ Function .onInit
     StrCpy $AxyneDesktop 1
     StrCpy $AxyneJournal ""
     StrCpy $AxyneBackupCount 0
+    ; Passed to Uninstall.exe through UninstallString so the uninstaller knows
+    ; which registry hive (HKLM or HKCU) it was started for.
+    StrCpy $AxyneScopeArg "/CURRENTUSER"
     ${GetParameters} $R0
     ClearErrors
     ${GetOptions} $R0 "/ALLUSERS" $R1
     ${IfNot} ${Errors}
         SetShellVarContext all
+        StrCpy $AxyneScopeArg "/ALLUSERS"
     ${EndIf}
     ClearErrors
     ${GetOptions} $R0 "/NOSTARTMENU" $R1
@@ -348,7 +353,7 @@ Section "Axyne" SecAxyne
     !insertmacro AxyneRegValue "DisplayName" "Axyne"
     !insertmacro AxyneRegValue "DisplayVersion" "@PROJECT_VERSION@"
     !insertmacro AxyneRegValue "InstallLocation" "$INSTDIR"
-    !insertmacro AxyneRegValue "UninstallString" "$INSTDIR\Uninstall.exe"
+    !insertmacro AxyneRegValue "UninstallString" "$\"$INSTDIR\Uninstall.exe$\" $AxyneScopeArg"
 SectionEnd
 
 ; The uninstaller UI copies Uninstall-Backend.exe to %TEMP% and runs it as

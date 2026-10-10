@@ -92,6 +92,7 @@ static BOOL g_elevated_instance;
 static HANDLE g_elevated_child;
 static int g_exit_code;
 static BOOL g_axyne_running;
+static BOOL g_scope_locked;
 
 static void fill(HDC dc, COLORREF color, int l, int t, int r, int b) {
     HBRUSH brush = CreateSolidBrush(color);
@@ -251,6 +252,7 @@ static void format_size(ULONGLONG bytes, WCHAR *out, size_t count) {
 
 static void set_scope(int scope) {
     /* A folder the user picked stays; only a default path follows the scope. */
+    if (g_scope_locked) return;
     const WCHAR *other = scope == SCOPE_ALL ? g_user_default_path : g_all_default_path;
     const WCHAR *mine = scope == SCOPE_ALL ? g_all_default_path : g_user_default_path;
     g_scope = scope;
@@ -266,18 +268,34 @@ static BOOL read_install_location(HKEY root, WCHAR *out) {
                         out, &size) == ERROR_SUCCESS && out[0] != 0;
 }
 
+static BOOL folder_has_axyne(const WCHAR *folder) {
+    WCHAR path[MAX_PATH];
+    StringCchPrintfW(path, MAX_PATH, L"%s\\axyne.exe", folder);
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 static void init_paths(void) {
-    WCHAR folder[MAX_PATH], existing[MAX_PATH];
+    WCHAR folder[MAX_PATH], machine[MAX_PATH], user[MAX_PATH];
+    BOOL has_machine, has_user;
     if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, folder) == S_OK)
         StringCchPrintfW(g_user_default_path, MAX_PATH, L"%s\\Programs\\Axyne", folder);
     if (SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES, NULL, SHGFP_TYPE_CURRENT, folder) == S_OK)
         StringCchPrintfW(g_all_default_path, MAX_PATH, L"%s\\Axyne", folder);
     lstrcpynW(g_install_path, g_user_default_path, MAX_PATH);
-    /* An existing installation is upgraded in place with its own scope. */
-    if (read_install_location(HKEY_LOCAL_MACHINE, existing)) {
-        g_scope = SCOPE_ALL; lstrcpynW(g_install_path, existing, MAX_PATH);
-    } else if (read_install_location(HKEY_CURRENT_USER, existing)) {
-        g_scope = SCOPE_USER; lstrcpynW(g_install_path, existing, MAX_PATH);
+    /* An existing installation (either scope) is upgraded in place: its scope
+     * and folder are preselected and locked, so a second install with its own
+     * uninstall entry is never created. If both entries exist (older
+     * installers), the one whose folder still has axyne.exe wins, HKLM first. */
+    has_machine = read_install_location(HKEY_LOCAL_MACHINE, machine);
+    has_user = read_install_location(HKEY_CURRENT_USER, user);
+    if (has_machine && has_user) {
+        if (!folder_has_axyne(machine) && folder_has_axyne(user)) has_machine = FALSE;
+        else has_user = FALSE;
+    }
+    if (has_machine) {
+        g_scope = SCOPE_ALL; lstrcpynW(g_install_path, machine, MAX_PATH); g_scope_locked = TRUE;
+    } else if (has_user) {
+        g_scope = SCOPE_USER; lstrcpynW(g_install_path, user, MAX_PATH); g_scope_locked = TRUE;
     }
     strip_trailing_separator(g_install_path);
 }
@@ -369,27 +387,27 @@ static void footer(HDC dc, const WCHAR *status, BOOL back, const WCHAR *next, BO
     button(dc, L"취소", 579, 417, 84, BUTTON_SECONDARY);
 }
 
-static void scope_card(HDC dc, int top, BOOL selected, const WCHAR *title,
+static void scope_card(HDC dc, int top, BOOL selected, BOOL enabled, const WCHAR *title,
                        const WCHAR *detail, int shield_x) {
     fill(dc, selected ? SELECTED : SURFACE, 219, top, 652, top + 60);
     frame(dc, selected ? ACCENT : BORDER, 219, top, 652, top + 60);
     radio(dc, 233, top + 13, selected);
-    text(dc, title, 258, top + 10, 300, 20, RGB(255,255,255), 13, 400);
+    text(dc, title, 258, top + 10, 300, 20, enabled ? RGB(255,255,255) : DISABLED_TEXT, 13, 400);
     if (shield_x) shield(dc, shield_x, top + 14);
-    text(dc, detail, 258, top + 33, 380, 18, MUTED, 11, 400);
+    text(dc, detail, 258, top + 33, 380, 18, enabled ? MUTED : DISABLED_TEXT, 11, 400);
 }
 
 static void location_page(HDC dc) {
     WCHAR required[32], available[32], summary[160];
     text(dc, L"설치 위치", 219, 58, 430, 28, RGB(255,255,255), 20, 700);
-    scope_card(dc, 96, g_scope == SCOPE_USER, L"현재 사용자만 (권장)",
-               L"관리자 권한 없이 설치 · 이 사용자 계정에서만 사용", 0);
-    scope_card(dc, 164, g_scope == SCOPE_ALL, L"모든 사용자",
-               L"관리자 권한(UAC) 필요 · Program Files에 설치", 336);
+    scope_card(dc, 96, g_scope == SCOPE_USER, !g_scope_locked || g_scope == SCOPE_USER,
+               L"현재 사용자만 (권장)", L"관리자 권한 없이 설치 · 이 사용자 계정에서만 사용", 0);
+    scope_card(dc, 164, g_scope == SCOPE_ALL, !g_scope_locked || g_scope == SCOPE_ALL,
+               L"모든 사용자", L"관리자 권한(UAC) 필요 · Program Files에 설치", 336);
     text(dc, L"폴더", 219, 238, 200, 18, MUTED, 12, 400);
     fill(dc, SIDEBAR, 219, 261, 562, 291); frame(dc, BORDER, 219, 261, 562, 291);
-    path_text(dc, g_install_path, 230, 268, 322, 18, TEXT, 12);
-    button(dc, L"찾아보기...", 571, 261, 81, BUTTON_SECONDARY);
+    path_text(dc, g_install_path, 230, 268, 322, 18, g_scope_locked ? MUTED : TEXT, 12);
+    button(dc, L"찾아보기...", 571, 261, 81, g_scope_locked ? BUTTON_DISABLED : BUTTON_SECONDARY);
     format_size(required_bytes(), required, 32);
     if (g_free_known) {
         format_size(g_free_bytes, available, 32);
@@ -400,6 +418,9 @@ static void location_page(HDC dc) {
     text(dc, summary, 219, 300, 433, 18, enough_space() ? MUTED : DANGER, 12, 400);
     if (!enough_space())
         text(dc, L"대상 드라이브의 공간이 부족합니다. 다른 위치를 선택하세요.", 219, 322, 433, 18, DANGER, 12, 400);
+    if (g_scope_locked)
+        text(dc, L"이미 설치된 Axyne를 같은 범위와 위치에 업그레이드합니다. 다른 범위나 위치에 설치하려면 먼저 Axyne를 제거하세요.",
+             219, 346, 433, 40, MUTED, 11, 400);
     footer(dc, L"설치 마법사 3 / 6", TRUE, L"다음 >", enough_space());
 }
 
@@ -1007,7 +1028,7 @@ static void on_click(int x, int y) {
     } else if (g_page == PAGE_LOCATION) {
         if (inside(x, y, 219, 96, 652, 156)) set_scope(SCOPE_USER);
         else if (inside(x, y, 219, 164, 652, 224)) set_scope(SCOPE_ALL);
-        else if (inside(x, y, 571, 261, 652, 291)) choose_folder();
+        else if (inside(x, y, 571, 261, 652, 291) && !g_scope_locked) choose_folder();
     } else if (g_page == PAGE_COMPONENTS) {
         if (g_axyne_running && inside(x, y, 560, 271, 642, 301)) EnumWindows(close_axyne_window_callback, 0);
         else if (inside(x, y, 219, 160, 652, 206)) g_start_menu = !g_start_menu;

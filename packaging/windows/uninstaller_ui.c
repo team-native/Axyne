@@ -49,6 +49,8 @@ static BOOL remove_user_data;
 static BOOL axyne_running;
 static BOOL all_users;
 static BOOL from_temp;
+enum { HIVE_UNKNOWN, HIVE_MACHINE, HIVE_USER };
+static int hive_hint = HIVE_UNKNOWN;
 static BOOL removal_ok;
 static HANDLE remove_process;
 static WCHAR install_dir[MAX_PATH];
@@ -186,14 +188,25 @@ static BOOL read_uninstall_value(HKEY root, const WCHAR *name, WCHAR *out, DWORD
     return RegGetValueW(root, UNINSTALL_KEY, name, RRF_RT_REG_SZ, NULL, out, &size) == ERROR_SUCCESS;
 }
 
-/* The install belongs to "모든 사용자" when the HKLM uninstall entry points
- * at this folder; that scope needs an elevated backend. */
+static BOOL entry_matches_folder(HKEY root) {
+    WCHAR location[MAX_PATH];
+    if (!read_uninstall_value(root, L"InstallLocation", location, MAX_PATH) || location[0] == 0) return FALSE;
+    strip_trailing_separator(location);
+    return lstrcmpiW(location, install_dir) == 0;
+}
+
+/* Picks the uninstall entry this run belongs to. UninstallString passes
+ * /ALLUSERS or /CURRENTUSER (the hive it was registered in); that hive wins
+ * when its InstallLocation matches this executable's folder. Without a usable
+ * hint, the only matching hive is used, and HKCU when both match (an older
+ * duplicate). "모든 사용자" needs an elevated backend. */
 static void detect_install(void) {
-    WCHAR location[MAX_PATH], folder[MAX_PATH];
-    if (read_uninstall_value(HKEY_LOCAL_MACHINE, L"InstallLocation", location, MAX_PATH)) {
-        strip_trailing_separator(location);
-        all_users = lstrcmpiW(location, install_dir) == 0;
-    }
+    WCHAR folder[MAX_PATH];
+    BOOL machine = entry_matches_folder(HKEY_LOCAL_MACHINE);
+    BOOL user = entry_matches_folder(HKEY_CURRENT_USER);
+    if (hive_hint == HIVE_MACHINE && machine) all_users = TRUE;
+    else if (hive_hint == HIVE_USER && user) all_users = FALSE;
+    else all_users = machine && !user;
     if (!read_uninstall_value(all_users ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER, L"DisplayVersion",
                               version, 64) || version[0] == 0)
         StringCchCopyW(version, 64, L"Axyne");
@@ -683,8 +696,9 @@ static BOOL relaunch_from_temp(void) {
     GetTempPathW(MAX_PATH, temp);
     StringCchPrintfW(copy, MAX_PATH, L"%sAxyne-Uninstall-%lu.exe", temp, GetCurrentProcessId());
     if (!CopyFileW(self, copy, FALSE)) return FALSE;
-    StringCchPrintfW(command, MAX_PATH * 3, L"\"%s\" --from-temp \"--install-dir=%s%s\"", copy, install_dir,
-                     length > 0 && install_dir[length - 1] == L'\\' ? L"\\" : L"");
+    StringCchPrintfW(command, MAX_PATH * 3, L"\"%s\" --from-temp%s \"--install-dir=%s%s\"", copy,
+                     hive_hint == HIVE_MACHINE ? L" /ALLUSERS" : (hive_hint == HIVE_USER ? L" /CURRENTUSER" : L""),
+                     install_dir, length > 0 && install_dir[length - 1] == L'\\' ? L"\\" : L"");
     ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); ZeroMemory(&pi, sizeof(pi));
     if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         DeleteFileW(copy);
@@ -703,6 +717,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, LPWSTR cmd, int show) {
     if (slash) *slash = 0;
     for (int i = 1; argv && i < count; ++i) {
         if (lstrcmpW(argv[i], L"--from-temp") == 0) from_temp = TRUE;
+        else if (lstrcmpiW(argv[i], L"/ALLUSERS") == 0) hive_hint = HIVE_MACHINE;
+        else if (lstrcmpiW(argv[i], L"/CURRENTUSER") == 0) hive_hint = HIVE_USER;
         else if (wcsncmp(argv[i], L"--install-dir=", 14) == 0) lstrcpynW(install_dir, argv[i] + 14, MAX_PATH);
     }
     if (argv) LocalFree(argv);
