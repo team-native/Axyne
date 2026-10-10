@@ -16,6 +16,21 @@
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 
+/* include/axyne/build_target.h (pulled in by language.h and build_selector.h)
+ * and include/axyne/commands.h both define AxynePlatform and
+ * AXYNE_PLATFORM_WINDOWS/MACOS, with different values, so no translation
+ * unit can include both as they are (core bug, reported). The registry
+ * headers are included under renamed identifiers; macOS code passes
+ * axyne_platform_current() wherever the registry or key map wants a
+ * platform and never names the registry enumerators. */
+#define AxynePlatform AxyneRegistryPlatform
+#define AXYNE_PLATFORM_WINDOWS AXYNE_REGISTRY_PLATFORM_WINDOWS
+#define AXYNE_PLATFORM_MACOS AXYNE_REGISTRY_PLATFORM_MACOS
+#include "axyne/commands.h"
+#include "axyne/keymap.h"
+#undef AxynePlatform
+#undef AXYNE_PLATFORM_WINDOWS
+#undef AXYNE_PLATFORM_MACOS
 #include "axyne/document.h"
 #include "axyne/empty_state.h"
 #include "axyne/search.h"
@@ -114,6 +129,37 @@ static inline NSColor *axyne_color(CGFloat red, CGFloat green, CGFloat blue)
 - (void)problemsViewFilterChanged:(AxyneProblemsView *)view;
 - (void)problemsViewWillHitTest:(AxyneProblemsView *)view;
 @end
+
+/* ---- shared chrome model -------------------------------------------------- */
+
+/* Bottom panel tabs in strip order. The strip shows every visible tab (see
+ * -setBottomPanelTab:visible:); DEBUG_CONSOLE stays hidden until the debug
+ * feature enables it. _panelMode holds the selected tab. */
+typedef enum AxyneBottomPanelTab {
+    AXYNE_BOTTOM_PANEL_OUTPUT = 0,
+    AXYNE_BOTTOM_PANEL_PROBLEMS = 1,
+    AXYNE_BOTTOM_PANEL_TERMINAL = 2,
+    AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE = 3,
+    AXYNE_BOTTOM_PANEL_TAB_COUNT
+} AxyneBottomPanelTab;
+
+/* Result of a feature category's validate hook. */
+typedef enum AxyneMacCommandState {
+    AXYNE_MAC_COMMAND_UNHANDLED = -1, /* not implemented by this category */
+    AXYNE_MAC_COMMAND_DISABLED = 0,   /* implemented, currently disabled */
+    AXYNE_MAC_COMMAND_ENABLED = 1
+} AxyneMacCommandState;
+
+/* Resolved chrome colours of the active theme (-chromeColors). The colours
+ * are autoreleased: use them inside the current call (drawing hooks). */
+typedef struct AxyneMacChromeColors {
+    NSColor *background, *panel, *toolbar, *border, *text, *muted, *accent;
+    NSColor *tabBackground; /* editor tab row and bottom panel tab strip */
+    NSColor *output;        /* bottom panel content surface */
+    NSColor *statusBar;     /* status bar band */
+    BOOL light;             /* light preset, or System in a light appearance */
+    BOOL reference;         /* the default dark (Figma reference) surfaces */
+} AxyneMacChromeColors;
 
 /* The deferred discovery block must not retain the workspace: a retained view
  * would never deallocate when the main queue is not drained (the editor runtime
@@ -235,6 +281,21 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxynePaletteOverlay *_paletteOverlay;
     NSTextField *_paletteField;
     NSTimer *_paletteTimer;
+    /* Feature category objects (ui_<feature>_macos.m). Each starts nil, is
+     * created lazily by its category and released by its Teardown hook; the
+     * object's class is private to the category file. */
+    id _fileUi;
+    id _editUi;
+    id _viewUi;
+    id _buildUi;
+    id _debugUi;
+    id _terminalUi;
+    id _statusUi;
+    id _toolsUi;
+    id _helpUi;
+    id _lspNavUi;
+    id _diagUi;
+    id _releaseUi;
 }
 @end
 
@@ -314,6 +375,10 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
              size:(CGFloat)size color:(NSColor *)color family:(NSString *)family;
 - (void)drawFileBadge:(const char *)name inRect:(NSRect)rect tab:(BOOL)tab;
 - (void)startGitBatch:(int)kind message:(char *)message stageAll:(int)stageAll;
+- (void)drawDefaultStatusAtTop:(CGFloat)statusTop width:(CGFloat)width
+                          text:(NSColor *)text muted:(NSColor *)muted;
+- (void)notifyDocumentSaved;
+- (void)notifyDocumentWillClose:(AxyneDocument *)document;
 - (void)newDocument:(id)sender;
 - (void)openDocument:(id)sender;
 - (void)saveDocument:(id)sender;
@@ -518,6 +583,238 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)paletteFocusField;
 - (void)paletteGotoLine:(size_t)line column:(size_t)column;
 - (void)paletteRunCommand:(AxynePaletteCommandId)command;
+@end
+
+/* Base services for the feature categories (implemented in ui_macos.m). */
+@interface AxyneWorkspaceView (AxyneFoundation)
+/* Colours of the active theme for drawing hooks. */
+- (AxyneMacChromeColors)chromeColors;
+@end
+
+/* ---- feature categories ----------------------------------------------------
+ * Every feature category is one file ui_<feature>_macos.m implementing
+ * `AxyneWorkspaceView (Axyne<Feature>Feature)` with the fixed hook set below.
+ * ui_macos.m calls the hooks of every category, in AXYNE_MAC_FEATURES order:
+ *   ValidateCommand  - menu validation, keyboard dispatch and palette listing
+ *                      of a registry command (item is nil outside menus; set
+ *                      the item's state for check/radio entries). Return
+ *                      AXYNE_MAC_COMMAND_UNHANDLED for commands the category
+ *                      does not implement. The first category that does not
+ *                      return UNHANDLED owns the command (before the legacy
+ *                      base handlers of ui_macos.m).
+ *   PerformCommand   - runs an owned command; YES when handled.
+ *   DocumentActivated- after a document was loaded into the editor (NULL in
+ *                      the empty state).
+ *   DocumentWillClose- before a tab (or a replaced preview) is released.
+ *   DocumentSaved    - after Save / Save As wrote the active document.
+ *   EditorNotification - every Scintilla notification of the active editor.
+ *   DrawStatusBarInRect - inside drawRect:; YES when the category painted
+ *                      the status segments (the default text is skipped).
+ *   DrawBottomPanelStripInRect - inside drawRect: after the tab strip.
+ *   LayoutBottomPanelInRect - inside -layout with the content rect of the
+ *                      selected tab (NSZeroRect while the panel is hidden);
+ *                      YES when the category shows its own view for `tab`
+ *                      (the default output/problems views are hidden).
+ *   Layout           - at the end of -layout.
+ *   ApplyPreferences - at the end of -applyPreferences (theme, settings).
+ *   Teardown         - first thing in -dealloc: release _<feature>Ui and
+ *                      anything the category registered (observers, timers,
+ *                      monitors). Never let blocks or timers retain the view:
+ *                      use an assign-only AxyneDiscoveryBox. */
+#define AXYNE_MAC_FEATURES(X) \
+    X(file) X(edit) X(view) X(build) X(debug) X(terminal) X(status) \
+    X(tools) X(help) X(lspNav) X(diag) X(release)
+
+/* ui_file_macos.m - D4-D6: new project, save all, auto save, close window, recent files and folders. */
+@interface AxyneWorkspaceView (AxyneFileFeature)
+- (NSInteger)fileValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)filePerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)fileDocumentActivated:(AxyneDocument *)document;
+- (void)fileDocumentWillClose:(AxyneDocument *)document;
+- (void)fileDocumentSaved:(AxyneDocument *)document;
+- (void)fileEditorNotification:(SCNotification *)notification;
+- (BOOL)fileDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)fileDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)fileLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)fileLayout;
+- (void)fileApplyPreferences;
+- (void)fileTeardown;
+@end
+
+/* ui_edit_macos.m - Edit menu additions: block comment, undo limit (D8). */
+@interface AxyneWorkspaceView (AxyneEditFeature)
+- (NSInteger)editValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)editPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)editDocumentActivated:(AxyneDocument *)document;
+- (void)editDocumentWillClose:(AxyneDocument *)document;
+- (void)editDocumentSaved:(AxyneDocument *)document;
+- (void)editEditorNotification:(SCNotification *)notification;
+- (BOOL)editDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)editDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)editLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)editLayout;
+- (void)editApplyPreferences;
+- (void)editTeardown;
+@end
+
+/* ui_view_macos.m - View toggles, themes and full screen (D7, D9, D18). */
+@interface AxyneWorkspaceView (AxyneViewFeature)
+- (NSInteger)viewValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)viewPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)viewDocumentActivated:(AxyneDocument *)document;
+- (void)viewDocumentWillClose:(AxyneDocument *)document;
+- (void)viewDocumentSaved:(AxyneDocument *)document;
+- (void)viewEditorNotification:(SCNotification *)notification;
+- (BOOL)viewDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)viewDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)viewLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)viewLayout;
+- (void)viewApplyPreferences;
+- (void)viewTeardown;
+@end
+
+/* ui_build_macos.m - CMake, build configurations, targets, tasks.json (D10, D11). */
+@interface AxyneWorkspaceView (AxyneBuildFeature)
+- (NSInteger)buildValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)buildPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)buildDocumentActivated:(AxyneDocument *)document;
+- (void)buildDocumentWillClose:(AxyneDocument *)document;
+- (void)buildDocumentSaved:(AxyneDocument *)document;
+- (void)buildEditorNotification:(SCNotification *)notification;
+- (BOOL)buildDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)buildDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)buildLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)buildLayout;
+- (void)buildApplyPreferences;
+- (void)buildTeardown;
+@end
+
+/* ui_debug_macos.m - debugger, run configuration, external debuggers, debug console (D1, D12, D13). */
+@interface AxyneWorkspaceView (AxyneDebugFeature)
+- (NSInteger)debugValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)debugPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)debugDocumentActivated:(AxyneDocument *)document;
+- (void)debugDocumentWillClose:(AxyneDocument *)document;
+- (void)debugDocumentSaved:(AxyneDocument *)document;
+- (void)debugEditorNotification:(SCNotification *)notification;
+- (BOOL)debugDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)debugDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)debugLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)debugLayout;
+- (void)debugApplyPreferences;
+- (void)debugTeardown;
+@end
+
+/* ui_terminal_macos.m - terminal profiles and sessions (D14). */
+@interface AxyneWorkspaceView (AxyneTerminalFeature)
+- (NSInteger)terminalValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)terminalPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)terminalDocumentActivated:(AxyneDocument *)document;
+- (void)terminalDocumentWillClose:(AxyneDocument *)document;
+- (void)terminalDocumentSaved:(AxyneDocument *)document;
+- (void)terminalEditorNotification:(SCNotification *)notification;
+- (BOOL)terminalDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)terminalDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)terminalLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)terminalLayout;
+- (void)terminalApplyPreferences;
+- (void)terminalTeardown;
+@end
+
+/* ui_status_macos.m - status bar segments and memory gauge (D15, D16). */
+@interface AxyneWorkspaceView (AxyneStatusFeature)
+- (NSInteger)statusValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)statusPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)statusDocumentActivated:(AxyneDocument *)document;
+- (void)statusDocumentWillClose:(AxyneDocument *)document;
+- (void)statusDocumentSaved:(AxyneDocument *)document;
+- (void)statusEditorNotification:(SCNotification *)notification;
+- (BOOL)statusDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)statusDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)statusLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)statusLayout;
+- (void)statusApplyPreferences;
+- (void)statusTeardown;
+@end
+
+/* ui_tools_macos.m - Tools menu: external tools, keybindings, file associations, memory dialog (D23, D24). */
+@interface AxyneWorkspaceView (AxyneToolsFeature)
+- (NSInteger)toolsValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)toolsPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)toolsDocumentActivated:(AxyneDocument *)document;
+- (void)toolsDocumentWillClose:(AxyneDocument *)document;
+- (void)toolsDocumentSaved:(AxyneDocument *)document;
+- (void)toolsEditorNotification:(SCNotification *)notification;
+- (BOOL)toolsDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)toolsDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)toolsLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)toolsLayout;
+- (void)toolsApplyPreferences;
+- (void)toolsTeardown;
+@end
+
+/* ui_help_macos.m - Help menu: getting started, log folder, updates, licenses (D22, D27, D28). */
+@interface AxyneWorkspaceView (AxyneHelpFeature)
+- (NSInteger)helpValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)helpPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)helpDocumentActivated:(AxyneDocument *)document;
+- (void)helpDocumentWillClose:(AxyneDocument *)document;
+- (void)helpDocumentSaved:(AxyneDocument *)document;
+- (void)helpEditorNotification:(SCNotification *)notification;
+- (BOOL)helpDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)helpDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)helpLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)helpLayout;
+- (void)helpApplyPreferences;
+- (void)helpTeardown;
+@end
+
+/* ui_lsp_nav_macos.m - go to definition, references, workspace symbols (D20). */
+@interface AxyneWorkspaceView (AxyneLspNavFeature)
+- (NSInteger)lspNavValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)lspNavPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)lspNavDocumentActivated:(AxyneDocument *)document;
+- (void)lspNavDocumentWillClose:(AxyneDocument *)document;
+- (void)lspNavDocumentSaved:(AxyneDocument *)document;
+- (void)lspNavEditorNotification:(SCNotification *)notification;
+- (BOOL)lspNavDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)lspNavDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)lspNavLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)lspNavLayout;
+- (void)lspNavApplyPreferences;
+- (void)lspNavTeardown;
+@end
+
+/* ui_diag_macos.m - inline diagnostics and explorer badges (D17, D19). */
+@interface AxyneWorkspaceView (AxyneDiagFeature)
+- (NSInteger)diagValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)diagPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)diagDocumentActivated:(AxyneDocument *)document;
+- (void)diagDocumentWillClose:(AxyneDocument *)document;
+- (void)diagDocumentSaved:(AxyneDocument *)document;
+- (void)diagEditorNotification:(SCNotification *)notification;
+- (BOOL)diagDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)diagDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)diagLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)diagLayout;
+- (void)diagApplyPreferences;
+- (void)diagTeardown;
+@end
+
+/* ui_release_macos.m - release notes window and banner (D21). */
+@interface AxyneWorkspaceView (AxyneReleaseFeature)
+- (NSInteger)releaseValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)releasePerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)releaseDocumentActivated:(AxyneDocument *)document;
+- (void)releaseDocumentWillClose:(AxyneDocument *)document;
+- (void)releaseDocumentSaved:(AxyneDocument *)document;
+- (void)releaseEditorNotification:(SCNotification *)notification;
+- (BOOL)releaseDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
+- (void)releaseDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
+- (BOOL)releaseLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
+- (void)releaseLayout;
+- (void)releaseApplyPreferences;
+- (void)releaseTeardown;
 @end
 
 #endif

@@ -2567,6 +2567,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self updateBraceHighlight];
         [self applyEditorLexer];
     }
+#define AXYNE_MAC_HOOK(feature) [self feature##ApplyPreferences];
+    AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
     [self setNeedsLayout:YES]; /* the Git panel follows the theme in -layout */
     [self setNeedsDisplay:YES];
 }
@@ -2781,6 +2784,12 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [self refreshActionControls];
     [self refreshProblems]; /* the active file's problems come first */
     [self refreshOutline];
+    {
+        AxyneDocument *activated = [self isEmptyState] ? NULL : doc;
+#define AXYNE_MAC_HOOK(feature) [self feature##DocumentActivated:activated];
+        AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
+    }
     /* In the empty state and behind an image preview the editor stays hidden
      * and keeps no focus. */
     if ([self window] != nil && ![self isEmptyState] && ![self imagePreviewShown])
@@ -2846,6 +2855,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self setNeedsDisplay:YES];
         [self updateWindowTitle];
     }
+#define AXYNE_MAC_HOOK(feature) [self feature##EditorNotification:notification];
+    AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
     [self refreshActionControls];
 }
 
@@ -2887,6 +2899,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
     [self afterSaveAsFromPath:oldPath];
     free(oldPath);
+    [self notifyDocumentSaved];
     [self refreshOutline]; /* Save As may change the file type */
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
@@ -2918,6 +2931,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return NO;
     }
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self notifyDocumentSaved];
     [self refreshOutline]; /* Save As may change the file type */
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
@@ -3046,6 +3060,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return;
     }
     if (replaced) {
+        [self notifyDocumentWillClose:&evicted];
         if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, &evicted, NULL);
         [self clearLspProblemsForPath:evicted.path];
         if (evicted.owns_native_editor_document)
@@ -4236,6 +4251,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return;
     }
     if (replaced) {
+        [self notifyDocumentWillClose:&evicted];
         if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, &evicted, NULL);
         [self clearLspProblemsForPath:evicted.path];
         if (evicted.owns_native_editor_document)
@@ -4549,6 +4565,7 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         if (![self selectDocumentAtIndex:successor]) return;
     }
     AxyneDocument *doc = &_documents.documents[index];
+    [self notifyDocumentWillClose:doc];
     if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
     [self clearLspProblemsForPath:doc->path];
     if (doc->owns_native_editor_document)
@@ -6404,6 +6421,9 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [_terminalScroll setHidden:YES]; [_terminalInput setHidden:YES];
         [_terminalSend setHidden:YES]; [_problemsView setHidden:YES];
     }
+#define AXYNE_MAC_HOOK(feature) [self feature##Layout];
+    AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
     [self layoutPalette];
     [self refreshSplitterTracking];
 }
@@ -6690,6 +6710,26 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [NSGraphicsContext restoreGraphicsState];
         [self drawOutlineAtTop:treeBottom light:light reference:reference];
     }
+    {
+        AxyneMacChromeColors chrome = [self chromeColors];
+        NSRect statusRect = NSMakeRect(0, statusTop, width, AXYNE_STATUS);
+        BOOL statusDrawn = NO;
+#define AXYNE_MAC_HOOK(feature) \
+        if (!statusDrawn) statusDrawn = [self feature##DrawStatusBarInRect:statusRect colors:&chrome];
+        AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
+        if (!statusDrawn) [self drawDefaultStatusAtTop:statusTop width:width text:text muted:muted];
+    }
+    if (_editorView == nil)
+        [self drawLabel:@"Required Scintilla framework failed to load"
+            at:NSMakePoint([self sidebarWidth] + 24, editorTop + 24) size:12 color:muted family:@"Menlo"];
+}
+
+/* The status bar text shown when no feature category draws the segments:
+ * run state on the left, line/column, indentation and encoding on the right. */
+- (void)drawDefaultStatusAtTop:(CGFloat)statusTop width:(CGFloat)width
+                          text:(NSColor *)text muted:(NSColor *)muted
+{
     NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"✗ 실행 실패 (%d)", _lastExitCode] :
         (_activeAction != 0 ? @"● 실행 중" : (_hasExitStatus ? @"✓ 실행 완료" : @"준비"));
     [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
@@ -6707,12 +6747,48 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
             size:11 color:text family:@"SF Pro Text"];
     }
-    if (_editorView == nil)
-        [self drawLabel:@"Required Scintilla framework failed to load"
-            at:NSMakePoint([self sidebarWidth] + 24, editorTop + 24) size:12 color:muted family:@"Menlo"];
+}
+
+- (AxyneMacChromeColors)chromeColors
+{
+    AxyneMacChromeColors colors;
+    const AxyneThemePreferences *theme = &_preferences.theme;
+    BOOL reference = axyne_macos_reference_surfaces(theme);
+    colors.background = axyne_preference_color(theme->background);
+    colors.panel = axyne_preference_color(theme->panel);
+    colors.toolbar = axyne_preference_color(theme->toolbar);
+    colors.border = axyne_preference_color(theme->border);
+    colors.text = axyne_preference_color(theme->text);
+    colors.muted = axyne_preference_color(theme->muted);
+    colors.accent = axyne_preference_color(reference ? 0xa66bf0 : theme->accent);
+    colors.tabBackground = axyne_preference_color(reference ? 0x17191c : theme->toolbar);
+    colors.output = axyne_preference_color(axyne_macos_output_background(theme));
+    colors.statusBar = colors.toolbar;
+    colors.light = theme->preset == AXYNE_THEME_LIGHT ||
+        (theme->preset == AXYNE_THEME_SYSTEM && !axyne_macos_prefers_dark(self));
+    colors.reference = reference;
+    return colors;
+}
+
+- (void)notifyDocumentSaved
+{
+    AxyneDocument *document = [self activeDocument];
+#define AXYNE_MAC_HOOK(feature) [self feature##DocumentSaved:document];
+    AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
+}
+
+- (void)notifyDocumentWillClose:(AxyneDocument *)document
+{
+#define AXYNE_MAC_HOOK(feature) [self feature##DocumentWillClose:document];
+    AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
 }
 - (void)dealloc
 {
+#define AXYNE_MAC_HOOK(feature) [self feature##Teardown];
+    AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
+#undef AXYNE_MAC_HOOK
     if (_popup != nil) {
         [_popup setDelegate:nil];
         [_popup close];
