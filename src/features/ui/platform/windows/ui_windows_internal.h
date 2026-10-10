@@ -32,6 +32,84 @@
 #include "axyne/watcher.h"
 #include "Scintilla.h"
 
+/* commands.h and build_target.h (pulled in by build_selector.h above) both
+ * define `AxynePlatform` with different values (core issue, reported). The
+ * registry's enum is renamed for this UI so both headers can be used in one
+ * translation unit: after this block AXYNE_PLATFORM_WINDOWS is the build
+ * target's value, and registry/key map calls use AXYNE_WIN_COMMAND_PLATFORM.
+ * Never include commands.h or keymap.h before this header. */
+#define AxynePlatform AxyneCommandPlatform
+#define AXYNE_PLATFORM_WINDOWS AXYNE_COMMAND_PLATFORM_WINDOWS
+#define AXYNE_PLATFORM_MACOS AXYNE_COMMAND_PLATFORM_MACOS
+#include "axyne/commands.h"
+#include "axyne/keymap.h"
+#undef AxynePlatform
+#undef AXYNE_PLATFORM_WINDOWS
+#undef AXYNE_PLATFORM_MACOS
+#define AXYNE_WIN_COMMAND_PLATFORM AXYNE_COMMAND_PLATFORM_WINDOWS
+
+/* ---- feature categories -------------------------------------------------
+ * Each feature category owns one file ui_<feature>_windows.c that defines its
+ * hook table (AxyneWinFeature) and keeps its private data behind one opaque
+ * pointer in AxyneWindowState. The order of this enum is the order in which
+ * hooks run. */
+typedef enum AxyneWinFeatureId {
+    AXYNE_WIN_FEATURE_FILE = 0,
+    AXYNE_WIN_FEATURE_EDIT,
+    AXYNE_WIN_FEATURE_VIEW,
+    AXYNE_WIN_FEATURE_BUILD,
+    AXYNE_WIN_FEATURE_DEBUG,
+    AXYNE_WIN_FEATURE_TERMINAL,
+    AXYNE_WIN_FEATURE_STATUS,
+    AXYNE_WIN_FEATURE_TOOLS,
+    AXYNE_WIN_FEATURE_HELP,
+    AXYNE_WIN_FEATURE_LSP_NAV,
+    AXYNE_WIN_FEATURE_DIAG,
+    AXYNE_WIN_FEATURE_RELEASE,
+    AXYNE_WIN_FEATURE_COUNT
+} AxyneWinFeatureId;
+
+struct AxyneWinFileUi;
+struct AxyneWinEditUi;
+struct AxyneWinViewUi;
+struct AxyneWinBuildUi;
+struct AxyneWinDebugUi;
+struct AxyneWinTerminalUi;
+struct AxyneWinStatusUi;
+struct AxyneWinToolsUi;
+struct AxyneWinHelpUi;
+struct AxyneWinLspNavUi;
+struct AxyneWinDiagUi;
+struct AxyneWinReleaseUi;
+
+/* Id ranges reserved per feature so features never collide with the base or
+ * with each other: WM_COMMAND/control ids, SetTimer ids and private window
+ * messages. n is 0..stride-1. */
+enum {
+    AXYNE_WIN_FEATURE_CONTROL_BASE = 20000,
+    AXYNE_WIN_FEATURE_CONTROL_STRIDE = 256,
+    AXYNE_WIN_FEATURE_TIMER_BASE = 6000,
+    AXYNE_WIN_FEATURE_TIMER_STRIDE = 16,
+    AXYNE_WM_FEATURE_BASE = WM_APP + 0x100,
+    AXYNE_WM_FEATURE_STRIDE = 16
+};
+#define AXYNE_WIN_FEATURE_CONTROL_ID(feature, n) \
+    ((UINT)(AXYNE_WIN_FEATURE_CONTROL_BASE + (int)(feature) * AXYNE_WIN_FEATURE_CONTROL_STRIDE + (int)(n)))
+#define AXYNE_WIN_FEATURE_TIMER_ID(feature, n) \
+    ((UINT_PTR)(AXYNE_WIN_FEATURE_TIMER_BASE + (int)(feature) * AXYNE_WIN_FEATURE_TIMER_STRIDE + (int)(n)))
+#define AXYNE_WM_FEATURE(feature, n) \
+    ((UINT)(AXYNE_WM_FEATURE_BASE + (int)(feature) * AXYNE_WM_FEATURE_STRIDE + (int)(n)))
+
+/* Tabs of the bottom panel, in strip order. DEBUG_CONSOLE is hidden until a
+ * feature enables it (axyne_win_panel_set_tab_enabled). */
+typedef enum AxyneWinPanelTab {
+    AXYNE_WIN_PANEL_OUTPUT = 0,
+    AXYNE_WIN_PANEL_PROBLEMS,
+    AXYNE_WIN_PANEL_TERMINAL,
+    AXYNE_WIN_PANEL_DEBUG_CONSOLE,
+    AXYNE_WIN_PANEL_COUNT
+} AxyneWinPanelTab;
+
 typedef struct AxyneGitUiRun AxyneGitUiRun;
 typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
 
@@ -206,7 +284,127 @@ typedef struct AxyneWindowState {
     HFONT palette_fonts[7];
     int palette_updating;
     int palette_wheel_remainder;
+    /* Per-feature state owned by ui_<feature>_windows.c: created lazily by
+     * the feature (never at startup unless the feature needs it) and released
+     * by its destroy hook. */
+    struct AxyneWinFileUi *file_ui;
+    struct AxyneWinEditUi *edit_ui;
+    struct AxyneWinViewUi *view_ui;
+    struct AxyneWinBuildUi *build_ui;
+    struct AxyneWinDebugUi *debug_ui;
+    struct AxyneWinTerminalUi *terminal_ui;
+    struct AxyneWinStatusUi *status_ui;
+    struct AxyneWinToolsUi *tools_ui;
+    struct AxyneWinHelpUi *help_ui;
+    struct AxyneWinLspNavUi *lsp_nav_ui;
+    struct AxyneWinDiagUi *diag_ui;
+    struct AxyneWinReleaseUi *release_ui;
 } AxyneWindowState;
+
+/* ---- hook table ----------------------------------------------------------
+ * Every member may be NULL. Hooks run in AxyneWinFeatureId order; for the
+ * "first wins" hooks (message, command, command_state, timer, status_paint,
+ * panel_paint) the first feature returning non-zero stops the walk and the
+ * base behaviour is skipped. */
+
+/* Menu/palette/key state of a command. */
+typedef struct AxyneWinCommandState {
+    int enabled;
+    int checked; /* check mark (CHECKABLE) or dot (RADIO) */
+} AxyneWinCommandState;
+
+/* Places in the menus where features add dynamic items (with ids from their
+ * AXYNE_WIN_FEATURE_CONTROL_ID range, handled through the message hook's
+ * WM_COMMAND). */
+typedef enum AxyneWinMenuSlot {
+    AXYNE_WIN_MENU_SLOT_RECENT_FOLDERS = 0, /* File > 최근 항목, before the files */
+    AXYNE_WIN_MENU_SLOT_EXTERNAL_TOOLS,     /* Tools > 외부 도구, before 외부 도구 구성… */
+    AXYNE_WIN_MENU_SLOT_COUNT
+} AxyneWinMenuSlot;
+
+typedef struct AxyneWinMenu AxyneWinMenu;
+
+typedef struct AxyneWinFeature {
+    const char *name;
+    /* WM_CREATE, after the base controls exist / WM_NCDESTROY, before the
+     * state is freed (child windows are already gone). */
+    void (*create)(AxyneWindowState *state);
+    void (*destroy)(AxyneWindowState *state);
+    /* Any window message of the main window except WM_NCCREATE, WM_CREATE
+     * and WM_NCDESTROY, before the base handles it. Return 1 and set
+     * *result to consume it (private WM_APP messages, WM_COMMAND from the
+     * feature's controls or menu items, WM_CTLCOLOR* of its controls). */
+    int (*message)(AxyneWindowState *state, HWND window, UINT message,
+                   WPARAM w_param, LPARAM l_param, LRESULT *result);
+    /* Runs a registry command; 1 = handled (the base does not run it). */
+    int (*command)(AxyneWindowState *state, AxyneCommandId id);
+    /* 1 = this feature implements `id` and filled *out. A command nobody
+     * implements is shown disabled and is never dispatched. */
+    int (*command_state)(AxyneWindowState *state, AxyneCommandId id,
+                         AxyneWinCommandState *out);
+    void (*menu_populate)(AxyneWindowState *state, AxyneWinMenuSlot slot,
+                          AxyneWinMenu *menu);
+    /* WM_TIMER; 1 = the timer id was the feature's. */
+    int (*timer)(AxyneWindowState *state, UINT_PTR timer_id);
+    /* Scintilla notifications of the editor (not while a document loads). */
+    void (*editor_notify)(AxyneWindowState *state,
+                          const SCNotification *notification);
+    /* A document became the visible one / is about to be released (tab
+     * closed or preview replaced; the native document still exists) / was
+     * written to disk (Save, Save As). */
+    void (*document_activated)(AxyneWindowState *state, AxyneDocument *document);
+    void (*document_closed)(AxyneWindowState *state, const AxyneDocument *document);
+    void (*document_saved)(AxyneWindowState *state, AxyneDocument *document);
+    /* Paints the status bar `area`; 1 = the base paints no status text. */
+    int (*status_paint)(AxyneWindowState *state, HDC dc, RECT area);
+    /* Paints the body of panel tab `tab` (below the tab strip); 1 = done. */
+    int (*panel_paint)(AxyneWindowState *state, HDC dc, AxyneWinPanelTab tab,
+                       RECT body);
+    /* Positions the feature's panel controls for the selected tab;
+     * `visible` is 0 while the panel is hidden. */
+    void (*panel_layout)(AxyneWindowState *state, AxyneWinPanelTab tab,
+                         RECT body, int visible);
+    /* After the base layout, with the client size. */
+    void (*layout)(AxyneWindowState *state, int width, int height);
+} AxyneWinFeature;
+
+extern const AxyneWinFeature axyne_win_feature_file;
+extern const AxyneWinFeature axyne_win_feature_edit;
+extern const AxyneWinFeature axyne_win_feature_view;
+extern const AxyneWinFeature axyne_win_feature_build;
+extern const AxyneWinFeature axyne_win_feature_debug;
+extern const AxyneWinFeature axyne_win_feature_terminal;
+extern const AxyneWinFeature axyne_win_feature_status;
+extern const AxyneWinFeature axyne_win_feature_tools;
+extern const AxyneWinFeature axyne_win_feature_help;
+extern const AxyneWinFeature axyne_win_feature_lsp_nav;
+extern const AxyneWinFeature axyne_win_feature_diag;
+extern const AxyneWinFeature axyne_win_feature_release;
+
+/* Hook fan-out (ui_commands_windows.c), called by ui_windows.c at fixed
+ * points. */
+const AxyneWinFeature *axyne_win_feature(AxyneWinFeatureId id);
+void axyne_win_hooks_create(AxyneWindowState *state);
+void axyne_win_hooks_destroy(AxyneWindowState *state);
+int axyne_win_hooks_message(AxyneWindowState *state, HWND window, UINT message,
+                            WPARAM w_param, LPARAM l_param, LRESULT *result);
+int axyne_win_hooks_command(AxyneWindowState *state, AxyneCommandId id);
+int axyne_win_hooks_command_state(AxyneWindowState *state, AxyneCommandId id,
+                                  AxyneWinCommandState *out);
+void axyne_win_hooks_menu_populate(AxyneWindowState *state, AxyneWinMenuSlot slot,
+                                   AxyneWinMenu *menu);
+int axyne_win_hooks_timer(AxyneWindowState *state, UINT_PTR timer_id);
+void axyne_win_hooks_editor_notify(AxyneWindowState *state,
+                                   const SCNotification *notification);
+void axyne_win_hooks_document_activated(AxyneWindowState *state, AxyneDocument *document);
+void axyne_win_hooks_document_closed(AxyneWindowState *state, const AxyneDocument *document);
+void axyne_win_hooks_document_saved(AxyneWindowState *state, AxyneDocument *document);
+int axyne_win_hooks_status_paint(AxyneWindowState *state, HDC dc, RECT area);
+int axyne_win_hooks_panel_paint(AxyneWindowState *state, HDC dc, AxyneWinPanelTab tab,
+                                RECT body);
+void axyne_win_hooks_panel_layout(AxyneWindowState *state, AxyneWinPanelTab tab,
+                                  RECT body, int visible);
+void axyne_win_hooks_layout(AxyneWindowState *state, int width, int height);
 
 /* ---- exported helpers (implemented in ui_windows.c) ---------------------- */
 

@@ -1,8 +1,22 @@
 if(WIN32)
     add_library(axyne_ui STATIC
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_commands_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/syntax.c"
-        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/preferences_window_windows.c")
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/preferences_window_windows.c"
+        # One file per feature category (hooks: ui_windows_internal.h).
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_file_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_edit_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_view_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_build_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_debug_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_terminal_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_status_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_tools_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_help_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_lsp_nav_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_diag_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_release_windows.c")
     target_link_libraries(axyne_ui PRIVATE user32 gdi32 comdlg32 shell32 ole32)
 elseif(APPLE)
     add_library(axyne_ui STATIC

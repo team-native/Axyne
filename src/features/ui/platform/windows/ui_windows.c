@@ -2589,6 +2589,7 @@ static int axyne_save_active(HWND window, AxyneWindowState *state)
     axyne_refresh_outline(state); /* Save As may change the file type */
     axyne_update_title(window, state);
     axyne_refresh_action_controls(state);
+    axyne_win_hooks_document_saved(state, axyne_active(state));
     return 1;
 }
 
@@ -2648,6 +2649,7 @@ static int axyne_show_document(AxyneWindowState *state, size_t index)
     axyne_refresh_action_controls(state);
     axyne_problems_refresh(state); /* the active file's problems come first */
     axyne_refresh_outline(state);
+    axyne_win_hooks_document_activated(state, doc);
     SetFocus(state->editor);
     return 1;
 }
@@ -2756,6 +2758,7 @@ static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
         return;
     }
     if (replaced) {
+        axyne_win_hooks_document_closed(state, &evicted);
         if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
         axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
@@ -2797,6 +2800,7 @@ static int axyne_open_virtual_document(HWND window, AxyneWindowState *state,
         return 0;
     }
     if (replaced) {
+        axyne_win_hooks_document_closed(state, &evicted);
         if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
         axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
@@ -2843,6 +2847,7 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
         if (!axyne_show_document(state, successor)) return;
     }
     AxyneDocument *doc = &state->documents.documents[index];
+    axyne_win_hooks_document_closed(state, doc);
     if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
     axyne_problems_clear_lsp(state, doc->path);
     if (doc->owns_native_editor_document && state->editor != NULL)
@@ -8559,6 +8564,7 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     axyne_problems_update_filter(state);
     axyne_problems_clamp_scroll(state);
     axyne_git_panel_place_controls(state);
+    axyne_win_hooks_layout(state, width, height);
     axyne_palette_refresh(window, state);
     InvalidateRect(window, NULL, FALSE);
 }
@@ -8640,6 +8646,47 @@ static void axyne_paint_empty_guide(HDC dc, AxyneWindowState *state, int left,
         y += ROW;
     }
     if (saved != 0) RestoreDC(dc, saved);
+}
+
+/* Base status bar text: action state (left), LSP status (middle), caret
+ * position and encoding (right). */
+static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
+                               int width, int height)
+{
+    {
+        wchar_t status[96];
+        if (state->last_exit_failed) {
+            (void)swprintf_s(status, 96, L"✗ 실행 실패 (exit %d)",
+                              state->last_exit_code);
+        } else if (state->active_action != 0) {
+            (void)swprintf_s(status, 96, L"● 실행 중");
+        } else if (state->has_exit_status) {
+            (void)swprintf_s(status, 96, L"✓ 실행 완료 (exit 0)");
+        } else {
+            (void)swprintf_s(status, 96, L"준비");
+        }
+        RECT rect = {12, status_top, axyne_sidebar_size(state) - 8, height};
+        axyne_text_rect(dc, state->ui_font,
+                   state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED, rect, status, DT_LEFT);
+    }
+    if (state->lsp_status[0] != '\0') {
+        wchar_t *lsp_status = axyne_wide(state->lsp_status);
+        if (lsp_status != NULL) {
+            RECT rect = {axyne_sidebar_size(state) + 8, status_top, width - 250, height};
+            axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, lsp_status, DT_LEFT);
+            free(lsp_status);
+        }
+    }
+    if (state->editor != NULL && axyne_active_visible(state) != NULL) {
+        wchar_t position[96];
+        LRESULT caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+        LRESULT line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+        LRESULT column = SendMessageA(state->editor, SCI_GETCOLUMN, (WPARAM)caret, 0);
+        RECT rect = {width - 246, status_top, width - 12, height};
+        (void)swprintf_s(position, 96, L"줄 %lld, 열 %lld     UTF-8",
+                       (long long)line + 1, (long long)column + 1);
+        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, position, DT_RIGHT);
+    }
 }
 
 static void axyne_paint_shell(HWND window, AxyneWindowState *state)
@@ -8858,38 +8905,9 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     if (axyne_problems_visible(state))
         axyne_problems_paint(dc, state);
     {
-        wchar_t status[96];
-        if (state->last_exit_failed) {
-            (void)swprintf_s(status, 96, L"✗ 실행 실패 (exit %d)",
-                              state->last_exit_code);
-        } else if (state->active_action != 0) {
-            (void)swprintf_s(status, 96, L"● 실행 중");
-        } else if (state->has_exit_status) {
-            (void)swprintf_s(status, 96, L"✓ 실행 완료 (exit 0)");
-        } else {
-            (void)swprintf_s(status, 96, L"준비");
-        }
-        RECT rect = {12, status_top, axyne_sidebar_size(state) - 8, height};
-        axyne_text_rect(dc, state->ui_font,
-                   state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED, rect, status, DT_LEFT);
-    }
-    if (state->lsp_status[0] != '\0') {
-        wchar_t *lsp_status = axyne_wide(state->lsp_status);
-        if (lsp_status != NULL) {
-            RECT rect = {axyne_sidebar_size(state) + 8, status_top, width - 250, height};
-            axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, lsp_status, DT_LEFT);
-            free(lsp_status);
-        }
-    }
-    if (state->editor != NULL && axyne_active_visible(state) != NULL) {
-        wchar_t position[96];
-        LRESULT caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
-        LRESULT line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-        LRESULT column = SendMessageA(state->editor, SCI_GETCOLUMN, (WPARAM)caret, 0);
-        RECT rect = {width - 246, status_top, width - 12, height};
-        (void)swprintf_s(position, 96, L"줄 %lld, 열 %lld     UTF-8",
-                       (long long)line + 1, (long long)column + 1);
-        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, position, DT_RIGHT);
+        RECT status_area = {0, status_top, width, height};
+        if (!axyne_win_hooks_status_paint(state, dc, status_area))
+            axyne_paint_status(dc, state, status_top, width, height);
     }
 
     if (axyne_empty_state(state))
@@ -9123,6 +9141,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
 {
     AxyneWindowState *state = (AxyneWindowState *)GetWindowLongPtrW(
         window, GWLP_USERDATA);
+    if (state != NULL && state->main_window == window && message != WM_NCCREATE &&
+        message != WM_CREATE && message != WM_NCDESTROY) {
+        LRESULT result = 0;
+        if (axyne_win_hooks_message(state, window, message, w_param, l_param, &result))
+            return result;
+    }
     switch (message) {
     case WM_NCCREATE: {
         CREATESTRUCTW *create = (CREATESTRUCTW *)l_param;
@@ -9176,6 +9200,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else
             axyne_refresh_action_controls(state);
         axyne_update_title(window, state);
+        axyne_win_hooks_create(state);
         axyne_layout(window, state);
         if (state->editor != NULL) SetFocus(state->editor);
         return 0;
@@ -9236,6 +9261,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (state != NULL && w_param) axyne_git_panel_schedule_refresh(window, state);
         break;
     case WM_TIMER:
+        if (state != NULL && axyne_win_hooks_timer(state, (UINT_PTR)w_param)) return 0;
         if (state != NULL && w_param == AXYNE_PALETTE_TIMER_ID) {
             axyne_palette_tick(window, state);
             return 0;
@@ -9659,6 +9685,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                     axyne_refresh_outline(state);
                     axyne_update_title(window, state);
                     axyne_refresh_action_controls(state);
+                    axyne_win_hooks_document_saved(state, axyne_active(state));
                 } else MessageBoxA(window, error.message, "Axyne - Save failed",
                                    MB_OK | MB_ICONERROR);
                 free(old_path);
@@ -9943,6 +9970,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->documents.active_index, NULL);
             axyne_update_title(window, state);
         }
+        if (header != NULL && header->hwndFrom == state->editor && !state->loading_editor)
+            axyne_win_hooks_editor_notify(state, (const SCNotification *)l_param);
         axyne_refresh_action_controls(state);
         {
             RECT client;
@@ -9996,6 +10025,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 0;
     case WM_NCDESTROY:
         if (state != NULL) {
+            axyne_win_hooks_destroy(state);
             if (state->terminal_process != NULL) {
                 axyne_process_release(state->terminal_process);
                 state->terminal_process = NULL;
