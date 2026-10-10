@@ -817,6 +817,80 @@ static int test_problem_list(void)
     return 1;
 }
 
+/* Queries the UIs use for the tab label, status and per-file badges. */
+static int test_problem_queries(void)
+{
+    AxyneProblemList list = {0};
+    AxyneProblemCounts counts;
+    char text[64];
+    AxyneProblem lsp[3];
+    AxyneProblem built = make(AXYNE_PROBLEM_INFORMATION, "/p/b.c", 4, 1, "", "note");
+
+    axyne_problems_counts_for_path(&list, "/p/a.c", &counts);
+    CHECK(counts.total == 0 && axyne_problems_counts_worst(&counts) == 0);
+    CHECK(axyne_problems_counts_worst(NULL) == 0);
+    {
+        size_t label_length = axyne_problems_tab_label(&counts, text, sizeof(text));
+        CHECK(label_length == strlen(text));
+    }
+    CHECK_STR(text, "문제");
+    CHECK(axyne_problems_tab_label(NULL, text, sizeof(text)) == strlen("문제"));
+    CHECK_STR(text, "문제");
+
+    lsp[0] = make(AXYNE_PROBLEM_WARNING, NULL, 1, 1, "", "w1");
+    lsp[1] = make(AXYNE_PROBLEM_ERROR, NULL, 2, 1, "", "e1");
+    lsp[2] = make(AXYNE_PROBLEM_HINT, NULL, 3, 1, "", "h1");
+    CHECK(axyne_problems_set_source(&list, AXYNE_PROBLEM_ORIGIN_LSP, "/p/a.c", lsp, 3, NULL) ==
+          AXYNE_STATUS_OK);
+    CHECK(axyne_problems_set_source(&list, AXYNE_PROBLEM_ORIGIN_LSP, "/p/b.c", lsp, 1, NULL) ==
+          AXYNE_STATUS_OK);
+    CHECK(axyne_problems_append(&list, AXYNE_PROBLEM_ORIGIN_BUILD, &built, NULL) ==
+          AXYNE_STATUS_OK);
+
+    axyne_problems_counts_for_path(&list, "/p/a.c", &counts);
+    CHECK(counts.errors == 1 && counts.warnings == 1 && counts.hints == 1 &&
+          counts.information == 0 && counts.total == 3);
+    CHECK(axyne_problems_counts_worst(&counts) == AXYNE_PROBLEM_ERROR);
+    /* LSP and build problems of the same file are counted together */
+    axyne_problems_counts_for_path(&list, "/p/b.c", &counts);
+    CHECK(counts.warnings == 1 && counts.information == 1 && counts.total == 2);
+    CHECK(axyne_problems_counts_worst(&counts) == AXYNE_PROBLEM_WARNING);
+#ifdef _WIN32
+    axyne_problems_counts_for_path(&list, "\\P\\B.C", &counts);
+    CHECK(counts.total == 2);
+#endif
+    axyne_problems_counts_for_path(&list, "/p/none.c", &counts);
+    CHECK(counts.total == 0);
+    axyne_problems_counts_for_path(&list, "", &counts);
+    CHECK(counts.total == 0);
+    axyne_problems_counts_for_path(&list, NULL, &counts);
+    CHECK(counts.total == 0);
+    axyne_problems_counts_for_path(NULL, "/p/a.c", &counts);
+    CHECK(counts.total == 0);
+    axyne_problems_counts_for_path(&list, "/p/a.c", NULL); /* no crash */
+
+    counts.errors = 0; counts.warnings = 0; counts.information = 0; counts.hints = 2;
+    CHECK(axyne_problems_counts_worst(&counts) == AXYNE_PROBLEM_HINT);
+    counts.information = 1;
+    CHECK(axyne_problems_counts_worst(&counts) == AXYNE_PROBLEM_INFORMATION);
+
+    axyne_problems_counts(&list, &counts);
+    CHECK(counts.total == 5);
+    {
+        size_t label_length = axyne_problems_tab_label(&counts, text, sizeof(text));
+        CHECK(label_length == strlen(text));
+    }
+    CHECK_STR(text, "문제  5");
+    {
+        char tiny[4];
+        size_t needed = axyne_problems_tab_label(&counts, tiny, sizeof(tiny));
+        CHECK(needed == strlen("문제  5") && strlen(tiny) < sizeof(tiny));
+        CHECK(axyne_problems_tab_label(&counts, NULL, 0) == needed);
+    }
+    axyne_problems_destroy(&list);
+    return 1;
+}
+
 static int test_problem_limit(void)
 {
     AxyneProblemList list = {0};
@@ -1222,6 +1296,7 @@ int axyne_test_palette_problems(const char *root)
     CHECK(test_symbols_limits());
     CHECK(test_symbols_supports_file());
     CHECK(test_problem_list());
+    CHECK(test_problem_queries());
     CHECK(test_problem_limit());
     CHECK(test_path_helpers());
     CHECK(test_filter());

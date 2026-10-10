@@ -13,6 +13,7 @@
 #include "axyne/empty_state.h"
 #include "axyne/search.h"
 #include "axyne/explorer.h"
+#include "axyne/outline.h"
 #include "axyne/watcher.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
@@ -20,6 +21,8 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/problems.h"
+#include "axyne/problems_feed.h"
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
@@ -748,12 +751,623 @@ static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
 
 @end
 
+/* ---- problems panel (Figma 24:14087) -------------------------------------
+ * A custom list view: 36px summary/filter row, 30px problem and file-group
+ * rows, severity icons drawn natively. It only paints rows produced by
+ * axyne_problems_rows and reports activations to its delegate; the workspace
+ * owns the data. The view owns its rows (axyne_problems_rows_destroy). */
+static const CGFloat AXYNE_PROBLEMS_TOOLBAR = 36;
+static const CGFloat AXYNE_PROBLEMS_ROW = 30;
+static const CGFloat AXYNE_PROBLEMS_PAD = 18;
+static const CGFloat AXYNE_PROBLEMS_FILTER_WIDTH = 260;
+static const CGFloat AXYNE_PROBLEMS_FILTER_HEIGHT = 25;
+static const CGFloat AXYNE_PROBLEMS_FILTER_MIN = 120;
+
+@class AxyneProblemsView;
+
+@protocol AxyneProblemsViewDelegate <NSObject>
+- (void)problemsView:(AxyneProblemsView *)view activateRowAtIndex:(size_t)index;
+- (void)problemsViewFilterChanged:(AxyneProblemsView *)view;
+- (void)problemsViewWillHitTest:(AxyneProblemsView *)view;
+@end
+
+static NSFont *axyne_problems_mono_font(CGFloat size)
+{
+    NSFont *font = [NSFont fontWithName:@"JetBrains Mono" size:size];
+    return font != nil ? font : [NSFont monospacedSystemFontOfSize:size
+                                                            weight:NSFontWeightRegular];
+}
+
+static NSColor *axyne_problems_severity_color(int severity)
+{
+    switch (severity) {
+    case AXYNE_PROBLEM_ERROR: return axyne_color(0xec, 0x6a, 0x72);
+    case AXYNE_PROBLEM_WARNING: return axyne_color(0xe5, 0xa4, 0x45);
+    case AXYNE_PROBLEM_INFORMATION: return axyne_color(0x7d, 0xb5, 0xe3);
+    default: return axyne_color(0x66, 0x6c, 0x76);
+    }
+}
+
+/* Lucide-style outline icons drawn in a 24-unit grid scaled into `box`
+ * (flipped coordinates). */
+static void axyne_problems_draw_severity_icon(int severity, NSRect box)
+{
+    CGFloat s = NSWidth(box) / 24.0;
+    CGFloat x = NSMinX(box), y = NSMinY(box);
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path setLineWidth:MAX(1.0, 2.0 * s)];
+    [path setLineCapStyle:NSLineCapStyleRound];
+    [path setLineJoinStyle:NSLineJoinStyleRound];
+    [axyne_problems_severity_color(severity) setStroke];
+    if (severity == AXYNE_PROBLEM_WARNING) {
+        [path moveToPoint:NSMakePoint(x + 12 * s, y + 3.5 * s)];
+        [path lineToPoint:NSMakePoint(x + 21.5 * s, y + 20 * s)];
+        [path lineToPoint:NSMakePoint(x + 2.5 * s, y + 20 * s)];
+        [path closePath];
+        [path moveToPoint:NSMakePoint(x + 12 * s, y + 9 * s)];
+        [path lineToPoint:NSMakePoint(x + 12 * s, y + 13 * s)];
+        [path moveToPoint:NSMakePoint(x + 12 * s, y + 17 * s)];
+        [path lineToPoint:NSMakePoint(x + 12 * s, y + 17.2 * s)];
+    } else {
+        [path appendBezierPathWithOvalInRect:
+            NSMakeRect(x + 2 * s, y + 2 * s, 20 * s, 20 * s)];
+        if (severity == AXYNE_PROBLEM_ERROR) {
+            [path moveToPoint:NSMakePoint(x + 15 * s, y + 9 * s)];
+            [path lineToPoint:NSMakePoint(x + 9 * s, y + 15 * s)];
+            [path moveToPoint:NSMakePoint(x + 9 * s, y + 9 * s)];
+            [path lineToPoint:NSMakePoint(x + 15 * s, y + 15 * s)];
+        } else {
+            [path moveToPoint:NSMakePoint(x + 12 * s, y + 16 * s)];
+            [path lineToPoint:NSMakePoint(x + 12 * s, y + 12 * s)];
+            [path moveToPoint:NSMakePoint(x + 12 * s, y + 8 * s)];
+            [path lineToPoint:NSMakePoint(x + 12 * s, y + 8.2 * s)];
+        }
+    }
+    [path stroke];
+}
+
+static void axyne_problems_draw_chevron(BOOL expanded, NSRect box, NSColor *color)
+{
+    CGFloat s = NSWidth(box) / 24.0;
+    CGFloat x = NSMinX(box), y = NSMinY(box);
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path setLineWidth:MAX(1.0, 2.0 * s)];
+    [path setLineCapStyle:NSLineCapStyleRound];
+    [path setLineJoinStyle:NSLineJoinStyleRound];
+    if (expanded) {
+        [path moveToPoint:NSMakePoint(x + 6 * s, y + 9 * s)];
+        [path lineToPoint:NSMakePoint(x + 12 * s, y + 15 * s)];
+        [path lineToPoint:NSMakePoint(x + 18 * s, y + 9 * s)];
+    } else {
+        [path moveToPoint:NSMakePoint(x + 9 * s, y + 6 * s)];
+        [path lineToPoint:NSMakePoint(x + 15 * s, y + 12 * s)];
+        [path lineToPoint:NSMakePoint(x + 9 * s, y + 18 * s)];
+    }
+    [color setStroke];
+    [path stroke];
+}
+
+static void axyne_problems_draw_filter_icon(NSRect box, NSColor *color)
+{
+    CGFloat s = NSWidth(box) / 24.0;
+    CGFloat x = NSMinX(box), y = NSMinY(box);
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path setLineWidth:MAX(1.0, 2.0 * s)];
+    [path setLineCapStyle:NSLineCapStyleRound];
+    [path setLineJoinStyle:NSLineJoinStyleRound];
+    [path moveToPoint:NSMakePoint(x + 22 * s, y + 3 * s)];
+    [path lineToPoint:NSMakePoint(x + 2 * s, y + 3 * s)];
+    [path lineToPoint:NSMakePoint(x + 10 * s, y + 12.46 * s)];
+    [path lineToPoint:NSMakePoint(x + 10 * s, y + 19 * s)];
+    [path lineToPoint:NSMakePoint(x + 14 * s, y + 21 * s)];
+    [path lineToPoint:NSMakePoint(x + 14 * s, y + 12.46 * s)];
+    [path closePath];
+    [color setStroke];
+    [path stroke];
+}
+
+/* Draws one line of text in `rect`, vertically centered, tail-truncated. */
+static void axyne_problems_draw_text(NSString *text, NSFont *font, NSColor *color,
+                                     NSRect rect, NSTextAlignment alignment)
+{
+    NSMutableParagraphStyle *style;
+    NSDictionary *attributes;
+    CGFloat height;
+    if (text == nil || NSWidth(rect) <= 0) return;
+    style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [style setLineBreakMode:NSLineBreakByTruncatingTail];
+    [style setAlignment:alignment];
+    attributes = @{NSFontAttributeName:font, NSForegroundColorAttributeName:color,
+                   NSParagraphStyleAttributeName:style};
+    height = ceil([text sizeWithAttributes:attributes].height);
+    [text drawInRect:NSMakeRect(NSMinX(rect), NSMinY(rect) + (NSHeight(rect) - height) / 2.0,
+                                NSWidth(rect), height)
+      withAttributes:attributes];
+}
+
+static CGFloat axyne_problems_text_width(NSString *text, NSFont *font)
+{
+    if (text == nil) return 0;
+    return ceil([text sizeWithAttributes:@{NSFontAttributeName:font}].width);
+}
+
+static NSString *axyne_problems_string(const char *text)
+{
+    NSString *string = [NSString stringWithUTF8String:text != NULL ? text : ""];
+    return string != nil ? string : @"(invalid text)";
+}
+
+static char *axyne_problems_copy_text(const char *text)
+{
+    return strdup(text != NULL ? text : "");
+}
+
+@interface AxyneProblemsView : NSView <NSTextFieldDelegate> {
+    AxyneProblemRow *_rows;
+    size_t _rowCount;
+    NSString *_summary;
+    BOOL _hasSelection;
+    int _selectedKind;
+    size_t _selectedLine;
+    size_t _selectedColumn;
+    char *_selectedPath;
+    char *_selectedMessage;
+    NSInteger _selected;
+    CGFloat _scroll;
+    NSTextField *_filter;
+    NSColor *_backgroundColor;
+    NSColor *_textColor;
+    NSColor *_mutedColor;
+    NSColor *_faintColor;
+    NSColor *_selectionColor;
+    NSColor *_fieldFillColor;
+    NSColor *_fieldBorderColor;
+    NSFont *_messageFont;
+    NSFont *_groupFont;
+    NSFont *_monoFont;
+    id<AxyneProblemsViewDelegate> _delegate; /* assign: the workspace owns this view */
+}
+- (void)setDelegate:(id<AxyneProblemsViewDelegate>)delegate;
+- (id<AxyneProblemsViewDelegate>)delegate;
+- (void)setBackground:(NSColor *)background text:(NSColor *)text
+                muted:(NSColor *)muted faint:(NSColor *)faint
+            selection:(NSColor *)selection fieldFill:(NSColor *)fieldFill
+          fieldBorder:(NSColor *)fieldBorder;
+- (void)updateFilterAppearance;
+- (void)layoutFilter;
+- (CGFloat)listHeight;
+- (void)clampScroll;
+- (BOOL)rowMatchesSelection:(const AxyneProblemRow *)row;
+- (void)forgetSelection;
+- (void)rememberSelection:(const AxyneProblemRow *)row;
+- (void)setRows:(AxyneProblemRow *)rows count:(size_t)count;
+- (void)setSummary:(NSString *)summary;
+- (NSString *)filterText;
+- (size_t)rowCount;
+- (const AxyneProblemRow *)rowAtIndex:(size_t)index;
+- (NSInteger)selectedRowIndex;
+- (void)scrollRowToVisible:(NSInteger)index;
+- (void)selectRowAtIndex:(NSInteger)index;
+- (void)moveSelectionBy:(NSInteger)delta;
+- (void)activateSelection;
+- (NSInteger)rowIndexAtPoint:(NSPoint)point;
+- (NSRect)filterFieldRect;
+- (void)drawRow:(const AxyneProblemRow *)row at:(CGFloat)top selected:(BOOL)selected;
+@end
+
+@implementation AxyneProblemsView
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        _selected = -1;
+        _summary = [@"오류 0개 · 경고 0개 · 정보 0개" copy];
+        _messageFont = [[NSFont systemFontOfSize:12] retain];
+        _groupFont = [[NSFont systemFontOfSize:11] retain];
+        _monoFont = [axyne_problems_mono_font(10) retain];
+        _backgroundColor = [axyne_color(0x1d, 0x1f, 0x23) retain];
+        _textColor = [axyne_color(0xd2, 0xd5, 0xdb) retain];
+        _mutedColor = [axyne_color(0x96, 0x9b, 0xa5) retain];
+        _faintColor = [axyne_color(0x66, 0x6c, 0x76) retain];
+        _selectionColor = [axyne_color(0x30, 0x23, 0x42) retain];
+        _fieldFillColor = [axyne_color(0x17, 0x19, 0x1d) retain];
+        _fieldBorderColor = [axyne_color(0x2b, 0x2e, 0x35) retain];
+        _filter = [[NSTextField alloc] initWithFrame:NSZeroRect];
+        [_filter setBordered:NO];
+        [_filter setBezeled:NO];
+        [_filter setDrawsBackground:NO];
+        [_filter setFocusRingType:NSFocusRingTypeNone];
+        [_filter setFont:[NSFont systemFontOfSize:10]];
+        [[_filter cell] setUsesSingleLineMode:YES];
+        [[_filter cell] setScrollable:YES];
+        [_filter setDelegate:self];
+        [_filter setAccessibilityLabel:@"문제 필터"];
+        [self addSubview:_filter];
+        [self setAccessibilityLabel:@"문제 목록"];
+        [self setAccessibilityRole:NSAccessibilityListRole];
+        [self setAccessibilityElement:YES];
+        [self updateFilterAppearance];
+    }
+    return self;
+}
+
+- (void)dealloc
+{
+    [_filter setDelegate:nil];
+    [_filter removeFromSuperview];
+    [_filter release];
+    axyne_problems_rows_destroy(_rows, _rowCount);
+    [_summary release];
+    free(_selectedPath);
+    free(_selectedMessage);
+    [_backgroundColor release]; [_textColor release]; [_mutedColor release];
+    [_faintColor release]; [_selectionColor release];
+    [_fieldFillColor release]; [_fieldBorderColor release];
+    [_messageFont release]; [_groupFont release]; [_monoFont release];
+    [super dealloc];
+}
+
+- (void)setDelegate:(id<AxyneProblemsViewDelegate>)delegate { _delegate = delegate; }
+- (id<AxyneProblemsViewDelegate>)delegate { return _delegate; }
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+
+- (void)updateFilterAppearance
+{
+    NSAttributedString *placeholder = [[[NSAttributedString alloc]
+        initWithString:@"필터 (예: C4244, editor.c)"
+            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:10],
+                         NSForegroundColorAttributeName:_faintColor}] autorelease];
+    [_filter setTextColor:_textColor];
+    [_filter setPlaceholderAttributedString:placeholder];
+}
+
+- (void)setBackground:(NSColor *)background text:(NSColor *)text
+                muted:(NSColor *)muted faint:(NSColor *)faint
+            selection:(NSColor *)selection fieldFill:(NSColor *)fieldFill
+          fieldBorder:(NSColor *)fieldBorder
+{
+    [background retain]; [_backgroundColor release]; _backgroundColor = background;
+    [text retain]; [_textColor release]; _textColor = text;
+    [muted retain]; [_mutedColor release]; _mutedColor = muted;
+    [faint retain]; [_faintColor release]; _faintColor = faint;
+    [selection retain]; [_selectionColor release]; _selectionColor = selection;
+    [fieldFill retain]; [_fieldFillColor release]; _fieldFillColor = fieldFill;
+    [fieldBorder retain]; [_fieldBorderColor release]; _fieldBorderColor = fieldBorder;
+    [self updateFilterAppearance];
+    [self setNeedsDisplay:YES];
+}
+
+- (NSRect)filterFieldRect
+{
+    CGFloat width = NSWidth([self bounds]);
+    CGFloat fieldWidth = MIN(AXYNE_PROBLEMS_FILTER_WIDTH,
+        MAX(0, width - 2 * AXYNE_PROBLEMS_PAD - 220));
+    return NSMakeRect(width - AXYNE_PROBLEMS_PAD - fieldWidth,
+        (AXYNE_PROBLEMS_TOOLBAR - AXYNE_PROBLEMS_FILTER_HEIGHT) / 2.0,
+        fieldWidth, AXYNE_PROBLEMS_FILTER_HEIGHT);
+}
+
+- (void)layoutFilter
+{
+    NSRect field = [self filterFieldRect];
+    BOOL visible = NSWidth(field) >= AXYNE_PROBLEMS_FILTER_MIN;
+    [_filter setHidden:!visible];
+    /* 8px padding, 12px icon and 6px gap precede the text. */
+    [_filter setFrame:NSMakeRect(NSMinX(field) + 26, NSMinY(field) + 5,
+        MAX(0, NSWidth(field) - 34), 15)];
+}
+
+- (void)setFrameSize:(NSSize)size
+{
+    [super setFrameSize:size];
+    [self layoutFilter];
+    [self clampScroll];
+}
+
+- (CGFloat)listHeight
+{
+    return MAX(0, NSHeight([self bounds]) - AXYNE_PROBLEMS_TOOLBAR);
+}
+
+- (void)clampScroll
+{
+    CGFloat maximum = MAX(0, (CGFloat)_rowCount * AXYNE_PROBLEMS_ROW - [self listHeight]);
+    _scroll = MIN(maximum, MAX(0, _scroll));
+}
+
+- (BOOL)rowMatchesSelection:(const AxyneProblemRow *)row
+{
+    return _hasSelection && (int)row->kind == _selectedKind &&
+        row->line == _selectedLine && row->column == _selectedColumn &&
+        strcmp(row->path != NULL ? row->path : "", _selectedPath != NULL ? _selectedPath : "") == 0 &&
+        strcmp(row->message != NULL ? row->message : "",
+               _selectedMessage != NULL ? _selectedMessage : "") == 0;
+}
+
+- (void)forgetSelection
+{
+    free(_selectedPath);
+    free(_selectedMessage);
+    _selectedPath = NULL;
+    _selectedMessage = NULL;
+    _hasSelection = NO;
+}
+
+/* Keeps the same problem selected across list rebuilds. */
+- (void)rememberSelection:(const AxyneProblemRow *)row
+{
+    char *path = axyne_problems_copy_text(row->path);
+    char *message = axyne_problems_copy_text(row->message);
+    [self forgetSelection];
+    _selectedPath = path;
+    _selectedMessage = message;
+    _selectedKind = (int)row->kind;
+    _selectedLine = row->line;
+    _selectedColumn = row->column;
+    _hasSelection = path != NULL && message != NULL;
+}
+
+/* Takes ownership of `rows` (from axyne_problems_rows). */
+- (void)setRows:(AxyneProblemRow *)rows count:(size_t)count
+{
+    AxyneProblemRow *old = _rows;
+    size_t oldCount = _rowCount;
+    _rows = rows;
+    _rowCount = rows != NULL ? count : 0;
+    _selected = -1;
+    if (_hasSelection) {
+        for (size_t i = 0; i < _rowCount; ++i) {
+            if ([self rowMatchesSelection:&_rows[i]]) {
+                _selected = (NSInteger)i;
+                break;
+            }
+        }
+        if (_selected < 0) [self forgetSelection];
+    }
+    axyne_problems_rows_destroy(old, oldCount);
+    [self clampScroll];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setSummary:(NSString *)summary
+{
+    if (summary == nil) summary = @"";
+    if ([summary isEqualToString:_summary]) return;
+    [_summary release];
+    _summary = [summary copy];
+    [self setNeedsDisplay:YES];
+}
+
+- (NSString *)filterText { return [_filter stringValue]; }
+- (size_t)rowCount { return _rowCount; }
+- (NSInteger)selectedRowIndex { return _selected; }
+
+- (const AxyneProblemRow *)rowAtIndex:(size_t)index
+{
+    return index < _rowCount ? &_rows[index] : NULL;
+}
+
+- (NSInteger)rowIndexAtPoint:(NSPoint)point
+{
+    NSInteger row;
+    if (point.y < AXYNE_PROBLEMS_TOOLBAR || point.y >= NSHeight([self bounds]) ||
+        point.x < 0 || point.x >= NSWidth([self bounds]))
+        return -1;
+    row = (NSInteger)floor((point.y - AXYNE_PROBLEMS_TOOLBAR + _scroll) / AXYNE_PROBLEMS_ROW);
+    return row >= 0 && (size_t)row < _rowCount ? row : -1;
+}
+
+- (void)scrollRowToVisible:(NSInteger)index
+{
+    CGFloat top = (CGFloat)index * AXYNE_PROBLEMS_ROW;
+    CGFloat bottom = top + AXYNE_PROBLEMS_ROW;
+    if (top < _scroll) _scroll = top;
+    else if (bottom > _scroll + [self listHeight]) _scroll = bottom - [self listHeight];
+    [self clampScroll];
+}
+
+- (void)selectRowAtIndex:(NSInteger)index
+{
+    if (index < 0 || (size_t)index >= _rowCount) {
+        _selected = -1;
+        [self forgetSelection];
+    } else {
+        _selected = index;
+        [self rememberSelection:&_rows[index]];
+        [self scrollRowToVisible:index];
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)moveSelectionBy:(NSInteger)delta
+{
+    NSInteger next;
+    [_delegate problemsViewWillHitTest:self];
+    if (_rowCount == 0) return;
+    if (_selected < 0) next = delta > 0 ? 0 : (NSInteger)_rowCount - 1;
+    else next = _selected + delta;
+    next = MIN((NSInteger)_rowCount - 1, MAX(0, next));
+    [self selectRowAtIndex:next];
+}
+
+- (void)activateSelection
+{
+    [_delegate problemsViewWillHitTest:self];
+    if (_selected < 0 && _rowCount != 0) [self selectRowAtIndex:0];
+    if (_selected >= 0 && (size_t)_selected < _rowCount)
+        [_delegate problemsView:self activateRowAtIndex:(size_t)_selected];
+}
+
+- (void)mouseDown:(NSEvent *)event
+{
+    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+    NSInteger row;
+    [[self window] makeFirstResponder:self];
+    /* Rows must match the model before a point maps to a problem. */
+    [_delegate problemsViewWillHitTest:self];
+    row = [self rowIndexAtPoint:point];
+    if (row < 0) return;
+    [self selectRowAtIndex:row];
+    [_delegate problemsView:self activateRowAtIndex:(size_t)row];
+}
+
+- (void)scrollWheel:(NSEvent *)event
+{
+    CGFloat delta = [event scrollingDeltaY] *
+        ([event hasPreciseScrollingDeltas] ? 1.0 : AXYNE_PROBLEMS_ROW);
+    _scroll -= delta;
+    [self clampScroll];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)keyDown:(NSEvent *)event
+{
+    NSEventModifierFlags modifiers = [event modifierFlags] &
+        (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption);
+    if (modifiers != 0) { [super keyDown:event]; return; }
+    switch ([event keyCode]) {
+    case 125: [self moveSelectionBy:1]; break;   /* down */
+    case 126: [self moveSelectionBy:-1]; break;  /* up */
+    case 36: case 76: [self activateSelection]; break; /* return, enter */
+    default: [super keyDown:event]; break;
+    }
+}
+
+- (void)controlTextDidBeginEditing:(NSNotification *)notification
+{
+    NSTextView *editor = [[notification userInfo] objectForKey:@"NSFieldEditor"];
+    if ([editor isKindOfClass:[NSTextView class]])
+        [editor setInsertionPointColor:_textColor];
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification
+{
+    (void)notification;
+    _scroll = 0;
+    [_delegate problemsViewFilterChanged:self];
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView
+        doCommandBySelector:(SEL)selector
+{
+    (void)control;
+    if (selector == @selector(moveDown:)) { [self moveSelectionBy:1]; return YES; }
+    if (selector == @selector(moveUp:)) { [self moveSelectionBy:-1]; return YES; }
+    if (selector == @selector(insertNewline:)) { [self activateSelection]; return YES; }
+    if (selector == @selector(cancelOperation:) && [[_filter stringValue] length] != 0) {
+        [_filter setStringValue:@""];
+        [textView setString:@""];
+        _scroll = 0;
+        [_delegate problemsViewFilterChanged:self];
+        return YES;
+    }
+    return NO;
+}
+
+- (void)drawRow:(const AxyneProblemRow *)row at:(CGFloat)top selected:(BOOL)selected
+{
+    CGFloat width = NSWidth([self bounds]);
+    if (selected) {
+        [_selectionColor setFill];
+        NSRectFill(NSMakeRect(0, top, width, AXYNE_PROBLEMS_ROW));
+    }
+    if (row->kind == AXYNE_PROBLEM_ROW_GROUP) {
+        CGFloat x = AXYNE_PROBLEMS_PAD;
+        NSString *name = axyne_problems_string(row->file_name);
+        NSString *count = [NSString stringWithFormat:@"[%zu]", row->count];
+        CGFloat countWidth, nameWidth;
+        axyne_problems_draw_chevron(row->expanded != 0,
+            NSMakeRect(x, top + (AXYNE_PROBLEMS_ROW - 12) / 2.0, 12, 12), _mutedColor);
+        x += 12 + 8;
+        countWidth = axyne_problems_text_width(count, _monoFont);
+        nameWidth = MIN(axyne_problems_text_width(name, _groupFont),
+            MAX(0, width - x - AXYNE_PROBLEMS_PAD - 8 - countWidth));
+        axyne_problems_draw_text(name, _groupFont, _mutedColor,
+            NSMakeRect(x, top, nameWidth, AXYNE_PROBLEMS_ROW), NSTextAlignmentLeft);
+        axyne_problems_draw_text(count, _monoFont, _faintColor,
+            NSMakeRect(x + nameWidth + 8, top, countWidth + 2, AXYNE_PROBLEMS_ROW),
+            NSTextAlignmentLeft);
+        return;
+    }
+    {
+        CGFloat left = row->indent != 0 ? 42 : AXYNE_PROBLEMS_PAD;
+        NSString *message = axyne_problems_string(row->message);
+        NSString *file = axyne_problems_string(row->file_name);
+        NSString *location = [NSString stringWithFormat:@"[%zu, %zu]", row->line, row->column];
+        CGFloat locationWidth = axyne_problems_text_width(location, _monoFont);
+        CGFloat locationX = width - AXYNE_PROBLEMS_PAD - locationWidth;
+        CGFloat fileWidth = axyne_problems_text_width(file, _monoFont);
+        CGFloat fileX = locationX - 10 - fileWidth;
+        CGFloat messageX = left + 14 + 10;
+        if (fileX < messageX + 40) { /* narrow panel: the file name gives way */
+            fileWidth = MAX(0, MIN(fileWidth, locationX - 10 - messageX - 40));
+            fileX = locationX - 10 - fileWidth;
+        }
+        axyne_problems_draw_severity_icon(row->severity,
+            NSMakeRect(left, top + (AXYNE_PROBLEMS_ROW - 14) / 2.0, 14, 14));
+        axyne_problems_draw_text(message, _messageFont, _textColor,
+            NSMakeRect(messageX, top, MAX(0, fileX - 10 - messageX), AXYNE_PROBLEMS_ROW),
+            NSTextAlignmentLeft);
+        axyne_problems_draw_text(file, _monoFont, _mutedColor,
+            NSMakeRect(fileX, top, fileWidth, AXYNE_PROBLEMS_ROW), NSTextAlignmentLeft);
+        axyne_problems_draw_text(location, _monoFont, _faintColor,
+            NSMakeRect(locationX, top, locationWidth + 2, AXYNE_PROBLEMS_ROW),
+            NSTextAlignmentLeft);
+    }
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    NSRect bounds = [self bounds];
+    NSRect field = [self filterFieldRect];
+    BOOL usable = NSWidth(field) >= AXYNE_PROBLEMS_FILTER_MIN;
+    NSRect list;
+    (void)dirtyRect;
+    [_backgroundColor setFill];
+    NSRectFill(bounds);
+    axyne_problems_draw_text(_summary, _groupFont, _mutedColor,
+        NSMakeRect(AXYNE_PROBLEMS_PAD, 0,
+            MAX(0, (usable ? NSMinX(field) - 12 : NSWidth(bounds) - AXYNE_PROBLEMS_PAD)
+                - AXYNE_PROBLEMS_PAD),
+            AXYNE_PROBLEMS_TOOLBAR), NSTextAlignmentLeft);
+    if (usable) {
+        NSBezierPath *border = [NSBezierPath bezierPathWithRect:NSInsetRect(field, 0.5, 0.5)];
+        [_fieldFillColor setFill];
+        NSRectFill(field);
+        [border setLineWidth:1];
+        [_fieldBorderColor setStroke];
+        [border stroke];
+        axyne_problems_draw_filter_icon(
+            NSMakeRect(NSMinX(field) + 8, NSMinY(field) + (NSHeight(field) - 12) / 2.0, 12, 12),
+            _faintColor);
+    }
+    list = NSMakeRect(0, AXYNE_PROBLEMS_TOOLBAR, NSWidth(bounds), [self listHeight]);
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(list);
+    if (_rowCount == 0) {
+        axyne_problems_draw_text(@"문제가 없습니다", _messageFont, _mutedColor,
+            NSMakeRect(0, NSMinY(list), NSWidth(list), NSHeight(list)), NSTextAlignmentCenter);
+    } else {
+        size_t first = (size_t)floor(_scroll / AXYNE_PROBLEMS_ROW);
+        for (size_t i = first; i < _rowCount; ++i) {
+            CGFloat top = AXYNE_PROBLEMS_TOOLBAR + (CGFloat)i * AXYNE_PROBLEMS_ROW - _scroll;
+            if (top >= NSHeight(bounds)) break;
+            [self drawRow:&_rows[i] at:top selected:(NSInteger)i == _selected];
+        }
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+@end
+
 /* The deferred discovery block must not retain the workspace: a retained view
  * would never deallocate when the main queue is not drained (the editor runtime
  * test), leaking its Scintilla documents. The block holds only this box. */
 typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
 
-@interface AxyneWorkspaceView : NSView <NSMenuItemValidation> {
+@interface AxyneWorkspaceView : NSView <NSMenuItemValidation, AxyneProblemsViewDelegate> {
     NSView *_editorView;
     AxyneEmptyEditorView *_emptyView;
     NSImageView *_imagePreview;
@@ -775,13 +1389,27 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSButton *_terminalTab;
     NSButton *_clearOutput;
     NSScrollView *_terminalScroll;
-    NSTextField *_problemSummary;
+    /* Problems panel: the model (LSP diagnostics + build output) and the
+     * list view that paints the rows built from it. */
+    AxyneProblemsView *_problemsView;
+    AxyneProblemList _problems;
+    AxyneProblemCollapsed _problemsCollapsed;
+    AxyneProblemCounts _problemCounts;
+    AxyneBuildFeed _buildFeed;
+    BOOL _buildFeedActive;
     NSInteger _panelMode;
     NSInteger _activeMenuIndex; /* bar item whose popup is open, or -1 */
     NSInteger _hoverMenuIndex;  /* bar item under the pointer, or -1 */
     NSTrackingArea *_menuTracking;
     AxynePopupMenu *_popup; /* open Axyne popup (menu bar, build target, context), or nil */
     NSInteger _explorerFirstRow;
+    /* Outline (개요) section at the bottom of the explorer tab. Scanned only
+     * while that tab is shown; otherwise marked stale and rescanned when the
+     * tab appears. Edits rescan after a debounce (assign-only box). */
+    AxyneOutline _outline;
+    AxyneDiscoveryBox *_outlineBox;
+    NSTimeInterval _outlineDue; /* reference-date seconds of the next rescan */
+    BOOL _outlineStale;
     CGFloat _tabScroll;
     void *_lexillaModule;
     void *(*_createLexer)(const char *name);
@@ -804,6 +1432,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     BOOL _buildMenuOpen; /* chevron points up while the popup is open */
     AxyneDiscoveryBox *_discoveryBox;
     AxyneDiscoveryBox *_refreshBox; /* assign-only target of the queued reload */
+    AxyneDiscoveryBox *_problemsBox; /* assign-only target of the queued problems rebuild */
     /* Plan whose run step starts when its build step exits with 0. */
     AxyneLanguagePlan _pendingPlan;
     BOOL _pendingRun;
@@ -1189,6 +1818,36 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)syncLspActive;
 - (void)navigateLspReferences:(id)sender;
 - (void)setLspStatus:(NSString *)status;
+- (void)applyProblemsTheme;
+- (void)cancelProblemsRefresh;
+- (void)refreshProblems;
+- (void)scheduleProblemsRefresh;
+- (void)flushProblemsRefresh;
+- (const AxyneProblemCounts *)problemCounts;
+- (void)applyLspDiagnostics:(const AxyneLspDiagnostic *)diagnostics
+                      count:(size_t)count path:(const char *)path;
+- (void)clearLspProblemsForPath:(const char *)path;
+- (void)beginBuildProblemsInDirectory:(const char *)directory clear:(BOOL)clear;
+- (void)beginBuildProblems;
+- (void)feedBuildProblems:(const char *)bytes length:(size_t)length
+                   stream:(AxyneProcessStream)stream;
+- (void)finishBuildProblems;
+- (void)showProblemAtPath:(NSString *)path line:(size_t)line column:(size_t)column
+                    utf16:(BOOL)utf16;
+- (void)moveCaretToProblemLine:(size_t)line column:(size_t)column utf16:(BOOL)utf16;
+- (void)afterSaveAsFromPath:(const char *)oldPath;
+- (BOOL)outlineVisible;
+- (CGFloat)outlineHeight;
+- (CGFloat)explorerTreeBottom;
+- (BOOL)pointIsInOutline:(NSPoint)point;
+- (NSInteger)outlineSymbolAtPoint:(NSPoint)point;
+- (void)cancelOutlineRefresh;
+- (void)queueOutlineRefreshAfter:(NSTimeInterval)delay;
+- (void)scheduleOutlineRefresh;
+- (void)outlineRefreshDue;
+- (void)refreshOutline;
+- (void)jumpToOutlineSymbol:(NSInteger)index;
+- (void)drawOutlineAtTop:(CGFloat)top light:(BOOL)light reference:(BOOL)reference;
 @end
 
 @interface AxyneWorkspaceView (AxynePalette) <AxynePaletteOwner, NSTextFieldDelegate>
@@ -1274,10 +1933,30 @@ static void axyne_macos_lsp_diagnostics(AxyneLspClient *client, const char *path
                                         size_t count, void *user_data)
 {
     char text[192];
-    (void)client; (void)diagnostics;
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
+    AxyneLspDiagnostic *copy = NULL;
+    char *pathCopy;
+    (void)client;
     (void)snprintf(text, sizeof(text), "LSP: %zu diagnostics%s%s", count,
                    path == NULL ? "" : " in ", path == NULL ? "" : path);
-    axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
+    axyne_macos_lsp_status(view, text);
+    if (view == nil || path == NULL || path[0] == '\0') return;
+    /* The callback runs on the LSP reader thread: copy everything and apply
+     * it on the main queue, like the status messages above. */
+    if (axyne_problems_diagnostics_copy(diagnostics, count, &copy) != AXYNE_STATUS_OK)
+        return;
+    pathCopy = strdup(path);
+    if (pathCopy == NULL) {
+        axyne_problems_diagnostics_free(copy, count);
+        return;
+    }
+    [view retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view applyLspDiagnostics:copy count:count path:pathCopy];
+        axyne_problems_diagnostics_free(copy, count);
+        free(pathCopy);
+        [view release];
+    });
 }
 
 static void axyne_macos_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
@@ -1320,6 +1999,8 @@ static void axyne_macos_terminal_output(AxyneProcess *process,
     message->stream = stream;
     [view retain];
     dispatch_async(dispatch_get_main_queue(), ^{
+        [view feedBuildProblems:message->bytes length:message->length
+                         stream:message->stream];
         [view terminalAppend:message->bytes length:message->length
                        stream:message->stream];
         [view release];
@@ -1556,8 +2237,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
         _clearOutput = axyne_macos_toolbar_button(@"⊘", self, @selector(clearOutput:));
         [_clearOutput setToolTip:@"출력 지우기"];
         [self addSubview:_clearOutput];
-        _problemSummary = [[NSTextField labelWithString:@"LSP 진단 없음"] retain];
-        [self addSubview:_problemSummary];
+        _problemsView = [[AxyneProblemsView alloc] initWithFrame:NSZeroRect];
+        [_problemsView setDelegate:self];
+        [_problemsView setHidden:YES];
+        [self addSubview:_problemsView];
         _terminalInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
         [_terminalInput setPlaceholderString:@"Terminal input"];
         [_terminalInput setTarget:self]; [_terminalInput setAction:@selector(sendTerminal:)];
@@ -1903,8 +2586,11 @@ static BOOL axyne_macos_is_image_path(const char *path)
 {
     _panelMode = [sender tag];
     _panelHidden = NO;
-    [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
+    [_problemsView setHidden:_panelMode != 1];
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
+    /* The list takes the keyboard (Up/Down/Enter) when its tab is chosen. */
+    if (_panelMode == 1 && [self window] != nil)
+        [[self window] makeFirstResponder:_problemsView];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
@@ -2257,7 +2943,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [_terminalOutput setBackgroundColor:axyne_preference_color(
         axyne_macos_output_background(&_preferences.theme))];
     [_terminalScroll setBackgroundColor:[_terminalOutput backgroundColor]];
-    [_problemSummary setTextColor:axyne_preference_color(_preferences.theme.text)];
+    [self applyProblemsTheme];
     [_terminalInput setTextColor:axyne_preference_color(_preferences.theme.text)];
     [_terminalInput setBackgroundColor:axyne_preference_color(_preferences.theme.panel)];
     /* Figma: the input line sits directly on the terminal surface as plain
@@ -2454,7 +3140,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 {
     [_lspStatus release];
     _lspStatus = [status copy];
-    [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
+    [_problemsView setToolTip:_lspStatus];
     [self setNeedsDisplay:YES];
 }
 
@@ -2577,6 +3263,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshActionControls];
+    [self refreshProblems]; /* the active file's problems come first */
+    [self refreshOutline];
     /* In the empty state and behind an image preview the editor stays hidden
      * and keeps no focus. */
     if ([self window] != nil && ![self isEmptyState] && ![self imagePreviewShown])
@@ -2622,6 +3310,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self setNeedsDisplay:YES];
     }
     if (notification->nmhdr.code == SCN_MODIFIED &&
+        (notification->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) != 0)
+        [self scheduleOutlineRefresh];
+    if (notification->nmhdr.code == SCN_MODIFIED &&
         [self sendEditorMessage:SCI_GETMODIFY wParam:0 lParam:0] != 0) {
         if (!doc->is_dirty) {
             (void)axyne_documents_mark_dirty(&_documents, _documents.active_index, NULL);
@@ -2663,17 +3354,24 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return NO;
     const char *utf8Path = [path UTF8String];
     AxyneError error;
+    AxyneDocument *previous = [self activeDocument];
+    char *oldPath = previous != NULL && !previous->is_untitled && previous->path != NULL
+        ? strdup(previous->path) : NULL;
     AxyneStatus status = axyne_documents_save_as(&_documents,
         _documents.active_index, utf8Path, &error);
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
         NSString *detail = [NSString stringWithUTF8String:error.message];
+        free(oldPath);
         [alert setMessageText:@"Could not save file"];
         [alert setInformativeText:detail != nil ? detail : @""];
         [alert runModal];
         return NO;
     }
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self afterSaveAsFromPath:oldPath];
+    free(oldPath);
+    [self refreshOutline]; /* Save As may change the file type */
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshRecentMenu];
@@ -2704,6 +3402,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return NO;
     }
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self refreshOutline]; /* Save As may change the file type */
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
     [self refreshRecentMenu];
@@ -2832,6 +3531,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
     if (replaced) {
         if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, &evicted, NULL);
+        [self clearLspProblemsForPath:evicted.path];
         if (evicted.owns_native_editor_document)
             (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
                 lParam:(intptr_t)evicted.native_editor_document];
@@ -2977,10 +3677,235 @@ static BOOL axyne_macos_is_image_path(const char *path)
     return YES;
 }
 
-/* Rows that fit below the "탐색기" header. */
+/* ---- explorer outline (개요) -------------------------------------------- */
+
+/* The outline is part of the explorer tab; it is scanned only while shown. */
+- (BOOL)outlineVisible
+{
+    return !_explorerHidden && _sidebarTab == 0;
+}
+
+/* Height of the outline section at the bottom of the explorer column, or 0
+ * when it is hidden. The cap is a share of the whole explorer column. */
+- (CGFloat)outlineHeight
+{
+    CGFloat explorer = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] -
+        (AXYNE_CONTENT_TOP + AXYNE_TABS);
+    if (![self outlineVisible] || explorer <= 0) return 0;
+    return (CGFloat)axyne_outline_height(&_outline, (int)explorer);
+}
+
+/* The file tree ends where the outline begins. */
+- (CGFloat)explorerTreeBottom
+{
+    return NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] - [self outlineHeight];
+}
+
+- (BOOL)pointIsInOutline:(NSPoint)point
+{
+    CGFloat height = [self outlineHeight];
+    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    return height > 0 && point.x >= 0 && point.x < [self sidebarWidth] &&
+        point.y >= bottom - height && point.y < bottom;
+}
+
+/* Symbol index under the point, or -1 (separator, header, message row, gap). */
+- (NSInteger)outlineSymbolAtPoint:(NSPoint)point
+{
+    CGFloat height = [self outlineHeight];
+    CGFloat top = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] - height;
+    if (![self pointIsInOutline:point]) return -1;
+    return (NSInteger)axyne_outline_symbol_at(&_outline, (int)height, (int)(point.y - top));
+}
+
+- (void)cancelOutlineRefresh
+{
+    if (_outlineBox != NULL) {
+        _outlineBox->target = nil; /* the queued block frees the box */
+        _outlineBox = NULL;
+    }
+}
+
+/* One queued check `delay` seconds from now. The block holds only an
+ * assign-only box (see scheduleRuntimeDiscovery), never the view. */
+- (void)queueOutlineRefreshAfter:(NSTimeInterval)delay
+{
+    AxyneDiscoveryBox *box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    if (box == NULL) { [self refreshOutline]; return; }
+    box->target = self;
+    _outlineBox = box;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (box->target != nil) {
+            AxyneWorkspaceView *view = box->target;
+            view->_outlineBox = NULL;
+            [view outlineRefreshDue];
+        }
+        free(box);
+    });
+}
+
+/* Debounced rescan after edits: every edit moves the deadline 300 ms out. */
+- (void)scheduleOutlineRefresh
+{
+    if (![self outlineVisible]) {
+        [self cancelOutlineRefresh];
+        _outlineStale = YES;
+        return;
+    }
+    _outlineDue = [NSDate timeIntervalSinceReferenceDate] +
+        (NSTimeInterval)AXYNE_OUTLINE_DEBOUNCE_MS / 1000.0;
+    if (_outlineBox == NULL)
+        [self queueOutlineRefreshAfter:(NSTimeInterval)AXYNE_OUTLINE_DEBOUNCE_MS / 1000.0];
+}
+
+- (void)outlineRefreshDue
+{
+    NSTimeInterval remaining = _outlineDue - [NSDate timeIntervalSinceReferenceDate];
+    if (remaining > 0.01) [self queueOutlineRefreshAfter:remaining];
+    else [self refreshOutline];
+}
+
+/* Rescans the active document. Files over the size limit and unsupported
+ * extensions are classified without reading any text; nothing is scanned
+ * while the section is hidden (it is marked stale instead). */
+- (void)refreshOutline
+{
+    AxyneDocument *doc;
+    [self cancelOutlineRefresh];
+    if (![self outlineVisible]) {
+        _outlineStale = YES;
+        return;
+    }
+    _outlineStale = NO;
+    doc = [self isEmptyState] ? NULL : [self activeDocument];
+    if (doc == NULL || _editorView == nil) {
+        axyne_outline_clear(&_outline);
+    } else {
+        const char *name = doc->is_untitled || doc->is_virtual || doc->is_image ? NULL :
+            (doc->title != NULL ? doc->title : doc->path);
+        NSInteger length = [self sendEditorMessage:SCI_GETTEXTLENGTH wParam:0 lParam:0];
+        if (length < 0) length = 0;
+        if (axyne_outline_prepare(&_outline, name, (size_t)length)) {
+            char *text = (char *)malloc((size_t)length + 1);
+            if (text == NULL) {
+                axyne_outline_clear(&_outline);
+            } else {
+                (void)[self sendEditorMessage:SCI_GETTEXT wParam:(uintptr_t)length + 1
+                                        lParam:(intptr_t)text];
+                (void)axyne_outline_scan(&_outline, text, (size_t)length, NULL);
+                free(text);
+            }
+        }
+    }
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+/* Puts the caret on the symbol name, scrolls it into view and focuses the
+ * editor. */
+- (void)jumpToOutlineSymbol:(NSInteger)index
+{
+    NSInteger lineCount, line, start, end, position, column;
+    const AxyneSymbol *symbol;
+    if (index < 0 || (size_t)index >= _outline.symbols.count || _editorView == nil ||
+        [self isEmptyState])
+        return;
+    symbol = &_outline.symbols.items[index];
+    lineCount = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
+    if (lineCount < 1) return;
+    line = symbol->line > 0 ? (NSInteger)symbol->line - 1 : 0;
+    if (line >= lineCount) line = lineCount - 1;
+    start = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)line lParam:0];
+    end = [self sendEditorMessage:SCI_GETLINEENDPOSITION wParam:(uintptr_t)line lParam:0];
+    if (end < start) end = start;
+    column = symbol->column > 0 ? (NSInteger)symbol->column - 1 : 0;
+    if (column > end - start) column = end - start;
+    position = start + column;
+    (void)[self sendEditorMessage:SCI_ENSUREVISIBLEENFORCEPOLICY wParam:(uintptr_t)line lParam:0];
+    (void)[self sendEditorMessage:SCI_SETSEL wParam:(uintptr_t)position lParam:(intptr_t)position];
+    (void)[self sendEditorMessage:SCI_SCROLLCARET wParam:0 lParam:0];
+    if ([self window] != nil)
+        [[self window] makeFirstResponder:[(id)_editorView content]];
+    [self setNeedsDisplay:YES];
+}
+
+/* Explorer outline: 9px separator band with a 1px line, a 30px header and
+ * 22px symbol rows (Figma 6:399). The symbol holding the caret is bright. */
+- (void)drawOutlineAtTop:(CGFloat)top light:(BOOL)light reference:(BOOL)reference
+{
+    CGFloat height = [self outlineHeight];
+    CGFloat width = [self sidebarWidth] - 1;
+    CGFloat rowsTop = top + AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER;
+    char header[256];
+    NSString *title;
+    NSColor *muted;
+    NSColor *normal;
+    NSColor *active;
+    if (height <= 0 || width <= 0) return;
+    muted = axyne_preference_color(_preferences.theme.muted);
+    normal = axyne_preference_color(light ? 0x24272d : 0xc4c8ce);
+    active = axyne_preference_color(light ? 0x111317 : 0xffffff);
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(NSMakeRect(0, top, width, height));
+    [axyne_preference_color(_preferences.theme.panel) setFill];
+    NSRectFill(NSMakeRect(0, top, width, height));
+    [axyne_preference_color(reference ? 0x2a2d33 : _preferences.theme.border) setFill];
+    NSRectFill(NSMakeRect(0, top + 4, width, 1));
+    axyne_outline_header(&_outline, header, sizeof(header));
+    title = [NSString stringWithUTF8String:header];
+    [self drawLabel:[self label:title != nil ? title : @"개요"
+                   fittingWidth:MAX(0, width - 20) size:11 family:@"SF Pro Text"]
+        at:NSMakePoint(12, top + AXYNE_OUTLINE_SEPARATOR + 8) size:11
+        color:axyne_preference_color(light ? 0x68707d : 0x8b919b) family:@"SF Pro Text"];
+    NSRectClip(NSMakeRect(0, rowsTop, width, MAX(0, height - (rowsTop - top))));
+    if (_outline.state == AXYNE_OUTLINE_SYMBOLS) {
+        NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+        NSInteger caretLine = [self sendEditorMessage:SCI_LINEFROMPOSITION
+            wParam:(uintptr_t)(caret < 0 ? 0 : caret) lParam:0] + 1;
+        long current = axyne_outline_symbol_for_line(&_outline,
+            (size_t)(caretLine < 1 ? 1 : caretLine));
+        size_t visible = axyne_outline_visible_rows((int)height);
+        CGFloat nameX = AXYNE_OUTLINE_PAD_LEFT + AXYNE_OUTLINE_GLYPH_WIDTH + AXYNE_OUTLINE_GLYPH_GAP;
+        NSMutableParagraphStyle *center = [[[NSMutableParagraphStyle alloc] init] autorelease];
+        [center setAlignment:NSTextAlignmentCenter];
+        for (size_t k = 0; k < visible; ++k) {
+            size_t i = _outline.first_row + k;
+            const AxyneSymbol *symbol;
+            CGFloat y = rowsTop + (CGFloat)k * AXYNE_OUTLINE_ROW;
+            char glyph[2];
+            NSString *name;
+            if (i >= _outline.symbols.count) break;
+            symbol = &_outline.symbols.items[i];
+            glyph[0] = axyne_outline_glyph(symbol->kind);
+            glyph[1] = '\0';
+            [[NSString stringWithUTF8String:glyph] drawInRect:NSMakeRect(
+                AXYNE_OUTLINE_PAD_LEFT, y + 4, AXYNE_OUTLINE_GLYPH_WIDTH, 14)
+                withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9],
+                    NSForegroundColorAttributeName:
+                        axyne_preference_color(axyne_outline_glyph_color(symbol->kind)),
+                    NSParagraphStyleAttributeName:center}];
+            name = [NSString stringWithUTF8String:symbol->name];
+            [self drawLabel:[self label:name != nil ? name : @"(invalid name)"
+                           fittingWidth:MAX(0, width - 8 - nameX) size:12
+                                 family:@"SF Pro Text"]
+                at:NSMakePoint(nameX, y + 3)
+                size:12 color:(long)i == current ? active : normal family:@"SF Pro Text"];
+        }
+    } else {
+        const char *message = axyne_outline_message(_outline.state);
+        NSString *label = message != NULL ? [NSString stringWithUTF8String:message] : nil;
+        if (label != nil)
+            [self drawLabel:label at:NSMakePoint(AXYNE_OUTLINE_PAD_LEFT, rowsTop + 3)
+                size:12 color:muted family:@"SF Pro Text"];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+/* Rows that fit below the "탐색기" header (above the outline section). */
 - (NSInteger)explorerVisibleRows
 {
-    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    CGFloat bottom = [self explorerTreeBottom];
     CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
     return MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
 }
@@ -3001,7 +3926,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (NSInteger)explorerSlotAtPoint:(NSPoint)point
 {
     const CGFloat explorerTop = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
-    const CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    const CGFloat bottom = [self explorerTreeBottom];
     NSInteger slot;
     if (_sidebarTab != 0 || _explorer.root == NULL || point.x < 0 ||
         point.x >= [self sidebarWidth] || point.y < explorerTop || point.y >= bottom) return -1;
@@ -3041,8 +3966,17 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self scrollTabsBy:-delta * ([event hasPreciseScrollingDeltas] ? 1 : 40)];
         return;
     }
+    if ([self pointIsInOutline:point]) {
+        CGFloat section = [self outlineHeight];
+        NSInteger step = (NSInteger)ceil(fabs([event scrollingDeltaY]) /
+            ([event hasPreciseScrollingDeltas] ? AXYNE_UI_ROW : 1));
+        if ([event scrollingDeltaY] > 0) step = -step;
+        (void)axyne_outline_scroll_by(&_outline, (long)step, (int)section);
+        [self setNeedsDisplay:YES];
+        return;
+    }
     CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS + AXYNE_UI_EXPLORER_HEADER;
-    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    CGFloat bottom = [self explorerTreeBottom];
     if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= top && point.y < bottom) {
         NSInteger visible = MAX(1, (NSInteger)((bottom - top) / AXYNE_UI_ROW));
         NSInteger maximum = MAX(0, (NSInteger)_explorer.count - visible);
@@ -3673,6 +4607,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_gitPanel setHidden:YES];
         [_gitPanel unload];
     }
+    if (tab == 0 && _outlineStale && !_explorerHidden) [self refreshOutline];
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
 }
 
@@ -3786,6 +4721,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
     if (replaced) {
         if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, &evicted, NULL);
+        [self clearLspProblemsForPath:evicted.path];
         if (evicted.owns_native_editor_document)
             (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
                 lParam:(intptr_t)evicted.native_editor_document];
@@ -4098,6 +5034,7 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     }
     AxyneDocument *doc = &_documents.documents[index];
     if (_lsp != NULL) (void)axyne_lsp_did_close(_lsp, doc, NULL);
+    [self clearLspProblemsForPath:doc->path];
     if (doc->owns_native_editor_document)
         (void)[self sendEditorMessage:SCI_RELEASEDOCUMENT wParam:0
             lParam:(intptr_t)doc->native_editor_document];
@@ -4359,6 +5296,13 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     }
     if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
         point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
+        if ([self pointIsInOutline:point]) {
+            /* Never a tree click: flush a pending rescan so the row maps to
+             * the current text, then jump. */
+            if (_outlineBox != NULL) [self refreshOutline];
+            [self jumpToOutlineSymbol:[self outlineSymbolAtPoint:point]];
+            return;
+        }
         NSInteger row = [self explorerNodeAtPoint:point];
         if (row != NSNotFound) {
             _explorerSelection = row;
@@ -4409,6 +5353,7 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     /* The explorer's context menu does not apply to the Git tab. */
     if (_sidebarTab != 0 && !_explorerHidden && point.x < [self sidebarWidth] &&
         point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS) return;
+    if ([self pointIsInOutline:point]) return; /* no tree menu over the outline */
     if (point.x >= [self sidebarWidth] || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
         point.y >= NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
         [super rightMouseDown:event];
@@ -4722,7 +5667,6 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     _panelMode = 0;
     /* Output must be visible even if View > Bottom Panel hid the panel. */
     _panelHidden = NO;
-    [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
 }
@@ -5129,6 +6073,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 - (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode
 {
     char message[96];
+    [self finishBuildProblems];
     _lastExitCode = exitCode;
     _lastExitFailed = exitCode != 0;
     _hasExitStatus = YES;
@@ -5395,6 +6340,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     const char *header = action == 2 ? "[run]\n" : "[build]\n";
     if (clear) [_terminalOutput setString:[NSString stringWithUTF8String:header]];
     else [self terminalAppend:header length:strlen(header) stream:AXYNE_PROCESS_STDOUT];
+    [self beginBuildProblemsInDirectory:plan->working_directory clear:clear];
     _activeAction = action;
     _lastExitFailed = NO;
     [_terminalStart setEnabled:NO];
@@ -5514,6 +6460,295 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     return attributes;
 }
 
+/* ---- problems panel data and navigation ---------------------------------- */
+
+static BOOL axyne_macos_same_file(const char *a, const char *b)
+{
+    char *real_a;
+    char *real_b;
+    BOOL same;
+    if (a == NULL || b == NULL) return NO;
+    if (axyne_problems_path_equal(a, b)) return YES;
+    real_a = realpath(a, NULL);
+    real_b = realpath(b, NULL);
+    same = real_a != NULL && real_b != NULL && strcmp(real_a, real_b) == 0;
+    free(real_a);
+    free(real_b);
+    return same;
+}
+
+- (void)applyProblemsTheme
+{
+    const AxyneThemePreferences *theme = &_preferences.theme;
+    BOOL reference = axyne_macos_reference_surfaces(theme);
+    NSColor *muted = axyne_preference_color(reference ? 0x969ba5 : theme->muted);
+    [_problemsView
+        setBackground:axyne_preference_color(axyne_macos_output_background(theme))
+                 text:axyne_preference_color(reference ? 0xd2d5db : theme->text)
+                muted:muted
+                faint:reference ? axyne_preference_color(0x666c76)
+                                : [muted colorWithAlphaComponent:0.7]
+            selection:reference ? axyne_preference_color(0x302342)
+                                : [axyne_preference_color(theme->accent) colorWithAlphaComponent:0.25]
+            fieldFill:axyne_preference_color(reference ? 0x17191d : theme->panel)
+          fieldBorder:axyne_preference_color(reference ? 0x2b2e35 : theme->border)];
+}
+
+- (void)cancelProblemsRefresh
+{
+    if (_problemsBox != NULL) {
+        _problemsBox->target = nil; /* the queued block frees the box */
+        _problemsBox = NULL;
+    }
+}
+
+/* Rebuilds the panel rows, the summary and the tab label from the model. */
+- (void)refreshProblems
+{
+    AxyneProblemRow *rows = NULL;
+    size_t count = 0;
+    char summary[160];
+    char label[64];
+    AxyneDocument *doc;
+    const char *active;
+    NSString *filter;
+    NSString *title;
+    [self cancelProblemsRefresh];
+    if (_problemsView == nil) return;
+    doc = [self isEmptyState] ? NULL : [self activeDocument];
+    active = doc != NULL && !doc->is_untitled && !doc->is_virtual ? doc->path : NULL;
+    filter = [_problemsView filterText];
+    if (axyne_problems_rows(&_problems, filter != nil ? [filter UTF8String] : "", active,
+                            &_problemsCollapsed, &rows, &count, NULL) != AXYNE_STATUS_OK) {
+        rows = NULL;
+        count = 0;
+    }
+    [_problemsView setRows:rows count:count];
+    axyne_problems_counts(&_problems, &_problemCounts);
+    (void)axyne_problems_summary(&_problems, summary, sizeof(summary));
+    [_problemsView setSummary:axyne_problems_string(summary)];
+    (void)axyne_problems_tab_label(&_problemCounts, label, sizeof(label));
+    title = axyne_problems_string(label);
+    if (![[_problemsTab title] isEqualToString:title]) {
+        [_problemsTab setTitle:title];
+        [self setNeedsLayout:YES];
+        [self setNeedsDisplay:YES];
+    }
+}
+
+/* Coalesces rebuilds while build output or diagnostics stream in. The block
+ * holds only an assign-only box (see scheduleRuntimeDiscovery). */
+- (void)scheduleProblemsRefresh
+{
+    AxyneDiscoveryBox *box;
+    if (_problemsBox != NULL) return;
+    box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    if (box == NULL) { [self refreshProblems]; return; }
+    box->target = self;
+    _problemsBox = box;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (box->target != nil) {
+            AxyneWorkspaceView *view = box->target;
+            view->_problemsBox = NULL;
+            [view refreshProblems];
+        }
+        free(box);
+    });
+}
+
+- (void)flushProblemsRefresh
+{
+    if (_problemsBox != NULL) [self refreshProblems];
+}
+
+- (const AxyneProblemCounts *)problemCounts
+{
+    return &_problemCounts;
+}
+
+- (void)applyLspDiagnostics:(const AxyneLspDiagnostic *)diagnostics
+                      count:(size_t)count path:(const char *)path
+{
+    if (path == NULL || path[0] == '\0') return;
+    if (axyne_problems_set_lsp(&_problems, path, diagnostics, count, NULL) == AXYNE_STATUS_OK)
+        [self scheduleProblemsRefresh];
+}
+
+/* The document of `path` was closed: the server stops reporting on it. */
+- (void)clearLspProblemsForPath:(const char *)path
+{
+    size_t before = _problems.count;
+    if (path == NULL || path[0] == '\0') return;
+    axyne_problems_clear_source(&_problems, AXYNE_PROBLEM_ORIGIN_LSP, path);
+    if (_problems.count != before) [self scheduleProblemsRefresh];
+}
+
+/* Save As moved the active document from `oldPath` (NULL for an untitled
+ * buffer) to its new path: the server forgets the old path, its LSP problems
+ * go away, and the list is rebuilt for the new active path. */
+- (void)afterSaveAsFromPath:(const char *)oldPath
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (oldPath != NULL && oldPath[0] != '\0' &&
+        (doc == NULL || doc->path == NULL || !axyne_macos_same_file(oldPath, doc->path))) {
+        if (_lsp != NULL) {
+            AxyneDocument closed;
+            memset(&closed, 0, sizeof(closed));
+            closed.path = (char *)oldPath;
+            (void)axyne_lsp_did_close(_lsp, &closed, NULL); /* NOT_FOUND is fine */
+        }
+        [self clearLspProblemsForPath:oldPath];
+    }
+    [self refreshProblems];
+}
+
+/* A build or run step starts. `clear` is set for the first step of an
+ * action and drops the previous BUILD problems; the run step that follows a
+ * successful build keeps them. Relative paths resolve against the step's
+ * working directory, else the workspace root. */
+- (void)beginBuildProblemsInDirectory:(const char *)directory clear:(BOOL)clear
+{
+    if (directory == NULL || directory[0] == '\0') directory = _explorer.root;
+    (void)axyne_build_feed_begin(&_buildFeed, clear ? &_problems : NULL, directory);
+    _buildFeedActive = YES;
+    if (clear) [self refreshProblems];
+}
+
+- (void)beginBuildProblems
+{
+    [self beginBuildProblemsInDirectory:NULL clear:YES];
+}
+
+- (void)feedBuildProblems:(const char *)bytes length:(size_t)length
+                   stream:(AxyneProcessStream)stream
+{
+    if (!_buildFeedActive || bytes == NULL || length == 0) return;
+    if (axyne_build_feed_push(&_buildFeed, &_problems,
+                              stream == AXYNE_PROCESS_STDERR, bytes, length) != 0)
+        [self scheduleProblemsRefresh];
+}
+
+- (void)finishBuildProblems
+{
+    if (!_buildFeedActive) return;
+    _buildFeedActive = NO;
+    if (axyne_build_feed_finish(&_buildFeed, &_problems) != 0) [self refreshProblems];
+    else [self flushProblemsRefresh];
+}
+
+- (void)problemsViewWillHitTest:(AxyneProblemsView *)view
+{
+    (void)view;
+    [self flushProblemsRefresh];
+}
+
+- (void)problemsViewFilterChanged:(AxyneProblemsView *)view
+{
+    (void)view;
+    [self refreshProblems];
+}
+
+- (void)problemsView:(AxyneProblemsView *)view activateRowAtIndex:(size_t)index
+{
+    const AxyneProblemRow *row = [view rowAtIndex:index];
+    NSString *path;
+    size_t line;
+    size_t column;
+    BOOL utf16;
+    if (row == NULL) return;
+    if (row->kind == AXYNE_PROBLEM_ROW_GROUP) {
+        /* refreshProblems replaces the rows: `row` is not used afterwards. */
+        (void)axyne_problems_collapsed_set(&_problemsCollapsed, row->path,
+                                           !row->expanded, NULL);
+        [self refreshProblems];
+        return;
+    }
+    path = [NSString stringWithUTF8String:row->path != NULL ? row->path : ""];
+    line = row->line;
+    column = row->column;
+    utf16 = row->problem_index < _problems.count &&
+        _problems.items[row->problem_index].origin == AXYNE_PROBLEM_ORIGIN_LSP;
+    if (path == nil || [path length] == 0) return;
+    [self showProblemAtPath:path line:line column:column utf16:utf16];
+}
+
+/* Opens `path` (relative build paths resolve below the workspace root) unless
+ * it is already the active document, then moves the caret. */
+- (void)showProblemAtPath:(NSString *)path line:(size_t)line column:(size_t)column
+                    utf16:(BOOL)utf16
+{
+    AxyneDocument *doc = [self isEmptyState] ? NULL : [self activeDocument];
+    const char *target = [path fileSystemRepresentation];
+    if (doc == NULL || doc->path == NULL || !axyne_macos_same_file(doc->path, target)) {
+        NSString *resolved = path;
+        size_t previousCount = _documents.count;
+        size_t previousIndex = _documents.active_index;
+        if (![path isAbsolutePath] && _explorer.root != NULL) {
+            char *joined = axyne_problems_resolve_path(target, _explorer.root);
+            if (joined != NULL) {
+                NSString *candidate = [NSString stringWithUTF8String:joined];
+                if (candidate != nil) resolved = candidate;
+                free(joined);
+            }
+        }
+        [self openPath:resolved];
+        doc = [self isEmptyState] ? NULL : [self activeDocument];
+        if (doc == NULL) return;
+        /* openPath reports failures with an alert and keeps the old tab. */
+        if (_documents.count == previousCount && _documents.active_index == previousIndex &&
+            !axyne_macos_same_file(doc->path, [resolved fileSystemRepresentation]))
+            return;
+    }
+    [self moveCaretToProblemLine:line column:column utf16:utf16];
+}
+
+/* Moves the caret to a 1-based line/column and shows that line roughly in
+ * the middle of the editor. LSP columns are UTF-16 offsets; build columns
+ * are bytes. */
+- (void)moveCaretToProblemLine:(size_t)line column:(size_t)column utf16:(BOOL)utf16
+{
+    NSInteger lineCount;
+    NSInteger index;
+    NSInteger start;
+    NSInteger length;
+    NSInteger position;
+    if (_editorView == nil || line == 0 || [self activeIsImage]) return;
+    lineCount = [self sendEditorMessage:SCI_GETLINECOUNT wParam:0 lParam:0];
+    if (lineCount < 1) return;
+    index = line - 1 < (size_t)lineCount ? (NSInteger)(line - 1) : lineCount - 1;
+    start = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)index lParam:0];
+    length = [self sendEditorMessage:SCI_LINELENGTH wParam:(uintptr_t)index lParam:0];
+    position = start;
+    if (length > 0) {
+        char *buffer = (char *)malloc((size_t)length + 1);
+        if (buffer != NULL) {
+            NSInteger copied = [self sendEditorMessage:SCI_GETLINE wParam:(uintptr_t)index
+                                                lParam:(intptr_t)buffer];
+            if (copied < 0) copied = 0;
+            if (copied > length) copied = length;
+            position = start + (NSInteger)axyne_problems_column_offset(
+                buffer, (size_t)copied, column, utf16 ? 1 : 0);
+            free(buffer);
+        }
+    }
+    (void)[self sendEditorMessage:SCI_ENSUREVISIBLEENFORCEPOLICY
+                           wParam:(uintptr_t)index lParam:0];
+    (void)[self sendEditorMessage:SCI_SETEMPTYSELECTION wParam:(uintptr_t)position lParam:0];
+    (void)[self sendEditorMessage:SCI_SCROLLCARET wParam:0 lParam:0];
+    {
+        NSInteger visible = [self sendEditorMessage:SCI_VISIBLEFROMDOCLINE
+                                             wParam:(uintptr_t)index lParam:0];
+        NSInteger onScreen = [self sendEditorMessage:SCI_LINESONSCREEN wParam:0 lParam:0];
+        NSInteger first = visible - onScreen / 2;
+        (void)[self sendEditorMessage:SCI_SETFIRSTVISIBLELINE
+                               wParam:(uintptr_t)(first > 0 ? first : 0) lParam:0];
+    }
+    if ([self window] != nil)
+        [[self window] makeFirstResponder:[(id)_editorView content]];
+    [self setNeedsDisplay:YES];
+}
+
 - (NSRect)tabFrameAtIndex:(size_t)index
 {
     CGFloat x = [self sidebarWidth] - _tabScroll;
@@ -5575,7 +6810,9 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         if ([_gitPanel isHidden] == showGit) [_gitPanel setHidden:!showGit];
         if (!showGit) [_gitPanel unload];
     }
-    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - editorTop -
+    CGFloat outlineHeight = [self outlineHeight];
+    (void)axyne_outline_set_scroll(&_outline, (long)_outline.first_row, (int)outlineHeight);
+    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - outlineHeight - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
     BOOL terminal = _panelMode == 2;
@@ -5584,17 +6821,27 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         MAX(0, width - [self sidebarWidth] - 24),
         MAX(0, [self panelHeight] - 32 - (terminal ? 34 : 0)))];
     [_terminalScroll setHidden:_panelMode == 1];
+    [_problemsView setFrame:NSMakeRect([self sidebarWidth], bottomTop + 32,
+        MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32))];
+    [_problemsView setHidden:_panelMode != 1];
     [_terminalInput setFrame:NSMakeRect([self sidebarWidth] + 16, inputTop,
         MAX(0, width - [self sidebarWidth] - 88), 22)];
     [_terminalSend setFrame:NSMakeRect(width - 64, inputTop, 52, 22)];
     [_terminalInput setHidden:!terminal]; [_terminalSend setHidden:!terminal];
     [_terminalInput setBezeled:NO];
-    [_problemSummary setFrame:NSMakeRect([self sidebarWidth] + 16, bottomTop + 42,
-        MAX(0, width - [self sidebarWidth] - 32), 22)];
-    [_problemSummary setHidden:_panelMode != 1];
     [_outputTab setFrame:NSMakeRect([self sidebarWidth] + 8, bottomTop, 38, 32)];
-    [_problemsTab setFrame:NSMakeRect([self sidebarWidth] + 48, bottomTop, 38, 32)];
-    [_terminalTab setFrame:NSMakeRect([self sidebarWidth] + 88, bottomTop, 50, 32)];
+    {
+        /* The "문제  N" label grows with the count; the terminal tab follows. */
+        CGFloat problemsWidth = 38;
+        if (![[_problemsTab title] isEqualToString:@"문제"])
+            problemsWidth = MAX(38, ceil([[_problemsTab title] sizeWithAttributes:
+                @{NSFontAttributeName:[_problemsTab font] != nil ? [_problemsTab font]
+                    : [NSFont systemFontOfSize:11]}].width) + 16);
+        [_problemsTab setFrame:NSMakeRect([self sidebarWidth] + 48, bottomTop,
+                                          problemsWidth, 32)];
+        [_terminalTab setFrame:NSMakeRect([self sidebarWidth] + 50 + problemsWidth,
+                                          bottomTop, 50, 32)];
+    }
     [_terminalStart setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
     [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
     [_terminalStop setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
@@ -5639,7 +6886,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         [panelView setHidden:_panelHidden];
     if (_panelHidden) {
         [_terminalScroll setHidden:YES]; [_terminalInput setHidden:YES];
-        [_terminalSend setHidden:YES]; [_problemSummary setHidden:YES];
+        [_terminalSend setHidden:YES]; [_problemsView setHidden:YES];
     }
     [self layoutPalette];
     [self refreshSplitterTracking];
@@ -5835,7 +7082,8 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         NSRectFill(NSMakeRect(NSMinX([selected frame]), bottomTop + 29, NSWidth([selected frame]), 3));
         NSString *shell = _terminalRunner.executable == NULL ? @"" :
             [[NSString stringWithUTF8String:_terminalRunner.executable] lastPathComponent];
-        [self drawLabel:shell at:NSMakePoint([self sidebarWidth] + 148, bottomTop + 10)
+        [self drawLabel:shell at:NSMakePoint(MAX([self sidebarWidth] + 148,
+                NSMaxX([_terminalTab frame]) + 10), bottomTop + 10)
             size:11 color:muted family:@"SF Pro Text"];
     }
     if (_palette.active) [self drawPaletteFieldInRect:[_searchButton frame]];
@@ -5894,8 +7142,9 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     }
     if (!_explorerHidden && _sidebarTab == 0) {
         CGFloat explorerY = editorTop + AXYNE_UI_EXPLORER_HEADER;
+        CGFloat treeBottom = [self explorerTreeBottom];
         [NSGraphicsContext saveGraphicsState];
-        NSRectClip(NSMakeRect(0, explorerY, [self sidebarWidth] - 1, MAX(0, bottomTop - explorerY)));
+        NSRectClip(NSMakeRect(0, explorerY, [self sidebarWidth] - 1, MAX(0, treeBottom - explorerY)));
         if (_explorer.root == NULL) {
             [self drawLabel:@"폴더 열기…" at:NSMakePoint(16, explorerY + 3)
                 size:12 color:text family:@"SF Pro Text"];
@@ -5904,7 +7153,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
             NSUInteger pinnedCount = [self explorerPinnedRows:pinned];
             CGFloat listTop = explorerY;
             for (size_t i = (size_t)_explorerFirstRow; i < _explorer.count &&
-                explorerY + AXYNE_UI_ROW <= bottomTop; ++i, explorerY += AXYNE_UI_ROW)
+                explorerY + AXYNE_UI_ROW <= treeBottom; ++i, explorerY += AXYNE_UI_ROW)
                 [self drawExplorerNodeAtIndex:i y:explorerY light:light
                     reference:reference text:text muted:muted];
             /* Sticky ancestors: opaque sidebar background over the first rows
@@ -5923,6 +7172,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
             }
         }
         [NSGraphicsContext restoreGraphicsState];
+        [self drawOutlineAtTop:treeBottom light:light reference:reference];
     }
     NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"✗ 실행 실패 (%d)", _lastExitCode] :
         (_activeAction != 0 ? @"● 실행 중" : (_hasExitStatus ? @"✓ 실행 완료" : @"준비"));
@@ -5956,6 +7206,8 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
     if (_refreshBox != NULL) _refreshBox->target = nil;
+    [self cancelProblemsRefresh];
+    [self cancelOutlineRefresh];
     axyne_palette_ctl_destroy(&_palette);
     if (_gitRun != NULL) {
         AxyneMacGitRun *run = _gitRun;
@@ -5987,6 +7239,7 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
         axyne_watcher_release(_watcher);
     }
     axyne_explorer_destroy(&_explorer);
+    axyne_outline_destroy(&_outline);
     if (_menuTracking != nil) [self removeTrackingArea:_menuTracking];
     [_menuTracking release];
     if (_sidebarSplitterTracking != nil) [self removeTrackingArea:_sidebarSplitterTracking];
@@ -6031,7 +7284,14 @@ static NSDictionary *axyne_macos_tab_title_attributes(BOOL preview, NSColor *col
     [_buildButton release]; [_runButton release];
     [_targetButton release]; [_searchButton release];
     [_outputTab release]; [_problemsTab release]; [_terminalTab release];
-    [_clearOutput release]; [_problemSummary release];
+    [_clearOutput release];
+    [_problemsView setDelegate:nil];
+    [_problemsView removeFromSuperview];
+    [_problemsView release];
+    _problemsView = nil;
+    axyne_problems_destroy(&_problems);
+    axyne_problems_collapsed_destroy(&_problemsCollapsed);
+    axyne_build_feed_destroy(&_buildFeed);
     [_terminalScroll release];
     [_terminalOutput release];
     [_terminalInput release];
@@ -6388,7 +7648,6 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     case AXYNE_PALETTE_COMMAND_PANEL_TERMINAL:
         _panelMode = command == AXYNE_PALETTE_COMMAND_PANEL_OUTPUT ? 0 :
             (command == AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS ? 1 : 2);
-        [_problemSummary setStringValue:_lspStatus != nil ? _lspStatus : @"LSP 진단 없음"];
         [self setNeedsLayout:YES];
         [self setNeedsDisplay:YES];
         break;
