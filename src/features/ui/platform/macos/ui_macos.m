@@ -1835,6 +1835,7 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)showProblemAtPath:(NSString *)path line:(size_t)line column:(size_t)column
                     utf16:(BOOL)utf16;
 - (void)moveCaretToProblemLine:(size_t)line column:(size_t)column utf16:(BOOL)utf16;
+- (void)afterSaveAsFromPath:(const char *)oldPath;
 - (BOOL)outlineVisible;
 - (CGFloat)outlineHeight;
 - (CGFloat)explorerTreeBottom;
@@ -3353,17 +3354,23 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return NO;
     const char *utf8Path = [path UTF8String];
     AxyneError error;
+    AxyneDocument *previous = [self activeDocument];
+    char *oldPath = previous != NULL && !previous->is_untitled && previous->path != NULL
+        ? strdup(previous->path) : NULL;
     AxyneStatus status = axyne_documents_save_as(&_documents,
         _documents.active_index, utf8Path, &error);
     if (status != AXYNE_STATUS_OK) {
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
         NSString *detail = [NSString stringWithUTF8String:error.message];
+        free(oldPath);
         [alert setMessageText:@"Could not save file"];
         [alert setInformativeText:detail != nil ? detail : @""];
         [alert runModal];
         return NO;
     }
     (void)[self sendEditorMessage:SCI_SETSAVEPOINT wParam:0 lParam:0];
+    [self afterSaveAsFromPath:oldPath];
+    free(oldPath);
     [self refreshOutline]; /* Save As may change the file type */
     [self setNeedsDisplay:YES];
     [self updateWindowTitle];
@@ -6575,6 +6582,25 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (path == NULL || path[0] == '\0') return;
     axyne_problems_clear_source(&_problems, AXYNE_PROBLEM_ORIGIN_LSP, path);
     if (_problems.count != before) [self scheduleProblemsRefresh];
+}
+
+/* Save As moved the active document from `oldPath` (NULL for an untitled
+ * buffer) to its new path: the server forgets the old path, its LSP problems
+ * go away, and the list is rebuilt for the new active path. */
+- (void)afterSaveAsFromPath:(const char *)oldPath
+{
+    AxyneDocument *doc = [self activeDocument];
+    if (oldPath != NULL && oldPath[0] != '\0' &&
+        (doc == NULL || doc->path == NULL || !axyne_macos_same_file(oldPath, doc->path))) {
+        if (_lsp != NULL) {
+            AxyneDocument closed;
+            memset(&closed, 0, sizeof(closed));
+            closed.path = (char *)oldPath;
+            (void)axyne_lsp_did_close(_lsp, &closed, NULL); /* NOT_FOUND is fine */
+        }
+        [self clearLspProblemsForPath:oldPath];
+    }
+    [self refreshProblems];
 }
 
 /* A build or run step starts. `clear` is set for the first step of an

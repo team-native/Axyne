@@ -2711,6 +2711,25 @@ static int axyne_editor_ready_for_save(HWND window, AxyneWindowState *state)
     return 0;
 }
 
+/* Save As moved the active document from `old_path` (NULL for an untitled
+ * buffer) to its new path: the server forgets the old path, its LSP problems
+ * go away, and the list is rebuilt for the new active path. */
+static void axyne_after_save_as(AxyneWindowState *state, const char *old_path)
+{
+    AxyneDocument *doc = axyne_active(state);
+    if (old_path != NULL && old_path[0] != '\0' &&
+        (doc == NULL || doc->path == NULL || !axyne_problems_path_equal(old_path, doc->path))) {
+        if (state->lsp != NULL) {
+            AxyneDocument closed;
+            memset(&closed, 0, sizeof(closed));
+            closed.path = (char *)old_path;
+            (void)axyne_lsp_did_close(state->lsp, &closed, NULL); /* NOT_FOUND is fine */
+        }
+        axyne_problems_clear_lsp(state, old_path);
+    }
+    axyne_problems_refresh(state);
+}
+
 static int axyne_save_active(HWND window, AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
@@ -2720,6 +2739,7 @@ static int axyne_save_active(HWND window, AxyneWindowState *state)
     char *path = NULL;
     AxyneStatus status;
     AxyneError error;
+    int saved_as = doc->is_untitled;
     if (doc->is_untitled) {
         if (!axyne_choose_path(window, 1, &path)) return 0;
         status = axyne_documents_save_as(&state->documents,
@@ -2735,6 +2755,7 @@ static int axyne_save_active(HWND window, AxyneWindowState *state)
         return 0;
     }
     SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
+    if (saved_as) axyne_after_save_as(state, NULL); /* untitled: never in LSP */
     axyne_refresh_outline(state); /* Save As may change the file type */
     axyne_update_title(window, state);
     axyne_refresh_action_controls(state);
@@ -9504,16 +9525,21 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                     return 0;
                 }
                 AxyneError error;
+                AxyneDocument *active = axyne_active(state);
+                char *old_path = active != NULL && !active->is_untitled &&
+                    active->path != NULL ? _strdup(active->path) : NULL;
                 AxyneStatus status = axyne_documents_save_as(&state->documents,
                     state->documents.active_index, path, &error);
                 free(path);
                 if (status == AXYNE_STATUS_OK) {
                     SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
+                    axyne_after_save_as(state, old_path);
                     axyne_refresh_outline(state);
                     axyne_update_title(window, state);
                     axyne_refresh_action_controls(state);
                 } else MessageBoxA(window, error.message, "Axyne - Save failed",
                                    MB_OK | MB_ICONERROR);
+                free(old_path);
             }
         } else if (command == AXYNE_CMD_CLOSE)
             axyne_close_tab(window, state, state->documents.active_index);
