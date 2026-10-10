@@ -6,6 +6,7 @@
 
 #include "axyne/app_paths.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #include <wchar.h>
 static SRWLOCK log_lock = SRWLOCK_INIT;
 #define LOG_LOCK() AcquireSRWLockExclusive(&log_lock)
@@ -52,26 +55,50 @@ static wchar_t *wide_path(const char *utf8)
 static FILE *open_append(const char *path)
 {
 #ifdef _WIN32
+    /* FILE_SHARE_DELETE lets another Axyne instance rotate (rename) the log
+     * while this one holds it open. */
     wchar_t *wide = wide_path(path);
-    FILE *file = wide != NULL ? _wfopen(wide, L"ab") : NULL;
+    HANDLE handle;
+    int descriptor;
+    FILE *file;
+    if (wide == NULL) return NULL;
+    handle = CreateFileW(wide, FILE_APPEND_DATA,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    descriptor = _open_osfhandle((intptr_t)handle, _O_APPEND | _O_BINARY);
+    if (descriptor == -1) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    file = _fdopen(descriptor, "ab");
+    if (file == NULL) _close(descriptor);
     return file;
 #else
     return fopen(path, "ab");
 #endif
 }
 
-/* Replaces `to` with `from` (best effort). */
-static void replace_file(const char *from, const char *to)
+/* Replaces `to` with `from`; 1 on success. */
+static int replace_file(const char *from, const char *to)
 {
 #ifdef _WIN32
     wchar_t *a = wide_path(from), *b = wide_path(to);
-    if (a != NULL && b != NULL) (void)MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING);
+    int ok = a != NULL && b != NULL && MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING) != 0;
     free(a);
     free(b);
+    return ok;
 #else
-    (void)rename(from, to);
+    return rename(from, to) == 0;
 #endif
+}
+
+/* Current size of the open file (0 when unknown). */
+static size_t measure_file(FILE *file)
+{
+    long size = fseek(file, 0, SEEK_END) == 0 ? ftell(file) : -1;
+    return size > 0 ? (size_t)size : 0;
 }
 
 static void close_file(void)
@@ -92,7 +119,6 @@ static void reset_locked(void)
 static int open_locked(void)
 {
     char *directory;
-    long size;
     if (log_file != NULL) return 1;
     if (log_failed) return 0;
     if (log_directory_override != NULL) {
@@ -115,8 +141,7 @@ static int open_locked(void)
         log_failed = 1;
         return 0;
     }
-    size = fseek(log_file, 0, SEEK_END) == 0 ? ftell(log_file) : -1;
-    log_size = size > 0 ? (size_t)size : 0;
+    log_size = measure_file(log_file);
     return 1;
 }
 
@@ -131,11 +156,18 @@ static void rotate_locked(void)
     if (previous != NULL) {
         memcpy(previous, log_path, length);
         memcpy(previous + length, ".1", 3);
-        replace_file(log_path, previous);
+        (void)replace_file(log_path, previous);
         free(previous);
     }
     log_file = open_append(log_path);
-    if (log_file == NULL) log_failed = 1;
+    if (log_file == NULL) {
+        log_failed = 1;
+        return;
+    }
+    /* When the rename failed (e.g. another process holds the file without
+     * delete sharing) the reopened file is still the full one: measure it so
+     * the caller stops writing instead of growing it without bound. */
+    log_size = measure_file(log_file);
 }
 
 static size_t format_timestamp(char *buffer, size_t capacity)
@@ -190,7 +222,15 @@ void axyne_log_vwrite(AxyneLogLevel level, const char *component,
     LOG_LOCK();
     if (open_locked()) {
         size_t limit_bytes = log_max_bytes != 0 ? log_max_bytes : AXYNE_LOG_MAX_BYTES;
-        if (log_size != 0 && log_size + length > limit_bytes) rotate_locked();
+        if (log_size != 0 && log_size + length > limit_bytes) {
+            rotate_locked();
+            if (log_file != NULL && log_size != 0 && log_size + length > limit_bytes) {
+                /* Rotation failed: drop entries rather than exceed the limit
+                 * until the directory is reset. */
+                close_file();
+                log_failed = 1;
+            }
+        }
         if (log_file != NULL && fwrite(line, 1, length, log_file) == length) {
             log_size += length;
             (void)fflush(log_file);

@@ -118,6 +118,27 @@ int axyne_test_log(const char *root)
     }
 #endif
 
+    /* A rotation that cannot rename (axyne.log.1 is a non-empty directory)
+     * stops writing instead of growing past the limit. */
+    {
+        char blocker[512];
+        axyne_log_shutdown();
+        axyne_test_remove_file(file);
+        AXYNE_TEST_CHECK(axyne_test_make_directory(rotated));
+        AXYNE_TEST_CHECK(axyne_test_path(blocker, sizeof(blocker), rotated, "keep"));
+        AXYNE_TEST_CHECK(axyne_test_write(blocker, "x"));
+        axyne_log_set_directory(directory);
+        axyne_log_set_max_bytes(400);
+        for (int i = 0; i < 60; ++i) axyne_log_info("rotate", "blocked %02d padding padding", i);
+        AXYNE_TEST_CHECK(read_text(file, &text, &length));
+        AXYNE_TEST_CHECK(length > 0 && length <= 400);
+        axyne_fs_free(text);
+        text = NULL;
+        axyne_log_shutdown();
+        axyne_test_remove_file(blocker);
+        axyne_test_remove_directory(rotated);
+    }
+
     /* An unusable directory drops entries without failing. */
     AXYNE_TEST_CHECK(axyne_test_write(rotated, "not a directory"));
     axyne_log_set_directory(rotated);
