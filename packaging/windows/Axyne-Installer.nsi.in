@@ -125,9 +125,12 @@ FunctionEnd
     Call AxyneJournalWrite
 !macroend
 
-; Records a file about to be written: "N<TAB>path" when it is new, or moves
-; the existing file into $INSTDIR\.axyne-backup and records
-; "B<TAB>path<TAB>backup" so a cancelled install can restore it.
+; Records a file about to be written. A new file gets "N<TAB>path". An
+; existing file is moved into $INSTDIR\.axyne-backup first: "M<TAB>path<TAB>bak"
+; is written before the move (intent) and "B<TAB>path<TAB>bak" only after the
+; move succeeded, so a rollback never restores an unconfirmed or stale backup
+; over the current file. A stale backup that cannot be removed, or a file that
+; cannot be moved, aborts the install before anything is changed.
 Function AxyneBeforeWrite
     Exch $R0
     Push $R1
@@ -136,14 +139,19 @@ Function AxyneBeforeWrite
             IntOp $AxyneBackupCount $AxyneBackupCount + 1
             StrCpy $R1 "$INSTDIR\.axyne-backup\$AxyneBackupCount.bak"
             CreateDirectory "$INSTDIR\.axyne-backup"
-            !insertmacro AxyneJournal "B$\t$R0$\t$R1"
-            ; A stale backup left by an earlier run must not block the move.
-            Delete "$R1"
+            ${If} ${FileExists} "$R1"
+                Delete "$R1"
+                ${If} ${FileExists} "$R1"
+                    Abort
+                ${EndIf}
+            ${EndIf}
+            !insertmacro AxyneJournal "M$\t$R0$\t$R1"
             ClearErrors
             Rename "$R0" "$R1"
             ${If} ${Errors}
                 Abort
             ${EndIf}
+            !insertmacro AxyneJournal "B$\t$R0$\t$R1"
         ${Else}
             !insertmacro AxyneJournal "N$\t$R0"
         ${EndIf}

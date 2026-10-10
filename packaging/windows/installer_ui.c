@@ -48,7 +48,8 @@ enum { RESULT_RUNNING, RESULT_FAILED, RESULT_CANCELLED };
 /* One line of the backend's rollback journal (see Axyne-Installer.nsi.in):
  *   T<TAB>kib          total payload size
  *   N<TAB>path         new file about to be written
- *   B<TAB>path<TAB>bak existing file moved to bak before being replaced
+ *   M<TAB>path<TAB>bak about to move an existing file to bak (intent)
+ *   B<TAB>path<TAB>bak the move succeeded (confirmed), path will be replaced
  *   D<TAB>dir          directory created by the backend
  *   K                  uninstall registry key created
  *   V<TAB>name<TAB>old previous registry value (empty = did not exist) */
@@ -76,6 +77,8 @@ static WCHAR g_step[MAX_PATH];
 static WCHAR g_log[LOG_LINES][MAX_PATH];
 static int g_log_count;
 static WCHAR g_eta[64];
+static BOOL g_restore_incomplete;
+static WCHAR g_backup_folder[MAX_PATH];
 static BOOL g_license_ok;
 static BOOL g_launch = TRUE;
 static BOOL g_start_menu = TRUE;
@@ -381,9 +384,17 @@ static void install_page(HDC dc) {
         BOOL cancelled = g_install_result == RESULT_CANCELLED;
         text(dc, cancelled ? L"설치를 취소했습니다" : L"설치하지 못했습니다", 219, 58, 430, 30,
              RGB(255,255,255), 20, 700);
-        text(dc, L"이번 설치에서 만든 파일을 삭제하고, 덮어쓴 기존 파일을 원래대로 복원했습니다.",
-             219, 101, 433, 40, MUTED, 13, 400);
-        if (!cancelled)
+        if (g_restore_incomplete) {
+            text(dc, L"일부 기존 파일을 원래 위치로 복원하지 못했습니다. 아래 백업 폴더의 restore-list.txt에 각 파일의 원래 위치가 적혀 있습니다.",
+                 219, 101, 433, 40, DANGER, 13, 400);
+            fill(dc, SIDEBAR, 219, 147, 562, 177); frame(dc, BORDER, 219, 147, 562, 177);
+            path_text(dc, g_backup_folder, 230, 154, 322, 18, TEXT, 12);
+            button(dc, L"폴더 열기", 571, 147, 81, BUTTON_SECONDARY);
+        } else {
+            text(dc, L"이번 설치에서 만든 파일을 삭제하고, 덮어쓴 기존 파일을 원래대로 복원했습니다.",
+                 219, 101, 433, 40, MUTED, 13, 400);
+        }
+        if (!cancelled && !g_restore_incomplete)
             text(dc, L"실행 중인 Axyne를 닫았는지, 설치 위치에 쓸 수 있는지 확인한 뒤 다시 시도하세요.",
                  219, 147, 433, 40, MUTED, 12, 400);
         fill(dc, FOOTER, 1, 403, 679, 459); line(dc, BORDER, 1, 403, 679, 403);
@@ -740,26 +751,72 @@ static void restore_registry_value(const WCHAR *name, const WCHAR *old) {
     RegCloseKey(key);
 }
 
-/* Undoes this run in reverse journal order: new files are deleted, replaced
- * files are moved back from the backup folder, new folders and the uninstall
- * key are removed and overwritten registry values get their old value. */
+/* Moves a backup back over its original location, retrying briefly when a
+ * scanner or indexer holds the file. */
+static BOOL move_back(const WCHAR *backup, const WCHAR *target) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (MoveFileExW(backup, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) return TRUE;
+        Sleep(100);
+    }
+    return FALSE;
+}
+
+static BOOL has_confirmation(const JournalEntry *entries, int count, int index) {
+    for (int j = index + 1; j < count; ++j)
+        if (entries[j].kind == L'B' && lstrcmpiW(entries[j].first, entries[index].first) == 0 &&
+            lstrcmpiW(entries[j].second, entries[index].second) == 0) return TRUE;
+    return FALSE;
+}
+
+/* Writes "<backup> -> <original>" lines (UTF-8 with BOM) for the backups
+ * that could not be moved back, next to them in the backup folder. */
+static void write_restore_list(const JournalEntry *entries, const int *failed, int failed_count) {
+    WCHAR path[MAX_PATH], line_text[MAX_PATH * 2 + 8];
+    char bytes[(MAX_PATH * 2 + 8) * 3];
+    DWORD written;
+    HANDLE file;
+    StringCchPrintfW(path, MAX_PATH, L"%s\\restore-list.txt", g_backup_folder);
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    WriteFile(file, "\xEF\xBB\xBF", 3, &written, NULL);
+    for (int i = 0; i < failed_count; ++i) {
+        int length;
+        StringCchPrintfW(line_text, MAX_PATH * 2 + 8, L"%s -> %s\r\n", entries[failed[i]].second,
+                         entries[failed[i]].first);
+        length = WideCharToMultiByte(CP_UTF8, 0, line_text, -1, bytes, (int)sizeof(bytes), NULL, NULL);
+        if (length > 1) WriteFile(file, bytes, (DWORD)(length - 1), &written, NULL);
+    }
+    CloseHandle(file);
+}
+
+/* Undoes this run in reverse journal order: new files are deleted; a
+ * confirmed backup (B) is moved back over the replaced file; an unconfirmed
+ * move (M without B) is moved back only when the original is missing, i.e.
+ * the rename happened but was not yet confirmed; new folders and the
+ * uninstall key are removed and overwritten registry values get their old
+ * value. When a backup cannot be moved back, the backup folder is kept and
+ * restore-list.txt records where each file belongs. */
 static void rollback_install(void) {
     WCHAR *buffer = read_journal();
     JournalEntry *entries = (JournalEntry *)HeapAlloc(GetProcessHeap(), 0,
                                                       sizeof(JournalEntry) * MAX_JOURNAL_ENTRIES);
+    int failed[MAX_JOURNAL_ENTRIES], failed_count = 0;
+    g_restore_incomplete = FALSE;
+    StringCchPrintfW(g_backup_folder, MAX_PATH, L"%s\\.axyne-backup", g_install_path);
     if (buffer && entries) {
         int count = parse_journal(buffer, entries, MAX_JOURNAL_ENTRIES);
         for (int i = count - 1; i >= 0; --i) {
             const JournalEntry *entry = &entries[i];
+            BOOL backup_exists = entry->second[0] && GetFileAttributesW(entry->second) != INVALID_FILE_ATTRIBUTES;
             if (entry->kind == L'N' && entry->first[0]) {
                 SetFileAttributesW(entry->first, FILE_ATTRIBUTE_NORMAL);
                 DeleteFileW(entry->first);
-            } else if (entry->kind == L'B' && entry->second[0] &&
-                       GetFileAttributesW(entry->second) != INVALID_FILE_ATTRIBUTES) {
+            } else if (entry->kind == L'B' && backup_exists) {
                 SetFileAttributesW(entry->first, FILE_ATTRIBUTE_NORMAL);
-                DeleteFileW(entry->first);
-                MoveFileExW(entry->second, entry->first,
-                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+                if (!move_back(entry->second, entry->first)) failed[failed_count++] = i;
+            } else if (entry->kind == L'M' && backup_exists && !has_confirmation(entries, count, i) &&
+                       GetFileAttributesW(entry->first) == INVALID_FILE_ATTRIBUTES) {
+                if (!move_back(entry->second, entry->first)) failed[failed_count++] = i;
             } else if (entry->kind == L'D' && entry->first[0]) {
                 RemoveDirectoryW(entry->first);
             } else if (entry->kind == L'K') {
@@ -769,10 +826,14 @@ static void rollback_install(void) {
                 restore_registry_value(entry->first, entry->second);
             }
         }
+        if (failed_count > 0) {
+            g_restore_incomplete = TRUE;
+            write_restore_list(entries, failed, failed_count);
+        }
     }
     if (entries) HeapFree(GetProcessHeap(), 0, entries);
     if (buffer) HeapFree(GetProcessHeap(), 0, buffer);
-    delete_backup_folder();
+    if (!g_restore_incomplete) delete_backup_folder();
     for (int i = g_created_dir_count - 1; i >= 0; --i) RemoveDirectoryW(g_created_dirs[i]);
     g_created_dir_count = 0;
     delete_temporary_files();
@@ -904,6 +965,9 @@ static void on_click(int x, int y) {
     } else if (g_page == PAGE_COMPONENTS) {
         if (inside(x, y, 219, 160, 652, 206)) g_start_menu = !g_start_menu;
         else if (inside(x, y, 219, 206, 652, 244)) g_desktop = !g_desktop;
+    } else if (g_page == PAGE_INSTALL && g_install_result != RESULT_RUNNING && g_restore_incomplete &&
+               inside(x, y, 571, 147, 652, 177)) {
+        ShellExecuteW(g_window, L"open", g_backup_folder, NULL, NULL, SW_SHOWNORMAL);
     } else if (g_page == PAGE_DONE && inside(x, y, 219, 228, 652, 256)) {
         g_launch = !g_launch;
     }
