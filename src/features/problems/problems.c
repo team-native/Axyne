@@ -434,6 +434,55 @@ size_t axyne_problems_summary(const AxyneProblemList *list, char *buffer,
     return axyne_problems_format_summary(&counts, buffer, capacity);
 }
 
+void axyne_problems_counts_for_path(const AxyneProblemList *list,
+                                    const char *path, AxyneProblemCounts *out)
+{
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    if (list == NULL || path == NULL || path[0] == '\0') return;
+    for (size_t i = 0; i < list->count; ++i) {
+        if (!axyne_problems_path_equal(list->items[i].path, path)) continue;
+        switch (list->items[i].severity) {
+        case AXYNE_PROBLEM_ERROR: ++out->errors; break;
+        case AXYNE_PROBLEM_WARNING: ++out->warnings; break;
+        case AXYNE_PROBLEM_INFORMATION: ++out->information; break;
+        default: ++out->hints; break;
+        }
+        ++out->total;
+    }
+}
+
+int axyne_problems_counts_worst(const AxyneProblemCounts *counts)
+{
+    if (counts == NULL) return 0;
+    if (counts->errors != 0) return AXYNE_PROBLEM_ERROR;
+    if (counts->warnings != 0) return AXYNE_PROBLEM_WARNING;
+    if (counts->information != 0) return AXYNE_PROBLEM_INFORMATION;
+    if (counts->hints != 0) return AXYNE_PROBLEM_HINT;
+    return 0;
+}
+
+size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
+                                size_t capacity)
+{
+    char text[64];
+    int written;
+    if (counts == NULL || counts->total == 0)
+        written = snprintf(text, sizeof(text), "문제");
+    else
+        written = snprintf(text, sizeof(text), "문제  %lu",
+                           (unsigned long)counts->total);
+    if (written < 0) written = 0;
+    if ((size_t)written >= sizeof(text)) written = (int)sizeof(text) - 1;
+    text[written] = '\0';
+    if (buffer != NULL && capacity != 0) {
+        size_t copy = (size_t)written < capacity - 1 ? (size_t)written : capacity - 1;
+        memcpy(buffer, text, copy);
+        buffer[copy] = '\0';
+    }
+    return (size_t)written;
+}
+
 /* ---- filter --------------------------------------------------------------- */
 
 static int contains_folded(const char *text, const char *query, size_t query_length)
