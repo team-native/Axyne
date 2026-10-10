@@ -14,6 +14,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <share.h>
 
 static wchar_t *axyne_wide(const char *utf8)
 {
@@ -712,7 +713,8 @@ AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
         if (wide == NULL)
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
-        if (_wfopen_s(&file, wide, L"rb") != 0) file = NULL;
+        file = _wfsopen(wide, L"rb", _SH_DENYNO);
+        if (file == NULL) file = NULL;
         free(wide);
     }
 #else
@@ -779,7 +781,8 @@ AxyneStatus axyne_fs_read_head(const char *utf8_path, size_t max_bytes,
         if (wide == NULL)
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
-        if (_wfopen_s(&file, wide, L"rb") != 0) file = NULL;
+        file = _wfsopen(wide, L"rb", _SH_DENYNO);
+        if (file == NULL) file = NULL;
         free(wide);
     }
 #else
@@ -829,7 +832,8 @@ AxyneStatus axyne_fs_file_contains_nul(const char *utf8_path,
         if (wide == NULL)
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
-        if (_wfopen_s(&file, wide, L"rb") != 0) file = NULL;
+        file = _wfsopen(wide, L"rb", _SH_DENYNO);
+        if (file == NULL) file = NULL;
         free(wide);
     }
 #else
