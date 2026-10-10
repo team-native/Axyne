@@ -467,7 +467,10 @@ size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
 {
     /* Keep the public text UTF-8 even when MSVC's execution character set is
      * configured independently from the source file. */
-    static const char prefix[] = "\xEB\xAC\xB8\xEC\xA0\x9C";
+    static const char prefix[] = {
+        (char)0xEB, (char)0xAC, (char)0xB8,
+        (char)0xEC, (char)0xA0, (char)0x9C, '\0'
+    };
     char text[64];
     size_t written = sizeof(prefix) - 1;
     if (counts == NULL || counts->total == 0) {
