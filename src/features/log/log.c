@@ -70,7 +70,10 @@ static FILE *open_append(const char *path)
 {
 #ifdef _WIN32
     wchar_t *wide = wide_path(path);
-    if (wide == NULL) return NULL;
+    if (wide == NULL) {
+        fprintf(stderr, "log UTF-8 path conversion failed: path=%s\n", path);
+        return NULL;
+    }
     /* Use the wide CRT entry point so UTF-8 paths work without relying on
      * the process code page.  _SH_DENYNO permits concurrent readers/writers;
      * rotation closes the stream before renaming the file. */
@@ -185,6 +188,8 @@ static int open_locked(void)
     free(log_path);
     log_path = axyne_app_path_join(directory, "axyne.log");
     axyne_app_path_free(directory);
+    if (log_path == NULL)
+        fprintf(stderr, "log path join failed\n");
     log_file = log_path != NULL ? open_append(log_path) : NULL;
     if (log_file == NULL) {
         log_failed = 1;
