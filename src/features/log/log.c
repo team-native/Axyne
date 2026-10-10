@@ -56,39 +56,12 @@ static wchar_t *wide_path(const char *utf8)
 static FILE *open_append(const char *path)
 {
 #ifdef _WIN32
-    /* FILE_SHARE_DELETE lets another Axyne instance rotate (rename) the log
-     * while this one holds it open. */
     wchar_t *wide = wide_path(path);
-    HANDLE handle;
-    int descriptor;
-    FILE *file;
     if (wide == NULL) return NULL;
-    /* The logger measures the existing file before writing.  Request read
-     * access as well as append access so the CRT stream remains readable on
-     * Windows; a write-only CRT descriptor can otherwise make the initial
-     * open appear successful while later file operations fail. */
-    handle = CreateFileW(wide, FILE_APPEND_DATA | GENERIC_READ,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (handle == INVALID_HANDLE_VALUE) {
-        /* Keep a CRT fallback for runners where the inherited handle cannot
-         * be adapted by _open_osfhandle (notably some MSVC configurations). */
-        FILE *fallback = _wfsopen(wide, L"a+b", _SH_DENYNO);
-        free(wide);
-        return fallback;
-    }
-    descriptor = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_APPEND | _O_BINARY);
-    if (descriptor == -1) {
-        CloseHandle(handle);
-        file = _wfsopen(wide, L"a+b", _SH_DENYNO);
-        free(wide);
-        return file;
-    }
-    file = _fdopen(descriptor, "a+b");
-    if (file == NULL) {
-        _close(descriptor);
-        file = _wfsopen(wide, L"a+b", _SH_DENYNO);
-    }
+    /* Use the wide CRT entry point so UTF-8 paths work without relying on
+     * the process code page.  _SH_DENYNO permits concurrent readers/writers;
+     * rotation closes the stream before renaming the file. */
+    FILE *file = _wfsopen(wide, L"a+b", _SH_DENYNO);
     free(wide);
     return file;
 #else
