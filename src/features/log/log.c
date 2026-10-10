@@ -102,7 +102,6 @@ static FILE *open_append(const char *path)
             CloseHandle(handle);
         }
     }
-    }
     file = _wfsopen(wide, L"a+b", _SH_DENYNO);
     if (file == NULL) file = fopen(path, "a+b");
     if (file == NULL) {
