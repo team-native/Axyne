@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <fcntl.h>
 #include <io.h>
+#include <share.h>
 #include <wchar.h>
 static SRWLOCK log_lock = SRWLOCK_INIT;
 #define LOG_LOCK() AcquireSRWLockExclusive(&log_lock)
@@ -69,15 +70,26 @@ static FILE *open_append(const char *path)
     handle = CreateFileW(wide, FILE_APPEND_DATA | GENERIC_READ,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    free(wide);
-    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    if (handle == INVALID_HANDLE_VALUE) {
+        /* Keep a CRT fallback for runners where the inherited handle cannot
+         * be adapted by _open_osfhandle (notably some MSVC configurations). */
+        FILE *fallback = _wfsopen(wide, L"a+b", _SH_DENYNO);
+        free(wide);
+        return fallback;
+    }
     descriptor = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_APPEND | _O_BINARY);
     if (descriptor == -1) {
         CloseHandle(handle);
-        return NULL;
+        file = _wfsopen(wide, L"a+b", _SH_DENYNO);
+        free(wide);
+        return file;
     }
     file = _fdopen(descriptor, "a+b");
-    if (file == NULL) _close(descriptor);
+    if (file == NULL) {
+        _close(descriptor);
+        file = _wfsopen(wide, L"a+b", _SH_DENYNO);
+    }
+    free(wide);
     return file;
 #else
     return fopen(path, "ab");
