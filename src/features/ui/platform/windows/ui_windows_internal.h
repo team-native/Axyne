@@ -297,6 +297,12 @@ typedef struct AxyneWindowState {
      * axyne_win_apply_preferences). */
     AxyneKeymap keymap;
     int keymap_ready;
+    /* Set by the Debug category while its session runs: debug-context keys
+     * (F5 계속, F10/F11 steps) apply. The base debugger counts as well. */
+    int debug_context;
+    /* Transient status-bar text (chord hint, feature notices), UTF-8. */
+    char status_text[192];
+    int chord_hint_shown; /* status_text holds the chord hint */
     struct AxyneWinFileUi *file_ui;
     struct AxyneWinEditUi *edit_ui;
     struct AxyneWinViewUi *view_ui;
@@ -336,6 +342,8 @@ typedef struct AxyneWinMenu AxyneWinMenu;
 
 /* WM_COMMAND id of registry command `id` in the menus. */
 enum { AXYNE_WIN_COMMAND_ID_BASE = 3000 };
+/* Base timer that clears the chord hint (Ctrl+K ...). */
+enum { AXYNE_WIN_CHORD_TIMER_ID = 5123 };
 #define AXYNE_WIN_COMMAND_MENU_ID(id) ((UINT)(AXYNE_WIN_COMMAND_ID_BASE + (int)(id)))
 
 typedef struct AxyneWinFeature {
@@ -438,6 +446,20 @@ size_t axyne_win_command_key_text(const AxyneWindowState *state, AxyneCommandId 
  * preferences (called by axyne_win_apply_preferences). */
 void axyne_win_keymap_rebuild(AxyneWindowState *state);
 void axyne_win_keymap_destroy(AxyneWindowState *state);
+/* Key-down routing (WM_KEYDOWN/WM_SYSKEYDOWN virtual key): feeds the key map
+ * and runs the bound command; 1 = consumed. Chords show the hint
+ * "(Ctrl+K) 두 번째 키를 기다리는 중…" for 1.5 s. AltGr (right Alt reported as
+ * Ctrl+Alt) is text input. Commands that are disabled leave the key to the
+ * focused control, except the 11 legacy-action shortcuts (consumed as
+ * before) and the second stroke of a chord. */
+int axyne_win_handle_key(AxyneWindowState *state, WPARAM virtual_key);
+/* Palette text field: only the palette shortcuts (파일 이동, 명령 팔레트). */
+int axyne_win_palette_key(AxyneWindowState *state, WPARAM virtual_key);
+void axyne_win_chord_timer(AxyneWindowState *state);
+/* Non-zero while debug-context keys apply. */
+int axyne_win_debugging(AxyneWindowState *state);
+/* Sets (NULL or "" clears) the transient status-bar text. */
+void axyne_win_show_status_text(AxyneWindowState *state, const char *utf8);
 /* Fills the popup of menu-bar item `index` (0 파일 ... 6 도움말). */
 void axyne_win_menu_bar_fill(AxyneWindowState *state, int index, AxyneWinMenu *menu);
 

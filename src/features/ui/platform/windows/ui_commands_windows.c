@@ -1,6 +1,9 @@
 #include "ui_windows_internal.h"
 
+#include <stdio.h>
 #include <string.h>
+
+#include "axyne/ui_design.h"
 
 /* Base registry/feature glue of the Windows UI: the feature table and the
  * hook fan-out that ui_windows.c calls at fixed points, registry command
@@ -497,4 +500,131 @@ void axyne_win_menu_bar_fill(AxyneWindowState *state, int index, AxyneWinMenu *m
             break;
         }
     }
+}
+
+/* ---- keyboard dispatch ---------------------------------------------------- */
+
+void axyne_win_show_status_text(AxyneWindowState *state, const char *utf8)
+{
+    if (state == NULL) return;
+    (void)snprintf(state->status_text, sizeof(state->status_text), "%s",
+                   utf8 != NULL ? utf8 : "");
+    if (state->main_window != NULL && state->client_height > 0) {
+        RECT status = {0, state->client_height - AXYNE_UI_STATUS, state->client_width,
+                       state->client_height};
+        InvalidateRect(state->main_window, &status, FALSE);
+    }
+}
+
+int axyne_win_debugging(AxyneWindowState *state)
+{
+    return state != NULL && (state->debug_context ||
+                             axyne_debugger_is_active(&state->debugger));
+}
+
+static AxyneKeyStroke axyne_win_stroke(WPARAM virtual_key)
+{
+    AxyneKeyStroke stroke;
+    int control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    int alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    stroke.key = axyne_key_from_windows_vk((unsigned int)virtual_key);
+    stroke.mods = 0;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) stroke.mods |= AXYNE_KEYMOD_SHIFT;
+    if (control) stroke.mods |= AXYNE_KEYMOD_CTRL;
+    if (alt) stroke.mods |= AXYNE_KEYMOD_ALT;
+    /* AltGr reports as Ctrl+Alt with the right Alt down; it types text. */
+    if (control && alt && (GetKeyState(VK_RMENU) & 0x8000) != 0)
+        stroke.mods |= AXYNE_KEYMOD_ALTGR;
+    return stroke;
+}
+
+static void axyne_win_chord_hint(AxyneWindowState *state, uint64_t now)
+{
+    char hint[sizeof(state->status_text)];
+    if (axyne_keymap_chord_hint(&state->keymap, now, hint, sizeof(hint)) == 0) hint[0] = '\0';
+    if (hint[0] != '\0') {
+        axyne_win_show_status_text(state, hint);
+        state->chord_hint_shown = 1;
+        if (state->main_window != NULL)
+            (void)SetTimer(state->main_window, AXYNE_WIN_CHORD_TIMER_ID,
+                           AXYNE_KEYMAP_CHORD_TIMEOUT_MS + 20u, NULL);
+        return;
+    }
+    if (!state->chord_hint_shown) return;
+    state->chord_hint_shown = 0;
+    if (state->main_window != NULL) KillTimer(state->main_window, AXYNE_WIN_CHORD_TIMER_ID);
+    axyne_win_show_status_text(state, NULL);
+}
+
+void axyne_win_chord_timer(AxyneWindowState *state)
+{
+    uint64_t now;
+    if (state == NULL) return;
+    now = GetTickCount64();
+    if (state->keymap_ready && !axyne_keymap_pending(&state->keymap, now, NULL))
+        axyne_keymap_cancel_pending(&state->keymap);
+    if (state->keymap_ready) axyne_win_chord_hint(state, now);
+}
+
+/* Runs the command a shortcut resolved to; 1 = the key is consumed. */
+static int axyne_win_run_key_command(AxyneWindowState *state, AxyneCommandId command,
+                                     int completed_chord)
+{
+    const AxyneCommandInfo *info = axyne_command_info(command);
+    AxyneWinCommandState feature;
+    if (axyne_win_command_enabled(state, command)) {
+        (void)axyne_win_dispatch(state, command);
+        return 1;
+    }
+    if (completed_chord) return 1;
+    /* The 11 legacy-action shortcuts were always consumed and ran the base
+     * action, which reports why it cannot run (busy, unsaved, ...) or does
+     * nothing in the empty state. A feature that owns the command decides
+     * through its enabled state instead. */
+    if (info != NULL && info->legacy_action >= 0 &&
+        !axyne_win_hooks_command_state(state, command, &feature)) {
+        (void)axyne_win_base_command(state, command);
+        return 1;
+    }
+    return 0;
+}
+
+int axyne_win_handle_key(AxyneWindowState *state, WPARAM virtual_key)
+{
+    AxyneCommandId command = AXYNE_COMMAND_NONE;
+    AxyneKeymapResult result;
+    uint64_t now;
+    int was_pending;
+    if (state == NULL || !state->keymap_ready) return 0;
+    now = GetTickCount64();
+    was_pending = axyne_keymap_pending(&state->keymap, now, NULL);
+    result = axyne_keymap_feed(&state->keymap, axyne_win_stroke(virtual_key), now,
+                               axyne_win_debugging(state) ? AXYNE_KEYMAP_CONTEXT_DEBUGGING : 0u,
+                               &command);
+    axyne_win_chord_hint(state, now);
+    switch (result) {
+    case AXYNE_KEYMAP_PENDING:
+    case AXYNE_KEYMAP_ABORTED:
+        return 1;
+    case AXYNE_KEYMAP_COMMAND:
+        return axyne_win_run_key_command(state, command, was_pending);
+    default:
+        return 0;
+    }
+}
+
+int axyne_win_palette_key(AxyneWindowState *state, WPARAM virtual_key)
+{
+    AxyneKeySequence sequence;
+    AxyneCommandId command;
+    if (state == NULL || !state->keymap_ready) return 0;
+    memset(&sequence, 0, sizeof(sequence));
+    sequence.strokes[0] = axyne_win_stroke(virtual_key);
+    sequence.count = 1;
+    if ((sequence.strokes[0].mods & AXYNE_KEYMOD_ALTGR) != 0) return 0;
+    command = axyne_keymap_lookup(&state->keymap, &sequence, 0);
+    if (command != AXYNE_COMMAND_VIEW_QUICK_OPEN && command != AXYNE_COMMAND_VIEW_COMMAND_PALETTE)
+        return 0;
+    (void)axyne_win_dispatch(state, command);
+    return 1;
 }

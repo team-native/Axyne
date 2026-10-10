@@ -384,8 +384,6 @@ static void axyne_palette_open(HWND window, AxyneWindowState *state,
                                const char *initial);
 static int axyne_palette_document(void *user, char **path, char **text,
                                   size_t *length, size_t *line_count);
-static void axyne_palette_menu_label(wchar_t *buffer, size_t capacity,
-                                     const wchar_t *title);
 
 static wchar_t *axyne_wide(const char *utf8)
 {
@@ -2241,85 +2239,6 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     return 1;
 }
 
-static int axyne_windows_binding_matches(const AxyneWindowState *state,
-                                         AxynePreferenceAction action,
-                                         WPARAM key)
-{
-    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
-        &state->preferences, action);
-    unsigned int modifiers = 0;
-    if (binding == NULL || !binding->enabled) return 0;
-    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
-    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
-    if ((GetKeyState(VK_MENU) & 0x8000) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_ALT;
-    {
-        unsigned int required = binding->modifiers;
-        if ((required & AXYNE_KEY_MODIFIER_COMMAND) != 0)
-            required = (required & ~AXYNE_KEY_MODIFIER_COMMAND) |
-                       AXYNE_KEY_MODIFIER_CONTROL;
-        if (required != modifiers) return 0;
-    }
-    if (strlen(binding->key) == 1)
-        return toupper((unsigned char)binding->key[0]) == toupper((int)key);
-    return (key == VK_F5 && _stricmp(binding->key, "F5") == 0);
-}
-
-/* Ctrl+Shift+P: the quick-file binding plus Shift opens the palette with ">". */
-static int axyne_windows_palette_shift_matches(const AxyneWindowState *state,
-                                               WPARAM key)
-{
-    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
-        &state->preferences, AXYNE_ACTION_QUICK_FILE);
-    unsigned int modifiers = 0, required;
-    if (binding == NULL || !binding->enabled || strlen(binding->key) != 1) return 0;
-    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
-    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
-    if ((GetKeyState(VK_MENU) & 0x8000) != 0) modifiers |= AXYNE_KEY_MODIFIER_ALT;
-    required = binding->modifiers;
-    if ((required & AXYNE_KEY_MODIFIER_COMMAND) != 0)
-        required = (required & ~AXYNE_KEY_MODIFIER_COMMAND) | AXYNE_KEY_MODIFIER_CONTROL;
-    if ((required & AXYNE_KEY_MODIFIER_SHIFT) != 0) return 0;
-    if (modifiers != (required | AXYNE_KEY_MODIFIER_SHIFT)) return 0;
-    return toupper((unsigned char)binding->key[0]) == toupper((int)key);
-}
-
-static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key);
-
-static int axyne_palette_handle_open_key(HWND window, AxyneWindowState *state,
-                                         WPARAM key)
-{
-    if (axyne_windows_palette_shift_matches(state, key)) {
-        axyne_palette_open(window, state, ">");
-        return 1;
-    }
-    if (axyne_windows_binding_matches(state, AXYNE_ACTION_QUICK_FILE, key)) {
-        axyne_palette_open(window, state, "");
-        return 1;
-    }
-    return 0;
-}
-
-static int axyne_handle_key(HWND window, AxyneWindowState *state, WPARAM key)
-{
-    /* Document commands are consumed but do nothing in the empty state. */
-    int empty = axyne_empty_state(state);
-    if (axyne_palette_handle_open_key(window, state, key)) return 1;
-    if (axyne_windows_binding_matches(state, AXYNE_ACTION_NEW, key)) axyne_new_document(window, state);
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_OPEN, key)) axyne_open_document(window, state, NULL);
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_SAVE, key)) { if (!empty) (void)axyne_save_active(window, state); }
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_CLOSE, key)) { if (!empty) axyne_close_tab(window, state, state->documents.active_index); }
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_FIND, key)) { if (!empty) axyne_find(window, state, 0, 0); }
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_REPLACE, key)) { if (!empty) axyne_find(window, state, 1, 0); }
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_SEARCH_WORKSPACE, key)) axyne_search_folder(window, state, 0);
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_BUILD, key)) { if (!empty) axyne_start_action(window, state, 0); }
-    else if (axyne_windows_binding_matches(state, AXYNE_ACTION_RUN, key)) { if (!empty) axyne_start_action(window, state, 1); }
-    else return axyne_action_key(window, state, key);
-    return 1;
-}
-
 static int axyne_choose_folder(HWND owner, char **root)
 {
     BROWSEINFOW info = {0}; info.hwndOwner = owner;
@@ -3222,56 +3141,6 @@ static int axyne_action_command(HWND window, AxyneWindowState *state, UINT comma
         break;
     default: break;
     }
-    return 1;
-}
-
-/* Keyboard shortcuts for the actions above. Alt combinations arrive as
- * WM_SYSKEYDOWN, which the message loop also routes here. A shortcut whose
- * command is currently unavailable is left to the focused control. */
-static int axyne_action_key(HWND window, AxyneWindowState *state, WPARAM key)
-{
-    int control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    int shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    int alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-    /* AltGr reports as Ctrl+Alt; it types characters, never a shortcut. */
-    int altgr = (GetKeyState(VK_RMENU) & 0x8000) != 0;
-    UINT command = 0;
-    if (control && !alt && !shift) {
-        if (key == 'G') command = AXYNE_CMD_GOTO_LINE;
-        else if (key == VK_OEM_2) command = AXYNE_CMD_TOGGLE_COMMENT;
-        else if (key == 'D') command = AXYNE_CMD_DUPLICATE_LINE;
-        else if (key == 'J') command = AXYNE_CMD_VIEW_PANEL;
-        else if (key == VK_OEM_PLUS || key == VK_ADD) command = AXYNE_CMD_ZOOM_IN;
-        else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) command = AXYNE_CMD_ZOOM_OUT;
-        else if (key == '0' || key == VK_NUMPAD0) command = AXYNE_CMD_ZOOM_RESET;
-        else if (key == VK_OEM_3) command = AXYNE_CMD_PANEL_TERMINAL;
-    } else if (control && alt && !shift && !altgr) {
-        /* Handled here rather than in the window procedure's WM_KEYDOWN,
-         * which only runs while the main window itself has focus, not the
-         * editor. */
-        if (key == 'D') command = AXYNE_CMD_LSP_DEFINITION;
-        else if (key == 'R') command = AXYNE_CMD_LSP_REFERENCES;
-    } else if (control && shift && !alt) {
-        if (key == 'S') command = AXYNE_CMD_SAVE_AS;
-        else if (key == 'O') command = AXYNE_CMD_WORKSPACE;
-        else if (key == 'E') command = AXYNE_CMD_VIEW_EXPLORER;
-        else if (key == 'G') command = AXYNE_CMD_VIEW_GIT;
-        else if (key == 'U') command = AXYNE_CMD_PANEL_OUTPUT;
-        else if (key == 'M') command = AXYNE_CMD_PANEL_PROBLEMS;
-        else if (key == VK_F9) command = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS;
-    } else if (alt && !control && !shift) {
-        if (key == VK_UP) command = AXYNE_CMD_MOVE_LINE_UP;
-        else if (key == VK_DOWN) command = AXYNE_CMD_MOVE_LINE_DOWN;
-        else if (key == 'Z') command = AXYNE_CMD_WORD_WRAP;
-    } else if (!control && !alt) {
-        if (key == VK_F5 && shift) command = AXYNE_CMD_DEBUG_STOP;
-        else if (key == VK_F11 && shift) command = AXYNE_CMD_DEBUG_STEP_OUT;
-        else if (key == VK_F11)
-            command = axyne_debugger_is_active(&state->debugger)
-                ? AXYNE_CMD_DEBUG_STEP_INTO : AXYNE_CMD_FULLSCREEN;
-    }
-    if (command == 0 || !axyne_action_enabled(state, command)) return 0;
-    SendMessageW(window, WM_COMMAND, command, 0);
     return 1;
 }
 
@@ -5617,22 +5486,6 @@ static void axyne_palette_destroy_ui(AxyneWindowState *state)
     }
     if (state->palette_edit_brush != NULL) DeleteObject(state->palette_edit_brush);
     state->palette_edit_brush = NULL;
-}
-
-/* Menu label for the quick-file entry, with the shortcut from the palette
- * command table (Ctrl+P on Windows). */
-static void axyne_palette_menu_label(wchar_t *buffer, size_t capacity,
-                                     const wchar_t *title)
-{
-    const AxynePaletteCommand *command =
-        axyne_palette_command(AXYNE_PALETTE_COMMAND_QUICK_FILE);
-    char shortcut[64] = "";
-    wchar_t *wide;
-    if (command != NULL)
-        (void)axyne_palette_format_shortcut(&command->shortcut, 0, shortcut, sizeof(shortcut));
-    wide = axyne_wide(shortcut);
-    (void)swprintf_s(buffer, capacity, L"%ls\t%ls", title, wide != NULL ? wide : L"");
-    free(wide);
 }
 
 static void axyne_open_scintilla(AxyneWindowState *state, HWND parent,
@@ -8644,8 +8497,11 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
         axyne_text_rect(dc, state->ui_font,
                    state->last_exit_failed ? AXYNE_ACCENT : AXYNE_MUTED, rect, status, DT_LEFT);
     }
-    if (state->lsp_status[0] != '\0') {
-        wchar_t *lsp_status = axyne_wide(state->lsp_status);
+    if (state->status_text[0] != '\0' || state->lsp_status[0] != '\0') {
+        /* A transient status message (chord hint, feature notices) wins over
+         * the LSP status line. */
+        wchar_t *lsp_status = axyne_wide(state->status_text[0] != '\0'
+                                         ? state->status_text : state->lsp_status);
         if (lsp_status != NULL) {
             RECT rect = {axyne_sidebar_size(state) + 8, status_top, width - 250, height};
             axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, lsp_status, DT_LEFT);
@@ -9635,6 +9491,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         break;
     case WM_TIMER:
         if (state != NULL && axyne_win_hooks_timer(state, (UINT_PTR)w_param)) return 0;
+        if (state != NULL && w_param == AXYNE_WIN_CHORD_TIMER_ID) {
+            axyne_win_chord_timer(state);
+            return 0;
+        }
         if (state != NULL && w_param == AXYNE_PALETTE_TIMER_ID) {
             axyne_palette_tick(window, state);
             return 0;
@@ -9670,7 +9530,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_KEYDOWN:
         if (state != NULL && GetFocus() == window &&
             axyne_problems_key(window, state, w_param)) return 0;
-        if (axyne_handle_key(window, state, w_param)) return 0;
+        if (axyne_win_handle_key(state, w_param)) return 0;
         break;
     case WM_LBUTTONDBLCLK: {
         int x = GET_X_LPARAM(l_param);
@@ -10458,7 +10318,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
             if (current != NULL && current->palette.active &&
                 message.hwnd == current->palette_edit) {
                 /* only the palette shortcuts apply while typing in the field */
-                if (!axyne_palette_handle_open_key(window, current, message.wParam)) {
+                if (!axyne_win_palette_key(current, message.wParam)) {
                     TranslateMessage(&message);
                     DispatchMessageW(&message);
                 }
@@ -10478,7 +10338,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                     int forward = message.message == WM_SYSKEYDOWN ||
                         (ctrl && shift && (message.wParam == 'G' || message.wParam == 'E')) ||
                         (ctrl && !shift && message.wParam == 'S');
-                    if (forward && axyne_handle_key(window, current, message.wParam))
+                    if (forward && axyne_win_handle_key(current, message.wParam))
                         continue;
                 }
                 TranslateMessage(&message);
@@ -10511,8 +10371,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                 DispatchMessageW(&message);
                 continue;
             }
-            if (current != NULL && axyne_handle_key(window, current,
-                                                    message.wParam)) continue;
+            if (current != NULL && axyne_win_handle_key(current, message.wParam)) continue;
         }
         TranslateMessage(&message);
         DispatchMessageW(&message);
