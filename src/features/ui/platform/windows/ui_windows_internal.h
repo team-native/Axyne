@@ -293,6 +293,10 @@ typedef struct AxyneWindowState {
     /* Per-feature state owned by ui_<feature>_windows.c: created lazily by
      * the feature (never at startup unless the feature needs it) and released
      * by its destroy hook. */
+    /* Effective key map: registry defaults + user keybindings (rebuilt by
+     * axyne_win_apply_preferences). */
+    AxyneKeymap keymap;
+    int keymap_ready;
     struct AxyneWinFileUi *file_ui;
     struct AxyneWinEditUi *edit_ui;
     struct AxyneWinViewUi *view_ui;
@@ -329,6 +333,10 @@ typedef enum AxyneWinMenuSlot {
 } AxyneWinMenuSlot;
 
 typedef struct AxyneWinMenu AxyneWinMenu;
+
+/* WM_COMMAND id of registry command `id` in the menus. */
+enum { AXYNE_WIN_COMMAND_ID_BASE = 3000 };
+#define AXYNE_WIN_COMMAND_MENU_ID(id) ((UINT)(AXYNE_WIN_COMMAND_ID_BASE + (int)(id)))
 
 typedef struct AxyneWinFeature {
     const char *name;
@@ -411,6 +419,59 @@ int axyne_win_hooks_panel_paint(AxyneWindowState *state, HDC dc, AxyneWinPanelTa
 void axyne_win_hooks_panel_layout(AxyneWindowState *state, AxyneWinPanelTab tab,
                                   RECT body, int visible);
 void axyne_win_hooks_layout(AxyneWindowState *state, int width, int height);
+
+/* ---- registry commands (ui_commands_windows.c) ---------------------------
+ * command_state asks the features first, then the base; it returns 1 when
+ * somebody implements the command (unimplemented commands report disabled).
+ * execute runs an enabled command (0 when disabled or unimplemented);
+ * dispatch runs it without the enabled check (callers that checked). */
+int axyne_win_command_state(AxyneWindowState *state, AxyneCommandId id,
+                            AxyneWinCommandState *out);
+int axyne_win_command_enabled(AxyneWindowState *state, AxyneCommandId id);
+int axyne_win_execute(AxyneWindowState *state, AxyneCommandId id);
+int axyne_win_dispatch(AxyneWindowState *state, AxyneCommandId id);
+/* Menu text of the command's primary key binding ("Ctrl+K Ctrl+O"), "" when
+ * unbound; snprintf-like. */
+size_t axyne_win_command_key_text(const AxyneWindowState *state, AxyneCommandId id,
+                                  char *buffer, size_t capacity);
+/* Rebuilds state->keymap from the registry defaults and the effective
+ * preferences (called by axyne_win_apply_preferences). */
+void axyne_win_keymap_rebuild(AxyneWindowState *state);
+void axyne_win_keymap_destroy(AxyneWindowState *state);
+/* Fills the popup of menu-bar item `index` (0 파일 ... 6 도움말). */
+void axyne_win_menu_bar_fill(AxyneWindowState *state, int index, AxyneWinMenu *menu);
+
+/* Commands implemented by the base (ui_windows.c); features take a command
+ * over by implementing it in their own hooks (features run first). */
+int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
+                                 AxyneWinCommandState *out);
+int axyne_win_base_command(AxyneWindowState *state, AxyneCommandId id);
+
+/* ---- owner-drawn popup menus (ui_windows.c) ------------------------------
+ * create -> add/separator/submenu -> track -> destroy (destroy frees the
+ * whole tree; submenus belong to their root). Labels and shortcut text are
+ * UTF-8. track takes client coordinates of the main window; with
+ * return_command it returns the picked id (0 = none) instead of sending
+ * WM_COMMAND. */
+enum {
+    AXYNE_WIN_MENU_DISABLED = 1u << 0,
+    AXYNE_WIN_MENU_CHECKED = 1u << 1,
+    AXYNE_WIN_MENU_RADIO = 1u << 2 /* the check is drawn as a dot */
+};
+AxyneWinMenu *axyne_win_menu_create(void);
+void axyne_win_menu_add(AxyneWinMenu *menu, UINT id, const char *label,
+                        const char *shortcut, unsigned flags);
+void axyne_win_menu_separator(AxyneWinMenu *menu);
+AxyneWinMenu *axyne_win_menu_submenu(AxyneWinMenu *menu, const char *label,
+                                     unsigned flags);
+int axyne_win_menu_count(const AxyneWinMenu *menu);
+int axyne_win_menu_has_enabled(const AxyneWinMenu *menu);
+void axyne_win_menu_enable_at(AxyneWinMenu *menu, int position, int enabled);
+UINT axyne_win_menu_track(AxyneWindowState *state, AxyneWinMenu *menu, POINT point,
+                          int return_command);
+void axyne_win_menu_destroy(AxyneWinMenu *menu);
+/* Adds the recent files (File > 최근 항목); returns how many. */
+int axyne_win_menu_add_recent_files(AxyneWindowState *state, AxyneWinMenu *menu);
 
 /* ---- exported helpers (implemented in ui_windows.c) ---------------------- */
 

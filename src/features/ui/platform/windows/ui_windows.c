@@ -952,6 +952,7 @@ static void axyne_apply_preferences(AxyneWindowState *state)
     axyne_apply_editor_preferences(state);
     axyne_refresh_terminal_theme(state);
     if (state->editor != NULL) axyne_style_title_bar(GetParent(state->editor));
+    axyne_win_keymap_rebuild(state);
 }
 
 static void axyne_load_global_preferences(AxyneWindowState *state)
@@ -2974,11 +2975,6 @@ static int axyne_action_enabled(AxyneWindowState *state, UINT command)
     }
 }
 
-static UINT axyne_action_flags(AxyneWindowState *state, UINT command)
-{
-    return axyne_action_enabled(state, command) ? MF_ENABLED : MF_GRAYED;
-}
-
 /* Edit menu commands act on a focused standard text field (terminal input
  * or output, Git commit message) when it owns the keyboard, and on the
  * Scintilla editor otherwise. */
@@ -3007,11 +3003,6 @@ static int axyne_edit_command_enabled(AxyneWindowState *state, UINT command)
         return 1;
     }
     return state->editor != NULL && !axyne_empty_state(state);
-}
-
-static UINT axyne_edit_flags(AxyneWindowState *state, UINT command)
-{
-    return axyne_edit_command_enabled(state, command) ? MF_ENABLED : MF_GRAYED;
 }
 
 /* Returns 1 when `command` is an Edit command (handled or not available). */
@@ -3958,6 +3949,7 @@ typedef struct AxyneMenuItem {
     wchar_t *shortcut;
     int separator;
     int arrow;
+    int radio; /* checked state drawn as a dot */
     int first;
     int last;
 } AxyneMenuItem;
@@ -4106,18 +4098,6 @@ static POINT axyne_menu_anchor(AxyneWindowState *state, int index)
     return point;
 }
 
-static void axyne_menu_track(HWND window, AxyneWindowState *state,
-                             int menu_index, HMENU menu, AxyneMenuItem *pool)
-{
-    POINT point = axyne_menu_anchor(state, menu_index);
-    axyne_menu_seal(menu);
-    ClientToScreen(window, &point);
-    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
-                   point.x, point.y, 0, window, NULL);
-    DestroyMenu(menu);
-    axyne_menu_pool_free(pool);
-}
-
 static BOOL CALLBACK axyne_style_popup_menu_window(HWND menu, LPARAM unused)
 {
     wchar_t class_name[32];
@@ -4141,214 +4121,159 @@ static void axyne_style_popup_menu_windows(void)
     EnumWindows(axyne_style_popup_menu_window, 0);
 }
 
-static void axyne_file_popup(HWND window, AxyneWindowState *state)
+/* ---- menus built by ui_commands_windows.c (AxyneWinMenu) ----------------- */
+
+struct AxyneWinMenu {
+    HMENU menu;
+    AxyneMenuItem **pool;          /* the root's item pool */
+    AxyneMenuItem *items;          /* root only: every item of the tree */
+    struct AxyneWinMenu *root;
+    struct AxyneWinMenu *children; /* root only: submenu wrappers */
+    struct AxyneWinMenu *next;
+};
+
+AxyneWinMenu *axyne_win_menu_create(void)
 {
-    AxyneMenuItem *pool = NULL;
-    HMENU menu = axyne_menu_create();
-    HMENU recent = axyne_menu_create();
-    AxyneDocument *document = axyne_active_visible(state);
-    UINT document_flags = document != NULL ? MF_ENABLED : MF_GRAYED;
-    UINT save_flags = document != NULL && axyne_document_can_save(document)
-        ? MF_ENABLED : MF_GRAYED;
-    size_t i;
-    if (menu == NULL || recent == NULL) {
-        if (menu != NULL) DestroyMenu(menu);
-        if (recent != NULL) DestroyMenu(recent);
-        return;
+    AxyneWinMenu *menu = (AxyneWinMenu *)calloc(1, sizeof(*menu));
+    if (menu == NULL) return NULL;
+    menu->menu = axyne_menu_create();
+    if (menu->menu == NULL) { free(menu); return NULL; }
+    menu->pool = &menu->items;
+    menu->root = menu;
+    return menu;
+}
+
+void axyne_win_menu_add(AxyneWinMenu *menu, UINT id, const char *label,
+                        const char *shortcut, unsigned flags)
+{
+    wchar_t *wide_label, *wide_shortcut;
+    AxyneMenuItem *item;
+    if (menu == NULL) return;
+    wide_label = axyne_wide(label != NULL ? label : "");
+    wide_shortcut = shortcut != NULL && shortcut[0] != '\0' ? axyne_wide(shortcut) : NULL;
+    item = axyne_menu_item(menu->pool, menu->menu, wide_label != NULL ? wide_label : L"",
+                           wide_shortcut);
+    if (item != NULL) {
+        item->radio = (flags & AXYNE_WIN_MENU_RADIO) != 0;
+        AppendMenuW(menu->menu, MF_OWNERDRAW | MF_STRING |
+                    ((flags & AXYNE_WIN_MENU_DISABLED) != 0 ? MF_GRAYED : MF_ENABLED) |
+                    ((flags & AXYNE_WIN_MENU_CHECKED) != 0 ? MF_CHECKED : 0),
+                    id, (LPCWSTR)item);
     }
-    axyne_menu_add(menu, &pool, AXYNE_CMD_NEW, L"새 파일", L"Ctrl+N", MF_ENABLED);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_OPEN, L"열기...", L"Ctrl+O", MF_ENABLED);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE, L"폴더 열기...", L"Ctrl+Shift+O", MF_ENABLED);
-    axyne_menu_separator(menu, &pool);
+    free(wide_label);
+    free(wide_shortcut);
+}
+
+void axyne_win_menu_separator(AxyneWinMenu *menu)
+{
+    if (menu != NULL) axyne_menu_separator(menu->menu, menu->pool);
+}
+
+AxyneWinMenu *axyne_win_menu_submenu(AxyneWinMenu *menu, const char *label,
+                                     unsigned flags)
+{
+    AxyneWinMenu *sub;
+    wchar_t *wide;
+    if (menu == NULL) return NULL;
+    sub = (AxyneWinMenu *)calloc(1, sizeof(*sub));
+    if (sub == NULL) return NULL;
+    sub->menu = axyne_menu_create();
+    if (sub->menu == NULL) { free(sub); return NULL; }
+    sub->pool = menu->pool;
+    sub->root = menu->root;
+    sub->next = menu->root->children;
+    menu->root->children = sub;
+    wide = axyne_wide(label != NULL ? label : "");
+    /* The parent owns the submenu handle from here on (DestroyMenu). */
+    axyne_menu_submenu(menu->menu, menu->pool, sub->menu, wide != NULL ? wide : L"",
+                       (flags & AXYNE_WIN_MENU_DISABLED) != 0 ? MF_GRAYED : MF_ENABLED);
+    free(wide);
+    return sub;
+}
+
+int axyne_win_menu_count(const AxyneWinMenu *menu)
+{
+    int count;
+    if (menu == NULL) return 0;
+    count = GetMenuItemCount(menu->menu);
+    return count > 0 ? count : 0;
+}
+
+int axyne_win_menu_has_enabled(const AxyneWinMenu *menu)
+{
+    int i, count = axyne_win_menu_count(menu);
+    for (i = 0; i < count; ++i) {
+        UINT state = GetMenuState(menu->menu, (UINT)i, MF_BYPOSITION);
+        if (state != (UINT)-1 && (state & (MF_SEPARATOR | MF_GRAYED | MF_DISABLED)) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+void axyne_win_menu_enable_at(AxyneWinMenu *menu, int position, int enabled)
+{
+    if (menu == NULL || position < 0) return;
+    EnableMenuItem(menu->menu, (UINT)position,
+                   MF_BYPOSITION | (enabled ? MF_ENABLED : MF_GRAYED));
+}
+
+UINT axyne_win_menu_track(AxyneWindowState *state, AxyneWinMenu *menu, POINT point,
+                          int return_command)
+{
+    AxyneWinMenu *child;
+    UINT picked;
+    if (state == NULL || menu == NULL || state->main_window == NULL) return 0;
+    for (child = menu->root->children; child != NULL; child = child->next)
+        axyne_menu_seal(child->menu);
+    axyne_menu_seal(menu->menu);
+    ClientToScreen(state->main_window, &point);
+    picked = (UINT)TrackPopupMenu(menu->menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON |
+                                  (return_command ? TPM_RETURNCMD : 0),
+                                  point.x, point.y, 0, state->main_window, NULL);
+    return return_command ? picked : 0;
+}
+
+void axyne_win_menu_destroy(AxyneWinMenu *menu)
+{
+    AxyneWinMenu *child;
+    if (menu == NULL || menu->root != menu) return;
+    DestroyMenu(menu->menu); /* also destroys the attached submenus */
+    child = menu->children;
+    while (child != NULL) {
+        AxyneWinMenu *next = child->next;
+        free(child);
+        child = next;
+    }
+    axyne_menu_pool_free(menu->items);
+    free(menu);
+}
+
+/* File > 최근 항목: the recent files (ids AXYNE_CMD_RECENT_BASE + i). */
+int axyne_win_menu_add_recent_files(AxyneWindowState *state, AxyneWinMenu *menu)
+{
+    size_t i;
+    int added = 0;
+    if (state == NULL || menu == NULL) return 0;
     for (i = 0; i < state->documents.recent_count; ++i) {
         wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
-        if (path != NULL) {
-            axyne_menu_add(recent, &pool, AXYNE_CMD_RECENT_BASE + (UINT)i, path,
-                           NULL, MF_ENABLED);
-            free(path);
-        }
+        if (path == NULL) continue;
+        axyne_menu_add(menu->menu, menu->pool, AXYNE_CMD_RECENT_BASE + (UINT)i, path,
+                       NULL, MF_ENABLED);
+        free(path);
+        ++added;
     }
-    if (state->documents.recent_count == 0)
-        axyne_menu_add(recent, &pool, 0, L"최근 항목 없음", NULL, MF_GRAYED);
-    axyne_menu_seal(recent);
-    axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE, L"저장", L"Ctrl+S", save_flags);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SAVE_AS, L"다른 이름으로 저장...",
-                   L"Ctrl+Shift+S", save_flags);
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"환경 설정...", NULL, MF_ENABLED);
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_CLOSE, L"닫기", L"Ctrl+W", document_flags);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_EXIT, L"종료", L"Alt+F4", MF_ENABLED);
-    axyne_menu_track(window, state, 0, menu, pool);
+    return added;
 }
 
-static void axyne_edit_popup(HWND window, AxyneWindowState *state)
+/* Popup of menu-bar item `index` built from the registry layout. */
+static void axyne_menu_bar_popup(HWND window, AxyneWindowState *state, int index)
 {
-    AxyneMenuItem *pool = NULL;
-    HMENU menu = axyne_menu_create();
-    UINT has_editor = state->editor != NULL && !axyne_empty_state(state)
-        ? MF_ENABLED : MF_GRAYED;
-    UINT saved_document_flags = axyne_action_flags(state, AXYNE_CMD_LSP_DEFINITION);
+    AxyneWinMenu *menu = axyne_win_menu_create();
+    (void)window;
     if (menu == NULL) return;
-    axyne_menu_add(menu, &pool, AXYNE_CMD_UNDO, L"실행 취소", L"Ctrl+Z",
-                   axyne_edit_flags(state, AXYNE_CMD_UNDO));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_REDO, L"다시 실행", L"Ctrl+Y",
-                   axyne_edit_flags(state, AXYNE_CMD_REDO));
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_CUT, L"잘라내기", L"Ctrl+X",
-                   axyne_edit_flags(state, AXYNE_CMD_CUT));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_COPY, L"복사", L"Ctrl+C",
-                   axyne_edit_flags(state, AXYNE_CMD_COPY));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_PASTE, L"붙여넣기", L"Ctrl+V",
-                   axyne_edit_flags(state, AXYNE_CMD_PASTE));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SELECT_ALL, L"모두 선택", L"Ctrl+A",
-                   axyne_edit_flags(state, AXYNE_CMD_SELECT_ALL));
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_FIND, L"찾기...", L"Ctrl+F", has_editor);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_REPLACE, L"바꾸기...", L"Ctrl+H", has_editor);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SEARCH_FOLDER, L"파일에서 찾기...",
-                   L"Ctrl+Shift+F", MF_ENABLED);
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_GOTO_LINE, L"줄로 이동...", L"Ctrl+G",
-                   axyne_action_flags(state, AXYNE_CMD_GOTO_LINE));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_SELECT_LINE, L"줄 선택", NULL,
-                   axyne_action_flags(state, AXYNE_CMD_SELECT_LINE));
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_TOGGLE_COMMENT, L"줄 주석 토글", L"Ctrl+/",
-                   axyne_action_flags(state, AXYNE_CMD_TOGGLE_COMMENT));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_DUPLICATE_LINE, L"줄 복제", L"Ctrl+D",
-                   axyne_action_flags(state, AXYNE_CMD_DUPLICATE_LINE));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_MOVE_LINE_UP, L"줄 위로 이동", L"Alt+\u2191",
-                   axyne_action_flags(state, AXYNE_CMD_MOVE_LINE_UP));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_MOVE_LINE_DOWN, L"줄 아래로 이동", L"Alt+\u2193",
-                   axyne_action_flags(state, AXYNE_CMD_MOVE_LINE_DOWN));
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_INDENT, L"들여쓰기", L"Tab",
-                   axyne_action_flags(state, AXYNE_CMD_INDENT));
-    axyne_menu_add(menu, &pool, AXYNE_CMD_OUTDENT, L"내어쓰기", L"Shift+Tab",
-                   axyne_action_flags(state, AXYNE_CMD_OUTDENT));
-    axyne_menu_separator(menu, &pool);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_LSP_DEFINITION, L"정의로 이동",
-                   L"Ctrl+Alt+D", saved_document_flags);
-    axyne_menu_add(menu, &pool, AXYNE_CMD_LSP_REFERENCES, L"참조 찾기",
-                   L"Ctrl+Alt+R", saved_document_flags);
-    axyne_menu_track(window, state, 1, menu, pool);
-}
-
-static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
-                               int menu_index)
-{
-    AxyneMenuItem *pool = NULL;
-    HMENU menu = axyne_menu_create();
-    if (menu == NULL) return;
-    if (menu_index == 2) {
-        UINT output = state->panel_tab == AXYNE_WIN_PANEL_OUTPUT ? MF_CHECKED : 0;
-        UINT shown = state->panel_hidden ? 0 : MF_CHECKED;
-        axyne_menu_add(menu, &pool, AXYNE_CMD_QUICK_FILE, L"파일 이동...", L"Ctrl+P",
-                       MF_ENABLED);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_VIEW_EXPLORER, L"탐색기", L"Ctrl+Shift+E",
-                       MF_ENABLED | (!state->explorer_hidden &&
-                           state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER
-                           ? MF_CHECKED : 0));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_VIEW_GIT, L"Git 패널", L"Ctrl+Shift+G",
-                       MF_ENABLED | (!state->explorer_hidden &&
-                           state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT
-                           ? MF_CHECKED : 0));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_VIEW_PANEL, L"하단 패널", L"Ctrl+J",
-                       MF_ENABLED | shown);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_OUTPUT, L"출력", L"Ctrl+Shift+U",
-                       MF_ENABLED | (output & shown));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_PROBLEMS, L"문제", L"Ctrl+Shift+M",
-                       MF_ENABLED | (state->panel_tab == AXYNE_WIN_PANEL_PROBLEMS ? shown : 0));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_TERMINAL, L"터미널", L"Ctrl+`",
-                       MF_ENABLED | (state->panel_tab == AXYNE_WIN_PANEL_TERMINAL ? shown : 0));
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_ZOOM_IN, L"확대", L"Ctrl+=",
-                       axyne_action_flags(state, AXYNE_CMD_ZOOM_IN));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_ZOOM_OUT, L"축소", L"Ctrl+-",
-                       axyne_action_flags(state, AXYNE_CMD_ZOOM_OUT));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_ZOOM_RESET, L"기본 크기", L"Ctrl+0",
-                       axyne_action_flags(state, AXYNE_CMD_ZOOM_RESET));
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_WORD_WRAP, L"자동 줄 바꿈", L"Alt+Z",
-                       axyne_action_flags(state, AXYNE_CMD_WORD_WRAP) |
-                       (state->preferences.editor.word_wrap ? MF_CHECKED : 0));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_FULLSCREEN, L"전체 화면", L"F11",
-                       MF_ENABLED | (state->fullscreen ? MF_CHECKED : 0));
-    } else if (menu_index == 3) {
-        UINT flags = axyne_active_visible(state) != NULL && state->terminal_process == NULL &&
-            !axyne_debugger_is_active(&state->debugger) ? MF_ENABLED : MF_GRAYED;
-        axyne_menu_add(menu, &pool, AXYNE_CMD_BUILD, L"빌드", L"Ctrl+B", flags);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_RUN, L"실행", L"F5", flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_CONFIGURE_RUNNER, L"Runner 설정...", NULL,
-                       MF_ENABLED);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_TERMINAL_STOP, L"빌드 취소", NULL,
-                       state->active_action == 1 && state->terminal_process != NULL
-                           ? MF_ENABLED : MF_GRAYED);
-    } else if (menu_index == 4) {
-        axyne_refresh_action_controls(state);
-        axyne_menu_add(menu, &pool, AXYNE_DEBUG_START, L"디버깅 시작", NULL,
-                       IsWindowEnabled(state->debug_start) ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_DEBUG_STOP, L"중지", L"Shift+F5",
-                       axyne_action_flags(state, AXYNE_CMD_DEBUG_STOP));
-        axyne_menu_add(menu, &pool, AXYNE_DEBUG_PAUSE, L"일시 중지", NULL,
-                       IsWindowEnabled(state->debug_pause) ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_add(menu, &pool, AXYNE_DEBUG_CONTINUE, L"계속", NULL,
-                       IsWindowEnabled(state->debug_continue) ? MF_ENABLED : MF_GRAYED);
-        /* Figma separates run control, breakpoints and stepping. */
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_DEBUG_BREAKPOINT, L"중단점 토글", NULL,
-                       IsWindowEnabled(state->debug_breakpoint) ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS, L"모든 중단점 삭제",
-                       L"Ctrl+Shift+F9",
-                       axyne_action_flags(state, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS));
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_DEBUG_STEP_OVER, L"프로시저 단위 실행", NULL,
-                       IsWindowEnabled(state->debug_step_over) ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_DEBUG_STEP_INTO, L"한 단계씩 코드 실행", L"F11",
-                       axyne_action_flags(state, AXYNE_CMD_DEBUG_STEP_INTO));
-        axyne_menu_add(menu, &pool, AXYNE_CMD_DEBUG_STEP_OUT, L"프로시저 나가기", L"Shift+F11",
-                       axyne_action_flags(state, AXYNE_CMD_DEBUG_STEP_OUT));
-    } else if (menu_index == 5) {
-        UINT git_flags = state->explorer.root != NULL && state->git_process == NULL &&
-                         !state->git_batch_busy
-            ? MF_ENABLED : MF_GRAYED;
-        axyne_menu_add(menu, &pool, AXYNE_TERMINAL_START, L"새 터미널", NULL,
-                       state->terminal_process == NULL &&
-                               !axyne_debugger_is_active(&state->debugger)
-                           ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE_PREFERENCES, L"작업 영역 설정...",
-                       NULL, state->explorer.root != NULL ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_OPEN_PREFERENCES_FILE, L"settings.json 열기",
-                       NULL, axyne_action_flags(state, AXYNE_CMD_OPEN_PREFERENCES_FILE));
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_STATUS, L"Git 상태", NULL, git_flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_DIFF, L"Git 변경 사항", NULL, git_flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_STAGE_ALL, L"모두 스테이지", NULL, git_flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_UNSTAGE_ALL, L"모두 스테이지 해제", NULL,
-                       git_flags);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_COMMIT, L"Git 커밋...", NULL, git_flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_PUSH, L"Git 푸시", NULL, git_flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_PULL, L"Git 풀", NULL, git_flags);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_LOG, L"Git 기록 보기", NULL, git_flags);
-    } else {
-        axyne_menu_add(menu, &pool, AXYNE_CMD_SHORTCUTS, L"키보드 단축키 참조", NULL,
-                       MF_ENABLED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_REPORT_ISSUE, L"문제 보고...", NULL,
-                       MF_ENABLED);
-        axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_ABOUT, L"Axyne 정보", NULL, MF_ENABLED);
-    }
-    axyne_menu_track(window, state, menu_index, menu, pool);
+    axyne_win_menu_bar_fill(state, index, menu);
+    (void)axyne_win_menu_track(state, menu, axyne_menu_anchor(state, index), 0);
+    axyne_win_menu_destroy(menu);
 }
 
 static void axyne_fill(HDC dc, int left, int top, int right, int bottom,
@@ -4480,7 +4405,10 @@ static void axyne_menu_draw(AxyneWindowState *state, const DRAWITEMSTRUCT *draw)
         cell.right = cell.left + 18;
         cell.top = top;
         cell.bottom = top + AXYNE_MENU_ROW;
-        axyne_text_rect(dc, state->font_bold, AXYNE_POPUP_CHECK, cell, L"\u2713", DT_CENTER);
+        if (item->radio)
+            axyne_text_rect(dc, state->font_small, AXYNE_POPUP_CHECK, cell, L"\u25cf", DT_CENTER);
+        else
+            axyne_text_rect(dc, state->font_bold, AXYNE_POPUP_CHECK, cell, L"\u2713", DT_CENTER);
     }
     cell.left = rect.left + AXYNE_MENU_PAD + 10 + 18 + 8;
     cell.right = rect.right - AXYNE_MENU_PAD - 10;
@@ -4505,10 +4433,13 @@ static void axyne_menu_draw(AxyneWindowState *state, const DRAWITEMSTRUCT *draw)
         axyne_text_rect(dc, state->ui_font, text, cell, item->label, DT_LEFT);
 }
 
-static const UINT AXYNE_TOOLBAR_COMMANDS[] = {
-    AXYNE_CMD_NEW, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE, AXYNE_CMD_UNDO,
-    AXYNE_CMD_REDO, AXYNE_CMD_BUILD_TARGET, AXYNE_CMD_BUILD,
-    AXYNE_CMD_RUN, AXYNE_CMD_QUICK_FILE
+/* Toolbar slots in layout order (registry commands, so feature overrides
+ * apply to the toolbar too). */
+static const AxyneCommandId AXYNE_TOOLBAR_COMMANDS[] = {
+    AXYNE_COMMAND_FILE_NEW, AXYNE_COMMAND_FILE_OPEN, AXYNE_COMMAND_FILE_SAVE,
+    AXYNE_COMMAND_EDIT_UNDO, AXYNE_COMMAND_EDIT_REDO, AXYNE_COMMAND_BUILD_SELECT_TARGET,
+    AXYNE_COMMAND_BUILD_BUILD, AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING,
+    AXYNE_COMMAND_VIEW_QUICK_OPEN
 };
 
 /* Build-target label, "Debug · x64 (MSVC)", for the active file's language;
@@ -4603,19 +4534,15 @@ static void axyne_toolbar_layout(AxyneWindowState *state, int width,
     free(runner);
 }
 
-static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
+/* Toolbar Undo/Redo follow the editor's own undo stack (not a focused text
+ * field); the other buttons use the command's state. */
+static int axyne_toolbar_enabled(AxyneWindowState *state, AxyneCommandId command)
 {
-    if (command == AXYNE_CMD_SAVE)
-        return axyne_active_visible(state) != NULL &&
-               axyne_document_can_save(axyne_active_visible(state));
-    if (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO)
+    if (command == AXYNE_COMMAND_EDIT_UNDO || command == AXYNE_COMMAND_EDIT_REDO)
         return state->editor != NULL && !axyne_empty_state(state) &&
             SendMessageA(state->editor,
-            command == AXYNE_CMD_UNDO ? 2174 : 2016, 0, 0) != 0;
-    if (command == AXYNE_CMD_BUILD || command == AXYNE_CMD_RUN)
-        return axyne_active_visible(state) != NULL && state->terminal_process == NULL &&
-            !axyne_debugger_is_active(&state->debugger);
-    return 1;
+            command == AXYNE_COMMAND_EDIT_UNDO ? 2174 : 2016, 0, 0) != 0;
+    return axyne_win_command_enabled(state, command);
 }
 
 /* Build-target dropdown: Configuration and Architecture groups with the
@@ -5366,47 +5293,12 @@ static void axyne_palette_goto(AxyneWindowState *state, size_t line, size_t colu
     SetFocus(state->editor);
 }
 
-static UINT axyne_palette_command_message(AxynePaletteCommandId id)
-{
-    switch (id) {
-    case AXYNE_PALETTE_COMMAND_NEW_FILE: return AXYNE_CMD_NEW;
-    case AXYNE_PALETTE_COMMAND_OPEN_FILE: return AXYNE_CMD_OPEN;
-    case AXYNE_PALETTE_COMMAND_OPEN_FOLDER: return AXYNE_CMD_WORKSPACE;
-    case AXYNE_PALETTE_COMMAND_SAVE: return AXYNE_CMD_SAVE;
-    case AXYNE_PALETTE_COMMAND_SAVE_AS: return AXYNE_CMD_SAVE_AS;
-    case AXYNE_PALETTE_COMMAND_CLOSE_TAB: return AXYNE_CMD_CLOSE;
-    case AXYNE_PALETTE_COMMAND_FIND: return AXYNE_CMD_FIND;
-    case AXYNE_PALETTE_COMMAND_REPLACE: return AXYNE_CMD_REPLACE;
-    case AXYNE_PALETTE_COMMAND_BUILD: return AXYNE_CMD_BUILD;
-    case AXYNE_PALETTE_COMMAND_RUN: return AXYNE_CMD_RUN;
-    case AXYNE_PALETTE_COMMAND_START_DEBUGGING: return AXYNE_DEBUG_START;
-    case AXYNE_PALETTE_COMMAND_GIT_STATUS: return AXYNE_CMD_GIT_STATUS;
-    case AXYNE_PALETTE_COMMAND_GIT_DIFF: return AXYNE_CMD_GIT_DIFF;
-    case AXYNE_PALETTE_COMMAND_GIT_STAGE_ALL: return AXYNE_CMD_GIT_STAGE_ALL;
-    case AXYNE_PALETTE_COMMAND_GIT_UNSTAGE_ALL: return AXYNE_CMD_GIT_UNSTAGE_ALL;
-    case AXYNE_PALETTE_COMMAND_PREFERENCES: return AXYNE_CMD_PREFERENCES;
-    case AXYNE_PALETTE_COMMAND_WORKSPACE_SETTINGS: return AXYNE_CMD_WORKSPACE_PREFERENCES;
-    case AXYNE_PALETTE_COMMAND_PANEL_OUTPUT: return AXYNE_CMD_PANEL_OUTPUT;
-    case AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS: return AXYNE_CMD_PANEL_PROBLEMS;
-    case AXYNE_PALETTE_COMMAND_PANEL_TERMINAL: return AXYNE_CMD_PANEL_TERMINAL;
-    case AXYNE_PALETTE_COMMAND_CONFIGURE_RUNNER: return AXYNE_CMD_CONFIGURE_RUNNER;
-    default: return 0;
-    }
-}
-
+/* Palette command ids map onto the registry (axyne_command_from_palette), so
+ * a palette row runs exactly what the menu item and the shortcut run. */
 static void axyne_palette_run_command(HWND window, AxyneWindowState *state,
                                       AxynePaletteCommandId id)
 {
-    UINT message = axyne_palette_command_message(id);
-    if (id == AXYNE_PALETTE_COMMAND_CLEAR_OUTPUT) {
-        if (state->terminal_output != NULL) SetWindowTextW(state->terminal_output, L"");
-        return;
-    }
-    if (message == 0) return;
-    if ((id == AXYNE_PALETTE_COMMAND_SAVE || id == AXYNE_PALETTE_COMMAND_SAVE_AS ||
-         id == AXYNE_PALETTE_COMMAND_CLOSE_TAB) && axyne_active_visible(state) == NULL) return;
-    if ((id == AXYNE_PALETTE_COMMAND_BUILD || id == AXYNE_PALETTE_COMMAND_RUN) &&
-        !axyne_toolbar_enabled(state, message)) return;
+    AxyneCommandId command = axyne_command_from_palette((int)id);
     if (id >= AXYNE_PALETTE_COMMAND_GIT_STATUS && id <= AXYNE_PALETTE_COMMAND_GIT_UNSTAGE_ALL &&
         (state->explorer.root == NULL || state->git_process != NULL ||
          state->git_batch_busy)) {
@@ -5416,7 +5308,7 @@ static void axyne_palette_run_command(HWND window, AxyneWindowState *state,
             MB_OK | MB_ICONINFORMATION);
         return;
     }
-    SendMessageW(window, WM_COMMAND, message, 0);
+    if (command != AXYNE_COMMAND_NONE) (void)axyne_win_execute(state, command);
 }
 
 /* Enter or a click: closes the palette and runs what the controller returns. */
@@ -8883,7 +8775,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                                state->build_menu_open);
         }
         {
-            COLORREF color = axyne_toolbar_enabled(state, AXYNE_CMD_BUILD)
+            COLORREF color = axyne_toolbar_enabled(state, AXYNE_COMMAND_BUILD_BUILD)
                 ? AXYNE_TEXT : AXYNE_MUTED;
             axyne_round_fill(dc, rects[6].left, rects[6].top, rects[6].right,
                              rects[6].bottom, 3, AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
@@ -8893,7 +8785,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         {
             RECT rect = rects[7];
             RECT part = {rect.left + 14, rect.top, rect.right - 14, rect.bottom};
-            COLORREF color = axyne_toolbar_enabled(state, AXYNE_CMD_RUN)
+            COLORREF color = axyne_toolbar_enabled(state, AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING)
                 ? AXYNE_RUN_TEXT : axyne_blend(AXYNE_RUN_TEXT, AXYNE_ACCENT, 45);
             axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 4,
                              AXYNE_ACCENT, AXYNE_ACCENT);
@@ -9010,6 +8902,363 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         DeleteDC(buffer);
     }
     EndPaint(window, &paint);
+}
+
+/* Runs a command by its legacy id (toolbar, explorer context menu, recent
+ * files, panel buttons and the registry commands mapped onto it by
+ * axyne_win_base_command). */
+static void axyne_legacy_command(HWND window, AxyneWindowState *state, UINT command)
+{
+    /* Edit commands go to a focused text field first, which works
+     * without a document too. */
+    if (axyne_edit_field_focused(state) != NULL &&
+        axyne_edit_command(state, command))
+        return;
+    /* Document commands have nothing to act on in the empty state. */
+    if (axyne_empty_state(state) && axyne_command_needs_document(command))
+        return;
+    if (command == AXYNE_CMD_PANEL_OUTPUT || command == AXYNE_CMD_PANEL_TERMINAL ||
+        command == AXYNE_CMD_PANEL_PROBLEMS) {
+        axyne_select_panel_tab(window, state,
+            command == AXYNE_CMD_PANEL_TERMINAL ? AXYNE_WIN_PANEL_TERMINAL
+            : command == AXYNE_CMD_PANEL_PROBLEMS ? AXYNE_WIN_PANEL_PROBLEMS
+            : AXYNE_WIN_PANEL_OUTPUT, 1);
+    }
+    else if (axyne_action_command(window, state, command)) { /* handled */ }
+    else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
+    else if (command == AXYNE_CMD_ABOUT)
+        MessageBoxW(window,
+            L"Axyne\nLightweight native IDE\n\nhttps://github.com/team-native/Axyne",
+            L"About Axyne", MB_OK | MB_ICONINFORMATION);
+    else if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
+    else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
+    else if (command == AXYNE_CMD_BUILD_TARGET) axyne_build_target_popup(window, state);
+    else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
+        (void)axyne_configure_runner(window, &state->action_runner);
+        InvalidateRect(window, NULL, FALSE);
+    }
+    else if (command == AXYNE_CMD_PREFERENCES)
+        (void)axyne_preferences_dialog(window, state, 0);
+    else if (command == AXYNE_CMD_WORKSPACE_PREFERENCES) {
+        if (state->workspace_preferences_path == NULL)
+            MessageBoxA(window, "Open a workspace folder before editing workspace settings.", "Axyne - Preferences", MB_OK | MB_ICONINFORMATION);
+        else (void)axyne_preferences_dialog(window, state, 1);
+    }
+    else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
+    else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
+    else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
+    else if (command == AXYNE_DEBUG_START) axyne_windows_debugger_start(window, state);
+    else if (command == AXYNE_DEBUG_PAUSE)
+        axyne_debugger_command_ui(state, AXYNE_DEBUGGER_PAUSE);
+    else if (command == AXYNE_DEBUG_CONTINUE)
+        axyne_debugger_command_ui(state, AXYNE_DEBUGGER_CONTINUE);
+    else if (command == AXYNE_DEBUG_STEP_OVER)
+        axyne_debugger_command_ui(state, AXYNE_DEBUGGER_STEP_OVER);
+    else if (command == AXYNE_DEBUG_BREAKPOINT)
+        axyne_debugger_toggle_current_breakpoint(state);
+    else if (command == AXYNE_CMD_NEW) axyne_new_document(window, state);
+    else if (command == AXYNE_CMD_OPEN) axyne_open_document(window, state, NULL);
+    else if (command == AXYNE_CMD_SAVE) (void)axyne_save_active(window, state);
+    else if (command == AXYNE_CMD_SAVE_AS) {
+        char *path = NULL;
+        if (axyne_active(state) == NULL ||
+            !axyne_document_can_save(axyne_active(state)) ||
+            !axyne_editor_ready_for_save(window, state)) return;
+        if (axyne_choose_path(window, 1, &path)) {
+            if (!axyne_capture_editor(state)) {
+                free(path);
+                return;
+            }
+            AxyneError error;
+            AxyneDocument *active = axyne_active(state);
+            char *old_path = active != NULL && !active->is_untitled &&
+                active->path != NULL ? _strdup(active->path) : NULL;
+            AxyneStatus status = axyne_documents_save_as(&state->documents,
+                state->documents.active_index, path, &error);
+            free(path);
+            if (status == AXYNE_STATUS_OK) {
+                SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
+                axyne_after_save_as(state, old_path);
+                axyne_refresh_outline(state);
+                axyne_update_title(window, state);
+                axyne_refresh_action_controls(state);
+                axyne_win_hooks_document_saved(state, axyne_active(state));
+            } else MessageBoxA(window, error.message, "Axyne - Save failed",
+                               MB_OK | MB_ICONERROR);
+            free(old_path);
+        }
+    } else if (command == AXYNE_CMD_CLOSE)
+        axyne_close_tab(window, state, state->documents.active_index);
+    else if (command == AXYNE_CMD_FIND) axyne_find(window, state, 0, 0);
+    else if (command == AXYNE_CMD_REPLACE) axyne_find(window, state, 1, 0);
+    else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
+    else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
+    else if (command == AXYNE_CMD_GIT_STATUS)
+        axyne_git_start(window, state, "No Git status output.", command);
+    else if (command == AXYNE_CMD_GIT_DIFF)
+        axyne_git_start(window, state, "No Git differences.", command);
+    else if (command == AXYNE_CMD_GIT_STAGE_ALL)
+        axyne_git_start(window, state, "All workspace changes staged.", command);
+    else if (command == AXYNE_CMD_GIT_UNSTAGE_ALL)
+        axyne_git_start(window, state, "All changes unstaged.", command);
+    else if (command == AXYNE_CMD_GIT_COMMIT)
+        axyne_git_commit_command(window, state);
+    else if (command == AXYNE_CMD_GIT_PUSH)
+        axyne_git_batch_start(window, state, command, NULL, 0, 0);
+    else if (command == AXYNE_CMD_GIT_PULL)
+        axyne_git_batch_start(window, state, command, NULL, 0, 0);
+    else if (command == AXYNE_CMD_GIT_LOG)
+        axyne_git_batch_start(window, state, command, NULL, 0, 0);
+    else if (command == AXYNE_CMD_VIEW_GIT)
+        axyne_git_panel_toggle_view(window, state);
+    else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
+    else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
+    else if (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO ||
+             command == AXYNE_CMD_CUT || command == AXYNE_CMD_COPY ||
+             command == AXYNE_CMD_PASTE || command == AXYNE_CMD_SELECT_ALL)
+        (void)axyne_edit_command(state, command);
+    else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
+        axyne_workspace_operation(window, state, command);
+    else if (command >= AXYNE_CMD_RECENT_BASE &&
+             command - AXYNE_CMD_RECENT_BASE < state->documents.recent_count)
+        axyne_open_document(window, state,
+            state->documents.recent_paths[command - AXYNE_CMD_RECENT_BASE]);
+}
+
+/* ---- registry commands implemented by the base --------------------------
+ * The enabled/checked rules of the former hand-written menus, keyed by
+ * registry id. A command without a case here (and without a feature that
+ * implements it) is shown disabled and never runs. Every case of the state
+ * function has a case in axyne_win_base_command (checked by
+ * tests/test_menu_consistency.c). */
+
+static int axyne_git_available(const AxyneWindowState *state)
+{
+    return state->explorer.root != NULL && state->git_process == NULL &&
+           !state->git_batch_busy;
+}
+
+int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
+                                 AxyneWinCommandState *out)
+{
+    const AxyneDocument *document = axyne_active_visible(state);
+    int debugger_active = axyne_debugger_is_active(&state->debugger);
+    int shown = !state->panel_hidden;
+    out->enabled = 1;
+    out->checked = 0;
+    switch (id) {
+    case AXYNE_COMMAND_FILE_NEW: case AXYNE_COMMAND_FILE_OPEN:
+    case AXYNE_COMMAND_FILE_OPEN_FOLDER: case AXYNE_COMMAND_FILE_EXIT:
+    case AXYNE_COMMAND_EDIT_FIND_IN_FILES: case AXYNE_COMMAND_VIEW_COMMAND_PALETTE:
+    case AXYNE_COMMAND_VIEW_QUICK_OPEN: case AXYNE_COMMAND_VIEW_CLEAR_OUTPUT:
+    case AXYNE_COMMAND_BUILD_SELECT_TARGET: case AXYNE_COMMAND_BUILD_CONFIGURE_RUNNER:
+    case AXYNE_COMMAND_TOOLS_SETTINGS: case AXYNE_COMMAND_HELP_KEYBOARD_SHORTCUTS:
+    case AXYNE_COMMAND_HELP_REPORT_ISSUE: case AXYNE_COMMAND_HELP_ABOUT:
+        return 1;
+    case AXYNE_COMMAND_FILE_SAVE: case AXYNE_COMMAND_FILE_SAVE_AS:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_SAVE);
+        return 1;
+    case AXYNE_COMMAND_FILE_CLOSE:
+        out->enabled = document != NULL;
+        return 1;
+    case AXYNE_COMMAND_EDIT_UNDO: out->enabled = axyne_edit_command_enabled(state, AXYNE_CMD_UNDO); return 1;
+    case AXYNE_COMMAND_EDIT_REDO: out->enabled = axyne_edit_command_enabled(state, AXYNE_CMD_REDO); return 1;
+    case AXYNE_COMMAND_EDIT_CUT: out->enabled = axyne_edit_command_enabled(state, AXYNE_CMD_CUT); return 1;
+    case AXYNE_COMMAND_EDIT_COPY: out->enabled = axyne_edit_command_enabled(state, AXYNE_CMD_COPY); return 1;
+    case AXYNE_COMMAND_EDIT_PASTE: out->enabled = axyne_edit_command_enabled(state, AXYNE_CMD_PASTE); return 1;
+    case AXYNE_COMMAND_EDIT_SELECT_ALL:
+        out->enabled = axyne_edit_command_enabled(state, AXYNE_CMD_SELECT_ALL);
+        return 1;
+    case AXYNE_COMMAND_EDIT_FIND: case AXYNE_COMMAND_EDIT_REPLACE:
+        out->enabled = state->editor != NULL && !axyne_empty_state(state);
+        return 1;
+    case AXYNE_COMMAND_EDIT_GO_TO_LINE: out->enabled = axyne_action_enabled(state, AXYNE_CMD_GOTO_LINE); return 1;
+    case AXYNE_COMMAND_EDIT_SELECT_LINE: out->enabled = axyne_action_enabled(state, AXYNE_CMD_SELECT_LINE); return 1;
+    case AXYNE_COMMAND_EDIT_TOGGLE_LINE_COMMENT:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_TOGGLE_COMMENT);
+        return 1;
+    case AXYNE_COMMAND_EDIT_DUPLICATE_LINE:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_DUPLICATE_LINE);
+        return 1;
+    case AXYNE_COMMAND_EDIT_MOVE_LINE_UP: out->enabled = axyne_action_enabled(state, AXYNE_CMD_MOVE_LINE_UP); return 1;
+    case AXYNE_COMMAND_EDIT_MOVE_LINE_DOWN: out->enabled = axyne_action_enabled(state, AXYNE_CMD_MOVE_LINE_DOWN); return 1;
+    case AXYNE_COMMAND_EDIT_INDENT: out->enabled = axyne_action_enabled(state, AXYNE_CMD_INDENT); return 1;
+    case AXYNE_COMMAND_EDIT_OUTDENT: out->enabled = axyne_action_enabled(state, AXYNE_CMD_OUTDENT); return 1;
+    case AXYNE_COMMAND_EDIT_GO_TO_DEFINITION: case AXYNE_COMMAND_EDIT_FIND_REFERENCES:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_LSP_DEFINITION);
+        return 1;
+    case AXYNE_COMMAND_EDIT_GO_TO_SYMBOL:
+        out->enabled = state->editor != NULL;
+        return 1;
+    case AXYNE_COMMAND_VIEW_EXPLORER:
+        out->checked = !state->explorer_hidden && state->sidebar_tab == AXYNE_SIDEBAR_TAB_EXPLORER;
+        return 1;
+    case AXYNE_COMMAND_VIEW_GIT_PANEL:
+        out->checked = !state->explorer_hidden && state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT;
+        return 1;
+    case AXYNE_COMMAND_VIEW_PANEL:
+        out->checked = shown;
+        return 1;
+    case AXYNE_COMMAND_VIEW_OUTPUT:
+        out->checked = shown && state->panel_tab == AXYNE_WIN_PANEL_OUTPUT;
+        return 1;
+    case AXYNE_COMMAND_VIEW_PROBLEMS:
+        out->checked = shown && state->panel_tab == AXYNE_WIN_PANEL_PROBLEMS;
+        return 1;
+    case AXYNE_COMMAND_VIEW_TERMINAL:
+        out->checked = shown && state->panel_tab == AXYNE_WIN_PANEL_TERMINAL;
+        return 1;
+    case AXYNE_COMMAND_VIEW_ZOOM_IN: out->enabled = axyne_action_enabled(state, AXYNE_CMD_ZOOM_IN); return 1;
+    case AXYNE_COMMAND_VIEW_ZOOM_OUT: out->enabled = axyne_action_enabled(state, AXYNE_CMD_ZOOM_OUT); return 1;
+    case AXYNE_COMMAND_VIEW_ZOOM_RESET: out->enabled = axyne_action_enabled(state, AXYNE_CMD_ZOOM_RESET); return 1;
+    case AXYNE_COMMAND_VIEW_WORD_WRAP:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_WORD_WRAP);
+        out->checked = state->preferences.editor.word_wrap != 0;
+        return 1;
+    case AXYNE_COMMAND_VIEW_FULL_SCREEN:
+        out->checked = state->fullscreen != 0;
+        return 1;
+    case AXYNE_COMMAND_BUILD_BUILD: case AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING:
+        out->enabled = document != NULL && state->terminal_process == NULL && !debugger_active;
+        return 1;
+    case AXYNE_COMMAND_BUILD_CANCEL:
+        out->enabled = state->active_action == 1 && state->terminal_process != NULL;
+        return 1;
+    case AXYNE_COMMAND_DEBUG_START:
+        out->enabled = axyne_debugger_can_start(debugger_active, state->terminal_process != NULL,
+            document != NULL && !document->is_untitled && document->path != NULL &&
+            !document->is_dirty);
+        return 1;
+    case AXYNE_COMMAND_DEBUG_STOP: out->enabled = axyne_action_enabled(state, AXYNE_CMD_DEBUG_STOP); return 1;
+    case AXYNE_COMMAND_DEBUG_PAUSE: case AXYNE_COMMAND_DEBUG_CONTINUE:
+    case AXYNE_COMMAND_DEBUG_STEP_OVER:
+        out->enabled = axyne_debugger_can_control(debugger_active);
+        return 1;
+    case AXYNE_COMMAND_DEBUG_STEP_INTO: out->enabled = axyne_action_enabled(state, AXYNE_CMD_DEBUG_STEP_INTO); return 1;
+    case AXYNE_COMMAND_DEBUG_STEP_OUT: out->enabled = axyne_action_enabled(state, AXYNE_CMD_DEBUG_STEP_OUT); return 1;
+    case AXYNE_COMMAND_DEBUG_TOGGLE_BREAKPOINT:
+        out->enabled = axyne_debugger_can_toggle_breakpoint(
+            document != NULL && !document->is_untitled && document->path != NULL);
+        return 1;
+    case AXYNE_COMMAND_DEBUG_CLEAR_BREAKPOINTS:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS);
+        return 1;
+    case AXYNE_COMMAND_TERMINAL_NEW:
+        out->enabled = state->terminal_process == NULL && !debugger_active;
+        return 1;
+    case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS:
+        out->enabled = state->explorer.root != NULL;
+        return 1;
+    case AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON:
+        out->enabled = axyne_action_enabled(state, AXYNE_CMD_OPEN_PREFERENCES_FILE);
+        return 1;
+    case AXYNE_COMMAND_GIT_STATUS: case AXYNE_COMMAND_GIT_DIFF:
+    case AXYNE_COMMAND_GIT_STAGE_ALL: case AXYNE_COMMAND_GIT_UNSTAGE_ALL:
+    case AXYNE_COMMAND_GIT_COMMIT: case AXYNE_COMMAND_GIT_PUSH:
+    case AXYNE_COMMAND_GIT_PULL: case AXYNE_COMMAND_GIT_LOG:
+        out->enabled = axyne_git_available(state);
+        return 1;
+    case AXYNE_COMMAND_EXPLORER_NEW_FILE: case AXYNE_COMMAND_EXPLORER_NEW_FOLDER:
+    case AXYNE_COMMAND_EXPLORER_RENAME: case AXYNE_COMMAND_EXPLORER_DELETE:
+        out->enabled = state->explorer.root != NULL;
+        return 1;
+    default:
+        out->enabled = 0;
+        return 0;
+    }
+}
+
+int axyne_win_base_command(AxyneWindowState *state, AxyneCommandId id)
+{
+    HWND window = state->main_window;
+    UINT legacy;
+    if (window == NULL) return 0;
+    switch (id) {
+    case AXYNE_COMMAND_FILE_NEW: legacy = AXYNE_CMD_NEW; break;
+    case AXYNE_COMMAND_FILE_OPEN: legacy = AXYNE_CMD_OPEN; break;
+    case AXYNE_COMMAND_FILE_OPEN_FOLDER: legacy = AXYNE_CMD_WORKSPACE; break;
+    case AXYNE_COMMAND_FILE_SAVE: legacy = AXYNE_CMD_SAVE; break;
+    case AXYNE_COMMAND_FILE_SAVE_AS: legacy = AXYNE_CMD_SAVE_AS; break;
+    case AXYNE_COMMAND_FILE_CLOSE: legacy = AXYNE_CMD_CLOSE; break;
+    case AXYNE_COMMAND_FILE_EXIT: legacy = AXYNE_CMD_EXIT; break;
+    case AXYNE_COMMAND_EDIT_UNDO: legacy = AXYNE_CMD_UNDO; break;
+    case AXYNE_COMMAND_EDIT_REDO: legacy = AXYNE_CMD_REDO; break;
+    case AXYNE_COMMAND_EDIT_CUT: legacy = AXYNE_CMD_CUT; break;
+    case AXYNE_COMMAND_EDIT_COPY: legacy = AXYNE_CMD_COPY; break;
+    case AXYNE_COMMAND_EDIT_PASTE: legacy = AXYNE_CMD_PASTE; break;
+    case AXYNE_COMMAND_EDIT_SELECT_ALL: legacy = AXYNE_CMD_SELECT_ALL; break;
+    case AXYNE_COMMAND_EDIT_FIND: legacy = AXYNE_CMD_FIND; break;
+    case AXYNE_COMMAND_EDIT_REPLACE: legacy = AXYNE_CMD_REPLACE; break;
+    case AXYNE_COMMAND_EDIT_FIND_IN_FILES: legacy = AXYNE_CMD_SEARCH_FOLDER; break;
+    case AXYNE_COMMAND_EDIT_GO_TO_LINE: legacy = AXYNE_CMD_GOTO_LINE; break;
+    case AXYNE_COMMAND_EDIT_SELECT_LINE: legacy = AXYNE_CMD_SELECT_LINE; break;
+    case AXYNE_COMMAND_EDIT_TOGGLE_LINE_COMMENT: legacy = AXYNE_CMD_TOGGLE_COMMENT; break;
+    case AXYNE_COMMAND_EDIT_DUPLICATE_LINE: legacy = AXYNE_CMD_DUPLICATE_LINE; break;
+    case AXYNE_COMMAND_EDIT_MOVE_LINE_UP: legacy = AXYNE_CMD_MOVE_LINE_UP; break;
+    case AXYNE_COMMAND_EDIT_MOVE_LINE_DOWN: legacy = AXYNE_CMD_MOVE_LINE_DOWN; break;
+    case AXYNE_COMMAND_EDIT_INDENT: legacy = AXYNE_CMD_INDENT; break;
+    case AXYNE_COMMAND_EDIT_OUTDENT: legacy = AXYNE_CMD_OUTDENT; break;
+    case AXYNE_COMMAND_EDIT_GO_TO_DEFINITION: legacy = AXYNE_CMD_LSP_DEFINITION; break;
+    case AXYNE_COMMAND_EDIT_FIND_REFERENCES: legacy = AXYNE_CMD_LSP_REFERENCES; break;
+    case AXYNE_COMMAND_EDIT_GO_TO_SYMBOL:
+        axyne_palette_open(window, state, "@");
+        return 1;
+    case AXYNE_COMMAND_VIEW_COMMAND_PALETTE:
+        axyne_palette_open(window, state, ">");
+        return 1;
+    case AXYNE_COMMAND_VIEW_QUICK_OPEN: legacy = AXYNE_CMD_QUICK_FILE; break;
+    case AXYNE_COMMAND_VIEW_EXPLORER: legacy = AXYNE_CMD_VIEW_EXPLORER; break;
+    case AXYNE_COMMAND_VIEW_GIT_PANEL: legacy = AXYNE_CMD_VIEW_GIT; break;
+    case AXYNE_COMMAND_VIEW_PANEL: legacy = AXYNE_CMD_VIEW_PANEL; break;
+    case AXYNE_COMMAND_VIEW_OUTPUT: legacy = AXYNE_CMD_PANEL_OUTPUT; break;
+    case AXYNE_COMMAND_VIEW_PROBLEMS: legacy = AXYNE_CMD_PANEL_PROBLEMS; break;
+    case AXYNE_COMMAND_VIEW_TERMINAL: legacy = AXYNE_CMD_PANEL_TERMINAL; break;
+    case AXYNE_COMMAND_VIEW_CLEAR_OUTPUT:
+        if (state->terminal_output != NULL) SetWindowTextW(state->terminal_output, L"");
+        return 1;
+    case AXYNE_COMMAND_VIEW_ZOOM_IN: legacy = AXYNE_CMD_ZOOM_IN; break;
+    case AXYNE_COMMAND_VIEW_ZOOM_OUT: legacy = AXYNE_CMD_ZOOM_OUT; break;
+    case AXYNE_COMMAND_VIEW_ZOOM_RESET: legacy = AXYNE_CMD_ZOOM_RESET; break;
+    case AXYNE_COMMAND_VIEW_WORD_WRAP: legacy = AXYNE_CMD_WORD_WRAP; break;
+    case AXYNE_COMMAND_VIEW_FULL_SCREEN: legacy = AXYNE_CMD_FULLSCREEN; break;
+    case AXYNE_COMMAND_BUILD_BUILD: legacy = AXYNE_CMD_BUILD; break;
+    case AXYNE_COMMAND_BUILD_SELECT_TARGET: legacy = AXYNE_CMD_BUILD_TARGET; break;
+    case AXYNE_COMMAND_BUILD_CANCEL: legacy = AXYNE_TERMINAL_STOP; break;
+    case AXYNE_COMMAND_BUILD_CONFIGURE_RUNNER: legacy = AXYNE_CMD_CONFIGURE_RUNNER; break;
+    case AXYNE_COMMAND_DEBUG_START: legacy = AXYNE_DEBUG_START; break;
+    case AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING: legacy = AXYNE_CMD_RUN; break;
+    case AXYNE_COMMAND_DEBUG_STOP: legacy = AXYNE_CMD_DEBUG_STOP; break;
+    case AXYNE_COMMAND_DEBUG_PAUSE: legacy = AXYNE_DEBUG_PAUSE; break;
+    case AXYNE_COMMAND_DEBUG_CONTINUE: legacy = AXYNE_DEBUG_CONTINUE; break;
+    case AXYNE_COMMAND_DEBUG_STEP_OVER: legacy = AXYNE_DEBUG_STEP_OVER; break;
+    case AXYNE_COMMAND_DEBUG_STEP_INTO: legacy = AXYNE_CMD_DEBUG_STEP_INTO; break;
+    case AXYNE_COMMAND_DEBUG_STEP_OUT: legacy = AXYNE_CMD_DEBUG_STEP_OUT; break;
+    case AXYNE_COMMAND_DEBUG_TOGGLE_BREAKPOINT: legacy = AXYNE_DEBUG_BREAKPOINT; break;
+    case AXYNE_COMMAND_DEBUG_CLEAR_BREAKPOINTS: legacy = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS; break;
+    case AXYNE_COMMAND_TERMINAL_NEW: legacy = AXYNE_TERMINAL_START; break;
+    case AXYNE_COMMAND_TOOLS_SETTINGS: legacy = AXYNE_CMD_PREFERENCES; break;
+    case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS: legacy = AXYNE_CMD_WORKSPACE_PREFERENCES; break;
+    case AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON: legacy = AXYNE_CMD_OPEN_PREFERENCES_FILE; break;
+    case AXYNE_COMMAND_GIT_STATUS: legacy = AXYNE_CMD_GIT_STATUS; break;
+    case AXYNE_COMMAND_GIT_DIFF: legacy = AXYNE_CMD_GIT_DIFF; break;
+    case AXYNE_COMMAND_GIT_STAGE_ALL: legacy = AXYNE_CMD_GIT_STAGE_ALL; break;
+    case AXYNE_COMMAND_GIT_UNSTAGE_ALL: legacy = AXYNE_CMD_GIT_UNSTAGE_ALL; break;
+    case AXYNE_COMMAND_GIT_COMMIT: legacy = AXYNE_CMD_GIT_COMMIT; break;
+    case AXYNE_COMMAND_GIT_PUSH: legacy = AXYNE_CMD_GIT_PUSH; break;
+    case AXYNE_COMMAND_GIT_PULL: legacy = AXYNE_CMD_GIT_PULL; break;
+    case AXYNE_COMMAND_GIT_LOG: legacy = AXYNE_CMD_GIT_LOG; break;
+    case AXYNE_COMMAND_HELP_KEYBOARD_SHORTCUTS: legacy = AXYNE_CMD_SHORTCUTS; break;
+    case AXYNE_COMMAND_HELP_REPORT_ISSUE: legacy = AXYNE_CMD_REPORT_ISSUE; break;
+    case AXYNE_COMMAND_HELP_ABOUT: legacy = AXYNE_CMD_ABOUT; break;
+    case AXYNE_COMMAND_EXPLORER_NEW_FILE: legacy = AXYNE_CMD_EXPLORER_NEW_FILE; break;
+    case AXYNE_COMMAND_EXPLORER_NEW_FOLDER: legacy = AXYNE_CMD_EXPLORER_NEW_FOLDER; break;
+    case AXYNE_COMMAND_EXPLORER_RENAME: legacy = AXYNE_CMD_EXPLORER_RENAME; break;
+    case AXYNE_COMMAND_EXPLORER_DELETE: legacy = AXYNE_CMD_EXPLORER_REMOVE; break;
+    default:
+        return 0;
+    }
+    axyne_legacy_command(window, state, legacy);
+    return 1;
 }
 
 /* ---- exported helpers (ui_windows_internal.h) ---------------------------- */
@@ -9477,9 +9726,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->menu_active = index + 1;
                 InvalidateRect(window, NULL, FALSE);
                 UpdateWindow(window);
-                if (index == 0) axyne_file_popup(window, state);
-                else if (index == 1) axyne_edit_popup(window, state);
-                else axyne_chrome_popup(window, state, index);
+                axyne_menu_bar_popup(window, state, index);
                 state->menu_active = 0;
                 InvalidateRect(window, NULL, FALSE);
                 return 0;
@@ -9495,11 +9742,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                     if (axyne_toolbar_enabled(state, AXYNE_TOOLBAR_COMMANDS[i])) {
                         /* Toolbar Undo/Redo are the editor's (that is what
                          * enables them), not a focused text field's. */
-                        if ((AXYNE_TOOLBAR_COMMANDS[i] == AXYNE_CMD_UNDO ||
-                             AXYNE_TOOLBAR_COMMANDS[i] == AXYNE_CMD_REDO) &&
+                        if ((AXYNE_TOOLBAR_COMMANDS[i] == AXYNE_COMMAND_EDIT_UNDO ||
+                             AXYNE_TOOLBAR_COMMANDS[i] == AXYNE_COMMAND_EDIT_REDO) &&
                             state->editor != NULL)
                             SetFocus(state->editor);
-                        SendMessageW(window, WM_COMMAND, AXYNE_TOOLBAR_COMMANDS[i], 0);
+                        (void)axyne_win_dispatch(state, AXYNE_TOOLBAR_COMMANDS[i]);
                     }
                     return 0;
                 }
@@ -9732,120 +9979,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_palette_text_changed(window, state);
             return 0;
         }
-        /* Edit commands go to a focused text field first, which works
-         * without a document too. */
-        if (axyne_edit_field_focused(state) != NULL &&
-            axyne_edit_command(state, command))
+        if (command >= AXYNE_WIN_COMMAND_ID_BASE &&
+            command < AXYNE_WIN_COMMAND_ID_BASE + (UINT)AXYNE_COMMAND_COUNT) {
+            (void)axyne_win_execute(state, (AxyneCommandId)(command - AXYNE_WIN_COMMAND_ID_BASE));
             return 0;
-        /* Document commands have nothing to act on in the empty state. */
-        if (axyne_empty_state(state) && axyne_command_needs_document(command))
-            return 0;
-        if (command == AXYNE_CMD_PANEL_OUTPUT || command == AXYNE_CMD_PANEL_TERMINAL ||
-            command == AXYNE_CMD_PANEL_PROBLEMS) {
-            axyne_select_panel_tab(window, state,
-                command == AXYNE_CMD_PANEL_TERMINAL ? AXYNE_WIN_PANEL_TERMINAL
-                : command == AXYNE_CMD_PANEL_PROBLEMS ? AXYNE_WIN_PANEL_PROBLEMS
-                : AXYNE_WIN_PANEL_OUTPUT, 1);
         }
-        else if (axyne_action_command(window, state, command)) { /* handled */ }
-        else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
-        else if (command == AXYNE_CMD_ABOUT)
-            MessageBoxW(window,
-                L"Axyne\nLightweight native IDE\n\nhttps://github.com/team-native/Axyne",
-                L"About Axyne", MB_OK | MB_ICONINFORMATION);
-        else if (command == AXYNE_CMD_BUILD) axyne_start_action(window, state, 0);
-        else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
-        else if (command == AXYNE_CMD_BUILD_TARGET) axyne_build_target_popup(window, state);
-        else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
-            (void)axyne_configure_runner(window, &state->action_runner);
-            InvalidateRect(window, NULL, FALSE);
-        }
-        else if (command == AXYNE_CMD_PREFERENCES)
-            (void)axyne_preferences_dialog(window, state, 0);
-        else if (command == AXYNE_CMD_WORKSPACE_PREFERENCES) {
-            if (state->workspace_preferences_path == NULL)
-                MessageBoxA(window, "Open a workspace folder before editing workspace settings.", "Axyne - Preferences", MB_OK | MB_ICONINFORMATION);
-            else (void)axyne_preferences_dialog(window, state, 1);
-        }
-        else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
-        else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
-        else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
-        else if (command == AXYNE_DEBUG_START) axyne_windows_debugger_start(window, state);
-        else if (command == AXYNE_DEBUG_PAUSE)
-            axyne_debugger_command_ui(state, AXYNE_DEBUGGER_PAUSE);
-        else if (command == AXYNE_DEBUG_CONTINUE)
-            axyne_debugger_command_ui(state, AXYNE_DEBUGGER_CONTINUE);
-        else if (command == AXYNE_DEBUG_STEP_OVER)
-            axyne_debugger_command_ui(state, AXYNE_DEBUGGER_STEP_OVER);
-        else if (command == AXYNE_DEBUG_BREAKPOINT)
-            axyne_debugger_toggle_current_breakpoint(state);
-        else if (command == AXYNE_CMD_NEW) axyne_new_document(window, state);
-        else if (command == AXYNE_CMD_OPEN) axyne_open_document(window, state, NULL);
-        else if (command == AXYNE_CMD_SAVE) (void)axyne_save_active(window, state);
-        else if (command == AXYNE_CMD_SAVE_AS) {
-            char *path = NULL;
-            if (axyne_active(state) == NULL ||
-                !axyne_document_can_save(axyne_active(state)) ||
-                !axyne_editor_ready_for_save(window, state)) return 0;
-            if (axyne_choose_path(window, 1, &path)) {
-                if (!axyne_capture_editor(state)) {
-                    free(path);
-                    return 0;
-                }
-                AxyneError error;
-                AxyneDocument *active = axyne_active(state);
-                char *old_path = active != NULL && !active->is_untitled &&
-                    active->path != NULL ? _strdup(active->path) : NULL;
-                AxyneStatus status = axyne_documents_save_as(&state->documents,
-                    state->documents.active_index, path, &error);
-                free(path);
-                if (status == AXYNE_STATUS_OK) {
-                    SendMessageA(state->editor, SCI_SETSAVEPOINT, 0, 0);
-                    axyne_after_save_as(state, old_path);
-                    axyne_refresh_outline(state);
-                    axyne_update_title(window, state);
-                    axyne_refresh_action_controls(state);
-                    axyne_win_hooks_document_saved(state, axyne_active(state));
-                } else MessageBoxA(window, error.message, "Axyne - Save failed",
-                                   MB_OK | MB_ICONERROR);
-                free(old_path);
-            }
-        } else if (command == AXYNE_CMD_CLOSE)
-            axyne_close_tab(window, state, state->documents.active_index);
-        else if (command == AXYNE_CMD_FIND) axyne_find(window, state, 0, 0);
-        else if (command == AXYNE_CMD_REPLACE) axyne_find(window, state, 1, 0);
-        else if (command == AXYNE_CMD_SEARCH_FOLDER) axyne_search_folder(window, state, 0);
-        else if (command == AXYNE_CMD_QUICK_FILE) axyne_search_folder(window, state, 1);
-        else if (command == AXYNE_CMD_GIT_STATUS)
-            axyne_git_start(window, state, "No Git status output.", command);
-        else if (command == AXYNE_CMD_GIT_DIFF)
-            axyne_git_start(window, state, "No Git differences.", command);
-        else if (command == AXYNE_CMD_GIT_STAGE_ALL)
-            axyne_git_start(window, state, "All workspace changes staged.", command);
-        else if (command == AXYNE_CMD_GIT_UNSTAGE_ALL)
-            axyne_git_start(window, state, "All changes unstaged.", command);
-        else if (command == AXYNE_CMD_GIT_COMMIT)
-            axyne_git_commit_command(window, state);
-        else if (command == AXYNE_CMD_GIT_PUSH)
-            axyne_git_batch_start(window, state, command, NULL, 0, 0);
-        else if (command == AXYNE_CMD_GIT_PULL)
-            axyne_git_batch_start(window, state, command, NULL, 0, 0);
-        else if (command == AXYNE_CMD_GIT_LOG)
-            axyne_git_batch_start(window, state, command, NULL, 0, 0);
-        else if (command == AXYNE_CMD_VIEW_GIT)
-            axyne_git_panel_toggle_view(window, state);
-        else if (command == AXYNE_CMD_LSP_DEFINITION) axyne_lsp_navigate(window, state, 0);
-        else if (command == AXYNE_CMD_LSP_REFERENCES) axyne_lsp_navigate(window, state, 1);
-        else if (command == AXYNE_CMD_UNDO || command == AXYNE_CMD_REDO ||
-                 command == AXYNE_CMD_CUT || command == AXYNE_CMD_COPY ||
-                 command == AXYNE_CMD_PASTE || command == AXYNE_CMD_SELECT_ALL)
-            (void)axyne_edit_command(state, command);
-        else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
-            axyne_workspace_operation(window, state, command);
-        else if (command >= AXYNE_CMD_RECENT_BASE &&
-                 command - AXYNE_CMD_RECENT_BASE < state->documents.recent_count)
-            axyne_open_document(window, state,
-                state->documents.recent_paths[command - AXYNE_CMD_RECENT_BASE]);
+        axyne_legacy_command(window, state, command);
         return 0;
     }
     case WM_CTLCOLOREDIT:
@@ -10201,6 +10340,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             }
             axyne_git_panel_clear(&state->git_panel);
             axyne_palette_destroy_ui(state);
+            axyne_win_keymap_destroy(state);
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
             axyne_clear_pending_run(state);

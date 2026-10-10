@@ -1,7 +1,10 @@
 #include "ui_windows_internal.h"
 
+#include <string.h>
+
 /* Base registry/feature glue of the Windows UI: the feature table and the
- * hook fan-out that ui_windows.c calls at fixed points. */
+ * hook fan-out that ui_windows.c calls at fixed points, registry command
+ * dispatch, the key map and the menus built from the registry. */
 
 static const AxyneWinFeature *const axyne_win_features[AXYNE_WIN_FEATURE_COUNT] = {
     &axyne_win_feature_file,
@@ -159,5 +162,339 @@ void axyne_win_hooks_layout(AxyneWindowState *state, int width, int height)
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->layout != NULL) f->layout(state, width, height);
+    }
+}
+
+/* ---- registry command dispatch -------------------------------------------- */
+
+static int axyne_win_command_known(AxyneCommandId id)
+{
+    return axyne_command_available(id, AXYNE_WIN_COMMAND_PLATFORM);
+}
+
+int axyne_win_command_state(AxyneWindowState *state, AxyneCommandId id,
+                            AxyneWinCommandState *out)
+{
+    AxyneWinCommandState ignored;
+    if (out == NULL) out = &ignored;
+    out->enabled = 0;
+    out->checked = 0;
+    if (state == NULL || !axyne_win_command_known(id)) return 0;
+    if (axyne_win_hooks_command_state(state, id, out)) return 1;
+    return axyne_win_base_command_state(state, id, out);
+}
+
+int axyne_win_command_enabled(AxyneWindowState *state, AxyneCommandId id)
+{
+    AxyneWinCommandState command;
+    return axyne_win_command_state(state, id, &command) && command.enabled;
+}
+
+int axyne_win_dispatch(AxyneWindowState *state, AxyneCommandId id)
+{
+    if (state == NULL || !axyne_win_command_known(id)) return 0;
+    if (axyne_win_hooks_command(state, id)) return 1;
+    return axyne_win_base_command(state, id);
+}
+
+int axyne_win_execute(AxyneWindowState *state, AxyneCommandId id)
+{
+    if (!axyne_win_command_enabled(state, id)) return 0;
+    return axyne_win_dispatch(state, id);
+}
+
+size_t axyne_win_command_key_text(const AxyneWindowState *state, AxyneCommandId id,
+                                  char *buffer, size_t capacity)
+{
+    if (buffer != NULL && capacity > 0) buffer[0] = '\0';
+    if (state == NULL || !state->keymap_ready) return 0;
+    return axyne_keymap_display(&state->keymap, id, buffer, capacity);
+}
+
+/* ---- key map -------------------------------------------------------------- */
+
+void axyne_win_keymap_destroy(AxyneWindowState *state)
+{
+    if (state == NULL || !state->keymap_ready) return;
+    axyne_keymap_destroy(&state->keymap);
+    state->keymap_ready = 0;
+}
+
+/* Registry defaults, then the base-step exceptions, then the user's
+ * keybindings (legacy actions and command-keyed entries, which win).
+ * Base-step exception: the existing keys of existing commands stay, so Run
+ * (디버깅하지 않고 실행) keeps F5 and 디버깅 시작 has no key on Windows; the
+ * Debug category applies D1 (and calls axyne_preferences_migrate_run_binding)
+ * once the debugger works. */
+void axyne_win_keymap_rebuild(AxyneWindowState *state)
+{
+    AxyneKeySequence run;
+    if (state == NULL) return;
+    axyne_win_keymap_destroy(state);
+    if (axyne_keymap_init(&state->keymap, AXYNE_WIN_COMMAND_PLATFORM) != AXYNE_STATUS_OK)
+        return;
+    state->keymap_ready = 1;
+    if (axyne_key_sequence_parse("F5", &run) == AXYNE_STATUS_OK)
+        (void)axyne_keymap_set_command(&state->keymap,
+                                       AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING, &run, 1);
+    (void)axyne_keymap_set_command(&state->keymap, AXYNE_COMMAND_DEBUG_START, NULL, 0);
+    /* Malformed user key text is skipped (the rest still applies). */
+    (void)axyne_keymap_apply_preferences(&state->keymap, &state->preferences);
+}
+
+/* ---- menu table ------------------------------------------------------------
+ * The Windows menus in Figma order (file 7J8SYhLpybJgpxD3qFqL5u, frames
+ * 24:14189 파일, 24:14297 편집, 24:14400 보기, 24:14516 빌드, 24:14603 디버그,
+ * 24:14695 도구, 39:2402 도움말) plus the existing items Figma does not show.
+ * Titles and shortcut text come from the registry and the key map; commands
+ * not available on Windows are skipped; separators collapse when a group is
+ * empty. */
+
+typedef enum AxyneWinMenuEntryKind {
+    AXYNE_WIN_MENU_ENTRY_END = 0,
+    AXYNE_WIN_MENU_ENTRY_ITEM,
+    AXYNE_WIN_MENU_ENTRY_SEPARATOR,
+    AXYNE_WIN_MENU_ENTRY_SUBMENU,      /* title; disabled when no child is enabled */
+    AXYNE_WIN_MENU_ENTRY_SUBMENU_KEEP, /* title; always enabled */
+    AXYNE_WIN_MENU_ENTRY_SUBMENU_END,
+    AXYNE_WIN_MENU_ENTRY_SLOT,         /* feature items (AxyneWinMenuSlot) */
+    AXYNE_WIN_MENU_ENTRY_RECENT_FILES  /* recent files, or "최근 항목 없음" */
+} AxyneWinMenuEntryKind;
+
+typedef struct AxyneWinMenuEntry {
+    AxyneWinMenuEntryKind kind;
+    AxyneCommandId command;
+    const char *title;
+    AxyneWinMenuSlot slot;
+} AxyneWinMenuEntry;
+
+#define I(id) { AXYNE_WIN_MENU_ENTRY_ITEM, id, NULL, AXYNE_WIN_MENU_SLOT_COUNT }
+#define SEP { AXYNE_WIN_MENU_ENTRY_SEPARATOR, AXYNE_COMMAND_NONE, NULL, AXYNE_WIN_MENU_SLOT_COUNT }
+#define SUB(title) { AXYNE_WIN_MENU_ENTRY_SUBMENU, AXYNE_COMMAND_NONE, title, AXYNE_WIN_MENU_SLOT_COUNT }
+#define SUB_KEEP(title) { AXYNE_WIN_MENU_ENTRY_SUBMENU_KEEP, AXYNE_COMMAND_NONE, title, AXYNE_WIN_MENU_SLOT_COUNT }
+#define END_SUB { AXYNE_WIN_MENU_ENTRY_SUBMENU_END, AXYNE_COMMAND_NONE, NULL, AXYNE_WIN_MENU_SLOT_COUNT }
+#define SLOT(slot) { AXYNE_WIN_MENU_ENTRY_SLOT, AXYNE_COMMAND_NONE, NULL, slot }
+#define RECENT_FILES { AXYNE_WIN_MENU_ENTRY_RECENT_FILES, AXYNE_COMMAND_NONE, NULL, AXYNE_WIN_MENU_SLOT_COUNT }
+#define END { AXYNE_WIN_MENU_ENTRY_END, AXYNE_COMMAND_NONE, NULL, AXYNE_WIN_MENU_SLOT_COUNT }
+
+static const AxyneWinMenuEntry axyne_win_menu_file[] = {
+    I(AXYNE_COMMAND_FILE_NEW), I(AXYNE_COMMAND_FILE_NEW_PROJECT),
+    I(AXYNE_COMMAND_FILE_OPEN), I(AXYNE_COMMAND_FILE_OPEN_FOLDER), SEP,
+    SUB_KEEP("최근 항목"),
+        SLOT(AXYNE_WIN_MENU_SLOT_RECENT_FOLDERS), RECENT_FILES, SEP,
+        I(AXYNE_COMMAND_FILE_CLEAR_RECENT),
+    END_SUB, SEP,
+    I(AXYNE_COMMAND_FILE_SAVE), I(AXYNE_COMMAND_FILE_SAVE_AS), I(AXYNE_COMMAND_FILE_SAVE_ALL), SEP,
+    I(AXYNE_COMMAND_FILE_AUTO_SAVE),
+    SUB("환경 설정"),
+        I(AXYNE_COMMAND_TOOLS_SETTINGS), I(AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS),
+        I(AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON), I(AXYNE_COMMAND_TOOLS_KEYBINDINGS),
+    END_SUB, SEP,
+    I(AXYNE_COMMAND_FILE_CLOSE), I(AXYNE_COMMAND_FILE_CLOSE_WINDOW), I(AXYNE_COMMAND_FILE_EXIT),
+    END
+};
+
+static const AxyneWinMenuEntry axyne_win_menu_edit[] = {
+    I(AXYNE_COMMAND_EDIT_UNDO), I(AXYNE_COMMAND_EDIT_REDO), SEP,
+    I(AXYNE_COMMAND_EDIT_CUT), I(AXYNE_COMMAND_EDIT_COPY), I(AXYNE_COMMAND_EDIT_PASTE),
+    I(AXYNE_COMMAND_EDIT_SELECT_ALL), SEP,
+    I(AXYNE_COMMAND_EDIT_FIND), I(AXYNE_COMMAND_EDIT_REPLACE), I(AXYNE_COMMAND_EDIT_FIND_IN_FILES),
+    I(AXYNE_COMMAND_EDIT_GO_TO_LINE), I(AXYNE_COMMAND_EDIT_SELECT_LINE), SEP,
+    I(AXYNE_COMMAND_EDIT_TOGGLE_LINE_COMMENT), I(AXYNE_COMMAND_EDIT_TOGGLE_BLOCK_COMMENT),
+    I(AXYNE_COMMAND_EDIT_DUPLICATE_LINE), I(AXYNE_COMMAND_EDIT_MOVE_LINE_UP),
+    I(AXYNE_COMMAND_EDIT_MOVE_LINE_DOWN), SEP,
+    I(AXYNE_COMMAND_EDIT_INDENT), I(AXYNE_COMMAND_EDIT_OUTDENT), SEP,
+    I(AXYNE_COMMAND_EDIT_GO_TO_DEFINITION), I(AXYNE_COMMAND_EDIT_FIND_REFERENCES),
+    I(AXYNE_COMMAND_EDIT_GO_TO_SYMBOL),
+    END
+};
+
+static const AxyneWinMenuEntry axyne_win_menu_view[] = {
+    I(AXYNE_COMMAND_VIEW_COMMAND_PALETTE), I(AXYNE_COMMAND_VIEW_QUICK_OPEN), SEP,
+    I(AXYNE_COMMAND_VIEW_EXPLORER), I(AXYNE_COMMAND_VIEW_GIT_PANEL), I(AXYNE_COMMAND_VIEW_OUTLINE),
+    I(AXYNE_COMMAND_VIEW_TOOLBAR), I(AXYNE_COMMAND_VIEW_STATUS_BAR), I(AXYNE_COMMAND_VIEW_PANEL), SEP,
+    I(AXYNE_COMMAND_VIEW_OUTPUT), I(AXYNE_COMMAND_VIEW_PROBLEMS), I(AXYNE_COMMAND_VIEW_TERMINAL),
+    I(AXYNE_COMMAND_VIEW_CLEAR_OUTPUT), SEP,
+    I(AXYNE_COMMAND_VIEW_ZOOM_IN), I(AXYNE_COMMAND_VIEW_ZOOM_OUT), I(AXYNE_COMMAND_VIEW_ZOOM_RESET), SEP,
+    I(AXYNE_COMMAND_VIEW_ALWAYS_SHOW_ACTIONS), I(AXYNE_COMMAND_VIEW_WORD_WRAP),
+    SUB("테마"),
+        I(AXYNE_COMMAND_VIEW_THEME_DARK), I(AXYNE_COMMAND_VIEW_THEME_LIGHT),
+        I(AXYNE_COMMAND_VIEW_THEME_HIGH_CONTRAST), I(AXYNE_COMMAND_VIEW_THEME_CUSTOM), SEP,
+        I(AXYNE_COMMAND_VIEW_THEME_EDIT_JSON),
+    END_SUB, SEP,
+    I(AXYNE_COMMAND_VIEW_FULL_SCREEN),
+    END
+};
+
+static const AxyneWinMenuEntry axyne_win_menu_build[] = {
+    I(AXYNE_COMMAND_BUILD_BUILD), I(AXYNE_COMMAND_BUILD_REBUILD), I(AXYNE_COMMAND_BUILD_CLEAN), SEP,
+    I(AXYNE_COMMAND_BUILD_CMAKE_CONFIGURE), I(AXYNE_COMMAND_BUILD_CMAKE_RECONFIGURE_CLEAN), SEP,
+    SUB("빌드 구성"),
+        I(AXYNE_COMMAND_BUILD_CONFIG_DEBUG), I(AXYNE_COMMAND_BUILD_CONFIG_RELEASE),
+        I(AXYNE_COMMAND_BUILD_CONFIG_REL_WITH_DEB_INFO), I(AXYNE_COMMAND_BUILD_CONFIG_MIN_SIZE_REL), SEP,
+        I(AXYNE_COMMAND_BUILD_OPEN_CMAKE_PRESETS),
+    END_SUB,
+    I(AXYNE_COMMAND_BUILD_SELECT_TARGET), I(AXYNE_COMMAND_BUILD_CONFIGURE_RUNNER), SEP,
+    I(AXYNE_COMMAND_BUILD_RUN_TASK), I(AXYNE_COMMAND_BUILD_EDIT_TASKS), SEP,
+    I(AXYNE_COMMAND_BUILD_CANCEL),
+    END
+};
+
+static const AxyneWinMenuEntry axyne_win_menu_debug[] = {
+    I(AXYNE_COMMAND_DEBUG_START), I(AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING),
+    I(AXYNE_COMMAND_DEBUG_STOP), I(AXYNE_COMMAND_DEBUG_RESTART),
+    I(AXYNE_COMMAND_DEBUG_PAUSE), I(AXYNE_COMMAND_DEBUG_CONTINUE), SEP,
+    I(AXYNE_COMMAND_DEBUG_TOGGLE_BREAKPOINT), I(AXYNE_COMMAND_DEBUG_CLEAR_BREAKPOINTS), SEP,
+    I(AXYNE_COMMAND_DEBUG_STEP_OVER), I(AXYNE_COMMAND_DEBUG_STEP_INTO), I(AXYNE_COMMAND_DEBUG_STEP_OUT), SEP,
+    I(AXYNE_COMMAND_DEBUG_RUN_ARGUMENTS),
+    SUB("외부 디버거 열기"),
+        I(AXYNE_COMMAND_DEBUG_EXTERNAL_VISUAL_STUDIO), I(AXYNE_COMMAND_DEBUG_EXTERNAL_WINDBG),
+        I(AXYNE_COMMAND_DEBUG_EXTERNAL_X64DBG), I(AXYNE_COMMAND_DEBUG_EXTERNAL_LLDB), SEP,
+        I(AXYNE_COMMAND_DEBUG_CONFIGURE_DEBUGGERS),
+    END_SUB,
+    END
+};
+
+static const AxyneWinMenuEntry axyne_win_menu_tools[] = {
+    SUB("새 터미널"),
+        I(AXYNE_COMMAND_TERMINAL_NEW), I(AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL),
+        I(AXYNE_COMMAND_TERMINAL_NEW_COMMAND_PROMPT), I(AXYNE_COMMAND_TERMINAL_NEW_WSL),
+        I(AXYNE_COMMAND_TERMINAL_NEW_ZSH), I(AXYNE_COMMAND_TERMINAL_NEW_BASH), SEP,
+        I(AXYNE_COMMAND_TERMINAL_SELECT_DEFAULT_PROFILE),
+    END_SUB,
+    SUB("외부 도구"),
+        SLOT(AXYNE_WIN_MENU_SLOT_EXTERNAL_TOOLS), SEP,
+        I(AXYNE_COMMAND_TOOLS_CONFIGURE_EXTERNAL_TOOLS),
+    END_SUB, SEP,
+    I(AXYNE_COMMAND_TOOLS_SETTINGS), I(AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS),
+    I(AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON), I(AXYNE_COMMAND_TOOLS_OPEN_THEME_JSON),
+    I(AXYNE_COMMAND_TOOLS_KEYBINDINGS), SEP,
+    I(AXYNE_COMMAND_TOOLS_MEMORY_USAGE), I(AXYNE_COMMAND_TOOLS_FILE_ASSOCIATIONS), SEP,
+    I(AXYNE_COMMAND_GIT_STATUS), I(AXYNE_COMMAND_GIT_DIFF), I(AXYNE_COMMAND_GIT_STAGE_ALL),
+    I(AXYNE_COMMAND_GIT_UNSTAGE_ALL), SEP,
+    I(AXYNE_COMMAND_GIT_COMMIT), I(AXYNE_COMMAND_GIT_PUSH), I(AXYNE_COMMAND_GIT_PULL),
+    I(AXYNE_COMMAND_GIT_LOG),
+    END
+};
+
+static const AxyneWinMenuEntry axyne_win_menu_help[] = {
+    I(AXYNE_COMMAND_HELP_GETTING_STARTED), I(AXYNE_COMMAND_HELP_KEYBOARD_SHORTCUTS),
+    I(AXYNE_COMMAND_HELP_OPEN_LOG_FOLDER), SEP,
+    I(AXYNE_COMMAND_HELP_CHECK_FOR_UPDATES), I(AXYNE_COMMAND_HELP_RELEASE_NOTES),
+    I(AXYNE_COMMAND_HELP_REPORT_ISSUE), SEP,
+    I(AXYNE_COMMAND_HELP_LICENSES), I(AXYNE_COMMAND_HELP_ABOUT),
+    I(AXYNE_COMMAND_HELP_CONTENTS), I(AXYNE_COMMAND_HELP_SHOW_SETTINGS_FOLDER),
+    END
+};
+
+/* Menu-bar order (ui_design.h titles): 파일 편집 보기 빌드 디버그 도구 도움말. */
+static const AxyneWinMenuEntry *const axyne_win_menu_bar[] = {
+    axyne_win_menu_file, axyne_win_menu_edit, axyne_win_menu_view, axyne_win_menu_build,
+    axyne_win_menu_debug, axyne_win_menu_tools, axyne_win_menu_help
+};
+
+#undef I
+#undef SEP
+#undef SUB
+#undef SUB_KEEP
+#undef END_SUB
+#undef SLOT
+#undef RECENT_FILES
+#undef END
+/* ---- end of menu table ---------------------------------------------------- */
+
+typedef struct AxyneWinMenuLevel {
+    AxyneWinMenu *menu;
+    int pending_separator;
+    int parent_position; /* position of this submenu in its parent */
+    int keep_enabled;
+} AxyneWinMenuLevel;
+
+static void axyne_win_menu_flush_separator(AxyneWinMenuLevel *level)
+{
+    if (level->pending_separator && axyne_win_menu_count(level->menu) > 0)
+        axyne_win_menu_separator(level->menu);
+    level->pending_separator = 0;
+}
+
+static void axyne_win_menu_add_command(AxyneWindowState *state, AxyneWinMenuLevel *level,
+                                       AxyneCommandId id)
+{
+    const AxyneCommandInfo *info = axyne_command_info(id);
+    AxyneWinCommandState command;
+    char keys[64];
+    unsigned flags = 0;
+    if (info == NULL || !axyne_command_available(id, AXYNE_WIN_COMMAND_PLATFORM)) return;
+    /* Rule: no enabled entry that does nothing. Unimplemented = disabled. */
+    if (!axyne_win_command_state(state, id, &command) || !command.enabled)
+        flags |= AXYNE_WIN_MENU_DISABLED;
+    if (command.checked) flags |= AXYNE_WIN_MENU_CHECKED;
+    if ((info->flags & AXYNE_COMMAND_FLAG_RADIO) != 0) flags |= AXYNE_WIN_MENU_RADIO;
+    (void)axyne_win_command_key_text(state, id, keys, sizeof(keys));
+    axyne_win_menu_flush_separator(level);
+    axyne_win_menu_add(level->menu, AXYNE_WIN_COMMAND_MENU_ID(id),
+                       axyne_command_title(id, AXYNE_WIN_COMMAND_PLATFORM), keys, flags);
+}
+
+void axyne_win_menu_bar_fill(AxyneWindowState *state, int index, AxyneWinMenu *menu)
+{
+    AxyneWinMenuLevel levels[4];
+    size_t depth = 0;
+    const AxyneWinMenuEntry *entry;
+    int recent_items = 0;
+    if (state == NULL || menu == NULL || index < 0 ||
+        index >= (int)(sizeof(axyne_win_menu_bar) / sizeof(axyne_win_menu_bar[0])))
+        return;
+    memset(levels, 0, sizeof(levels));
+    levels[0].menu = menu;
+    for (entry = axyne_win_menu_bar[index]; entry->kind != AXYNE_WIN_MENU_ENTRY_END; ++entry) {
+        AxyneWinMenuLevel *level = &levels[depth];
+        switch (entry->kind) {
+        case AXYNE_WIN_MENU_ENTRY_ITEM:
+            axyne_win_menu_add_command(state, level, entry->command);
+            break;
+        case AXYNE_WIN_MENU_ENTRY_SEPARATOR:
+            level->pending_separator = 1;
+            break;
+        case AXYNE_WIN_MENU_ENTRY_SUBMENU:
+        case AXYNE_WIN_MENU_ENTRY_SUBMENU_KEEP: {
+            AxyneWinMenu *sub;
+            int position;
+            if (depth + 1 >= sizeof(levels) / sizeof(levels[0])) break;
+            axyne_win_menu_flush_separator(level);
+            position = axyne_win_menu_count(level->menu);
+            sub = axyne_win_menu_submenu(level->menu, entry->title, 0);
+            if (sub == NULL) break;
+            ++depth;
+            memset(&levels[depth], 0, sizeof(levels[depth]));
+            levels[depth].menu = sub;
+            levels[depth].parent_position = position;
+            levels[depth].keep_enabled = entry->kind == AXYNE_WIN_MENU_ENTRY_SUBMENU_KEEP;
+            recent_items = 0;
+            break;
+        }
+        case AXYNE_WIN_MENU_ENTRY_SUBMENU_END:
+            if (depth == 0) break;
+            if (!level->keep_enabled && !axyne_win_menu_has_enabled(level->menu))
+                axyne_win_menu_enable_at(levels[depth - 1].menu, level->parent_position, 0);
+            --depth;
+            break;
+        case AXYNE_WIN_MENU_ENTRY_SLOT: {
+            int before = axyne_win_menu_count(level->menu);
+            axyne_win_menu_flush_separator(level);
+            axyne_win_hooks_menu_populate(state, entry->slot, level->menu);
+            recent_items += axyne_win_menu_count(level->menu) - before;
+            break;
+        }
+        case AXYNE_WIN_MENU_ENTRY_RECENT_FILES:
+            axyne_win_menu_flush_separator(level);
+            recent_items += axyne_win_menu_add_recent_files(state, level->menu);
+            if (recent_items <= 0)
+                axyne_win_menu_add(level->menu, 0, "최근 항목 없음", NULL,
+                                   AXYNE_WIN_MENU_DISABLED);
+            break;
+        default:
+            break;
+        }
     }
 }
