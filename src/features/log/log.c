@@ -119,11 +119,15 @@ static int open_locked(void)
     } else {
         directory = axyne_app_path(AXYNE_APP_PATH_LOG_DIR);
     }
-    if (directory == NULL || axyne_app_paths_ensure_directory(directory, NULL) != AXYNE_STATUS_OK) {
+    if (directory == NULL) {
         axyne_app_path_free(directory);
         log_failed = 1;
         return 0;
     }
+    /* The directory helper may report an intermediate Windows sharing status
+     * even though the requested directory is already present.  The append
+     * open below is the authoritative check for whether logging can proceed. */
+    (void)axyne_app_paths_ensure_directory(directory, NULL);
     free(log_path);
     log_path = axyne_app_path_join(directory, "axyne.log");
     axyne_app_path_free(directory);
