@@ -8,6 +8,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <strsafe.h>
+#include <tlhelp32.h>
 #include "installer_ui_config.h"
 
 #ifndef AXYNE_UI_INSTALL_BYTES
@@ -17,6 +18,7 @@
 #define IDR_BACKEND 101
 #define TIMER_INSTALL 7
 #define TIMER_CHILD 8
+#define TIMER_RUNNING 9
 /* Exit code of the elevated wizard instance when the user asked to launch
  * Axyne; the unelevated parent then starts it without elevation. */
 #define EXIT_LAUNCH_AXYNE 10
@@ -89,6 +91,7 @@ static const WCHAR *g_error;
 static BOOL g_elevated_instance;
 static HANDLE g_elevated_child;
 static int g_exit_code;
+static BOOL g_axyne_running;
 
 static void fill(HDC dc, COLORREF color, int l, int t, int r, int b) {
     HBRUSH brush = CreateSolidBrush(color);
@@ -292,6 +295,40 @@ static BOOL is_elevated(void) {
     return elevated;
 }
 
+/* A running Axyne would hold axyne.exe and its DLLs open during an upgrade,
+ * so 설치 waits until it is closed (same check as the uninstaller). */
+static BOOL is_axyne_running(void) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W entry;
+    BOOL running = FALSE;
+    if (snapshot == INVALID_HANDLE_VALUE) return FALSE;
+    ZeroMemory(&entry, sizeof(entry)); entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (lstrcmpiW(entry.szExeFile, L"axyne.exe") == 0) { running = TRUE; break; }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return running;
+}
+
+/* Asks Axyne's top-level windows to close normally so it can still prompt
+ * for unsaved files; nothing is terminated. */
+static BOOL CALLBACK close_axyne_window_callback(HWND hwnd, LPARAM param) {
+    DWORD pid = 0; WCHAR path[MAX_PATH]; DWORD size = MAX_PATH; HANDLE process;
+    (void)param;
+    if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != NULL) return TRUE;
+    GetWindowThreadProcessId(hwnd, &pid);
+    process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return TRUE;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        WCHAR *name = wcsrchr(path, L'\\');
+        if (name && lstrcmpiW(name + 1, L"axyne.exe") == 0) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+    CloseHandle(process);
+    return TRUE;
+}
+
 /* --- painting ----------------------------------------------------------- */
 
 static void sidebar(HDC dc, int active) {
@@ -375,7 +412,14 @@ static void components_page(HDC dc) {
     text(dc, g_scope == SCOPE_ALL ? L"모든 사용자의 시작 메뉴에 추가합니다." : L"시작 메뉴에 Axyne를 추가합니다.",
          257, 186, 360, 18, MUTED, 11, 400);
     checkbox(dc, 233, 216, g_desktop, TRUE, L"바탕 화면 바로 가기");
-    footer(dc, L"설치 마법사 4 / 6", TRUE, L"설치", TRUE);
+    if (g_axyne_running) {
+        fill(dc, RGB(42, 35, 22), 219, 262, 652, 310); frame(dc, RGB(110, 85, 40), 219, 262, 652, 310);
+        centered_text(dc, L"⚠", 227, 262, 20, 48, WARNING, 13, 700);
+        draw_text(dc, L"Axyne가 실행 중입니다. 저장한 뒤 닫아 주세요.", 253, 262, 300, 48, TEXT, 12, 400,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        button(dc, L"Axyne 닫기", 560, 271, 82, BUTTON_SECONDARY);
+    }
+    footer(dc, L"설치 마법사 4 / 6", TRUE, L"설치", !g_axyne_running);
 }
 
 static void install_page(HDC dc) {
@@ -904,6 +948,8 @@ static void start_install(void) {
 static void begin_install(void) {
     refresh_free_space();
     if (!enough_space()) { g_page = PAGE_LOCATION; return; }
+    g_axyne_running = is_axyne_running();
+    if (g_axyne_running) { g_page = PAGE_COMPONENTS; return; }
     if (g_scope == SCOPE_ALL && !g_elevated_instance && !is_elevated()) {
         start_elevated_wizard();
         return;
@@ -925,7 +971,7 @@ static void finish(void) {
 static void on_next(void) {
     if (g_page == PAGE_WELCOME) g_page = PAGE_LICENSE;
     else if (g_page == PAGE_LICENSE && g_license_ok) { g_page = PAGE_LOCATION; refresh_free_space(); }
-    else if (g_page == PAGE_LOCATION && enough_space()) g_page = PAGE_COMPONENTS;
+    else if (g_page == PAGE_LOCATION && enough_space()) { g_page = PAGE_COMPONENTS; g_axyne_running = is_axyne_running(); }
     else if (g_page == PAGE_COMPONENTS) begin_install();
 }
 
@@ -963,7 +1009,8 @@ static void on_click(int x, int y) {
         else if (inside(x, y, 219, 164, 652, 224)) set_scope(SCOPE_ALL);
         else if (inside(x, y, 571, 261, 652, 291)) choose_folder();
     } else if (g_page == PAGE_COMPONENTS) {
-        if (inside(x, y, 219, 160, 652, 206)) g_start_menu = !g_start_menu;
+        if (g_axyne_running && inside(x, y, 560, 271, 642, 301)) EnumWindows(close_axyne_window_callback, 0);
+        else if (inside(x, y, 219, 160, 652, 206)) g_start_menu = !g_start_menu;
         else if (inside(x, y, 219, 206, 652, 244)) g_desktop = !g_desktop;
     } else if (g_page == PAGE_INSTALL && g_install_result != RESULT_RUNNING && g_restore_incomplete &&
                inside(x, y, 571, 147, 652, 177)) {
@@ -1001,6 +1048,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) return 1;
     if (msg == WM_TIMER && wp == TIMER_INSTALL) { on_install_timer(); return 0; }
     if (msg == WM_TIMER && wp == TIMER_CHILD) { on_child_timer(); return 0; }
+    if (msg == WM_TIMER && wp == TIMER_RUNNING) {
+        if (g_page == PAGE_COMPONENTS) {
+            BOOL running = is_axyne_running();
+            if (running != g_axyne_running) { g_axyne_running = running; InvalidateRect(hwnd, NULL, FALSE); }
+        }
+        return 0;
+    }
     if (msg == WM_CLOSE) { cancel_install(); DestroyWindow(hwnd); return 0; }
     if (msg == WM_LBUTTONUP) { on_click((int)(short)LOWORD(lp), (int)(short)HIWORD(lp)); return 0; }
     if (msg == WM_PAINT) {
@@ -1061,6 +1115,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, LPWSTR cmd, int show) {
     if (!g_window) return 1;
     SendMessageW(g_window, WM_SETICON, ICON_BIG, (LPARAM)wc.hIcon);
     SendMessageW(g_window, WM_SETICON, ICON_SMALL, (LPARAM)wc.hIcon);
+    SetTimer(g_window, TIMER_RUNNING, 700, NULL);
     if (g_elevated_instance) begin_install();
     ShowWindow(g_window, show); UpdateWindow(g_window);
     MSG msg; while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
