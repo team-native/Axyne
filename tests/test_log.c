@@ -50,7 +50,15 @@ int axyne_test_log(const char *root)
     axyne_log_error("lsp", "clangd exited with code %d", 1);
     axyne_log_warn(NULL, "two\nlines\r\nhere");
     axyne_log_info("settings", "%s", "\xed\x95\x9c\xea\xb8\x80 ok");
-    AXYNE_TEST_CHECK(read_text(file, &text, &length));
+    {
+        AxyneError read_error = {0};
+        AxyneStatus read_status = axyne_fs_read_file(file, &text, &length, &read_error);
+        if (read_status != AXYNE_STATUS_OK) {
+            fprintf(stderr, "log read failed: path=%s status=%d message=%s\\n",
+                    file, (int)read_status, read_error.message);
+            return 0;
+        }
+    }
     AXYNE_TEST_EQ_INT(count_lines(text, length), 3);
     AXYNE_TEST_CONTAINS(text, " ERROR [lsp] clangd exited with code 1\n");
     AXYNE_TEST_CONTAINS(text, " WARN [app] two lines  here\n");
