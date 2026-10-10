@@ -192,8 +192,10 @@ typedef struct AxyneWindowState {
     size_t first_visible_tab;
     size_t tab_reveal_index;
     int tab_wheel_remainder;
-    int terminal_panel_selected;
-    int problems_panel_selected;
+    /* Bottom panel: the selected tab and the enabled tabs (bit per
+     * AxyneWinPanelTab; DEBUG_CONSOLE starts disabled). */
+    AxyneWinPanelTab panel_tab;
+    unsigned panel_tabs_enabled;
     int closing;
     int loading_editor;
     int empty_shown; /* shortcut guide replaces the editor (no open document) */
@@ -463,6 +465,19 @@ int axyne_win_process_busy(AxyneWindowState *state);
  * plan is not retained. */
 int axyne_win_run_plan_step(AxyneWindowState *state, const AxyneLanguagePlan *plan,
                             int run_step, int clear);
+
+/* Bottom panel tabs. select shows the panel with `tab` (ignored while the
+ * tab is disabled); `focus` moves the keyboard to the tab's control.
+ * set_tab_enabled shows or hides a tab in the strip (OUTPUT is always
+ * enabled; hiding the selected tab selects OUTPUT). panel_body gives the
+ * area below the strip and returns 0 while the panel is hidden. */
+void axyne_win_select_panel_tab(AxyneWindowState *state, AxyneWinPanelTab tab,
+                                int focus);
+AxyneWinPanelTab axyne_win_panel_tab(const AxyneWindowState *state);
+void axyne_win_panel_set_tab_enabled(AxyneWindowState *state, AxyneWinPanelTab tab,
+                                     int enabled);
+int axyne_win_panel_tab_enabled(const AxyneWindowState *state, AxyneWinPanelTab tab);
+int axyne_win_panel_body(const AxyneWindowState *state, RECT *body);
 
 /* Re-runs the layout of every child window and repaints. */
 void axyne_win_layout(AxyneWindowState *state);

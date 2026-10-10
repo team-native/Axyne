@@ -1132,8 +1132,7 @@ static void axyne_terminal_start(HWND window, AxyneWindowState *state)
     AxyneProcessSpec spec;
     AxyneError error;
     AxyneStatus status;
-    state->terminal_panel_selected = 1;
-    state->problems_panel_selected = 0;
+    state->panel_tab = AXYNE_WIN_PANEL_TERMINAL;
     state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->terminal_process != NULL ||
@@ -1196,8 +1195,7 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
     if (axyne_debugger_is_active(&state->debugger)) return;
     /* Debugger messages go to the Output panel, which must be visible even
      * when View > Bottom Panel hid it. */
-    state->terminal_panel_selected = 0;
-    state->problems_panel_selected = 0;
+    state->panel_tab = AXYNE_WIN_PANEL_OUTPUT;
     state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->terminal_process != NULL) {
@@ -1410,8 +1408,7 @@ static wchar_t *axyne_git_ui_wide(const char *text)
  * when Problems or Terminal was the selected panel. */
 static void axyne_git_ui_show_output(HWND window, AxyneWindowState *state)
 {
-    state->terminal_panel_selected = 0;
-    state->problems_panel_selected = 0;
+    state->panel_tab = AXYNE_WIN_PANEL_OUTPUT;
     state->panel_hidden = 0;
     axyne_layout(window, state);
     InvalidateRect(window, NULL, FALSE);
@@ -2059,8 +2056,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     int action;
     AxyneStatus status;
     if (doc == NULL) return;
-    state->terminal_panel_selected = 0;
-    state->problems_panel_selected = 0;
+    state->panel_tab = AXYNE_WIN_PANEL_OUTPUT;
     state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->terminal_process != NULL ||
@@ -4210,8 +4206,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
     HMENU menu = axyne_menu_create();
     if (menu == NULL) return;
     if (menu_index == 2) {
-        UINT output = !state->terminal_panel_selected && !state->problems_panel_selected
-            ? MF_CHECKED : 0;
+        UINT output = state->panel_tab == AXYNE_WIN_PANEL_OUTPUT ? MF_CHECKED : 0;
         UINT shown = state->panel_hidden ? 0 : MF_CHECKED;
         axyne_menu_add(menu, &pool, AXYNE_CMD_QUICK_FILE, L"파일 이동...", L"Ctrl+P",
                        MF_ENABLED);
@@ -4230,9 +4225,9 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_OUTPUT, L"출력", L"Ctrl+Shift+U",
                        MF_ENABLED | (output & shown));
         axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_PROBLEMS, L"문제", L"Ctrl+Shift+M",
-                       MF_ENABLED | (state->problems_panel_selected ? shown : 0));
+                       MF_ENABLED | (state->panel_tab == AXYNE_WIN_PANEL_PROBLEMS ? shown : 0));
         axyne_menu_add(menu, &pool, AXYNE_CMD_PANEL_TERMINAL, L"터미널", L"Ctrl+`",
-                       MF_ENABLED | (state->terminal_panel_selected ? shown : 0));
+                       MF_ENABLED | (state->panel_tab == AXYNE_WIN_PANEL_TERMINAL ? shown : 0));
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_ZOOM_IN, L"확대", L"Ctrl+=",
                        axyne_action_flags(state, AXYNE_CMD_ZOOM_IN));
@@ -4730,33 +4725,75 @@ static size_t axyne_max_first_tab(AxyneWindowState *state, int width)
     return first;
 }
 
-static const wchar_t *const AXYNE_PANEL_LABELS[3] = {
-    L"출력", L"문제", L"터미널"
+/* Bottom panel tab strip: one entry per AxyneWinPanelTab, painted and
+ * hit-tested only while enabled (DEBUG_CONSOLE starts disabled). */
+static const wchar_t *const AXYNE_PANEL_LABELS[AXYNE_WIN_PANEL_COUNT] = {
+    L"출력", L"문제", L"터미널", L"디버그 콘솔"
 };
+
+enum { AXYNE_PANEL_TABS_DEFAULT = (1u << AXYNE_WIN_PANEL_OUTPUT) |
+                                  (1u << AXYNE_WIN_PANEL_PROBLEMS) |
+                                  (1u << AXYNE_WIN_PANEL_TERMINAL) };
+
+static int axyne_panel_tab_enabled(const AxyneWindowState *state, int tab)
+{
+    return tab >= 0 && tab < AXYNE_WIN_PANEL_COUNT &&
+           (state->panel_tabs_enabled & (1u << tab)) != 0;
+}
 
 /* The problems tab reads "문제  N" while there are problems. */
 static const wchar_t *axyne_panel_tab_label(const AxyneWindowState *state, int index)
 {
-    if (index == 1 && state->problems_tab_label[0] != L'\0')
+    if (index == AXYNE_WIN_PANEL_PROBLEMS && state->problems_tab_label[0] != L'\0')
         return state->problems_tab_label;
     return AXYNE_PANEL_LABELS[index];
 }
 
 /* Figma panel tabs: items start 8px past the explorer column, 6px padding
- * either side of the 11px label, 2px gaps. Paint and hit-test share this. */
+ * either side of the 11px label, 2px gaps. Paint and hit-test share this.
+ * A disabled tab has an empty rectangle and takes no room. */
 static RECT axyne_panel_tab_rect(AxyneWindowState *state, int index,
                                  int panel_top)
 {
     RECT rect = {0, panel_top, 0, panel_top + AXYNE_UI_PANEL_HEADER};
     int x = axyne_sidebar_width(state) + 8;
     int i;
-    for (i = 0; i <= index && i < 3; ++i) {
-        int width = 12 + axyne_measure_text(state->font_small,
-                                            axyne_panel_tab_label(state, i));
+    for (i = 0; i <= index && i < AXYNE_WIN_PANEL_COUNT; ++i) {
+        int width;
+        if (!axyne_panel_tab_enabled(state, i)) continue;
+        width = 12 + axyne_measure_text(state->font_small, axyne_panel_tab_label(state, i));
         if (i == index) { rect.left = x; rect.right = x + width; }
         x += width + 2;
     }
     return rect;
+}
+
+/* Area below the tab strip; 0 while the panel is hidden. */
+static int axyne_panel_body_rect(const AxyneWindowState *state, RECT *body)
+{
+    int status_top = state->client_height - AXYNE_STATUS;
+    int panel = axyne_panel_height(state);
+    body->left = axyne_sidebar_width(state);
+    body->top = status_top - panel + AXYNE_UI_PANEL_HEADER;
+    body->right = state->client_width;
+    body->bottom = status_top;
+    if (body->top > body->bottom) body->top = body->bottom;
+    return !state->panel_hidden && panel > 0;
+}
+
+/* Shows the panel with `tab` selected; `focus` moves the keyboard to the
+ * tab's control (terminal input, problems list, editor for the output). */
+static void axyne_select_panel_tab(HWND window, AxyneWindowState *state,
+                                   AxyneWinPanelTab tab, int focus)
+{
+    if (!axyne_panel_tab_enabled(state, (int)tab)) return;
+    state->panel_tab = tab;
+    state->panel_hidden = 0;
+    axyne_layout(window, state);
+    if (!focus) return;
+    if (tab == AXYNE_WIN_PANEL_TERMINAL) SetFocus(state->terminal_input);
+    else if (tab == AXYNE_WIN_PANEL_OUTPUT) { if (state->editor != NULL) SetFocus(state->editor); }
+    else SetFocus(window);
 }
 
 static size_t axyne_visible_tabs(AxyneWindowState *state, int width)
@@ -7779,7 +7816,7 @@ enum {
 
 static int axyne_problems_visible(const AxyneWindowState *state)
 {
-    return !state->panel_hidden && state->problems_panel_selected;
+    return !state->panel_hidden && state->panel_tab == AXYNE_WIN_PANEL_PROBLEMS;
 }
 
 /* The list area: the whole panel below its 32px tab header. */
@@ -8528,7 +8565,10 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     if (state->terminal_output != NULL) {
         int terminal_top = bottom_top + AXYNE_UI_PANEL_HEADER + 6;
         int input_top = status_top - 28;
-        int terminal_bottom = state->terminal_panel_selected ? input_top - 6 : status_top - 6;
+        int terminal_selected = state->panel_tab == AXYNE_WIN_PANEL_TERMINAL;
+        int output_shown = !state->panel_hidden && (terminal_selected ||
+            state->panel_tab == AXYNE_WIN_PANEL_OUTPUT);
+        int terminal_bottom = terminal_selected ? input_top - 6 : status_top - 6;
         int terminal_width = width - axyne_sidebar_width(state) - 32;
         if (terminal_width < 0) terminal_width = 0;
         SetWindowPos(state->terminal_output, NULL, axyne_sidebar_width(state) + 16, terminal_top,
@@ -8543,11 +8583,11 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
         SetWindowPos(state->terminal_send, NULL, width - 64, bottom_top + 5,
                      48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(state->terminal_output,
-                   state->problems_panel_selected || state->panel_hidden ? SW_HIDE : SW_SHOW);
+                   output_shown ? SW_SHOW : SW_HIDE);
         ShowWindow(state->terminal_input,
-                   state->terminal_panel_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
+                   terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
         ShowWindow(state->terminal_send,
-                   state->terminal_panel_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
+                   terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
         ShowWindow(state->terminal_start, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->terminal_stop, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->debug_start, SW_HIDE);
@@ -8564,6 +8604,11 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     axyne_problems_update_filter(state);
     axyne_problems_clamp_scroll(state);
     axyne_git_panel_place_controls(state);
+    {
+        RECT body;
+        int visible = axyne_panel_body_rect(state, &body);
+        axyne_win_hooks_panel_layout(state, state->panel_tab, body, visible);
+    }
     axyne_win_hooks_layout(state, width, height);
     axyne_palette_refresh(window, state);
     InvalidateRect(window, NULL, FALSE);
@@ -8886,24 +8931,27 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         }
     }
     if (!state->panel_hidden) {
-        size_t i;
-        for (i = 0; i < 3; ++i) {
-            int selected = (i == 0 && !state->terminal_panel_selected && !state->problems_panel_selected) ||
-                (i == 1 && state->problems_panel_selected) ||
-                (i == 2 && state->terminal_panel_selected);
-            RECT rect = axyne_panel_tab_rect(state, (int)i, bottom_top);
-            RECT label = {rect.left + 6, rect.top, rect.right - 6, rect.bottom};
+        int i;
+        RECT body;
+        for (i = 0; i < AXYNE_WIN_PANEL_COUNT; ++i) {
+            int selected = i == (int)state->panel_tab;
+            RECT rect, label;
+            if (!axyne_panel_tab_enabled(state, i)) continue;
+            rect = axyne_panel_tab_rect(state, i, bottom_top);
+            label = (RECT){rect.left + 6, rect.top, rect.right - 6, rect.bottom};
             /* Figma keeps every label #737780; only the underline marks the
              * selected tab. Custom palettes still brighten the selection. */
             axyne_text_rect(dc, state->font_small,
                            selected && !AXYNE_REFERENCE ? AXYNE_TEXT : AXYNE_MUTED,
-                           label, axyne_panel_tab_label(state, (int)i), DT_LEFT);
+                           label, axyne_panel_tab_label(state, i), DT_LEFT);
             if (selected) axyne_fill(dc, rect.left, rect.bottom - 3,
                                      rect.right, rect.bottom, AXYNE_INDICATOR);
         }
+        (void)axyne_panel_body_rect(state, &body);
+        if (!axyne_win_hooks_panel_paint(state, dc, state->panel_tab, body) &&
+            axyne_problems_visible(state))
+            axyne_problems_paint(dc, state);
     }
-    if (axyne_problems_visible(state))
-        axyne_problems_paint(dc, state);
     {
         RECT status_area = {0, status_top, width, height};
         if (!axyne_win_hooks_status_paint(state, dc, status_area))
@@ -9065,6 +9113,42 @@ int axyne_win_run_plan_step(AxyneWindowState *state, const AxyneLanguagePlan *pl
                             plan, run_step ? 2 : 1, clear);
 }
 
+void axyne_win_select_panel_tab(AxyneWindowState *state, AxyneWinPanelTab tab, int focus)
+{
+    if (state != NULL && state->main_window != NULL)
+        axyne_select_panel_tab(state->main_window, state, tab, focus);
+}
+
+AxyneWinPanelTab axyne_win_panel_tab(const AxyneWindowState *state)
+{
+    return state != NULL ? state->panel_tab : AXYNE_WIN_PANEL_OUTPUT;
+}
+
+void axyne_win_panel_set_tab_enabled(AxyneWindowState *state, AxyneWinPanelTab tab,
+                                     int enabled)
+{
+    if (state == NULL || (int)tab < 0 || tab >= AXYNE_WIN_PANEL_COUNT ||
+        tab == AXYNE_WIN_PANEL_OUTPUT)
+        return;
+    if (enabled) state->panel_tabs_enabled |= 1u << tab;
+    else {
+        state->panel_tabs_enabled &= ~(1u << tab);
+        if (state->panel_tab == tab) state->panel_tab = AXYNE_WIN_PANEL_OUTPUT;
+    }
+    if (state->main_window != NULL) axyne_layout(state->main_window, state);
+}
+
+int axyne_win_panel_tab_enabled(const AxyneWindowState *state, AxyneWinPanelTab tab)
+{
+    return state != NULL && axyne_panel_tab_enabled(state, (int)tab);
+}
+
+int axyne_win_panel_body(const AxyneWindowState *state, RECT *body)
+{
+    if (state == NULL || body == NULL) return 0;
+    return axyne_panel_body_rect(state, body);
+}
+
 void axyne_win_layout(AxyneWindowState *state)
 {
     if (state != NULL && state->main_window != NULL) axyne_layout(state->main_window, state);
@@ -9158,6 +9242,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state = (AxyneWindowState *)GetWindowLongPtrW(window, GWLP_USERDATA);
         HINSTANCE instance = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
         axyne_palette_ctl_init(&state->palette, 0, axyne_palette_document, state);
+        state->panel_tab = AXYNE_WIN_PANEL_OUTPUT;
+        state->panel_tabs_enabled = AXYNE_PANEL_TABS_DEFAULT;
         state->build_target = axyne_build_target_default();
         state->ui_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -9402,14 +9488,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             int panel_top = client.bottom - AXYNE_STATUS - axyne_panel_height(state);
             if (!state->panel_hidden && y >= panel_top &&
                 y < panel_top + AXYNE_UI_PANEL_HEADER) {
-                static const UINT panel_commands[3] = {
-                    AXYNE_CMD_PANEL_OUTPUT, AXYNE_CMD_PANEL_PROBLEMS,
-                    AXYNE_CMD_PANEL_TERMINAL };
                 int panel_index;
-                for (panel_index = 0; panel_index < 3; ++panel_index) {
-                    RECT rect = axyne_panel_tab_rect(state, panel_index, panel_top);
+                for (panel_index = 0; panel_index < AXYNE_WIN_PANEL_COUNT; ++panel_index) {
+                    RECT rect;
+                    if (!axyne_panel_tab_enabled(state, panel_index)) continue;
+                    rect = axyne_panel_tab_rect(state, panel_index, panel_top);
                     if (x >= rect.left && x < rect.right) {
-                        SendMessageW(window, WM_COMMAND, panel_commands[panel_index], 0);
+                        axyne_select_panel_tab(window, state, (AxyneWinPanelTab)panel_index, 1);
                         break;
                     }
                 }
@@ -9619,13 +9704,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return 0;
         if (command == AXYNE_CMD_PANEL_OUTPUT || command == AXYNE_CMD_PANEL_TERMINAL ||
             command == AXYNE_CMD_PANEL_PROBLEMS) {
-            state->terminal_panel_selected = command == AXYNE_CMD_PANEL_TERMINAL;
-            state->problems_panel_selected = command == AXYNE_CMD_PANEL_PROBLEMS;
-            state->panel_hidden = 0;
-            axyne_layout(window, state);
-            if (state->terminal_panel_selected) SetFocus(state->terminal_input);
-            else if (state->problems_panel_selected) SetFocus(window);
-            else if (state->editor != NULL) SetFocus(state->editor);
+            axyne_select_panel_tab(window, state,
+                command == AXYNE_CMD_PANEL_TERMINAL ? AXYNE_WIN_PANEL_TERMINAL
+                : command == AXYNE_CMD_PANEL_PROBLEMS ? AXYNE_WIN_PANEL_PROBLEMS
+                : AXYNE_WIN_PANEL_OUTPUT, 1);
         }
         else if (axyne_action_command(window, state, command)) { /* handled */ }
         else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
