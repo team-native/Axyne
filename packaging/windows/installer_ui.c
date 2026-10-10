@@ -95,6 +95,7 @@ static HANDLE g_elevated_child;
 static int g_exit_code;
 static BOOL g_axyne_running;
 static BOOL g_scope_locked;
+static BOOL g_folder_appended;
 
 static void fill(HDC dc, COLORREF color, int l, int t, int r, int b) {
     HBRUSH brush = CreateSolidBrush(color);
@@ -258,7 +259,7 @@ static void set_scope(int scope) {
     const WCHAR *other = scope == SCOPE_ALL ? g_user_default_path : g_all_default_path;
     const WCHAR *mine = scope == SCOPE_ALL ? g_all_default_path : g_user_default_path;
     g_scope = scope;
-    if (lstrcmpiW(g_install_path, other) == 0) lstrcpynW(g_install_path, mine, MAX_PATH);
+    if (lstrcmpiW(g_install_path, other) == 0) { lstrcpynW(g_install_path, mine, MAX_PATH); g_folder_appended = FALSE; }
     g_error = NULL;
     refresh_free_space();
 }
@@ -274,6 +275,21 @@ static BOOL folder_has_axyne(const WCHAR *folder) {
     WCHAR path[MAX_PATH];
     StringCchPrintfW(path, MAX_PATH, L"%s\\axyne.exe", folder);
     return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static BOOL folder_is_empty(const WCHAR *folder) {
+    WCHAR pattern[MAX_PATH];
+    WIN32_FIND_DATAW data;
+    HANDLE find;
+    BOOL empty = TRUE;
+    StringCchPrintfW(pattern, MAX_PATH, L"%s\\*", folder);
+    find = FindFirstFileW(pattern, &data);
+    if (find == INVALID_HANDLE_VALUE) return TRUE;
+    do {
+        if (lstrcmpW(data.cFileName, L".") != 0 && lstrcmpW(data.cFileName, L"..") != 0) empty = FALSE;
+    } while (empty && FindNextFileW(find, &data));
+    FindClose(find);
+    return empty;
 }
 
 static void init_paths(void) {
@@ -420,6 +436,8 @@ static void location_page(HDC dc) {
     text(dc, summary, 219, 300, 433, 18, enough_space() ? MUTED : DANGER, 12, 400);
     if (!enough_space())
         text(dc, L"대상 드라이브의 공간이 부족합니다. 다른 위치를 선택하세요.", 219, 322, 433, 18, DANGER, 12, 400);
+    if (g_folder_appended && !g_scope_locked)
+        text(dc, L"선택한 폴더에 다른 파일이 있어 그 안의 Axyne 폴더에 설치합니다.", 219, 346, 433, 40, MUTED, 11, 400);
     if (g_scope_locked)
         text(dc, L"이미 설치된 Axyne를 같은 범위와 위치에 업그레이드합니다. 다른 범위나 위치에 설치하려면 먼저 Axyne를 제거하세요.",
              219, 346, 433, 40, MUTED, 11, 400);
@@ -548,8 +566,18 @@ static void choose_folder(void) {
     PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&info);
     if (pidl) {
         if (SHGetPathFromIDListW(pidl, path)) {
+            /* Install and uninstall own every top-level file of the folder, so
+             * a folder that already has other content gets an Axyne subfolder
+             * (an existing Axyne install is used as is). */
             lstrcpynW(g_install_path, path, MAX_PATH);
             strip_trailing_separator(g_install_path);
+            g_folder_appended = FALSE;
+            if (!folder_has_axyne(g_install_path) && !folder_is_empty(g_install_path)) {
+                size_t length = (size_t)lstrlenW(g_install_path);
+                StringCchCatW(g_install_path, MAX_PATH,
+                              length > 0 && g_install_path[length - 1] == L'\\' ? L"Axyne" : L"\\Axyne");
+                g_folder_appended = TRUE;
+            }
             refresh_free_space();
         }
         CoTaskMemFree(pidl);
