@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "axyne/keymap.h"
+#include "axyne/log.h"
 #include "axyne/preferences.h"
 #include "axyne/settings.h"
 
@@ -64,6 +65,11 @@ static int axyne_test_settings_v2(const char *root)
     V2_CHECK(axyne_test_path(path, sizeof(path), directory, "settings.json"));
     V2_CHECK(axyne_test_path(legacy_path, sizeof(legacy_path), directory, "preferences.json"));
     V2_CHECK(axyne_test_path(other, sizeof(other), directory, "other.json"));
+    {
+        char logs[512];
+        V2_CHECK(axyne_test_path(logs, sizeof(logs), root, "logs"));
+        axyne_log_set_directory(logs);
+    }
 
     /* Defaults. */
     axyne_preferences_defaults(original);
@@ -73,7 +79,7 @@ static int axyne_test_settings_v2(const char *root)
     V2_CHECK(strcmp(original->build.build_directory, "build/${config}") == 0);
     V2_CHECK(original->version == AXYNE_PREFERENCES_VERSION);
     binding = axyne_preferences_find_binding(original, AXYNE_ACTION_RUN);
-    V2_CHECK(binding != NULL && strcmp(binding->key, "F5") == 0 && binding->modifiers != 0);
+    V2_CHECK(binding != NULL && strcmp(binding->key, "F5") == 0 && binding->modifiers == 0);
     V2_CHECK(axyne_preferences_check_undo_limit(0) != AXYNE_PREFERENCE_CHECK_OK &&
              axyne_preferences_check_undo_limit(1024) == AXYNE_PREFERENCE_CHECK_OK &&
              axyne_preferences_check_undo_limit(1025) != AXYNE_PREFERENCE_CHECK_OK);
@@ -224,16 +230,15 @@ static int axyne_test_settings_v2(const char *root)
     /* Workspace command bindings override global ones by id. */
     {
         const char *global_keys[] = {"Alt+1"};
-        const char *workspace_keys[] = {"Alt+2"};
         AxynePreferences *base = (AxynePreferences *)calloc(1, sizeof(AxynePreferences));
+        AxynePreferences *edited = (AxynePreferences *)calloc(1, sizeof(AxynePreferences));
         AxynePreferences *out = (AxynePreferences *)calloc(1, sizeof(AxynePreferences));
-        V2_CHECK(base != NULL && out != NULL);
+        V2_CHECK(base != NULL && edited != NULL && out != NULL);
         axyne_preferences_defaults(original);
         (void)axyne_preferences_set_command_binding(original, "view.outline", global_keys, 1);
         (void)axyne_preferences_set_command_binding(original, "view.toolbar", global_keys, 1);
-        axyne_preferences_defaults(workspace);
-        workspace->present_fields = 0;
-        (void)axyne_preferences_set_command_binding(workspace, "view.outline", workspace_keys, 1);
+        V2_CHECK(axyne_test_write(other, "{\"keybindings\":{\"view.outline\":\"Alt+2\"}}"));
+        V2_CHECK(axyne_preferences_load(other, workspace, &error) == AXYNE_STATUS_OK);
         axyne_preferences_apply_workspace(original, workspace);
         entry = axyne_preferences_find_command_binding(original, "view.outline");
         V2_CHECK(entry != NULL && strcmp(entry->keys[0], "Alt+2") == 0);
@@ -242,46 +247,153 @@ static int axyne_test_settings_v2(const char *root)
         axyne_preferences_workspace_base(base, original, workspace);
         V2_CHECK(axyne_preferences_find_command_binding(base, "view.outline")->present == 1);
         V2_CHECK(axyne_preferences_find_command_binding(base, "view.toolbar")->present == 0);
-        axyne_preferences_prepare_save(out, base, base, 1);
+        *edited = *base;
+        edited->editor.font_size = 14;
+        axyne_preferences_prepare_save(out, base, edited, 1);
         V2_CHECK(axyne_preferences_save_workspace(out, other, &error) == AXYNE_STATUS_OK);
         V2_CHECK(axyne_test_json_string_is(other, "/keybindings/view.outline", "Alt+2"));
         V2_CHECK(axyne_test_json_has(other, "/keybindings/view.toolbar") == 0);
+        V2_CHECK(axyne_test_json_has(other, "/editor/fontSize") == 1);
+
+        /* Review case: the current UIs build the workspace editing base from
+         * the effective profile (global command bindings included) without
+         * axyne_preferences_workspace_base. Saving a font-size change must not
+         * copy the global keybindings into the workspace file. */
+        V2_CHECK(axyne_test_write(path, "{\"keybindings\":{\"view.outline\":\"Ctrl+Alt+O\"}}"));
+        V2_CHECK(axyne_preferences_load_global(path, original, &error) == AXYNE_STATUS_OK);
+        axyne_test_remove_file(other);
+        *base = *original;                 /* initial = state->preferences */
+        base->present_fields = 0;          /* no workspace file yet */
+        memset(base->binding_present, 0, sizeof(base->binding_present));
+        *edited = *base;
+        edited->editor.font_size = 15;
+        axyne_preferences_prepare_save(out, base, edited, 1);
+        V2_CHECK(axyne_preferences_save_workspace(out, other, &error) == AXYNE_STATUS_OK);
+        V2_CHECK(axyne_test_json_has(other, "/keybindings") == 0);
+        V2_CHECK(axyne_test_json_has(other, "/editor/fontSize") == 1);
+        /* The UIs also create an empty workspace file from the effective
+         * profile with nothing marked present. */
+        axyne_test_remove_file(other);
+        *out = *original;
+        out->present_fields = 0;
+        memset(out->binding_present, 0, sizeof(out->binding_present));
+        V2_CHECK(axyne_preferences_save_workspace(out, other, &error) == AXYNE_STATUS_OK);
+        V2_CHECK(axyne_test_json_has(other, "/keybindings") == 0);
+        /* Changing a command binding in the workspace editor writes it. */
+        {
+            const char *keys[] = {"Alt+9"};
+            *edited = *base;
+            V2_CHECK(axyne_preferences_set_command_binding(edited, "view.outline", keys, 1) == AXYNE_STATUS_OK);
+            axyne_preferences_prepare_save(out, base, edited, 1);
+            V2_CHECK(axyne_preferences_save_workspace(out, other, &error) == AXYNE_STATUS_OK);
+            V2_CHECK(axyne_test_json_string_is(other, "/keybindings/view.outline", "Alt+9"));
+        }
         free(base);
+        free(edited);
         free(out);
     }
 
-    /* D1 migration: a version 1 Run binding of F5 becomes Ctrl+F5 once. */
+    /* A workspace binding for an action without a default slot applies. */
+    {
+        const char *keys[] = {"Ctrl+,"};
+        axyne_preferences_defaults(original);
+        axyne_preferences_defaults(workspace);
+        workspace->present_fields = 0;
+        memset(workspace->binding_present, 0, sizeof(workspace->binding_present));
+        V2_CHECK(axyne_preferences_find_binding(original, AXYNE_ACTION_PREFERENCES) == NULL);
+        V2_CHECK(axyne_preferences_set_command_binding(workspace, "tools.settings", keys, 1) == AXYNE_STATUS_OK);
+        axyne_preferences_apply_workspace(original, workspace);
+        binding = axyne_preferences_find_binding(original, AXYNE_ACTION_PREFERENCES);
+        V2_CHECK(binding != NULL && binding->enabled && strcmp(binding->key, ",") == 0);
+    }
+
+    /* Legacy key text no stroke can express is kept verbatim. */
+    {
+        AxyneKeyBinding *save;
+        axyne_preferences_defaults(original);
+        save = (AxyneKeyBinding *)axyne_preferences_find_binding(original, AXYNE_ACTION_SAVE);
+        strcpy(save->key, "Weird");
+        V2_CHECK(axyne_preferences_save_global(original, path, &error) == AXYNE_STATUS_OK);
+#ifdef __APPLE__
+        V2_CHECK(axyne_test_json_string_is(path, "/keybindings/file.save", "Cmd+Weird"));
+#else
+        V2_CHECK(axyne_test_json_string_is(path, "/keybindings/file.save", "Ctrl+Weird"));
+#endif
+        V2_CHECK(axyne_preferences_load_global(path, loaded, &error) == AXYNE_STATUS_OK);
+        binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
+        V2_CHECK(binding != NULL && strcmp(binding->key, "Weird") == 0 &&
+                 binding->modifiers == AXYNE_KEY_MODIFIER_COMMAND && binding->enabled);
+    }
+
+    /* D1: loading never migrates; the explicit hook does, once. */
     V2_CHECK(axyne_test_write(legacy_path,
         "{\"editor\":{\"tabWidth\":2},\"keybindings\":["
         "{\"action\":9,\"modifiers\":0,\"key\":\"F5\",\"enabled\":true},"
         "{\"action\":2,\"modifiers\":1,\"key\":\"Q\",\"enabled\":true}]}"));
     V2_CHECK(axyne_preferences_load(legacy_path, loaded, &error) == AXYNE_STATUS_OK);
-    V2_CHECK(loaded->version == 1 && loaded->migrated == 1);
+    V2_CHECK(loaded->version == 1 && loaded->migrated == 0);
     binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_RUN);
-    V2_CHECK(binding != NULL && strcmp(binding->key, "F5") == 0 &&
-             axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key,
-                                             axyne_platform_current(), NULL));
+    V2_CHECK(binding != NULL && strcmp(binding->key, "F5") == 0 && binding->modifiers == 0);
+    /* Saving without the hook keeps the file at version 1 and F5. */
+    V2_CHECK(axyne_preferences_save(loaded, path, &error) == AXYNE_STATUS_OK);
+    V2_CHECK(axyne_test_json_has(path, "/version") == 0);
+    V2_CHECK(axyne_test_json_has(path, "/keybindings/debug.runWithoutDebugging") == 0);
+    V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 1);
+    V2_CHECK(loaded->migrated == 1 && loaded->version == AXYNE_PREFERENCES_VERSION_RUN_MIGRATED);
+    binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_RUN);
     {
         AxyneKeyStroke run;
-        V2_CHECK(axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key,
-                                                 axyne_platform_current(), &run));
+        V2_CHECK(binding != NULL && axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key,
+                                                                    axyne_platform_current(), &run));
         V2_CHECK(axyne_key_stroke_equal(run, axyne_test_stroke("Ctrl+F5")));
     }
+    V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 0);
     V2_CHECK(axyne_preferences_save(loaded, path, &error) == AXYNE_STATUS_OK);
     V2_CHECK(axyne_preferences_load(path, loaded, &error) == AXYNE_STATUS_OK);
     V2_CHECK(loaded->version == 2 && loaded->migrated == 0);
+    V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 0);
     binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
     V2_CHECK(binding != NULL && strcmp(binding->key, "Q") == 0);
-    V2_CHECK(axyne_test_json_has(path, "/keybindings/debug.runWithoutDebugging") == 0);
-    /* A version 2 file that binds Run to F5 on purpose keeps it. */
+    V2_CHECK(axyne_test_json_string_is(path, "/keybindings/debug.runWithoutDebugging", "Ctrl+F5"));
+    /* A migrated (version 2) file that binds Run to F5 on purpose keeps it. */
     V2_CHECK(axyne_test_write(other,
         "{\"version\":2,\"keybindings\":{\"debug.runWithoutDebugging\":\"F5\"}}"));
     V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_OK);
+    V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 0);
     binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_RUN);
     V2_CHECK(binding != NULL && binding->modifiers == 0 && !loaded->migrated);
-    /* Malformed keybinding text is rejected; null unbinds. */
-    V2_CHECK(axyne_test_write(other, "{\"keybindings\":{\"file.save\":\"Ctrl+\"}}"));
-    V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_INVALID_ARGUMENT);
+
+    /* Lenient loading: invalid keybindings / tools are skipped. */
+    V2_CHECK(axyne_test_write(other,
+        "{\"editor\":{\"tabWidth\":3},\"keybindings\":{\"file.save\":\"Ctrl+\","
+        "\"view.panel\":\"Ctrl+Nope\",\"view.outline\":7,\"bad id!\":\"Alt+1\","
+        "\"view.toolbar\":\"Alt+T\"}}"));
+    V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_OK);
+    V2_CHECK(loaded->editor.tab_width == 3);
+    binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
+    V2_CHECK(binding != NULL && binding->enabled && strcmp(binding->key, "S") == 0);
+    V2_CHECK(axyne_preferences_find_command_binding(loaded, "view.panel") == NULL);
+    V2_CHECK(axyne_preferences_find_command_binding(loaded, "view.outline") == NULL);
+    V2_CHECK(axyne_preferences_find_command_binding(loaded, "view.toolbar") != NULL);
+    V2_CHECK(axyne_test_write(other, "{\"editor\":{\"tabWidth\":6},\"keybindings\":null}"));
+    V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_OK);
+    V2_CHECK(loaded->editor.tab_width == 6);
+    V2_CHECK(axyne_test_write(other, "{\"keybindings\":\"oops\",\"externalTools\":{}}"));
+    V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_OK);
+    V2_CHECK(loaded->external_tool_count == 0);
+    V2_CHECK(axyne_test_write(other,
+        "{\"externalTools\":[{\"name\":\"a\",\"command\":\"a\"},{\"name\":\"no command\"},"
+        "{\"name\":\"b\",\"command\":\"b\",\"args\":[1]},7,"
+        "{\"name\":\"c\",\"command\":\"c\"},{\"name\":\"d\",\"command\":\"d\"},"
+        "{\"name\":\"e\",\"command\":\"e\"},{\"name\":\"f\",\"command\":\"f\"},"
+        "{\"name\":\"g\",\"command\":\"g\"},{\"name\":\"h\",\"command\":\"h\"},"
+        "{\"name\":\"i\",\"command\":\"i\"},{\"name\":\"j\",\"command\":\"j\"}]}"));
+    V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_OK);
+    V2_CHECK(loaded->external_tool_count == AXYNE_PREFERENCE_EXTERNAL_TOOL_MAX);
+    V2_CHECK(strcmp(loaded->external_tools[0].name, "a") == 0 &&
+             strcmp(loaded->external_tools[1].name, "c") == 0 &&
+             strcmp(loaded->external_tools[7].name, "i") == 0);
+    /* Scalar type errors still fail as before. */
     V2_CHECK(axyne_test_write(other, "{\"keybindings\":{\"file.save\":null}}"));
     V2_CHECK(axyne_preferences_load(other, loaded, &error) == AXYNE_STATUS_OK);
     binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
@@ -321,6 +433,7 @@ static int axyne_test_settings_v2(const char *root)
     ok = 1;
 done:
 #undef V2_CHECK
+    axyne_log_shutdown();
     axyne_settings_destroy(settings);
     free(original);
     free(loaded);

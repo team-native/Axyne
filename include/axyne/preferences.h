@@ -69,8 +69,11 @@ enum {
 #define AXYNE_PREFERENCE_COMMAND_KEYS_MAX 2
 #define AXYNE_PREFERENCE_COMMAND_BINDING_MAX 64
 #define AXYNE_PREFERENCE_EXTERNAL_TOOL_MAX 8
-/* Schema version written to "version"; files without it are version 1. */
-#define AXYNE_PREFERENCES_VERSION 2
+/* "version" of a profile; files without it are version 1. Version 2 is
+ * recorded only after axyne_preferences_migrate_run_binding has run (the D1
+ * Run F5 -> Ctrl+F5 migration that the UI-wiring step will perform). */
+#define AXYNE_PREFERENCES_VERSION 1
+#define AXYNE_PREFERENCES_VERSION_RUN_MIGRATED 2
 
 typedef struct AxyneEditorPreferences {
     unsigned int tab_width;
@@ -188,8 +191,8 @@ typedef struct AxynePreferences {
      * entries here win over it (chords, aliases, unbinding). */
     AxyneCommandBinding command_bindings[AXYNE_PREFERENCE_COMMAND_BINDING_MAX];
     size_t command_binding_count;
-    /* Schema version of the loaded file (1 when it had none) and whether the
-     * one-time D1 migration (Run F5 -> Ctrl+F5) was applied while loading. */
+    /* Version of the loaded file (1 when it had none) and whether
+     * axyne_preferences_migrate_run_binding changed the Run binding. */
     unsigned int version;
     int migrated;
 } AxynePreferences;
@@ -253,14 +256,21 @@ void axyne_preferences_defaults(AxynePreferences *preferences);
  * Settings v2 (version 2): load reads both the old 11-action "keybindings"
  * array and the new object keyed by command string id
  * ({"file.save": "Ctrl+S", "file.openFolder": ["Ctrl+K Ctrl+O",
- * "Ctrl+Shift+O"], "view.outline": ""}); "" or null unbinds. A version 1
- * file whose Run binding is F5 is migrated to Ctrl+F5 (D1, `migrated`).
+ * "Ctrl+Shift+O"], "view.outline": ""}); "" or null unbinds. Invalid
+ * entries (bad key text, unknown modifier/key names, a non-object/array
+ * "keybindings", external tools beyond the limit or without name/command)
+ * are skipped with a warning in the log; type errors of scalar settings
+ * still fail the load as before. Loading never migrates (see
+ * axyne_preferences_migrate_run_binding).
  * Save merges into the existing file: members unknown to this version are
- * kept, known ones are rewritten, "version" is set to 2 and keybindings are
- * always written in the object form. Global saves write every field but only
- * the legacy bindings that differ from their defaults; workspace saves write
- * present fields only, remove known non-present members and drop empty
- * sections. */
+ * kept, known ones are rewritten and keybindings are written in the object
+ * form. Global saves write every field but only the legacy bindings that
+ * differ from their defaults (a legacy key text that cannot be converted is
+ * kept as "<modifiers>+<key text>"). Workspace saves write present fields
+ * only, remove known non-present members, keep the keybindings the file
+ * already has, add command-keyed entries only when present_fields has
+ * AXYNE_PREFERENCE_COMMAND_BINDINGS and the entry is marked present, and
+ * drop empty sections. */
 AxyneStatus axyne_preferences_load(const char *utf8_path,
                                    AxynePreferences *preferences,
                                    AxyneError *error);
@@ -326,7 +336,10 @@ uint64_t axyne_preferences_changed_fields(
  * when editing started (for a workspace its present_fields and
  * binding_present describe what the workspace file already overrides).
  * Global profiles are written completely. Workspace profiles keep the
- * existing overrides and add only what the user changed. */
+ * existing overrides and add only what the user changed; a command-keyed
+ * binding is marked present only when it is new or changed relative to
+ * `base` (the bindings the workspace file already has are kept by the
+ * save itself). */
 void axyne_preferences_prepare_save(AxynePreferences *out,
                                     const AxynePreferences *base,
                                     const AxynePreferences *edited,
@@ -371,6 +384,15 @@ int axyne_preferences_command_bindings_changed(const AxynePreferences *before,
 void axyne_preferences_workspace_base(AxynePreferences *out,
                                       const AxynePreferences *effective,
                                       const AxynePreferences *stored);
+
+/* D1 migration hook, NOT called by load: the UI-wiring step calls it once
+ * after loading the global (and each workspace) profile when it switches the
+ * Run shortcut to Ctrl+F5. When the profile version is below 2 and the Run
+ * binding is the old default F5 without modifiers, Run becomes Ctrl+F5
+ * (marked present, `migrated` = 1). In every case the version becomes 2 so
+ * the next save records it and the migration never repeats. Returns 1 when
+ * the Run binding changed. */
+int axyne_preferences_migrate_run_binding(AxynePreferences *preferences);
 
 /* Validation for the new numeric settings. */
 AxynePreferenceCheck axyne_preferences_check_undo_limit(unsigned long megabytes);

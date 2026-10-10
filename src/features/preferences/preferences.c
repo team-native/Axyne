@@ -3,6 +3,7 @@
 #include "axyne/commands.h"
 #include "axyne/filesystem.h"
 #include "axyne/keymap.h"
+#include "axyne/log.h"
 #include "axyne/settings.h"
 
 #include <stdio.h>
@@ -115,9 +116,10 @@ static const char *axyne_backend_name(AxyneDebuggerBackend backend)
 
 static AxynePlatform axyne_build_platform(void) { return axyne_platform_current(); }
 
-/* Default Run binding (D1): Ctrl+F5 on both platforms. On Windows the
- * primary modifier (COMMAND) already means Ctrl; on macOS it is Control. */
-static unsigned int axyne_default_run_modifiers(void)
+/* Run binding after the D1 migration: Ctrl+F5 on both platforms. On Windows
+ * the primary modifier (COMMAND) already means Ctrl; on macOS it is Control.
+ * The legacy default itself stays F5 until the UI adopts the new keys. */
+static unsigned int axyne_migrated_run_modifiers(void)
 {
     return axyne_build_platform() == AXYNE_PLATFORM_MACOS
         ? AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND;
@@ -154,7 +156,7 @@ static void axyne_default_bindings(AxynePreferences *preferences)
     axyne_add_binding(preferences, AXYNE_ACTION_SEARCH_WORKSPACE, AXYNE_KEY_MODIFIER_COMMAND | AXYNE_KEY_MODIFIER_SHIFT, "F");
     axyne_add_binding(preferences, AXYNE_ACTION_QUICK_FILE, AXYNE_KEY_MODIFIER_COMMAND, "P");
     axyne_add_binding(preferences, AXYNE_ACTION_BUILD, AXYNE_KEY_MODIFIER_COMMAND, "B");
-    axyne_add_binding(preferences, AXYNE_ACTION_RUN, axyne_default_run_modifiers(), "F5");
+    axyne_add_binding(preferences, AXYNE_ACTION_RUN, 0, "F5");
 }
 
 /* Text of one legacy binding: "" when disabled, else canonical stroke text.
@@ -179,6 +181,68 @@ static int axyne_legacy_equal(const AxyneKeyBinding *a, const AxyneKeyBinding *b
         axyne_keymap_stroke_from_legacy(b->modifiers, b->key, axyne_build_platform(), &y))
         return axyne_key_stroke_equal(x, y);
     return a->modifiers == b->modifiers && strcmp(a->key, b->key) == 0;
+}
+
+/* Fallback text for a legacy key that no stroke can express (e.g. a key name
+ * this version does not know): "<modifier names>+<key text as stored>". */
+static int axyne_legacy_raw_text(const AxyneKeyBinding *binding, char *text, size_t capacity)
+{
+    int mac = axyne_build_platform() == AXYNE_PLATFORM_MACOS;
+    int written;
+    if (binding->key[0] == '\0') return 0;
+    written = snprintf(text, capacity, "%s%s%s%s%s",
+                       (binding->modifiers & AXYNE_KEY_MODIFIER_CONTROL) ||
+                           (!mac && (binding->modifiers & AXYNE_KEY_MODIFIER_COMMAND)) ? "Ctrl+" : "",
+                       mac && (binding->modifiers & AXYNE_KEY_MODIFIER_COMMAND) ? "Cmd+" : "",
+                       (binding->modifiers & AXYNE_KEY_MODIFIER_ALT) ? "Alt+" : "",
+                       (binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) ? "Shift+" : "",
+                       binding->key);
+    return written > 0 && (size_t)written < capacity;
+}
+
+static int axyne_ascii_token_equal(const char *token, size_t length, const char *literal)
+{
+    if (strlen(literal) != length) return 0;
+    for (size_t i = 0; i < length; ++i) {
+        char a = token[i], b = literal[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/* Inverse of axyne_legacy_raw_text: leading modifier names, then the key
+ * text kept verbatim. */
+static int axyne_legacy_from_raw_text(const char *text, unsigned int *modifiers,
+                                      char *key, size_t capacity)
+{
+    int mac = axyne_build_platform() == AXYNE_PLATFORM_MACOS;
+    unsigned int bits = 0;
+    const char *cursor = text;
+    for (;;) {
+        const char *plus = strchr(cursor, '+');
+        size_t length;
+        if (plus == NULL || plus == cursor) break;
+        length = (size_t)(plus - cursor);
+        if (axyne_ascii_token_equal(cursor, length, "ctrl") ||
+            axyne_ascii_token_equal(cursor, length, "control"))
+            bits |= mac ? AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND;
+        else if (axyne_ascii_token_equal(cursor, length, "cmd") ||
+                 axyne_ascii_token_equal(cursor, length, "command"))
+            bits |= AXYNE_KEY_MODIFIER_COMMAND;
+        else if (axyne_ascii_token_equal(cursor, length, "alt") ||
+                 axyne_ascii_token_equal(cursor, length, "option"))
+            bits |= AXYNE_KEY_MODIFIER_ALT;
+        else if (axyne_ascii_token_equal(cursor, length, "shift"))
+            bits |= AXYNE_KEY_MODIFIER_SHIFT;
+        else
+            break;
+        cursor = plus + 1;
+    }
+    if (cursor[0] == '\0' || strlen(cursor) >= capacity) return 0;
+    axyne_copy_text(key, capacity, cursor);
+    *modifiers = bits;
+    return 1;
 }
 
 /* ---- packed argument lists ---------------------------------------------- */
@@ -576,6 +640,57 @@ static AxyneStatus axyne_load_legacy_bindings(AxyneSettings *settings,
     return AXYNE_STATUS_OK;
 }
 
+/* One command-keyed entry; 0 when it is invalid (the caller skips it). */
+static int axyne_load_command_binding(AxyneSettings *settings, AxynePreferences *preferences,
+                                      const char *command, const char *path)
+{
+    char texts[AXYNE_PREFERENCE_COMMAND_KEYS_MAX][AXYNE_PREFERENCE_SEQUENCE_TEXT_MAX];
+    const char *keys[AXYNE_PREFERENCE_COMMAND_KEYS_MAX];
+    size_t count = 0;
+    AxyneSettingsType type;
+    int legacy;
+    if (axyne_settings_get_type(settings, path, &type, NULL) != AXYNE_STATUS_OK) return 0;
+    if (type == AXYNE_SETTINGS_TYPE_STRING) {
+        if (axyne_get_string(settings, path, texts[0], sizeof(texts[0]), NULL) != AXYNE_STATUS_OK)
+            return 0;
+        if (texts[0][0] != '\0') count = 1;
+    } else if (type == AXYNE_SETTINGS_TYPE_ARRAY) {
+        size_t items = 0;
+        if (axyne_settings_get_count(settings, path, &items, NULL) != AXYNE_STATUS_OK ||
+            items > AXYNE_PREFERENCE_COMMAND_KEYS_MAX)
+            return 0;
+        for (size_t k = 0; k < items; ++k) {
+            char item[160];
+            (void)snprintf(item, sizeof(item), "%s/%u", path, (unsigned)k);
+            if (axyne_get_string(settings, item, texts[count], sizeof(texts[0]), NULL) != AXYNE_STATUS_OK)
+                return 0;
+            if (texts[count][0] != '\0') ++count;
+        }
+    } else if (type != AXYNE_SETTINGS_TYPE_NULL) {
+        return 0;
+    }
+    for (size_t k = 0; k < count; ++k) keys[k] = texts[k];
+    if (axyne_store_command_binding(preferences, command, keys, count, 1) == AXYNE_STATUS_OK)
+        return 1;
+    /* A legacy action whose key text no stroke can express was written as
+     * "<modifiers>+<key text>": restore it verbatim into the legacy view. */
+    legacy = axyne_legacy_action_of(command);
+    if (count == 1 && legacy >= 0 && legacy < AXYNE_ACTION_COUNT) {
+        int slot = axyne_binding_index(preferences, (AxynePreferenceAction)legacy);
+        unsigned int modifiers = 0;
+        char key[AXYNE_PREFERENCE_KEY_MAX];
+        if (slot >= 0 && axyne_legacy_from_raw_text(texts[0], &modifiers, key, sizeof(key))) {
+            AxyneKeyBinding *binding = &preferences->bindings[slot];
+            binding->enabled = 1;
+            binding->modifiers = modifiers;
+            axyne_copy_text(binding->key, sizeof(binding->key), key);
+            preferences->binding_present[legacy] = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static AxyneStatus axyne_load_command_bindings(AxyneSettings *settings,
                                                AxynePreferences *preferences,
                                                AxyneError *error)
@@ -585,48 +700,22 @@ static AxyneStatus axyne_load_command_bindings(AxyneSettings *settings,
     if (status != AXYNE_STATUS_OK) return status;
     for (size_t i = 0; i < members; ++i) {
         char *command = NULL, *path = NULL;
-        char texts[AXYNE_PREFERENCE_COMMAND_KEYS_MAX][AXYNE_PREFERENCE_SEQUENCE_TEXT_MAX];
-        const char *keys[AXYNE_PREFERENCE_COMMAND_KEYS_MAX];
-        size_t count = 0;
-        AxyneSettingsType type;
         status = axyne_settings_get_key(settings, "/keybindings", i, &command, error);
         if (status != AXYNE_STATUS_OK) return status;
         path = axyne_settings_pointer_join("/keybindings", command);
         if (path == NULL) { axyne_settings_free_json(command); return AXYNE_STATUS_OUT_OF_MEMORY; }
-        status = axyne_settings_get_type(settings, path, &type, error);
-        if (status == AXYNE_STATUS_OK && type == AXYNE_SETTINGS_TYPE_STRING) {
-            status = axyne_get_string(settings, path, texts[0], sizeof(texts[0]), error);
-            if (status == AXYNE_STATUS_OK && texts[0][0] != '\0') count = 1;
-        } else if (status == AXYNE_STATUS_OK && type == AXYNE_SETTINGS_TYPE_ARRAY) {
-            size_t items = 0;
-            status = axyne_settings_get_count(settings, path, &items, error);
-            if (status == AXYNE_STATUS_OK && items > AXYNE_PREFERENCE_COMMAND_KEYS_MAX)
-                status = axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT, path, "too many key sequences");
-            for (size_t k = 0; status == AXYNE_STATUS_OK && k < items; ++k) {
-                char item[160];
-                (void)snprintf(item, sizeof(item), "%s/%u", path, (unsigned)k);
-                status = axyne_get_string(settings, item, texts[count], sizeof(texts[0]), error);
-                if (status == AXYNE_STATUS_OK && texts[count][0] != '\0') ++count;
-            }
-        } else if (status == AXYNE_STATUS_OK && type != AXYNE_SETTINGS_TYPE_NULL) {
-            status = axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT, path,
-                                "expected a key string, an array of key strings or null");
-        }
-        for (size_t k = 0; k < count; ++k) keys[k] = texts[k];
-        if (status == AXYNE_STATUS_OK) {
-            status = axyne_store_command_binding(preferences, command, keys, count, 1);
-            if (status != AXYNE_STATUS_OK)
-                status = axyne_fail(error, status, path, "invalid command id or key text");
-        }
+        if (!axyne_load_command_binding(settings, preferences, command, path))
+            axyne_log_warn("settings", "ignoring invalid keybinding \"%.64s\"", command);
         axyne_settings_free_json(path);
         axyne_settings_free_json(command);
-        if (status != AXYNE_STATUS_OK) return status;
     }
     if (preferences->command_binding_count != 0)
         preferences->present_fields |= AXYNE_PREFERENCE_COMMAND_BINDINGS;
     return AXYNE_STATUS_OK;
 }
 
+/* externalTools[]: entries that are not objects with a string name and
+ * command, or beyond AXYNE_PREFERENCE_EXTERNAL_TOOL_MAX, are skipped. */
 static AxyneStatus axyne_load_external_tools(AxyneSettings *settings,
                                              AxynePreferences *preferences,
                                              AxyneError *error)
@@ -635,24 +724,30 @@ static AxyneStatus axyne_load_external_tools(AxyneSettings *settings,
     AxyneSettingsType type;
     AxyneStatus status = axyne_settings_get_type(settings, "/externalTools", &type, error);
     if (status != AXYNE_STATUS_OK) return status;
-    if (type != AXYNE_SETTINGS_TYPE_ARRAY)
-        return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT, "/externalTools", "expected an array");
+    if (type != AXYNE_SETTINGS_TYPE_ARRAY) {
+        axyne_log_warn("settings", "ignoring externalTools: expected an array");
+        return AXYNE_STATUS_OK;
+    }
     status = axyne_settings_get_count(settings, "/externalTools", &count, error);
     if (status != AXYNE_STATUS_OK) return status;
-    if (count > AXYNE_PREFERENCE_EXTERNAL_TOOL_MAX)
-        return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT, "/externalTools", "too many external tools");
     preferences->external_tool_count = 0;
     for (size_t i = 0; i < count; ++i) {
-        AxyneExternalTool *tool = &preferences->external_tools[i];
+        AxyneExternalTool tool;
         char path[64];
-        memset(tool, 0, sizeof(*tool));
+        int valid = 1;
+        if (preferences->external_tool_count >= AXYNE_PREFERENCE_EXTERNAL_TOOL_MAX) {
+            axyne_log_warn("settings", "ignoring external tools beyond the first %u",
+                           (unsigned)AXYNE_PREFERENCE_EXTERNAL_TOOL_MAX);
+            break;
+        }
+        memset(&tool, 0, sizeof(tool));
 #define TOOL_STRING(member, name, required) do { \
             (void)snprintf(path, sizeof(path), "/externalTools/%u/" name, (unsigned)i); \
             if (axyne_value_present(settings, path)) { \
-                status = axyne_get_string(settings, path, tool->member, sizeof(tool->member), error); \
-                if (status != AXYNE_STATUS_OK) return status; \
+                if (axyne_get_string(settings, path, tool.member, sizeof(tool.member), NULL) != AXYNE_STATUS_OK) \
+                    valid = 0; \
             } else if (required) { \
-                return axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT, path, "is required"); \
+                valid = 0; \
             } \
         } while (0)
         TOOL_STRING(name, "name", 1);
@@ -660,11 +755,14 @@ static AxyneStatus axyne_load_external_tools(AxyneSettings *settings,
         TOOL_STRING(cwd, "cwd", 0);
 #undef TOOL_STRING
         (void)snprintf(path, sizeof(path), "/externalTools/%u/args", (unsigned)i);
-        if (axyne_value_present(settings, path)) {
-            status = axyne_get_args(settings, path, &tool->args, error);
-            if (status != AXYNE_STATUS_OK) return status;
+        if (valid && axyne_value_present(settings, path) &&
+            axyne_get_args(settings, path, &tool.args, NULL) != AXYNE_STATUS_OK)
+            valid = 0;
+        if (!valid || tool.name[0] == '\0' || tool.command[0] == '\0') {
+            axyne_log_warn("settings", "ignoring invalid external tool %u", (unsigned)i);
+            continue;
         }
-        preferences->external_tool_count = i + 1;
+        preferences->external_tools[preferences->external_tool_count++] = tool;
     }
     preferences->present_fields |= AXYNE_PREFERENCE_EXTERNAL_TOOLS;
     return AXYNE_STATUS_OK;
@@ -782,7 +880,8 @@ static AxyneStatus axyne_load_values(AxyneSettings *settings,
         if (status != AXYNE_STATUS_OK) return status;
         if (type == AXYNE_SETTINGS_TYPE_ARRAY) status = axyne_load_legacy_bindings(settings, preferences, error);
         else if (type == AXYNE_SETTINGS_TYPE_OBJECT) status = axyne_load_command_bindings(settings, preferences, error);
-        else status = axyne_fail(error, AXYNE_STATUS_INVALID_ARGUMENT, "/keybindings", "expected an object");
+        else if (type != AXYNE_SETTINGS_TYPE_NULL)
+            axyne_log_warn("settings", "ignoring keybindings: expected an object");
         if (status != AXYNE_STATUS_OK) return status;
     }
 #undef GET_UINT
@@ -792,22 +891,25 @@ static AxyneStatus axyne_load_values(AxyneSettings *settings,
     return AXYNE_STATUS_OK;
 }
 
-/* D1: a version 1 profile whose Run binding is the old default F5 moves to
- * the new default Ctrl+F5 (F5 now starts the debugger). Saving writes the
- * current version, so this happens once. */
-static void axyne_migrate(AxynePreferences *preferences)
+int axyne_preferences_migrate_run_binding(AxynePreferences *preferences)
 {
-    int index;
-    if (preferences->version >= 2) return;
+    int index, changed = 0;
+    if (preferences == NULL || preferences->version >= AXYNE_PREFERENCES_VERSION_RUN_MIGRATED)
+        return 0;
     index = axyne_binding_index(preferences, AXYNE_ACTION_RUN);
-    if (index >= 0 && preferences->binding_present[AXYNE_ACTION_RUN]) {
+    if (index >= 0) {
         AxyneKeyBinding *run = &preferences->bindings[index];
-        if (run->modifiers == 0 && (strcmp(run->key, "F5") == 0 || strcmp(run->key, "f5") == 0)) {
-            run->modifiers = axyne_default_run_modifiers();
+        if (run->enabled && run->modifiers == 0 &&
+            (strcmp(run->key, "F5") == 0 || strcmp(run->key, "f5") == 0)) {
+            run->modifiers = axyne_migrated_run_modifiers();
             axyne_copy_text(run->key, sizeof(run->key), "F5");
+            preferences->binding_present[AXYNE_ACTION_RUN] = 1;
             preferences->migrated = 1;
+            changed = 1;
         }
     }
+    preferences->version = AXYNE_PREFERENCES_VERSION_RUN_MIGRATED;
+    return changed;
 }
 
 AxyneStatus axyne_preferences_load(const char *utf8_path, AxynePreferences *preferences, AxyneError *error)
@@ -820,7 +922,7 @@ AxyneStatus axyne_preferences_load(const char *utf8_path, AxynePreferences *pref
     memset(preferences->binding_present, 0, sizeof(preferences->binding_present));
     status = axyne_load_values(settings, preferences, error);
     axyne_settings_destroy(settings);
-    if (status == AXYNE_STATUS_OK) { axyne_migrate(preferences); axyne_clear_error(error); }
+    if (status == AXYNE_STATUS_OK) axyne_clear_error(error);
     return status;
 }
 
@@ -892,7 +994,16 @@ static AxyneStatus axyne_write_keybindings(AxyneSettings *settings,
 {
     AxyneKeyBinding defaults[AXYNE_PREFERENCE_BINDING_MAX];
     size_t default_count;
-    AxyneStatus status = axyne_settings_set_json(settings, "/keybindings", "{}", error);
+    AxyneSettingsType type;
+    int keep_existing = workspace &&
+        axyne_settings_get_type(settings, "/keybindings", &type, NULL) == AXYNE_STATUS_OK &&
+        type == AXYNE_SETTINGS_TYPE_OBJECT;
+    int write_commands = !workspace ||
+        (preferences->present_fields & AXYNE_PREFERENCE_COMMAND_BINDINGS) != 0;
+    AxyneStatus status = AXYNE_STATUS_OK;
+    /* A workspace file keeps the overrides it already has; only what the
+     * editor marked present is (re)written on top. */
+    if (!keep_existing) status = axyne_settings_set_json(settings, "/keybindings", "{}", error);
     if (status != AXYNE_STATUS_OK) return status;
     {
         AxynePreferences *scratch = (AxynePreferences *)calloc(1, sizeof(*scratch));
@@ -913,7 +1024,10 @@ static AxyneStatus axyne_write_keybindings(AxyneSettings *settings,
             if (defaults[d].action == binding->action) fallback = &defaults[d];
         if (workspace) write = preferences->binding_present[binding->action] != 0;
         else write = fallback != NULL ? !axyne_legacy_equal(binding, fallback) : binding->enabled;
-        if (!write || !axyne_legacy_text(binding, keys[0], sizeof(keys[0]))) continue;
+        if (!write) continue;
+        if (!axyne_legacy_text(binding, keys[0], sizeof(keys[0])) &&
+            !axyne_legacy_raw_text(binding, keys[0], sizeof(keys[0])))
+            continue;
         command = axyne_command_name(axyne_command_from_legacy_action((int)binding->action));
         status = axyne_write_binding(settings, command, (const char (*)[AXYNE_PREFERENCE_SEQUENCE_TEXT_MAX])keys,
                                      keys[0][0] != '\0' ? 1u : 0u, error);
@@ -921,7 +1035,7 @@ static AxyneStatus axyne_write_keybindings(AxyneSettings *settings,
     }
     for (size_t i = 0; i < preferences->command_binding_count; ++i) {
         const AxyneCommandBinding *entry = &preferences->command_bindings[i];
-        if (workspace && !entry->present) continue;
+        if (!write_commands || (workspace && !entry->present)) continue;
         status = axyne_write_binding(settings, entry->command, entry->keys, entry->count, error);
         if (status != AXYNE_STATUS_OK) return status;
     }
@@ -994,8 +1108,13 @@ static AxyneStatus axyne_save_values(const AxynePreferences *preferences,
         PUT(bit, axyne_settings_set_string(settings, path_value, value, error), path_value)
 #define PUT_ARGS(bit, path_value, value) \
         PUT(bit, axyne_set_args(settings, path_value, value, error), path_value)
-    status = axyne_settings_set_json(settings, "/version", "2", error);
-    if (status != AXYNE_STATUS_OK) goto done;
+    if (preferences->version >= AXYNE_PREFERENCES_VERSION_RUN_MIGRATED) {
+        /* Only recorded once the D1 Run migration hook has run. */
+        char number[32];
+        (void)snprintf(number, sizeof(number), "%u", preferences->version);
+        status = axyne_settings_set_json(settings, "/version", number, error);
+        if (status != AXYNE_STATUS_OK) goto done;
+    }
     PUT_UINT(AXYNE_PREFERENCE_EDITOR_TAB_WIDTH, "/editor/tabWidth", preferences->editor.tab_width);
     PUT_UINT(AXYNE_PREFERENCE_EDITOR_FONT_SIZE, "/editor/fontSize", preferences->editor.font_size);
     PUT_BOOL(AXYNE_PREFERENCE_EDITOR_INSERT_SPACES, "/editor/insertSpaces", preferences->editor.insert_spaces);
@@ -1124,7 +1243,17 @@ void axyne_preferences_apply_workspace(AxynePreferences *effective, const AxyneP
     }
 #undef APPLY
 #undef APPLY_TEXT
-    for (size_t i = 0; i < workspace->binding_count; ++i) if (workspace->binding_present[workspace->bindings[i].action]) { int index = axyne_binding_index(effective, workspace->bindings[i].action); if (index >= 0) effective->bindings[index] = workspace->bindings[i]; }
+    for (size_t i = 0; i < workspace->binding_count; ++i) {
+        const AxyneKeyBinding *binding = &workspace->bindings[i];
+        int index;
+        if (binding->action < 0 || binding->action >= AXYNE_ACTION_COUNT ||
+            !workspace->binding_present[binding->action]) continue;
+        index = axyne_binding_index(effective, binding->action);
+        /* Actions without a default (Preferences) get a slot. */
+        if (index < 0 && effective->binding_count < AXYNE_PREFERENCE_BINDING_MAX)
+            index = (int)effective->binding_count++;
+        if (index >= 0) effective->bindings[index] = *binding;
+    }
     /* Workspace command bindings override the global ones by command id. */
     for (size_t i = 0; i < workspace->command_binding_count; ++i) {
         const AxyneCommandBinding *entry = &workspace->command_bindings[i];
@@ -1301,8 +1430,7 @@ void axyne_preferences_prepare_save(AxynePreferences *out,
     for (size_t i = 0; i < out->command_binding_count; ++i) {
         AxyneCommandBinding *entry = &out->command_bindings[i];
         const AxyneCommandBinding *old = axyne_preferences_find_command_binding(base, entry->command);
-        entry->present = (unsigned char)(old == NULL || old->present ||
-                                         !axyne_command_binding_equal(old, entry));
+        entry->present = (unsigned char)(old == NULL || !axyne_command_binding_equal(old, entry));
     }
 }
 
