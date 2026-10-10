@@ -1310,28 +1310,53 @@ static NSScrollView *axyne_macos_find_scroll_view(NSView *view)
 }
 
 
+/* Settings files (D3): every save writes <dir>/settings.json; loads read
+ * settings.json, or the old preferences.json while no settings.json exists.
+ * The old file is never deleted. The stored paths are the write paths;
+ * read paths are resolved on every use because the first save creates
+ * settings.json. Results are malloc'd (free()). */
+static char *axyne_macos_copy_settings_path(char *path)
+{
+    char *copy;
+    if (path == NULL) return NULL;
+    copy = strdup(path);
+    axyne_preferences_free_path(path);
+    return copy;
+}
+
 static char *axyne_macos_global_preferences_path(void)
 {
     NSArray *directories = NSSearchPathForDirectoriesInDomains(
         NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString *base = [directories count] != 0 ? [directories objectAtIndex:0] : nil;
     NSString *directory;
-    NSString *path;
     if (base == nil) return NULL;
     directory = [base stringByAppendingPathComponent:@"Axyne"];
-    path = [directory stringByAppendingPathComponent:@"preferences.json"];
-    return strdup([path UTF8String]);
+    return axyne_macos_copy_settings_path(
+        axyne_preferences_write_path([directory fileSystemRepresentation]));
 }
 
 static char *axyne_macos_workspace_preferences_path(const char *root)
 {
-    NSString *rootPath; NSString *directory; NSString *path;
+    char *directory;
+    char *path;
     if (root == NULL) return NULL;
-    rootPath = [NSString stringWithUTF8String:root];
-    if (rootPath == nil) return NULL;
-    directory = [rootPath stringByAppendingPathComponent:@".axyne"];
-    path = [directory stringByAppendingPathComponent:@"preferences.json"];
-    return strdup([path UTF8String]);
+    directory = axyne_preferences_workspace_directory(root);
+    if (directory == NULL) return NULL;
+    path = axyne_preferences_write_path(directory);
+    axyne_preferences_free_path(directory);
+    return axyne_macos_copy_settings_path(path);
+}
+
+/* The file a load reads for the settings file `writePath` (D3 fallback). */
+static char *axyne_macos_preferences_read_path(const char *writePath)
+{
+    NSString *file;
+    if (writePath == NULL) return NULL;
+    file = [NSString stringWithUTF8String:writePath];
+    if (file == nil) return NULL;
+    return axyne_macos_copy_settings_path(axyne_preferences_read_path(
+        [[file stringByDeletingLastPathComponent] fileSystemRepresentation]));
 }
 
 static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
@@ -1689,11 +1714,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
             AxyneError preferenceError;
             AxyneStatus status;
             axyne_preferences_defaults(&_globalPreferences);
+            char *readPath;
             _globalPreferencesPath = axyne_macos_global_preferences_path();
-            status = _globalPreferencesPath == NULL ? AXYNE_STATUS_NOT_FOUND :
-                axyne_preferences_load_global(_globalPreferencesPath,
-                                               &_globalPreferences,
+            readPath = axyne_macos_preferences_read_path(_globalPreferencesPath);
+            status = readPath == NULL ? AXYNE_STATUS_NOT_FOUND :
+                axyne_preferences_load_global(readPath, &_globalPreferences,
                                                &preferenceError);
+            free(readPath);
             _preferences = _globalPreferences;
             if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
                 [self showWorkspaceError:@"Unable to load preferences" error:&preferenceError];
@@ -3191,8 +3218,14 @@ static BOOL axyne_macos_is_image_path(const char *path)
     _workspacePreferencesPath = axyne_macos_workspace_preferences_path(path);
     if (_workspacePreferencesPath != NULL) {
         AxynePreferences workspacePreferences;
-        status = axyne_preferences_load(_workspacePreferencesPath,
-                                        &workspacePreferences, &error);
+        char *readPath = axyne_macos_preferences_read_path(_workspacePreferencesPath);
+        status = readPath == NULL ? AXYNE_STATUS_OUT_OF_MEMORY :
+            axyne_preferences_load(readPath, &workspacePreferences, &error);
+        if (readPath == NULL) {
+            error.code = status;
+            (void)snprintf(error.message, sizeof(error.message), "Out of memory");
+        }
+        free(readPath);
         if (status == AXYNE_STATUS_OK) {
             /* Keep the file's binding mask separate from the normalized
              * snapshot used to calculate effective workspace preferences. */
@@ -4139,7 +4172,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 }
 
 /* Session-only: the effective preference is flipped in memory and is not
- * written back to preferences.json. */
+ * written back to settings.json. */
 - (void)toggleWordWrap:(id)sender
 {
     (void)sender;
@@ -4367,20 +4400,29 @@ static BOOL axyne_macos_is_image_path(const char *path)
                        stream:AXYNE_PROCESS_STDERR];
 }
 
-- (BOOL)preferencesFileExists
+/* The global settings file a load reads: settings.json, or the old
+ * preferences.json while no settings.json exists (D3); nil when neither
+ * exists. */
+- (NSString *)existingGlobalPreferencesPath
 {
-    NSString *path;
-    if (_globalPreferencesPath == NULL) return NO;
-    path = [NSString stringWithUTF8String:_globalPreferencesPath];
-    return path != nil && [[NSFileManager defaultManager] fileExistsAtPath:path];
+    char *readPath = axyne_macos_preferences_read_path(_globalPreferencesPath);
+    NSString *path = readPath != NULL ? [NSString stringWithUTF8String:readPath] : nil;
+    free(readPath);
+    return path != nil && [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
 }
 
-/* Opens the existing global preferences document (preferences.json) as a tab. */
+- (BOOL)preferencesFileExists
+{
+    return [self existingGlobalPreferencesPath] != nil;
+}
+
+/* Tools > settings.json 열기: opens the existing global settings file as a
+ * tab (disabled until one exists). */
 - (void)openPreferencesFile:(id)sender
 {
+    NSString *path = [self existingGlobalPreferencesPath];
     (void)sender;
-    if (![self preferencesFileExists]) return;
-    [self openPath:[NSString stringWithUTF8String:_globalPreferencesPath]];
+    if (path != nil) [self openPath:path];
 }
 
 static NSString *axyne_macos_shortcut_text(NSString *key, NSEventModifierFlags flags)
@@ -5030,10 +5072,12 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
                sizeof(_workspaceBindingPresent));
     if (!workspace) {
         _globalPreferences = *edited;
-        if (_workspacePreferencesPath != NULL) {
+        char *workspaceReadPath = axyne_macos_preferences_read_path(_workspacePreferencesPath);
+        if (workspaceReadPath != NULL) {
             AxynePreferences workspacePreferences;
             AxyneStatus workspaceStatus = axyne_preferences_load_workspace(
-                _workspacePreferencesPath, &workspacePreferences, &error);
+                workspaceReadPath, &workspacePreferences, &error);
+            free(workspaceReadPath);
             if (workspaceStatus == AXYNE_STATUS_OK)
                 axyne_preferences_apply_workspace(&_preferences, &workspacePreferences);
             else if (workspaceStatus != AXYNE_STATUS_NOT_FOUND)
@@ -5045,14 +5089,17 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
 }
 
 /* Opens the Figma preferences window. The "settings.json 열기" link closes it
- * and opens the profile's file as an editor document; a profile that was
- * never saved is created first so there is something to open. */
+ * and opens the profile's file as an editor document: the file a load reads
+ * (settings.json, or the old preferences.json while no settings.json exists,
+ * D3); a profile that was never saved is created as settings.json first so
+ * there is something to open. */
 - (BOOL)showPreferences:(BOOL)workspace
 {
     AxynePreferences initial = workspace ? _preferences : _globalPreferences;
     AxyneMacPreferencesContext context = {self, workspace};
     AxynePreferencesWindowHooks hooks = {&context, axyne_macos_preferences_save_hook};
     const char *path = workspace ? _workspacePreferencesPath : _globalPreferencesPath;
+    char *readPath;
     AxyneError error;
     if (path == NULL) { [self showWorkspaceMessage:@"The preference path is unavailable."]; return NO; }
     if (workspace) {
@@ -5060,14 +5107,25 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
         AxynePreferences stored;
         memset(initial.binding_present, 0, sizeof(initial.binding_present));
         initial.present_fields = 0;
-        if (axyne_preferences_load(path, &stored, &error) == AXYNE_STATUS_OK) {
+        readPath = axyne_macos_preferences_read_path(path);
+        if (readPath != NULL &&
+            axyne_preferences_load(readPath, &stored, &error) == AXYNE_STATUS_OK) {
             initial.present_fields = stored.present_fields;
             memcpy(initial.binding_present, stored.binding_present,
                    sizeof(initial.binding_present));
         }
+        free(readPath);
     }
     if (!axyne_preferences_window_show([self window], workspace ? 1 : 0, &initial, &hooks))
         return YES;
+    readPath = axyne_macos_preferences_read_path(path);
+    if (readPath != NULL && access(readPath, F_OK) == 0) {
+        NSString *existing = [NSString stringWithUTF8String:readPath];
+        free(readPath);
+        if (existing != nil) [self openPath:existing];
+        return YES;
+    }
+    free(readPath);
     if (access(path, F_OK) != 0) {
         AxynePreferences created = workspace ? _preferences : _globalPreferences;
         AxyneStatus status;
