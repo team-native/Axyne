@@ -169,6 +169,9 @@ static void reset_locked(void)
 static int open_locked(void)
 {
     char *directory;
+    fprintf(stderr, "log open_locked start override=%s failed=%d\n",
+            log_directory_override != NULL ? log_directory_override : "(default)",
+            log_failed);
     if (log_file != NULL) return 1;
     if (log_failed) return 0;
     if (log_directory_override != NULL) {
@@ -203,6 +206,7 @@ static int open_locked(void)
     if (log_path == NULL)
         fprintf(stderr, "log path join failed\n");
     log_file = log_path != NULL ? open_append(log_path) : NULL;
+    fprintf(stderr, "log open_locked result=%s\n", log_file != NULL ? "open" : "failed");
     if (log_file == NULL) {
         log_failed = 1;
         return 0;
