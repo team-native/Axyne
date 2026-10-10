@@ -64,6 +64,17 @@ static int ensure_directory(const char *path)
     return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS ||
            result == ERROR_ALREADY_EXISTS;
 }
+
+static int directory_present(const char *path)
+{
+    wchar_t *wide = wide_path(path);
+    DWORD attributes;
+    if (wide == NULL) return 0;
+    attributes = GetFileAttributesW(wide);
+    free(wide);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
 #endif
 
 static FILE *open_append(const char *path)
@@ -173,7 +184,7 @@ static int open_locked(void)
         return 0;
     }
 #ifdef _WIN32
-    if (!ensure_directory(directory)) {
+    if (!ensure_directory(directory) && !directory_present(directory)) {
         fprintf(stderr, "log directory creation failed: path=%s\n", directory);
         axyne_app_path_free(directory);
         log_failed = 1;
