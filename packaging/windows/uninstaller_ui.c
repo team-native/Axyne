@@ -331,9 +331,14 @@ static void collect_leftovers(void) {
     if (logs_dir[0] && exists(logs_dir)) add_leftover(L"로그", logs_dir);
     if (local_dir[0] && exists(local_dir) && folder_has_other_entries(local_dir, L"logs"))
         add_leftover(L"캐시", local_dir);
-    /* In place, Uninstall.exe is removed by the delayed self-delete. */
-    if (exists(install_dir) && folder_has_other_entries(install_dir, from_temp ? NULL : L"Uninstall.exe"))
-        add_leftover(L"설치 폴더", install_dir);
+    /* In place, Uninstall.exe is removed by the delayed self-delete. An
+     * empty folder the backend could not remove is removed here, or listed. */
+    if (exists(install_dir)) {
+        if (folder_has_other_entries(install_dir, from_temp ? NULL : L"Uninstall.exe"))
+            add_leftover(L"설치 폴더", install_dir);
+        else if (from_temp && !RemoveDirectoryW(install_dir) && exists(install_dir))
+            add_leftover(L"빈 폴더", install_dir);
+    }
 }
 
 static void open_folder(const WCHAR *path) {
@@ -559,13 +564,16 @@ static void start_remove(void) {
         exec.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
         exec.hwnd = window_handle; exec.lpVerb = L"runas";
         exec.lpFile = backend_copy; exec.lpParameters = parameters; exec.nShow = SW_HIDE;
+        exec.lpDirectory = temp;
         if (ShellExecuteExW(&exec)) remove_process = exec.hProcess;
     } else {
         WCHAR command[MAX_PATH * 2 + 40];
         STARTUPINFOW si; PROCESS_INFORMATION pi;
         StringCchPrintfW(command, MAX_PATH * 2 + 40, L"\"%s\" %s", backend_copy, parameters);
         ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); ZeroMemory(&pi, sizeof(pi));
-        if (CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        /* The backend must not start inside the install folder, or it could
+         * not remove it (RMDir fails on a process's working directory). */
+        if (CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, temp, &si, &pi)) {
             remove_process = pi.hProcess; CloseHandle(pi.hThread);
         }
     }
@@ -700,7 +708,7 @@ static BOOL relaunch_from_temp(void) {
                      hive_hint == HIVE_MACHINE ? L" /ALLUSERS" : (hive_hint == HIVE_USER ? L" /CURRENTUSER" : L""),
                      install_dir, length > 0 && install_dir[length - 1] == L'\\' ? L"\\" : L"");
     ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); ZeroMemory(&pi, sizeof(pi));
-    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, temp, &si, &pi)) {
         DeleteFileW(copy);
         return FALSE;
     }
@@ -723,6 +731,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, LPWSTR cmd, int show) {
     }
     if (argv) LocalFree(argv);
     strip_trailing_separator(install_dir);
+    /* Started from Explorer the working directory is the install folder;
+     * leave it so the folder can be removed. */
+    {
+        WCHAR temp[MAX_PATH];
+        if (GetTempPathW(MAX_PATH, temp)) SetCurrentDirectoryW(temp);
+    }
     if (!from_temp && relaunch_from_temp()) return 0;
     detect_install();
     axyne_running = is_axyne_running();
