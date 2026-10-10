@@ -62,6 +62,8 @@ static FILE *open_append(const char *path)
      * the process code page.  _SH_DENYNO permits concurrent readers/writers;
      * rotation closes the stream before renaming the file. */
     FILE *file = _wfsopen(wide, L"a+b", _SH_DENYNO);
+    if (file == NULL)
+        file = fopen(path, "a+b");
     free(wide);
     return file;
 #else
