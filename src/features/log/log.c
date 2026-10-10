@@ -174,6 +174,7 @@ static int open_locked(void)
     }
 #ifdef _WIN32
     if (!ensure_directory(directory)) {
+        fprintf(stderr, "log directory creation failed: path=%s\n", directory);
         axyne_app_path_free(directory);
         log_failed = 1;
         return 0;
