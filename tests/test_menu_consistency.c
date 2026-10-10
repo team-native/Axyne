@@ -335,10 +335,13 @@ static void check_shared_labels(void)
     size_t i;
     if (mac != NULL && win != NULL) {
         for (i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+            /* D3: Windows already says settings.json. */
+            const char *windows_label = strcmp(labels[i], "preferences.json 열기") == 0
+                ? "settings.json 열기" : labels[i];
             if (!source_has_label(mac, '@', labels[i]))
                 FAIL("macOS menu lacks shared entry: %s", labels[i]);
-            if (!source_has_label(win, 'L', labels[i]))
-                FAIL("Windows menu lacks shared entry: %s", labels[i]);
+            if (!source_has_label(win, 'L', windows_label))
+                FAIL("Windows menu lacks shared entry: %s", windows_label);
         }
     }
     free(mac); free(win);

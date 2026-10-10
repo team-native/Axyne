@@ -231,8 +231,12 @@ typedef struct AxyneWindowState {
     int has_exit_status;
     AxynePreferences global_preferences;
     AxynePreferences preferences;
+    /* Settings files (D3): *_preferences_path is the file read (settings.json,
+     * else the old preferences.json); *_settings_write_path is settings.json. */
     char *global_preferences_path;
     char *workspace_preferences_path;
+    char *global_settings_write_path;
+    char *workspace_settings_write_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
     char lsp_status[192];

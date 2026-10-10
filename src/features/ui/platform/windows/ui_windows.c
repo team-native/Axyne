@@ -12,6 +12,7 @@
 #include <shellapi.h>
 
 #include "axyne/ui.h"
+#include "axyne/app_paths.h"
 #include "axyne/ui_design.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
@@ -347,6 +348,7 @@ static void axyne_lsp_error(AxyneLspClient *client, AxyneStatus status,
 }
 
 static AxyneDocument *axyne_active(AxyneWindowState *state);
+static int axyne_settings_file_exists(const char *utf8_path);
 static int axyne_empty_state(AxyneWindowState *state);
 static AxyneDocument *axyne_active_visible(AxyneWindowState *state);
 static void axyne_sync_empty_state(AxyneWindowState *state);
@@ -539,31 +541,35 @@ static int axyne_windows_prefers_dark(void)
     return value == 0;
 }
 
-static char *axyne_global_preferences_path(void)
+/* Settings files (D3): profiles are read from settings.json, falling back to
+ * the old preferences.json, and always written to settings.json; the old file
+ * is never deleted. The read path is refreshed after every write. */
+static char *axyne_workspace_settings_path(const char *root, int write)
 {
-    wchar_t app_data[MAX_PATH];
-    wchar_t directory[MAX_PATH];
-    wchar_t path[MAX_PATH];
-    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT,
-                         app_data) != S_OK) return NULL;
-    if (swprintf_s(directory, MAX_PATH, L"%ls\\Axyne", app_data) < 0 ||
-        swprintf_s(path, MAX_PATH, L"%ls\\preferences.json", directory) < 0)
-        return NULL;
-    return axyne_utf8(path);
+    char *directory, *path;
+    if (root == NULL) return NULL;
+    directory = axyne_preferences_workspace_directory(root);
+    if (directory == NULL) return NULL;
+    path = write ? axyne_preferences_write_path(directory)
+                 : axyne_preferences_read_path(directory);
+    axyne_preferences_free_path(directory);
+    return path;
 }
 
-static char *axyne_workspace_preferences_path(const char *root)
+static void axyne_refresh_settings_read_paths(AxyneWindowState *state)
 {
-    wchar_t *wide_root; wchar_t directory[32768]; wchar_t path[32768];
-    if (root == NULL) return NULL;
-    wide_root = axyne_wide(root);
-    if (wide_root == NULL || swprintf_s(directory, 32768, L"%ls\\.axyne",
-                                         wide_root) < 0 ||
-        swprintf_s(path, 32768, L"%ls\\preferences.json", directory) < 0) {
-        free(wide_root); return NULL;
+    char *global = axyne_app_path(AXYNE_APP_PATH_SETTINGS_READ);
+    if (global != NULL) {
+        free(state->global_preferences_path);
+        state->global_preferences_path = global;
     }
-    free(wide_root);
-    return axyne_utf8(path);
+    if (state->explorer.root != NULL && state->workspace_preferences_path != NULL) {
+        char *workspace = axyne_workspace_settings_path(state->explorer.root, 0);
+        if (workspace != NULL) {
+            free(state->workspace_preferences_path);
+            state->workspace_preferences_path = workspace;
+        }
+    }
 }
 
 static void axyne_debug_log(const char *format, const char *detail, unsigned long code)
@@ -953,7 +959,8 @@ static void axyne_load_global_preferences(AxyneWindowState *state)
     AxyneError error;
     AxyneStatus status;
     axyne_preferences_defaults(&state->global_preferences);
-    state->global_preferences_path = axyne_global_preferences_path();
+    state->global_preferences_path = axyne_app_path(AXYNE_APP_PATH_SETTINGS_READ);
+    state->global_settings_write_path = axyne_app_path(AXYNE_APP_PATH_SETTINGS_WRITE);
     status = state->global_preferences_path == NULL ? AXYNE_STATUS_NOT_FOUND :
         axyne_preferences_load_global(state->global_preferences_path,
                                       &state->global_preferences, &error);
@@ -972,7 +979,9 @@ static void axyne_load_workspace_preferences(AxyneWindowState *state,
     memset(state->workspace_binding_present, 0,
            sizeof(state->workspace_binding_present));
     free(state->workspace_preferences_path);
-    state->workspace_preferences_path = axyne_workspace_preferences_path(root);
+    free(state->workspace_settings_write_path);
+    state->workspace_preferences_path = axyne_workspace_settings_path(root, 0);
+    state->workspace_settings_write_path = axyne_workspace_settings_path(root, 1);
     if (state->workspace_preferences_path == NULL) {
         axyne_apply_preferences(state);
         return;
@@ -2162,12 +2171,13 @@ static int axyne_windows_preferences_save(void *context, AxynePreferences *edite
     AxyneWindowState *state = info->state;
     HWND owner = info->owner;
     int workspace = info->workspace;
-    const char *path = workspace ? state->workspace_preferences_path : state->global_preferences_path;
+    const char *path = workspace ? state->workspace_settings_write_path : state->global_settings_write_path;
     AxyneError error;
     AxyneStatus status;
     if (path == NULL) { MessageBoxA(owner, "The preference path is unavailable.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     status = workspace ? axyne_preferences_save_workspace(edited, path, &error) : axyne_preferences_save_global(edited, path, &error);
     if (status != AXYNE_STATUS_OK) { MessageBoxA(owner, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    axyne_refresh_settings_read_paths(state);
     state->preferences = *edited;
     if (workspace)
         memcpy(state->workspace_binding_present, edited->binding_present,
@@ -2199,10 +2209,12 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
     AxyneWindowsPreferencesContext context;
     AxynePreferencesWindowHooks hooks;
     const char *path = workspace ? state->workspace_preferences_path : state->global_preferences_path;
+    const char *write_path = workspace ? state->workspace_settings_write_path
+                                       : state->global_settings_write_path;
     AxyneError error;
     context.owner = owner; context.state = state; context.workspace = workspace;
     hooks.context = &context; hooks.save = axyne_windows_preferences_save;
-    if (path == NULL) { MessageBoxA(owner, "The preference path is unavailable.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
+    if (path == NULL || write_path == NULL) { MessageBoxA(owner, "The preference path is unavailable.", "Axyne - Preferences", MB_OK | MB_ICONERROR); return 0; }
     if (workspace) {
         /* Only fields the workspace file already overrides stay present. */
         AxynePreferences stored;
@@ -2214,14 +2226,17 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
         }
     }
     if (!axyne_preferences_window_show(owner, workspace, &initial, &hooks)) return 1;
-    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
+    /* "settings.json 열기": the file written from now on; it is created from
+     * the effective profile when missing (an old preferences.json stays). */
+    if (!axyne_settings_file_exists(write_path)) {
         AxynePreferences created = workspace ? state->preferences : state->global_preferences;
         AxyneStatus status;
         if (workspace) { created.present_fields = 0; memset(created.binding_present, 0, sizeof(created.binding_present)); }
-        status = workspace ? axyne_preferences_save_workspace(&created, path, &error) : axyne_preferences_save_global(&created, path, &error);
+        status = workspace ? axyne_preferences_save_workspace(&created, write_path, &error) : axyne_preferences_save_global(&created, write_path, &error);
         if (status != AXYNE_STATUS_OK) { axyne_workspace_show_error(owner, "Unable to create settings file", &error); return 0; }
+        axyne_refresh_settings_read_paths(state);
     }
-    axyne_open_document(owner, state, path);
+    axyne_open_document(owner, state, write_path);
     return 1;
 }
 
@@ -2881,17 +2896,40 @@ static int axyne_editor_actionable(AxyneWindowState *state)
            focus != state->terminal_input && focus != state->terminal_output;
 }
 
-static int axyne_preferences_file_exists(const AxyneWindowState *state)
+static int axyne_settings_file_exists(const char *utf8_path)
 {
     wchar_t *path;
     DWORD attributes;
-    if (state->global_preferences_path == NULL) return 0;
-    path = axyne_wide(state->global_preferences_path);
+    if (utf8_path == NULL) return 0;
+    path = axyne_wide(utf8_path);
     if (path == NULL) return 0;
     attributes = GetFileAttributesW(path);
     free(path);
     return attributes != INVALID_FILE_ATTRIBUTES &&
            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+/* A global profile exists (settings.json or the old preferences.json). */
+static int axyne_preferences_file_exists(const AxyneWindowState *state)
+{
+    return axyne_settings_file_exists(state->global_preferences_path);
+}
+
+/* Tools > settings.json 열기: opens the global settings.json, writing it from
+ * the loaded profile first when only the old preferences.json exists. */
+static void axyne_open_settings_json(HWND window, AxyneWindowState *state)
+{
+    AxyneError error;
+    if (state->global_settings_write_path == NULL) return;
+    if (!axyne_settings_file_exists(state->global_settings_write_path)) {
+        if (axyne_preferences_save_global(&state->global_preferences,
+                state->global_settings_write_path, &error) != AXYNE_STATUS_OK) {
+            axyne_workspace_show_error(window, "Unable to create settings file", &error);
+            return;
+        }
+        axyne_refresh_settings_read_paths(state);
+    }
+    axyne_open_document(window, state, state->global_settings_write_path);
 }
 
 /* One enabled-state rule shared by menu flags and keyboard shortcuts, so a
@@ -3181,7 +3219,7 @@ static int axyne_action_command(HWND window, AxyneWindowState *state, UINT comma
         break;
     }
     case AXYNE_CMD_OPEN_PREFERENCES_FILE:
-        axyne_open_document(window, state, state->global_preferences_path);
+        axyne_open_settings_json(window, state);
         break;
     case AXYNE_CMD_SHORTCUTS: axyne_show_shortcuts(window, state); break;
     case AXYNE_CMD_REPORT_ISSUE:
@@ -4289,7 +4327,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
         axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE_PREFERENCES, L"작업 영역 설정...",
                        NULL, state->explorer.root != NULL ? MF_ENABLED : MF_GRAYED);
-        axyne_menu_add(menu, &pool, AXYNE_CMD_OPEN_PREFERENCES_FILE, L"preferences.json 열기",
+        axyne_menu_add(menu, &pool, AXYNE_CMD_OPEN_PREFERENCES_FILE, L"settings.json 열기",
                        NULL, axyne_action_flags(state, AXYNE_CMD_OPEN_PREFERENCES_FILE));
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_GIT_STATUS, L"Git 상태", NULL, git_flags);
@@ -10207,6 +10245,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->font_mono_small != NULL) DeleteObject(state->font_mono_small);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
+            free(state->global_settings_write_path);
+            free(state->workspace_settings_write_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
             HeapFree(GetProcessHeap(), 0, state);
         }
