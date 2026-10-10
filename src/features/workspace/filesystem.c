@@ -714,7 +714,6 @@ AxyneStatus axyne_fs_read_file(const char *utf8_path, char **contents,
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
         file = _wfsopen(wide, L"rb", _SH_DENYNO);
-        if (file == NULL) file = NULL;
         free(wide);
     }
 #else
@@ -782,7 +781,6 @@ AxyneStatus axyne_fs_read_head(const char *utf8_path, size_t max_bytes,
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
         file = _wfsopen(wide, L"rb", _SH_DENYNO);
-        if (file == NULL) file = NULL;
         free(wide);
     }
 #else
@@ -833,7 +831,6 @@ AxyneStatus axyne_fs_file_contains_nul(const char *utf8_path,
             return axyne_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                "path is not valid UTF-8 or memory is unavailable");
         file = _wfsopen(wide, L"rb", _SH_DENYNO);
-        if (file == NULL) file = NULL;
         free(wide);
     }
 #else

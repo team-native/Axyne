@@ -81,10 +81,7 @@ static FILE *open_append(const char *path)
 {
 #ifdef _WIN32
     wchar_t *wide = wide_path(path);
-    if (wide == NULL) {
-        fprintf(stderr, "log UTF-8 path conversion failed: path=%s\n", path);
-        return NULL;
-    }
+    if (wide == NULL) return NULL;
     /* Use the wide CRT entry point so UTF-8 paths work without relying on
      * the process code page.  _SH_DENYNO permits concurrent readers/writers;
      * rotation closes the stream before renaming the file. */
@@ -105,19 +102,12 @@ static FILE *open_append(const char *path)
             CloseHandle(handle);
         }
     }
-    else {
-        fprintf(stderr, "log CreateFileW failed: %lu path=%s\n",
-                (unsigned long)GetLastError(), path);
     }
     file = _wfsopen(wide, L"a+b", _SH_DENYNO);
-    if (file == NULL)
-        fprintf(stderr, "log _wfsopen failed: errno=%d path=%s\n", errno, path);
     if (file == NULL) file = fopen(path, "a+b");
     if (file == NULL) {
         int descriptor = _sopen(path, _O_CREAT | _O_APPEND | _O_RDWR | _O_BINARY,
                                 _SH_DENYNO, _S_IREAD | _S_IWRITE);
-        if (descriptor == -1)
-            fprintf(stderr, "log _sopen failed: errno=%d path=%s\n", errno, path);
         if (descriptor != -1) {
             file = _fdopen(descriptor, "a+b");
             if (file == NULL) _close(descriptor);
@@ -169,9 +159,6 @@ static void reset_locked(void)
 static int open_locked(void)
 {
     char *directory;
-    fprintf(stderr, "log open_locked start override=%s failed=%d\n",
-            log_directory_override != NULL ? log_directory_override : "(default)",
-            log_failed);
     if (log_file != NULL) return 1;
     if (log_failed) return 0;
     if (log_directory_override != NULL) {
@@ -188,7 +175,6 @@ static int open_locked(void)
     }
 #ifdef _WIN32
     if (!ensure_directory(directory) && !directory_present(directory)) {
-        fprintf(stderr, "log directory creation failed: path=%s\n", directory);
         axyne_app_path_free(directory);
         log_failed = 1;
         return 0;
@@ -203,10 +189,7 @@ static int open_locked(void)
     free(log_path);
     log_path = axyne_app_path_join(directory, "axyne.log");
     axyne_app_path_free(directory);
-    if (log_path == NULL)
-        fprintf(stderr, "log path join failed\n");
     log_file = log_path != NULL ? open_append(log_path) : NULL;
-    fprintf(stderr, "log open_locked result=%s\n", log_file != NULL ? "open" : "failed");
     if (log_file == NULL) {
         log_failed = 1;
         return 0;
