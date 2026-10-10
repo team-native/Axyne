@@ -62,17 +62,21 @@ static FILE *open_append(const char *path)
     int descriptor;
     FILE *file;
     if (wide == NULL) return NULL;
-    handle = CreateFileW(wide, FILE_APPEND_DATA,
+    /* The logger measures the existing file before writing.  Request read
+     * access as well as append access so the CRT stream remains readable on
+     * Windows; a write-only CRT descriptor can otherwise make the initial
+     * open appear successful while later file operations fail. */
+    handle = CreateFileW(wide, FILE_APPEND_DATA | GENERIC_READ,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     free(wide);
     if (handle == INVALID_HANDLE_VALUE) return NULL;
-    descriptor = _open_osfhandle((intptr_t)handle, _O_APPEND | _O_BINARY);
+    descriptor = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_APPEND | _O_BINARY);
     if (descriptor == -1) {
         CloseHandle(handle);
         return NULL;
     }
-    file = _fdopen(descriptor, "ab");
+    file = _fdopen(descriptor, "a+b");
     if (file == NULL) _close(descriptor);
     return file;
 #else
