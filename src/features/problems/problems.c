@@ -472,6 +472,7 @@ size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
         (char)0xEC, (char)0xA0, (char)0x9C, '\0'
     };
     char text[64];
+    size_t result;
     size_t written = sizeof(prefix) - 1;
     if (counts == NULL || counts->total == 0) {
         memcpy(text, prefix, written);
@@ -488,15 +489,14 @@ size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
         written += (size_t)number;
     }
     text[written] = '\0';
+    result = written;
     if (buffer != NULL && capacity != 0) {
         size_t copy = written < capacity - 1 ? written : capacity - 1;
         memcpy(buffer, text, copy);
         buffer[copy] = '\0';
+        if (copy == written) result = strlen(buffer);
     }
-    /* Derive the public length from the emitted C string so the result stays
-     * consistent with strlen even when a Windows compiler uses a different
-     * execution character set for nearby source literals. */
-    return strlen(text);
+    return result;
 }
 
 /* ---- filter --------------------------------------------------------------- */
