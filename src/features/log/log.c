@@ -91,11 +91,19 @@ static FILE *open_append(const char *path)
             CloseHandle(handle);
         }
     }
+    else {
+        fprintf(stderr, "log CreateFileW failed: %lu path=%s\n",
+                (unsigned long)GetLastError(), path);
+    }
     file = _wfsopen(wide, L"a+b", _SH_DENYNO);
+    if (file == NULL)
+        fprintf(stderr, "log _wfsopen failed: errno=%d path=%s\n", errno, path);
     if (file == NULL) file = fopen(path, "a+b");
     if (file == NULL) {
         int descriptor = _sopen(path, _O_CREAT | _O_APPEND | _O_RDWR | _O_BINARY,
                                 _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        if (descriptor == -1)
+            fprintf(stderr, "log _sopen failed: errno=%d path=%s\n", errno, path);
         if (descriptor != -1) {
             file = _fdopen(descriptor, "a+b");
             if (file == NULL) _close(descriptor);
