@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <exdisp.h>
+#include <shldisp.h>
 #include <strsafe.h>
 #include <tlhelp32.h>
 #include "installer_ui_config.h"
@@ -496,7 +498,8 @@ static void done_page(HDC dc) {
     path_text(dc, g_install_path, 233, 194, 405, 18, TEXT, 12);
     checkbox(dc, 219, 236, g_launch, TRUE, L"지금 Axyne 실행");
     fill(dc, FOOTER, 1, 403, 679, 459); line(dc, BORDER, 1, 403, 679, 403);
-    text(dc, L"설치 마법사 6 / 6", 16, 424, 360, 18, DISABLED_TEXT, 11, 400);
+    if (g_error) text(dc, g_error, 16, 414, 520, 40, DANGER, 11, 400);
+    else text(dc, L"설치 마법사 6 / 6", 16, 424, 360, 18, DISABLED_TEXT, 11, 400);
     button(dc, L"마침", 567, 417, 96, BUTTON_PRIMARY);
 }
 
@@ -566,10 +569,82 @@ static BOOL write_backend(const WCHAR *path) {
     return ok && written == len;
 }
 
-static void launch_axyne(void) {
+/* COM identifiers used to reach the desktop's IShellDispatch2 (defined here
+ * so no uuid library symbols are needed). */
+static const GUID AXYNE_CLSID_ShellWindows =
+    {0x9BA05972, 0xF6A8, 0x11CF, {0xA4, 0x42, 0x00, 0xA0, 0xC9, 0x0A, 0x8F, 0x39}};
+static const GUID AXYNE_IID_IShellWindows =
+    {0x85CB6900, 0x4D95, 0x11CF, {0x96, 0x0C, 0x00, 0x80, 0xC7, 0xF4, 0xEE, 0x85}};
+static const GUID AXYNE_IID_IServiceProvider =
+    {0x6D5140C1, 0x7436, 0x11CE, {0x80, 0x34, 0x00, 0xAA, 0x00, 0x60, 0x09, 0xFA}};
+static const GUID AXYNE_SID_STopLevelBrowser =
+    {0x4C96BE40, 0x915C, 0x11CF, {0x99, 0xD3, 0x00, 0xAA, 0x00, 0x4A, 0xE8, 0x37}};
+static const GUID AXYNE_IID_IShellBrowser =
+    {0x000214E2, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID AXYNE_IID_IDispatch =
+    {0x00020400, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID AXYNE_IID_IShellFolderViewDual =
+    {0xE7A1AF80, 0x4D96, 0x11CF, {0x96, 0x0C, 0x00, 0x80, 0xC7, 0xF4, 0xEE, 0x85}};
+static const GUID AXYNE_IID_IShellDispatch2 =
+    {0xA4C6892C, 0x3BA9, 0x11D2, {0x9D, 0xEA, 0x00, 0xC0, 0x4F, 0xB1, 0x61, 0x62}};
+
+/* Starts `file` through the desktop shell (explorer.exe), which runs it
+ * with the signed-in user's normal, unelevated token. */
+static BOOL shell_execute_unelevated(const WCHAR *file) {
+    IShellWindows *windows = NULL;
+    IDispatch *desktop = NULL, *background = NULL, *application = NULL;
+    IServiceProvider *provider = NULL;
+    IShellBrowser *browser = NULL;
+    IShellView *view = NULL;
+    IShellFolderViewDual *folder_view = NULL;
+    IShellDispatch2 *shell = NULL;
+    VARIANT location, empty, show;
+    long hwnd = 0;
+    BOOL ok = FALSE;
+    VariantInit(&location); VariantInit(&empty); VariantInit(&show);
+    location.vt = VT_I4; location.lVal = CSIDL_DESKTOP;
+    if (SUCCEEDED(CoCreateInstance(&AXYNE_CLSID_ShellWindows, NULL, CLSCTX_LOCAL_SERVER,
+                                   &AXYNE_IID_IShellWindows, (void **)&windows)) &&
+        windows->lpVtbl->FindWindowSW(windows, &location, &empty, SWC_DESKTOP, &hwnd,
+                                      SWFO_NEEDDISPATCH, &desktop) == S_OK && desktop &&
+        SUCCEEDED(desktop->lpVtbl->QueryInterface(desktop, &AXYNE_IID_IServiceProvider, (void **)&provider)) &&
+        SUCCEEDED(provider->lpVtbl->QueryService(provider, &AXYNE_SID_STopLevelBrowser,
+                                                 &AXYNE_IID_IShellBrowser, (void **)&browser)) &&
+        SUCCEEDED(browser->lpVtbl->QueryActiveShellView(browser, &view)) &&
+        SUCCEEDED(view->lpVtbl->GetItemObject(view, SVGIO_BACKGROUND, &AXYNE_IID_IDispatch,
+                                              (void **)&background)) &&
+        SUCCEEDED(background->lpVtbl->QueryInterface(background, &AXYNE_IID_IShellFolderViewDual,
+                                                     (void **)&folder_view)) &&
+        SUCCEEDED(folder_view->lpVtbl->get_Application(folder_view, &application)) &&
+        SUCCEEDED(application->lpVtbl->QueryInterface(application, &AXYNE_IID_IShellDispatch2,
+                                                      (void **)&shell))) {
+        BSTR path = SysAllocString(file);
+        if (path) {
+            show.vt = VT_I4; show.lVal = SW_SHOWNORMAL;
+            ok = SUCCEEDED(shell->lpVtbl->ShellExecute(shell, path, empty, empty, empty, show));
+            SysFreeString(path);
+        }
+    }
+    if (shell) shell->lpVtbl->Release(shell);
+    if (application) application->lpVtbl->Release(application);
+    if (folder_view) folder_view->lpVtbl->Release(folder_view);
+    if (background) background->lpVtbl->Release(background);
+    if (view) view->lpVtbl->Release(view);
+    if (browser) browser->lpVtbl->Release(browser);
+    if (provider) provider->lpVtbl->Release(provider);
+    if (desktop) desktop->lpVtbl->Release(desktop);
+    if (windows) windows->lpVtbl->Release(windows);
+    return ok;
+}
+
+/* Starts the installed Axyne without elevation. When this wizard runs
+ * elevated (started "as administrator"), the launch goes through the desktop
+ * shell; if that is impossible it is skipped and FALSE is returned. */
+static BOOL launch_axyne(void) {
     WCHAR executable[MAX_PATH];
     StringCchPrintfW(executable, MAX_PATH, L"%s\\axyne.exe", g_install_path);
-    ShellExecuteW(NULL, L"open", executable, NULL, NULL, SW_SHOWNORMAL);
+    if (is_elevated()) return shell_execute_unelevated(executable);
+    return (INT_PTR)ShellExecuteW(NULL, L"open", executable, NULL, NULL, SW_SHOWNORMAL) > 32;
 }
 
 /* Appends `"--dir=<path>"`, doubling a trailing backslash so the closing
@@ -983,8 +1058,14 @@ static void begin_install(void) {
 static void finish(void) {
     if (g_launch) {
         /* The elevated instance hands the launch to its unelevated parent. */
-        if (g_elevated_instance) g_exit_code = EXIT_LAUNCH_AXYNE;
-        else launch_axyne();
+        if (g_elevated_instance) {
+            g_exit_code = EXIT_LAUNCH_AXYNE;
+        } else if (!launch_axyne()) {
+            g_launch = FALSE;
+            g_error = L"관리자 권한으로 실행 중이라 Axyne를 일반 권한으로 시작하지 못했습니다. 시작 메뉴에서 실행하세요.";
+            InvalidateRect(g_window, NULL, FALSE);
+            return;
+        }
     }
     DestroyWindow(g_window);
 }
@@ -1056,7 +1137,7 @@ static void on_child_timer(void) {
     if (!g_elevated_child || !GetExitCodeProcess(g_elevated_child, &code) || code == STILL_ACTIVE) return;
     KillTimer(g_window, TIMER_CHILD);
     CloseHandle(g_elevated_child); g_elevated_child = NULL;
-    if (code == EXIT_LAUNCH_AXYNE) launch_axyne();
+    if (code == EXIT_LAUNCH_AXYNE) (void)launch_axyne();
     DestroyWindow(g_window);
 }
 
