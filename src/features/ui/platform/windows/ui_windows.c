@@ -40,6 +40,7 @@
 #include "../../debugger_actions.h"
 #include "../../preferences_window.h"
 #include "../../app_dialogs.h"
+#include "ui_windows_internal.h"
 
 enum {
     AXYNE_TOP_MENU = AXYNE_UI_MENU,
@@ -117,13 +118,6 @@ static COLORREF AXYNE_PROBLEM_FIELD;
 static COLORREF AXYNE_PROBLEM_FIELD_BORDER;
 static HBRUSH AXYNE_PROBLEM_FIELD_BRUSH;
 
-typedef struct AxyneGitUiRun AxyneGitUiRun;
-typedef void *(__stdcall *AxyneCreateLexer)(const char *name);
-
-/* The left column shows either the file explorer or the Git panel. */
-enum { AXYNE_SIDEBAR_TAB_EXPLORER = 0, AXYNE_SIDEBAR_TAB_GIT = 1,
-       AXYNE_SIDEBAR_TAB_COUNT = 2, AXYNE_SIDEBAR_TAB_PAD = 9 };
-
 /* Git panel geometry (logical pixels) and its debounced refresh timer. */
 enum {
     AXYNE_GIT_ROW = AXYNE_UI_ROW,
@@ -143,174 +137,6 @@ enum {
     AXYNE_GIT_GRAPH_STEP = 200 /* commits added per "더 불러오기" */
 };
 
-/* Snapshot of the Git panel's data. Written only on the UI thread: worker
- * jobs return their results by window message and are applied there. */
-typedef struct AxyneGitPanelUi {
-    AxyneGitChanges changes;
-    AxyneGitGraph graph; /* newest first, at most graph_loaded_limit commits */
-    int graph_ok;        /* the graph could be read (zero commits is fine) */
-    int graph_limit;     /* commits requested by refreshes; 0 = default, grown by "더 불러오기" */
-    AxyneGitGraphMode graph_mode;
-    unsigned graph_generation; /* mode request identity, independent of commits/workspace */
-    HWND graph_selector;
-    int graph_loaded_limit; /* the request the shown graph answered (0 = none) */
-    int graph_loading;   /* a larger graph was requested and has not arrived */
-    int loaded;          /* a snapshot of the current workspace arrived */
-    int repo_ok;         /* the change list could be read */
-    char error[512];     /* Git's message when !repo_ok */
-    int has_staged;
-    int job_busy;        /* a refresh or stage job runs on a worker thread */
-    int refresh_pending; /* another refresh was requested meanwhile */
-    unsigned generation; /* bumped per workspace; stale results are dropped */
-    int changes_scroll;  /* first visible change row */
-    int graph_scroll;    /* first visible graph row */
-    int wheel_remainder;
-    unsigned diff_serial; /* newest diff request; older results are dropped */
-    char *selected_path; /* selected change (repository path) or NULL */
-    char *selected_hash; /* selected commit or NULL (one selection at a time) */
-    char *selected_cfile; /* selected file row under the expanded commit */
-    /* The commit whose changed files are listed inline below its row (only
-     * one at a time). expanded_state: 0 none, 1 loading, 2 ready, 3 failed. */
-    char *expanded_hash;
-    size_t expanded_row;  /* index of that commit in graph, (size_t)-1 = none */
-    AxyneGitChanges expanded_files;
-    int expanded_state;
-    char expanded_error[256];
-    unsigned expand_serial; /* newest file-list request; older results are dropped */
-    HWND message_edit;   /* multi-line commit message */
-    int message_filled;  /* the message has a non-blank character */
-    int message_focus;
-} AxyneGitPanelUi;
-
-typedef struct AxyneWindowState {
-    HMODULE scintilla_module;
-    HMODULE lexilla_module;
-    AxyneCreateLexer create_lexer;
-    HWND editor;
-    HFONT ui_font;
-    HFONT ui_font_italic; /* 12px italic: preview tab titles */
-    HFONT code_font;
-    HFONT badge_font;
-    HFONT tab_badge_font;
-    HFONT font_small;   /* 11px: toolbar chips, explorer header, panel tabs */
-    HFONT font_tiny;    /* 10px: shortcut hints */
-    HFONT font_bold;    /* 11px bold: accent run label */
-    HFONT font_glyph13; /* 13px: tab close glyph, toolbar glyphs */
-    HFONT font_glyph14; /* 14px: toolbar glyphs */
-    HFONT font_dot;     /* 7px: dirty marker */
-    HFONT font_output;  /* 12px mono: output and terminal panel text */
-    HFONT font_mono_small; /* 10px mono: problems file name and position */
-    HWND main_window;
-    AxyneDocumentSet documents;
-    AxyneExplorer explorer;
-    AxyneWatcher *watcher;
-    size_t explorer_selection;
-    int explorer_has_selection;
-    size_t explorer_scroll;
-    int explorer_wheel_remainder;
-    /* Outline (개요) section at the bottom of the explorer tab. It is scanned
-     * only while that tab is shown; otherwise it is marked stale and rescanned
-     * when the tab appears. */
-    AxyneOutline outline;
-    int outline_timer_active;
-    int outline_stale;
-    int outline_wheel_remainder;
-    size_t first_visible_tab;
-    size_t tab_reveal_index;
-    int tab_wheel_remainder;
-    int terminal_panel_selected;
-    int problems_panel_selected;
-    int closing;
-    int loading_editor;
-    int empty_shown; /* shortcut guide replaces the editor (no open document) */
-    AxyneRunnerConfig terminal_runner;
-    AxyneRunnerConfig action_runner;
-    /* Build target selector. Kept in memory for the session; runtimes are
-     * discovered lazily (first editor file, click or build), never at startup. */
-    AxyneBuildTarget build_target;
-    AxyneRuntimeList runtimes;
-    int runtimes_discovered;
-    int build_menu_open; /* chevron points up while the popup is open */
-    int runtime_discovery_posted;
-    AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
-    int pending_run;
-    AxyneDebugger debugger;
-    AxyneProcess *terminal_process;
-    AxyneProcess *git_process;
-    AxyneGitUiRun *git_run;
-    int git_batch_busy; /* a commit, push or pull runs on a worker thread */
-    HWND terminal_output;
-    HWND terminal_input;
-    HWND terminal_start;
-    HWND terminal_stop;
-    HWND terminal_send;
-    HWND debug_start;
-    HWND debug_pause;
-    HWND debug_continue;
-    HWND debug_step_over;
-    HWND debug_breakpoint;
-    int active_action;
-    int last_exit_code;
-    int last_exit_failed;
-    int has_exit_status;
-    AxynePreferences global_preferences;
-    AxynePreferences preferences;
-    char *global_preferences_path;
-    char *workspace_preferences_path;
-    unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
-    AxyneLspClient *lsp;
-    char lsp_status[192];
-    /* Problems panel: the model (LSP diagnostics + build output), the rows
-     * built from it for painting and the panel's view state. */
-    AxyneProblemList problems;
-    AxyneProblemCollapsed problems_collapsed;
-    AxyneBuildFeed build_feed;
-    int build_feed_active;
-    /* Process output is in the ANSI code page; a DBCS lead byte cut off from
-     * its trail byte at a chunk end waits here per stream (0 out, 1 err). */
-    unsigned char build_feed_lead[2];
-    int build_feed_has_lead[2];
-    AxyneProblemRow *problem_rows;
-    size_t problem_row_count;
-    AxyneProblemCounts problem_counts;
-    char problem_summary[160];
-    wchar_t problems_tab_label[32];
-    int problem_selected; /* row index or -1 */
-    int problem_scroll;   /* pixels */
-    int problem_wheel_remainder;
-    int problem_refresh_pending;
-    int problem_has_sel;  /* selection identity kept across rebuilds */
-    int problem_sel_kind;
-    size_t problem_sel_line;
-    size_t problem_sel_column;
-    char *problem_sel_path;
-    char *problem_sel_message;
-    HWND problems_filter;
-    int menu_active; /* 1-based index of the menu bar item whose popup is open */
-    int explorer_hidden; /* View > Explorer */
-    int sidebar_tab;     /* AXYNE_SIDEBAR_TAB_*: what the sidebar shows */
-    AxyneGitPanelUi git_panel;
-    int panel_hidden;    /* View > Bottom Panel */
-    int sidebar_size;    /* dragged explorer width; 0 = default, session only */
-    int panel_size;      /* dragged bottom panel height; 0 = default */
-    int client_width;    /* client size cached by axyne_layout and paint */
-    int client_height;
-    int splitter_drag;   /* 0 none, 1 explorer border, 2 panel border */
-    int splitter_start;  /* pointer coordinate when the drag began */
-    int splitter_start_size;
-    int fullscreen;
-    LONG_PTR saved_style;
-    WINDOWPLACEMENT saved_placement;
-    AxynePaletteController palette;
-    HWND palette_edit;
-    HWND palette_popup;
-    HWND palette_dim;
-    WNDPROC palette_edit_proc;
-    HBRUSH palette_edit_brush;
-    HFONT palette_fonts[7];
-    int palette_updating;
-    int palette_wheel_remainder;
-} AxyneWindowState;
 
 /* The explorer column and bottom panel collapse to zero when hidden, so every
  * layout, paint and hit-test computation shares these two sizes. */
@@ -3503,24 +3329,25 @@ static void axyne_workspace_show_error(HWND window, const char *prefix,
     MessageBoxA(window, message, "Axyne - Workspace", MB_OK | MB_ICONERROR);
 }
 
-static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
+/* Opens `root` as the workspace: watcher, explorer, workspace settings and
+ * the Git panel. 1 on success (errors are reported to the user). */
+static int axyne_workspace_open_root(HWND window, AxyneWindowState *state,
+                                     const char *root)
 {
-    char *root = NULL;
     AxyneWatcher *watcher = NULL;
     AxyneError error;
     AxyneStatus status;
-    if (!axyne_choose_folder(window, &root)) return 0;
     status = axyne_watcher_start(root, axyne_workspace_watch_callback, window,
                                  &watcher, &error);
     if (status != AXYNE_STATUS_OK) {
         axyne_workspace_show_error(window, "Unable to watch workspace", &error);
-        free(root); return 0;
+        return 0;
     }
     status = axyne_explorer_set_root(&state->explorer, root, &error);
     if (status != AXYNE_STATUS_OK) {
         axyne_watcher_stop(watcher); axyne_watcher_release(watcher);
         axyne_workspace_show_error(window, "Unable to open workspace", &error);
-        free(root); return 0;
+        return 0;
     }
     if (state->watcher != NULL) {
         axyne_watcher_stop(state->watcher);
@@ -3530,10 +3357,19 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
     state->explorer_has_selection = 0;
     state->explorer_scroll = 0;
     axyne_load_workspace_preferences(state, root);
-    free(root);
     axyne_git_panel_reset(window, state);
     InvalidateRect(window, NULL, FALSE);
     return 1;
+}
+
+static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
+{
+    char *root = NULL;
+    int opened;
+    if (!axyne_choose_folder(window, &root)) return 0;
+    opened = axyne_workspace_open_root(window, state, root);
+    free(root);
+    return opened;
 }
 
 /* The outline section is part of the explorer tab only. */
@@ -9071,6 +8907,216 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     }
     EndPaint(window, &paint);
 }
+
+/* ---- exported helpers (ui_windows_internal.h) ---------------------------- */
+
+wchar_t *axyne_win_wide(const char *utf8) { return utf8 != NULL ? axyne_wide(utf8) : NULL; }
+char *axyne_win_utf8(const wchar_t *wide) { return wide != NULL ? axyne_utf8(wide) : NULL; }
+
+AxyneDocument *axyne_win_active_document(AxyneWindowState *state)
+{
+    return state != NULL ? axyne_active_visible(state) : NULL;
+}
+
+int axyne_win_empty_state(AxyneWindowState *state) { return axyne_empty_state(state); }
+
+int axyne_win_capture_editor(AxyneWindowState *state)
+{
+    return state != NULL && axyne_capture_editor(state);
+}
+
+int axyne_win_open_document(AxyneWindowState *state, const char *path,
+                            size_t line, size_t column)
+{
+    AxyneDocument *doc;
+    if (state == NULL || state->main_window == NULL || path == NULL || path[0] == '\0')
+        return 0;
+    if (line == 0) {
+        doc = axyne_active_visible(state);
+        if (doc == NULL || doc->path == NULL || !axyne_problems_path_equal(doc->path, path))
+            axyne_open_document(state->main_window, state, path);
+    } else {
+        axyne_problems_show(state->main_window, state, path, line, column > 0 ? column : 1, 0);
+    }
+    doc = axyne_active_visible(state);
+    if (doc == NULL || doc->path == NULL) return 0;
+    if (axyne_problems_path_equal(doc->path, path)) return 1;
+    if (state->explorer.root != NULL) {
+        char *resolved = axyne_problems_resolve_path(path, state->explorer.root);
+        int same = resolved != NULL && axyne_problems_path_equal(doc->path, resolved);
+        free(resolved);
+        return same;
+    }
+    return 0;
+}
+
+void axyne_win_goto(AxyneWindowState *state, size_t line, size_t column,
+                    int utf16_column)
+{
+    if (state == NULL || axyne_active_visible(state) == NULL) return;
+    axyne_problems_goto(state, line, column > 0 ? column : 1, utf16_column);
+}
+
+int axyne_win_open_virtual_document(AxyneWindowState *state, const char *title,
+                                    const char *text, size_t length)
+{
+    if (state == NULL || state->main_window == NULL || title == NULL) return 0;
+    return axyne_open_virtual_document(state->main_window, state, title,
+                                       text != NULL ? text : "", text != NULL ? length : 0);
+}
+
+void axyne_win_new_document(AxyneWindowState *state)
+{
+    if (state != NULL && state->main_window != NULL)
+        axyne_new_document(state->main_window, state);
+}
+
+int axyne_win_save_active(AxyneWindowState *state)
+{
+    if (state == NULL || state->main_window == NULL || axyne_empty_state(state)) return 0;
+    return axyne_save_active(state->main_window, state);
+}
+
+int axyne_win_save_document(AxyneWindowState *state, size_t index)
+{
+    if (state == NULL || state->main_window == NULL || index >= state->documents.count ||
+        axyne_document_tab_hidden(&state->documents.documents[index]))
+        return 0;
+    if (index != state->documents.active_index) {
+        if (!axyne_capture_editor(state) || !axyne_show_document(state, index)) return 0;
+        axyne_update_title(state->main_window, state);
+    }
+    return axyne_save_active(state->main_window, state);
+}
+
+int axyne_win_close_document(AxyneWindowState *state, size_t index)
+{
+    size_t before;
+    if (state == NULL || state->main_window == NULL || index >= state->documents.count)
+        return 0;
+    before = state->documents.count;
+    axyne_close_tab(state->main_window, state, index);
+    /* The last tab is replaced by the hidden placeholder (same count). */
+    return state->documents.count < before || axyne_empty_state(state);
+}
+
+void axyne_win_update_title(AxyneWindowState *state)
+{
+    if (state != NULL && state->main_window != NULL)
+        axyne_update_title(state->main_window, state);
+}
+
+int axyne_win_open_folder(AxyneWindowState *state, const char *root)
+{
+    if (state == NULL || state->main_window == NULL || root == NULL || root[0] == '\0')
+        return 0;
+    return axyne_workspace_open_root(state->main_window, state, root);
+}
+
+void axyne_win_output_append(AxyneWindowState *state, const char *utf8,
+                             AxyneProcessStream stream)
+{
+    if (state != NULL) axyne_terminal_append_utf8(state->terminal_output, utf8, stream);
+}
+
+void axyne_win_output_append_bytes(AxyneWindowState *state, const char *bytes,
+                                   size_t length, AxyneProcessStream stream)
+{
+    if (state != NULL) axyne_terminal_append(state->terminal_output, bytes, length, stream);
+}
+
+void axyne_win_output_clear(AxyneWindowState *state)
+{
+    if (state != NULL && state->terminal_output != NULL)
+        SetWindowTextW(state->terminal_output, L"");
+}
+
+int axyne_win_process_busy(AxyneWindowState *state)
+{
+    return state != NULL && (state->terminal_process != NULL ||
+                             axyne_debugger_is_active(&state->debugger));
+}
+
+int axyne_win_run_plan_step(AxyneWindowState *state, const AxyneLanguagePlan *plan,
+                            int run_step, int clear)
+{
+    if (state == NULL || state->main_window == NULL || plan == NULL ||
+        axyne_win_process_busy(state))
+        return 0;
+    return axyne_start_step(state->main_window, state, run_step ? &plan->run : &plan->build,
+                            plan, run_step ? 2 : 1, clear);
+}
+
+void axyne_win_layout(AxyneWindowState *state)
+{
+    if (state != NULL && state->main_window != NULL) axyne_layout(state->main_window, state);
+}
+
+void axyne_win_invalidate(AxyneWindowState *state, const RECT *rect)
+{
+    if (state != NULL && state->main_window != NULL)
+        InvalidateRect(state->main_window, rect, FALSE);
+}
+
+int axyne_win_sidebar_width(const AxyneWindowState *state)
+{
+    return state != NULL ? axyne_sidebar_width(state) : 0;
+}
+
+int axyne_win_panel_height(const AxyneWindowState *state)
+{
+    return state != NULL ? axyne_panel_height(state) : 0;
+}
+
+void axyne_win_apply_preferences(AxyneWindowState *state)
+{
+    if (state == NULL) return;
+    axyne_apply_preferences(state);
+    if (state->main_window != NULL) InvalidateRect(state->main_window, NULL, FALSE);
+}
+
+COLORREF axyne_win_color(AxyneWinColor which)
+{
+    switch (which) {
+    case AXYNE_WIN_COLOR_BACKGROUND: return AXYNE_BG;
+    case AXYNE_WIN_COLOR_PANEL: return AXYNE_PANEL;
+    case AXYNE_WIN_COLOR_TOOLBAR: return AXYNE_TOOLBAR_BG;
+    case AXYNE_WIN_COLOR_BORDER: return AXYNE_BORDER;
+    case AXYNE_WIN_COLOR_TEXT: return AXYNE_TEXT;
+    case AXYNE_WIN_COLOR_MUTED: return AXYNE_MUTED;
+    case AXYNE_WIN_COLOR_ACCENT: return AXYNE_ACCENT;
+    case AXYNE_WIN_COLOR_OUTPUT_BACKGROUND: return AXYNE_OUTPUT_BG;
+    case AXYNE_WIN_COLOR_PANEL_HEADER: return AXYNE_PANEL_HEADER_BG;
+    case AXYNE_WIN_COLOR_STATUS_BACKGROUND: return AXYNE_STATUS_BG;
+    case AXYNE_WIN_COLOR_SELECTION: return AXYNE_SELECTION_BG;
+    case AXYNE_WIN_COLOR_INDICATOR: return AXYNE_INDICATOR;
+    case AXYNE_WIN_COLOR_ERROR: return axyne_problems_severity_color(AXYNE_PROBLEM_ERROR);
+    case AXYNE_WIN_COLOR_WARNING: return axyne_problems_severity_color(AXYNE_PROBLEM_WARNING);
+    default: return AXYNE_TEXT;
+    }
+}
+
+void axyne_win_fill(HDC dc, RECT rect, COLORREF color)
+{
+    axyne_fill(dc, rect.left, rect.top, rect.right, rect.bottom, color);
+}
+
+void axyne_win_round_fill(HDC dc, RECT rect, int radius, COLORREF fill, COLORREF border)
+{
+    axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, radius, fill, border);
+}
+
+void axyne_win_text(HDC dc, HFONT font, COLORREF color, RECT rect,
+                    const wchar_t *text, UINT alignment)
+{
+    if (text != NULL) axyne_text_rect(dc, font, color, rect, text, alignment);
+}
+
+int axyne_win_measure_text(HFONT font, const wchar_t *text)
+{
+    return text != NULL ? axyne_measure_text(font, text) : 0;
+}
+
 
 static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                                            WPARAM w_param, LPARAM l_param)
