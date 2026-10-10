@@ -266,6 +266,10 @@ typedef struct AxyneWindowState {
     AxyneProblemCollapsed problems_collapsed;
     AxyneBuildFeed build_feed;
     int build_feed_active;
+    /* Process output is in the ANSI code page; a DBCS lead byte cut off from
+     * its trail byte at a chunk end waits here per stream (0 out, 1 err). */
+    unsigned char build_feed_lead[2];
+    int build_feed_has_lead[2];
     AxyneProblemRow *problem_rows;
     size_t problem_row_count;
     AxyneProblemCounts problem_counts;
@@ -8114,23 +8118,95 @@ static void axyne_problems_begin_build(AxyneWindowState *state, const char *dire
     if (directory == NULL || directory[0] == '\0') directory = state->explorer.root;
     (void)axyne_build_feed_begin(&state->build_feed, clear ? &state->problems : NULL,
                                  directory);
+    state->build_feed_has_lead[0] = state->build_feed_has_lead[1] = 0;
     state->build_feed_active = 1;
     if (clear) axyne_problems_refresh(state);
+}
+
+/* Converts one chunk of ANSI-code-page process output of stream `index` to
+ * UTF-8 (the problems model's encoding). A trailing DBCS lead byte is held
+ * back and prepended to the stream's next chunk, so a character split across
+ * chunks converts intact. Returns a malloc'd buffer (NULL when nothing is
+ * left to convert or on failure) and its length in `*out_length`. */
+static char *axyne_problems_acp_to_utf8(AxyneWindowState *state, int index,
+                                        const char *bytes, size_t length,
+                                        size_t *out_length)
+{
+    UINT acp = GetACP();
+    size_t total = length + (state->build_feed_has_lead[index] ? 1u : 0u);
+    size_t convert = total, i = 0;
+    char *joined, *utf8 = NULL;
+    wchar_t *wide;
+    int wide_count, utf8_count;
+    *out_length = 0;
+    if (total == 0 || total > (size_t)INT_MAX) return NULL;
+    joined = (char *)malloc(total);
+    if (joined == NULL) return NULL;
+    if (state->build_feed_has_lead[index]) {
+        joined[0] = (char)state->build_feed_lead[index];
+        memcpy(joined + 1, bytes, length);
+    } else {
+        memcpy(joined, bytes, length);
+    }
+    state->build_feed_has_lead[index] = 0;
+    if (acp == CP_UTF8) { /* already UTF-8; the feed reassembles lines */
+        *out_length = total;
+        return joined;
+    }
+    while (i < total) {
+        if (IsDBCSLeadByteEx(acp, (BYTE)joined[i])) {
+            if (i + 1 >= total) { convert = i; break; }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    if (convert < total) {
+        state->build_feed_lead[index] = (unsigned char)joined[convert];
+        state->build_feed_has_lead[index] = 1;
+    }
+    if (convert == 0) { free(joined); return NULL; }
+    wide_count = MultiByteToWideChar(acp, 0, joined, (int)convert, NULL, 0);
+    wide = wide_count > 0 ? (wchar_t *)malloc((size_t)wide_count * sizeof(*wide)) : NULL;
+    if (wide != NULL &&
+        MultiByteToWideChar(acp, 0, joined, (int)convert, wide, wide_count) == wide_count) {
+        utf8_count = WideCharToMultiByte(CP_UTF8, 0, wide, wide_count, NULL, 0, NULL, NULL);
+        utf8 = utf8_count > 0 ? (char *)malloc((size_t)utf8_count) : NULL;
+        if (utf8 != NULL &&
+            WideCharToMultiByte(CP_UTF8, 0, wide, wide_count, utf8, utf8_count,
+                                NULL, NULL) == utf8_count) {
+            *out_length = (size_t)utf8_count;
+        } else {
+            free(utf8);
+            utf8 = NULL;
+        }
+    }
+    free(wide);
+    free(joined);
+    return utf8;
 }
 
 static void axyne_problems_feed_build(AxyneWindowState *state, AxyneProcessStream stream,
                                       const char *bytes, size_t length)
 {
-    if (!state->build_feed_active) return;
-    if (axyne_build_feed_push(&state->build_feed, &state->problems,
-                              stream == AXYNE_PROCESS_STDERR, bytes, length) != 0)
+    int index = stream == AXYNE_PROCESS_STDERR;
+    char *utf8;
+    size_t utf8_length = 0;
+    if (!state->build_feed_active || bytes == NULL || length == 0) return;
+    utf8 = axyne_problems_acp_to_utf8(state, index, bytes, length, &utf8_length);
+    if (utf8 == NULL) return;
+    if (axyne_build_feed_push(&state->build_feed, &state->problems, index,
+                              utf8, utf8_length) != 0)
         axyne_problems_schedule_refresh(state);
+    free(utf8);
 }
 
 static void axyne_problems_finish_build(AxyneWindowState *state)
 {
     if (!state->build_feed_active) return;
     state->build_feed_active = 0;
+    /* A lead byte without its trail byte at exit is not a character. */
+    state->build_feed_has_lead[0] = state->build_feed_has_lead[1] = 0;
     if (axyne_build_feed_finish(&state->build_feed, &state->problems) != 0)
         axyne_problems_refresh(state);
     else
