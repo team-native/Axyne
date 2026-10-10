@@ -829,7 +829,10 @@ static int test_problem_queries(void)
     axyne_problems_counts_for_path(&list, "/p/a.c", &counts);
     CHECK(counts.total == 0 && axyne_problems_counts_worst(&counts) == 0);
     CHECK(axyne_problems_counts_worst(NULL) == 0);
-    CHECK(axyne_problems_tab_label(&counts, text, sizeof(text)) == strlen(text));
+    {
+        size_t label_length = axyne_problems_tab_label(&counts, text, sizeof(text));
+        CHECK(label_length == strlen(text));
+    }
     CHECK_STR(text, "문제");
     CHECK(axyne_problems_tab_label(NULL, text, sizeof(text)) == strlen("문제"));
     CHECK_STR(text, "문제");
@@ -873,7 +876,10 @@ static int test_problem_queries(void)
 
     axyne_problems_counts(&list, &counts);
     CHECK(counts.total == 5);
-    CHECK(axyne_problems_tab_label(&counts, text, sizeof(text)) == strlen(text));
+    {
+        size_t label_length = axyne_problems_tab_label(&counts, text, sizeof(text));
+        CHECK(label_length == strlen(text));
+    }
     CHECK_STR(text, "문제  5");
     {
         char tiny[4];
