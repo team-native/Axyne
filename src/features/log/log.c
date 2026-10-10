@@ -15,6 +15,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shlobj.h>
 #include <fcntl.h>
 #include <io.h>
 #include <share.h>
@@ -50,6 +51,17 @@ static wchar_t *wide_path(const char *utf8)
         wide = NULL;
     }
     return wide;
+}
+
+static int ensure_directory(const char *path)
+{
+    wchar_t *wide = wide_path(path);
+    int result;
+    if (wide == NULL) return 0;
+    result = SHCreateDirectoryExW(NULL, wide, NULL);
+    free(wide);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS ||
+           result == ERROR_ALREADY_EXISTS;
 }
 #endif
 
@@ -140,10 +152,19 @@ static int open_locked(void)
         log_failed = 1;
         return 0;
     }
-    /* The directory helper may report an intermediate Windows sharing status
-     * even though the requested directory is already present.  The append
-     * open below is the authoritative check for whether logging can proceed. */
-    (void)axyne_app_paths_ensure_directory(directory, NULL);
+#ifdef _WIN32
+    if (!ensure_directory(directory)) {
+        axyne_app_path_free(directory);
+        log_failed = 1;
+        return 0;
+    }
+#else
+    if (axyne_app_paths_ensure_directory(directory, NULL) != AXYNE_STATUS_OK) {
+        axyne_app_path_free(directory);
+        log_failed = 1;
+        return 0;
+    }
+#endif
     free(log_path);
     log_path = axyne_app_path_join(directory, "axyne.log");
     axyne_app_path_free(directory);
