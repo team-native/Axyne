@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <share.h>
+#include <sys/stat.h>
 #include <wchar.h>
 static SRWLOCK log_lock = SRWLOCK_INIT;
 #define LOG_LOCK() AcquireSRWLockExclusive(&log_lock)
@@ -92,6 +93,14 @@ static FILE *open_append(const char *path)
     }
     file = _wfsopen(wide, L"a+b", _SH_DENYNO);
     if (file == NULL) file = fopen(path, "a+b");
+    if (file == NULL) {
+        int descriptor = _sopen(path, _O_CREAT | _O_APPEND | _O_RDWR | _O_BINARY,
+                                _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        if (descriptor != -1) {
+            file = _fdopen(descriptor, "a+b");
+            if (file == NULL) _close(descriptor);
+        }
+    }
     free(wide);
     return file;
 #else
