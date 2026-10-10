@@ -465,7 +465,9 @@ int axyne_problems_counts_worst(const AxyneProblemCounts *counts)
 size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
                                 size_t capacity)
 {
-    static const char prefix[] = "문제";
+    /* Keep the public text UTF-8 even when MSVC's execution character set is
+     * configured independently from the source file. */
+    static const char prefix[] = "\xEB\xAC\xB8\xEC\xA0\x9C";
     char text[64];
     size_t written = sizeof(prefix) - 1;
     if (counts == NULL || counts->total == 0) {
