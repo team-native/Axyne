@@ -23,6 +23,12 @@ add_executable(axyne_tests
     test_popup_menu.c
     test_completion.c
     test_memory_limits.c
+    test_commands.c
+    test_keymap.c
+    test_app_state.c
+    test_app_paths.c
+    test_memory_usage.c
+    test_log.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -37,6 +43,8 @@ if(MSVC)
     set_source_files_properties(test_palette_problems.c test_palette_controller.c
         PROPERTIES COMPILE_OPTIONS "/utf-8")
     set_source_files_properties(test_languages.c PROPERTIES COMPILE_OPTIONS "/utf-8")
+    set_source_files_properties(test_keymap.c PROPERTIES COMPILE_OPTIONS "/utf-8")
+    set_source_files_properties(test_commands.c PROPERTIES COMPILE_OPTIONS "/utf-8")
 else()
     target_compile_options(axyne_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -161,8 +169,44 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> memory-limits
             "${AXYNE_TEST_FIXTURE_DIR}/memory-limits"
 )
+add_test(
+    NAME axyne-commands
+    COMMAND $<TARGET_FILE:axyne_tests> commands
+            "${AXYNE_TEST_FIXTURE_DIR}/commands"
+)
+add_test(
+    NAME axyne-keymap
+    COMMAND $<TARGET_FILE:axyne_tests> keymap
+            "${AXYNE_TEST_FIXTURE_DIR}/keymap"
+)
+add_test(
+    NAME axyne-app-state
+    COMMAND $<TARGET_FILE:axyne_tests> app-state
+            "${AXYNE_TEST_FIXTURE_DIR}/app-state"
+)
+add_test(
+    NAME axyne-app-paths
+    COMMAND $<TARGET_FILE:axyne_tests> app-paths
+            "${AXYNE_TEST_FIXTURE_DIR}/app-paths"
+)
+add_test(
+    NAME axyne-memory-usage
+    COMMAND $<TARGET_FILE:axyne_tests> memory-usage
+            "${AXYNE_TEST_FIXTURE_DIR}/memory-usage"
+)
+add_test(
+    NAME axyne-log
+    COMMAND $<TARGET_FILE:axyne_tests> log
+            "${AXYNE_TEST_FIXTURE_DIR}/log"
+)
 set_tests_properties(
     axyne-memory-limits
+    axyne-log
+    axyne-memory-usage
+    axyne-app-paths
+    axyne-app-state
+    axyne-keymap
+    axyne-commands
     axyne-build-target
     axyne-languages
     axyne-build-selector
