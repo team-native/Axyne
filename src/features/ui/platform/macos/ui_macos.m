@@ -1,14 +1,5 @@
 #include "ui_macos_internal.h"
 
-/* Title of the top-level menu at bar position index, from the table shared
- * with the Windows adapter. */
-static NSString *axyne_macos_menu_label(NSUInteger index)
-{
-    const AxyneMenuTitle *title = axyne_ui_menu_title(index);
-    NSString *label = title != NULL ? [NSString stringWithUTF8String:title->label] : nil;
-    return label != nil ? label : @"";
-}
-
 /* Menu text at the Figma 12pt size. Only the font is set so AppKit keeps
  * choosing the colour (which also dims disabled entries) and draws the
  * key-equivalent column itself. */
@@ -1722,6 +1713,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
                                                &preferenceError);
             free(readPath);
             _preferences = _globalPreferences;
+            [self rebuildKeymap];
             if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
                 [self showWorkspaceError:@"Unable to load preferences" error:&preferenceError];
         }
@@ -2010,6 +2002,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
 }
 
 - (void)quickFile:(id)sender { (void)sender; [self openPaletteWithInput:@""]; }
+/* 보기 > 명령 팔레트 (the palette in command mode). */
+- (void)showCommandPalette:(id)sender { (void)sender; [self openPaletteWithInput:@">"]; }
+/* 편집 > 심볼로 이동: the palette's symbol mode on the current file. */
+- (void)goToSymbol:(id)sender { (void)sender; [self openPaletteWithInput:@"@"]; }
 - (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
 
 /* ---- build target selector ------------------------------------------------ */
@@ -2198,6 +2194,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
     SEL action = [menuItem action];
+    /* Registry entries: feature categories first, then the base rules below
+     * (evaluated for the command's old selector). */
+    if (action == @selector(performCommand:))
+        return [self validateCommand:(AxyneCommandId)[menuItem tag] item:menuItem];
     /* Empty state: only the hidden placeholder exists, so there is nothing
      * to save, close, build, search or edit. */
     BOOL emptyState = [self isEmptyState];
@@ -3240,6 +3240,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
             [self applyPreferences];
         } else [self applyPreferences];
     }
+    [self rebuildKeymap]; /* workspace keybindings */
     [_gitPanel workspaceChanged];
     [self setNeedsDisplay:YES];
     return YES;
@@ -3919,7 +3920,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     NSDictionary *attributes = @{NSFontAttributeName:[NSFont systemFontOfSize:12]};
     CGFloat x = AXYNE_UI_MENU_INSET;
     for (NSUInteger i = 0; i < AXYNE_UI_MENU_COUNT; ++i) {
-        CGFloat width = ceil([axyne_macos_menu_label(i) sizeWithAttributes:attributes].width) +
+        CGFloat width = ceil([axyne_macos_menu_title(i) sizeWithAttributes:attributes].width) +
             2 * AXYNE_UI_MENU_PAD;
         if (i == index) return NSMakeRect(x, 2, width, AXYNE_MENU - 4);
         x += width + AXYNE_UI_MENU_GAP;
@@ -4588,6 +4589,9 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     [self refreshRecentMenu];
 }
 
+/* File > 최근 항목: recent files, then the recent folders group and 최근
+ * 항목 지우기 (D6). Until the file feature persists folders the folder group
+ * shows its empty placeholder and the clear entry stays disabled. */
 - (void)refreshRecentMenu
 {
     if (_recentMenu == nil) return;
@@ -4598,8 +4602,6 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         [empty setEnabled:NO];
         [_recentMenu addItem:empty];
         [empty release];
-        axyne_macos_style_menu(_recentMenu);
-        return;
     }
     for (size_t i = 0; i < _documents.recent_count; ++i) {
         NSString *path = [NSString stringWithUTF8String:_documents.recent_paths[i]];
@@ -4611,6 +4613,16 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         [_recentMenu addItem:item];
         [item release];
     }
+    [_recentMenu addItem:[NSMenuItem separatorItem]];
+    {
+        NSMenuItem *folders = [[NSMenuItem alloc] initWithTitle:@"최근 폴더 없음"
+            action:nil keyEquivalent:@""];
+        [folders setEnabled:NO];
+        [_recentMenu addItem:folders];
+        [folders release];
+    }
+    [_recentMenu addItem:[NSMenuItem separatorItem]];
+    [_recentMenu addItem:[self commandMenuItem:AXYNE_COMMAND_FILE_CLEAR_RECENT]];
     axyne_macos_style_menu(_recentMenu);
 }
 
@@ -4997,22 +5009,15 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         _explorerSelection = row;
         _hasExplorerSelection = YES;
     }
+    /* Explorer context menu from the registry (탐색기 group). */
     NSMenu *menu = [[[NSMenu alloc] initWithTitle:@"Workspace"] autorelease];
-    NSMenuItem *workspace = [menu addItemWithTitle:@"Open Workspace Folder..."
-        action:@selector(openWorkspace:) keyEquivalent:@""];
-    [workspace setTarget:self];
+    [menu addItem:[self commandMenuItem:AXYNE_COMMAND_FILE_OPEN_FOLDER]];
     [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *file = [menu addItemWithTitle:@"New File"
-        action:@selector(newExplorerFile:) keyEquivalent:@""];
-    NSMenuItem *folder = [menu addItemWithTitle:@"New Folder"
-        action:@selector(newExplorerFolder:) keyEquivalent:@""];
-    [file setTarget:self]; [folder setTarget:self];
+    [menu addItem:[self commandMenuItem:AXYNE_COMMAND_EXPLORER_NEW_FILE]];
+    [menu addItem:[self commandMenuItem:AXYNE_COMMAND_EXPLORER_NEW_FOLDER]];
     if (row != NSNotFound) {
-        NSMenuItem *rename = [menu addItemWithTitle:@"Rename"
-            action:@selector(renameExplorerItem:) keyEquivalent:@""];
-        NSMenuItem *remove = [menu addItemWithTitle:@"Delete"
-            action:@selector(removeExplorerItem:) keyEquivalent:@""];
-        [rename setTarget:self]; [remove setTarget:self];
+        [menu addItem:[self commandMenuItem:AXYNE_COMMAND_EXPLORER_RENAME]];
+        [menu addItem:[self commandMenuItem:AXYNE_COMMAND_EXPLORER_DELETE]];
     }
     /* The popup's top-left corner sits at the click point. */
     NSRect click = [[self window] convertRectToScreen:
@@ -5084,6 +5089,7 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
                 [self showWorkspaceError:@"Unable to reload workspace preferences" error:&error];
         }
     }
+    [self rebuildKeymap];
     [self applyPreferences];
     return YES;
 }
@@ -6708,7 +6714,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [menuBackground setFill]; NSRectFill(NSMakeRect(0, 0, width, AXYNE_MENU));
         [menuBorder setFill]; NSRectFill(NSMakeRect(0, AXYNE_MENU - 1, width, 1));
         for (NSUInteger menuIndex = 0; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {
-            NSString *menuLabel = axyne_macos_menu_label(menuIndex);
+            NSString *menuLabel = axyne_macos_menu_title(menuIndex);
             NSRect itemRect = [self menuBarItemRect:menuIndex];
             BOOL lit = (NSInteger)menuIndex == _activeMenuIndex ||
                 (NSInteger)menuIndex == _hoverMenuIndex;
@@ -7049,6 +7055,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_editorLoadError release];
     free(_globalPreferencesPath);
     free(_workspacePreferencesPath);
+    axyne_keymap_destroy(&_keymap);
     [super dealloc];
 }
 
@@ -7484,32 +7491,6 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 
 @end
 
-/* Function keys must be given to AppKit as the private-use Unicode
- * characters (NSF5FunctionKey, ...) with an empty modifier mask. */
-static void axyne_set_function_key(NSMenuItem *item, unichar key,
-                                   NSEventModifierFlags modifiers)
-{
-    [item setKeyEquivalent:[NSString stringWithCharacters:&key length:1]];
-    [item setKeyEquivalentModifierMask:modifiers];
-}
-
-static NSString *axyne_macos_special_key(unichar key)
-{
-    return [NSString stringWithCharacters:&key length:1];
-}
-
-/* Adds a menu item bound to the workspace view with an explicit modifier
- * mask (lower-case key equivalents, so Shift is never implied). */
-static NSMenuItem *axyne_macos_add_item(NSMenu *menu, NSString *title, SEL action,
-                                        id target, NSString *key,
-                                        NSEventModifierFlags modifiers)
-{
-    NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:key];
-    [item setKeyEquivalentModifierMask:modifiers];
-    [item setTarget:target];
-    return item;
-}
-
 static void axyne_install_menu(NSApplication *application,
                                AxyneWorkspaceView *workspace)
 {
@@ -7528,250 +7509,17 @@ static void axyne_install_menu(NSApplication *application,
                  keyEquivalent:@"q"];
     [appItem setSubmenu:appMenu];
     [mainMenu addItem:appItem];
-    NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:axyne_macos_menu_label(0)
-        action:nil keyEquivalent:@""];
-    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:axyne_macos_menu_label(0)];
-    NSMenuItem *newItem = [fileMenu addItemWithTitle:@"새 파일"
-        action:@selector(newDocument:) keyEquivalent:@"n"];
-    [newItem setTarget:workspace];
-    NSMenuItem *openItem = [fileMenu addItemWithTitle:@"열기…"
-        action:@selector(openDocument:) keyEquivalent:@"o"];
-    [openItem setTarget:workspace];
-    NSMenuItem *saveItem = [fileMenu addItemWithTitle:@"저장"
-        action:@selector(saveDocument:) keyEquivalent:@"s"];
-    [saveItem setTarget:workspace];
-    NSMenuItem *saveAsItem = [fileMenu addItemWithTitle:@"다른 이름으로 저장…"
-        action:@selector(saveDocumentAs:) keyEquivalent:@"S"];
-    [saveAsItem setTarget:workspace];
-    NSMenuItem *closeItem = [fileMenu addItemWithTitle:@"닫기"
-        action:@selector(closeDocument:) keyEquivalent:@"w"];
-    [closeItem setTarget:workspace];
-    [fileMenu addItem:[NSMenuItem separatorItem]];
-    /* Command+Shift+O (an upper-case equivalent implies Shift, as with
-     * Save As); the empty-state shortcut guide shows the same chord. */
-    NSMenuItem *workspaceItem = [fileMenu addItemWithTitle:@"폴더 열기…"
-        action:@selector(openWorkspace:) keyEquivalent:@"O"];
-    [workspaceItem setTarget:workspace];
-    NSMenuItem *workspacePreferences = [fileMenu addItemWithTitle:@"작업 영역 설정…"
-        action:@selector(showWorkspacePreferences:) keyEquivalent:@""];
-    [workspacePreferences setTarget:workspace];
-    [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *gitStatus = [fileMenu addItemWithTitle:@"Git 상태"
-        action:@selector(showGitStatus:) keyEquivalent:@""];
-    NSMenuItem *gitDiff = [fileMenu addItemWithTitle:@"Git 변경 사항"
-        action:@selector(showGitDiff:) keyEquivalent:@""];
-    NSMenuItem *gitStage = [fileMenu addItemWithTitle:@"모두 스테이지"
-        action:@selector(stageAllGitChanges:) keyEquivalent:@""];
-    NSMenuItem *gitUnstage = [fileMenu addItemWithTitle:@"모두 스테이지 해제"
-        action:@selector(unstageAllGitChanges:) keyEquivalent:@""];
-    [gitStatus setTarget:workspace]; [gitDiff setTarget:workspace];
-    [gitStage setTarget:workspace]; [gitUnstage setTarget:workspace];
-    [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *gitCommit = [fileMenu addItemWithTitle:@"Git 커밋…"
-        action:@selector(commitGitChanges:) keyEquivalent:@""];
-    NSMenuItem *gitPush = [fileMenu addItemWithTitle:@"Git 푸시"
-        action:@selector(pushGitChanges:) keyEquivalent:@""];
-    NSMenuItem *gitPull = [fileMenu addItemWithTitle:@"Git 풀"
-        action:@selector(pullGitChanges:) keyEquivalent:@""];
-    NSMenuItem *gitLog = [fileMenu addItemWithTitle:@"Git 기록 보기"
-        action:@selector(showGitLog:) keyEquivalent:@""];
-    [gitCommit setTarget:workspace]; [gitPush setTarget:workspace];
-    [gitPull setTarget:workspace]; [gitLog setTarget:workspace];
-    [fileMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"최근 항목"
-        action:nil keyEquivalent:@""];
-    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"최근 항목"];
-    [recentItem setSubmenu:recentMenu];
-    [fileMenu addItem:recentItem];
-    [workspace setRecentMenu:recentMenu];
-    [fileItem setSubmenu:fileMenu];
-    [fileItem setTag:AXYNE_MACOS_MENU_TAG_BASE];
-    [mainMenu addItem:fileItem];
-    [fileItem release]; [recentItem release];
-    [recentMenu release]; [fileMenu release];
-    /* Bar order after File: 편집, 보기, 빌드, 디버그, 도구, 도움말. */
-    for (NSUInteger menuIndex = 1; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {
-        NSString *title = axyne_macos_menu_label(menuIndex);
+    /* Bar order: 파일, 편집, 보기, 빌드, 디버그, 도구, 도움말. Every entry is a
+     * registry command (ui_commands_macos.m); its key equivalent comes from
+     * the effective key map and is refreshed when the bindings change. */
+    for (NSUInteger menuIndex = 0; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {
+        NSString *title = axyne_macos_menu_title(menuIndex);
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
             action:nil keyEquivalent:@""];
-        NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
-        if (menuIndex == 1) {
-            NSMenuItem *undo = [submenu addItemWithTitle:@"실행 취소"
-                action:@selector(undo:) keyEquivalent:@"z"];
-            NSMenuItem *redo = [submenu addItemWithTitle:@"다시 실행"
-                action:@selector(redo:) keyEquivalent:@"Z"];
-            [redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
-                                          NSEventModifierFlagShift];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *cut = [submenu addItemWithTitle:@"잘라내기"
-                action:@selector(editCut:) keyEquivalent:@"x"];
-            NSMenuItem *copy = [submenu addItemWithTitle:@"복사"
-                action:@selector(editCopy:) keyEquivalent:@"c"];
-            NSMenuItem *paste = [submenu addItemWithTitle:@"붙여넣기"
-                action:@selector(editPaste:) keyEquivalent:@"v"];
-            NSMenuItem *selectAll = [submenu addItemWithTitle:@"모두 선택"
-                action:@selector(editSelectAll:) keyEquivalent:@"a"];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *find = [submenu addItemWithTitle:@"찾기…"
-                action:@selector(findInDocument:) keyEquivalent:@"f"];
-            NSMenuItem *replace = [submenu addItemWithTitle:@"바꾸기…"
-                action:@selector(replaceInDocument:) keyEquivalent:@"h"];
-            NSMenuItem *findInWorkspace = [submenu addItemWithTitle:@"파일에서 찾기…"
-                action:@selector(searchWorkspace:) keyEquivalent:@""];
-            NSMenuItem *quickOpen = [submenu addItemWithTitle:@"파일 이동…"
-                action:@selector(quickFile:) keyEquivalent:@""];
-            NSArray *editItems = @[undo, redo, cut, copy, paste, selectAll,
-                find, replace, findInWorkspace, quickOpen];
-            for (NSMenuItem *editItem in editItems) [editItem setTarget:workspace];
-            axyne_macos_add_item(submenu, @"줄로 이동…", @selector(goToLine:),
-                workspace, @"l", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"줄 선택", @selector(selectLine:),
-                workspace, @"", 0);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"줄 주석 토글",
-                @selector(toggleLineComment:), workspace, @"/",
-                NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"줄 복제", @selector(duplicateLine:),
-                workspace, @"d", NSEventModifierFlagCommand | NSEventModifierFlagShift);
-            axyne_macos_add_item(submenu, @"줄 위로 이동", @selector(moveLineUp:),
-                workspace, axyne_macos_special_key(NSUpArrowFunctionKey),
-                NSEventModifierFlagOption);
-            axyne_macos_add_item(submenu, @"줄 아래로 이동", @selector(moveLineDown:),
-                workspace, axyne_macos_special_key(NSDownArrowFunctionKey),
-                NSEventModifierFlagOption);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"들여쓰기", @selector(indentSelection:),
-                workspace, @"]", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"내어쓰기", @selector(outdentSelection:),
-                workspace, @"[", NSEventModifierFlagCommand);
-        } else if (menuIndex == 3) {
-            NSMenuItem *build = [submenu addItemWithTitle:@"빌드"
-                action:@selector(buildDocument:) keyEquivalent:@"b"];
-            NSMenuItem *run = [submenu addItemWithTitle:@"실행"
-                action:@selector(runDocument:) keyEquivalent:@"r"];
-            NSMenuItem *configure = [submenu addItemWithTitle:@"Runner 설정…"
-                action:@selector(configureRunnerAction:) keyEquivalent:@""];
-            [build setTarget:workspace]; [run setTarget:workspace];
-            [configure setTarget:workspace];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"빌드 취소", @selector(cancelBuild:),
-                workspace, @".", NSEventModifierFlagCommand);
-        } else if (menuIndex == 4) {
-            NSMenuItem *start = [submenu addItemWithTitle:@"디버깅 시작"
-                action:@selector(startDebugger:) keyEquivalent:@""];
-            /* F5 is the default Run binding in preferences, so Start Debugger
-             * takes Shift+F5 to keep both shortcuts reachable. */
-            axyne_set_function_key(start, NSF5FunctionKey, NSEventModifierFlagShift);
-            [start setTarget:workspace];
-            axyne_macos_add_item(submenu, @"중지", @selector(stopDebugger:),
-                workspace, @".", NSEventModifierFlagCommand | NSEventModifierFlagShift);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *pause = [submenu addItemWithTitle:@"일시 중지"
-                action:@selector(debugCommand:) keyEquivalent:@""];
-            axyne_set_function_key(pause, NSF6FunctionKey, 0);
-            NSMenuItem *resume = [submenu addItemWithTitle:@"계속"
-                action:@selector(debugCommand:) keyEquivalent:@""];
-            [resume setTag:AXYNE_DEBUGGER_CONTINUE]; [resume setTarget:workspace];
-            [pause setTarget:workspace]; [pause setTag:AXYNE_DEBUGGER_PAUSE];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            /* debugCommand: carries AxyneDebuggerCommand in the item tag. */
-            NSMenuItem *next = [submenu addItemWithTitle:@"프로시저 단위 실행"
-                action:@selector(debugCommand:) keyEquivalent:@""];
-            axyne_set_function_key(next, NSF10FunctionKey, 0);
-            [next setTarget:workspace]; [next setTag:AXYNE_DEBUGGER_STEP_OVER];
-            NSMenuItem *into = [submenu addItemWithTitle:@"한 단계씩 코드 실행"
-                action:@selector(debugCommand:) keyEquivalent:@""];
-            axyne_set_function_key(into, NSF11FunctionKey, 0);
-            [into setTarget:workspace]; [into setTag:AXYNE_DEBUGGER_STEP_INTO];
-            NSMenuItem *out = [submenu addItemWithTitle:@"프로시저 나가기"
-                action:@selector(debugCommand:) keyEquivalent:@""];
-            axyne_set_function_key(out, NSF11FunctionKey, NSEventModifierFlagShift);
-            [out setTarget:workspace]; [out setTag:AXYNE_DEBUGGER_STEP_OUT];
-            [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *toggle = [submenu addItemWithTitle:@"중단점 토글"
-                action:@selector(toggleBreakpoint:) keyEquivalent:@""];
-            axyne_set_function_key(toggle, NSF9FunctionKey, 0);
-            [toggle setTarget:workspace];
-            NSMenuItem *clearBreakpoints = [submenu addItemWithTitle:@"모든 중단점 삭제"
-                action:@selector(clearBreakpoints:) keyEquivalent:@""];
-            axyne_set_function_key(clearBreakpoints, NSF9FunctionKey,
-                NSEventModifierFlagCommand | NSEventModifierFlagShift);
-            [clearBreakpoints setTarget:workspace];
-        } else if (menuIndex == 2) {
-            axyne_macos_add_item(submenu, @"탐색기", @selector(toggleExplorer:),
-                workspace, @"e", NSEventModifierFlagCommand | NSEventModifierFlagShift);
-            axyne_macos_add_item(submenu, @"Git 패널", @selector(showGitPanel:),
-                workspace, @"", 0);
-            axyne_macos_add_item(submenu, @"하단 패널", @selector(togglePanel:),
-                workspace, @"j", NSEventModifierFlagCommand);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            NSArray *panels = @[@"출력", @"문제", @"터미널"];
-            NSArray *panelKeys = @[@"u", @"m", @"`"];
-            NSEventModifierFlags panelMasks[3] = {
-                NSEventModifierFlagCommand | NSEventModifierFlagShift,
-                NSEventModifierFlagCommand | NSEventModifierFlagShift,
-                NSEventModifierFlagControl };
-            for (NSInteger i = 0; i < (NSInteger)[panels count]; ++i) {
-                NSMenuItem *panelItem = axyne_macos_add_item(submenu,
-                    panels[(NSUInteger)i], @selector(selectPanel:), workspace,
-                    panelKeys[(NSUInteger)i], panelMasks[i]);
-                [panelItem setTag:i];
-            }
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"확대", @selector(zoomInEditor:),
-                workspace, @"=", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"축소", @selector(zoomOutEditor:),
-                workspace, @"-", NSEventModifierFlagCommand);
-            axyne_macos_add_item(submenu, @"기본 크기", @selector(zoomResetEditor:),
-                workspace, @"0", NSEventModifierFlagCommand);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            /* Option+Z types a character, so Word Wrap takes Command+Option. */
-            axyne_macos_add_item(submenu, @"자동 줄 바꿈", @selector(toggleWordWrap:),
-                workspace, @"z", NSEventModifierFlagCommand | NSEventModifierFlagOption);
-        } else if (menuIndex == 5) {
-            /* Figma Tools lists the terminal and settings; the application
-             * menu's Preferences is not reachable from the in-window bar. */
-            axyne_macos_add_item(submenu, @"새 터미널", @selector(startTerminal:),
-                workspace, @"", 0);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            axyne_macos_add_item(submenu, @"설정…", @selector(showGlobalPreferences:),
-                workspace, @"", 0);
-            axyne_macos_add_item(submenu, @"작업 영역 설정…",
-                @selector(showWorkspacePreferences:), workspace, @"", 0);
-            axyne_macos_add_item(submenu, @"preferences.json 열기",
-                @selector(openPreferencesFile:), workspace, @"", 0);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *definition = [submenu addItemWithTitle:@"정의로 이동"
-                action:@selector(navigateLspReferences:) keyEquivalent:@"d"];
-            NSMenuItem *references = [submenu addItemWithTitle:@"참조 찾기"
-                action:@selector(navigateLspReferences:) keyEquivalent:@"r"];
-            [definition setTarget:workspace];
-            /* Cmd+Option+D is the system Dock hide/show shortcut, so Go to Definition adds Shift. */
-            [definition setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
-            [references setTarget:workspace];
-            /* Cmd+R belongs to Build > Run, so References adds Shift. */
-            [references setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagShift];
-            [references setTag:1];
-        } else if (menuIndex == 6) {
-            NSMenuItem *help = [submenu addItemWithTitle:@"Axyne 도움말"
-                action:@selector(openHelp:) keyEquivalent:@"?"];
-            NSMenuItem *folder = [submenu addItemWithTitle:@"설정 폴더 표시"
-                action:@selector(showSettingsFolder:) keyEquivalent:@""];
-            [help setTarget:workspace]; [folder setTarget:workspace];
-            axyne_macos_add_item(submenu, @"키보드 단축키 참조",
-                @selector(showKeyboardShortcuts:), workspace, @"", 0);
-            axyne_macos_add_item(submenu, @"문제 보고…", @selector(reportIssue:),
-                workspace, @"", 0);
-            [submenu addItem:[NSMenuItem separatorItem]];
-            /* Figma Help ends with "Axyne 정보"; the application menu's copy
-             * is not reachable from the in-window bar. */
-            NSMenuItem *about = [submenu addItemWithTitle:@"Axyne 정보"
-                action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
-            [about setTarget:application];
-            [application setHelpMenu:submenu];
-        }
+        NSMenu *submenu = [workspace newMenuBarSubmenu:menuIndex];
         [item setSubmenu:submenu];
         [item setTag:(NSInteger)(AXYNE_MACOS_MENU_TAG_BASE + menuIndex)];
+        if (menuIndex == AXYNE_UI_MENU_COUNT - 1) [application setHelpMenu:submenu];
         [submenu release];
         [mainMenu addItem:item];
         [item release];
@@ -7782,6 +7530,7 @@ static void axyne_install_menu(NSApplication *application,
     [mainMenu release];
     [appMenu release];
     [appItem release];
+    [workspace refreshMenuKeyEquivalents];
 }
 
 int axyne_ui_run(const char *app_name)

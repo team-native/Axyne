@@ -11,6 +11,7 @@ elseif(APPLE)
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/preferences_window_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/popup_menu_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/git_panel_macos.m"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_commands_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_file_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_edit_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_view_macos.m"

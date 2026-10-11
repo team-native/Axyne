@@ -85,6 +85,15 @@ static const CGFloat AXYNE_STATUS = AXYNE_UI_STATUS;
  * (the application menu keeps tag 0 and has no bar item). */
 enum { AXYNE_MACOS_MENU_TAG_BASE = 100 };
 
+/* Title of the top-level menu at bar position index, from the table shared
+ * with the Windows adapter. */
+static inline NSString *axyne_macos_menu_title(NSUInteger index)
+{
+    const AxyneMenuTitle *title = axyne_ui_menu_title(index);
+    NSString *label = title != NULL ? [NSString stringWithUTF8String:title->label] : nil;
+    return label != nil ? label : @"";
+}
+
 @class AxyneWorkspaceView;
 @class AxyneEmptyEditorView;
 @class AxynePaletteOverlay;
@@ -190,6 +199,10 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     /* Bottom panel tab model: hidden tabs (zero = shown) indexed by
      * AxyneBottomPanelTab; DEBUG_CONSOLE starts hidden. */
     BOOL _panelTabHidden[AXYNE_BOTTOM_PANEL_TAB_COUNT];
+    /* Effective key map (registry defaults, base-step key overrides, user
+     * bindings); rebuilt whenever the bindings change. */
+    AxyneKeymap _keymap;
+    BOOL _keymapReady;
     NSButton *_clearOutput;
     NSScrollView *_terminalScroll;
     /* Problems panel: the model (LSP diagnostics + build output) and the
@@ -484,6 +497,8 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)selectPanel:(id)sender;
 - (void)clearOutput:(id)sender;
 - (void)quickFile:(id)sender;
+- (void)showCommandPalette:(id)sender;
+- (void)goToSymbol:(id)sender;
 - (void)configureRunnerAction:(id)sender;
 - (void)showBuildTargetMenu:(id)sender;
 - (void)pickBuildTarget:(id)sender;
@@ -604,6 +619,34 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (CGFloat)bottomPanelTabWidth:(AxyneBottomPanelTab)tab;
 @end
 
+/* Command routing (ui_commands_macos.m): registry menus, key map,
+ * validation and dispatch. */
+@interface AxyneWorkspaceView (AxyneCommandRouting)
+/* Rebuilds _keymap from the registry and _preferences and refreshes the
+ * menu key equivalents. */
+- (void)rebuildKeymap;
+/* Primary binding of a command as menu text ("⇧⌘S", "⌘K ⌘O"; "" unbound). */
+- (NSString *)keyTextForCommand:(AxyneCommandId)command;
+- (void)applyKeyEquivalentToItem:(NSMenuItem *)item command:(AxyneCommandId)command;
+- (void)refreshMenuKeyEquivalents;
+/* Autoreleased menu item for a registry command (-performCommand:). */
+- (NSMenuItem *)commandMenuItem:(AxyneCommandId)command;
+/* Retained submenu of top-level bar position `index`. */
+- (NSMenu *)newMenuBarSubmenu:(NSUInteger)index;
+/* First feature category's validate result, or AXYNE_MAC_COMMAND_UNHANDLED. */
+- (NSInteger)featureValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+/* YES when a feature category or a base handler implements the command. */
+- (BOOL)commandImplemented:(AxyneCommandId)command;
+/* Enabled state (item may be nil; its check state is updated). */
+- (BOOL)validateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+/* Runs the command without validating; NO when nobody implements it. */
+- (BOOL)dispatchCommand:(AxyneCommandId)command sender:(id)sender;
+/* Validates, then dispatches (keyboard, palette). */
+- (BOOL)runCommand:(AxyneCommandId)command;
+/* Action of every registry menu item; the sender's tag is the command. */
+- (void)performCommand:(id)sender;
+@end
+
 /* ---- feature categories ----------------------------------------------------
  * Every feature category is one file ui_<feature>_macos.m implementing
  * `AxyneWorkspaceView (Axyne<Feature>Feature)` with the fixed hook set below.
@@ -614,7 +657,7 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
  *                      AXYNE_MAC_COMMAND_UNHANDLED for commands the category
  *                      does not implement. The first category that does not
  *                      return UNHANDLED owns the command (before the legacy
- *                      base handlers of ui_macos.m).
+ *                      base handlers in ui_commands_macos.m).
  *   PerformCommand   - runs an owned command; YES when handled.
  *   DocumentActivated- after a document was loaded into the editor (NULL in
  *                      the empty state).
