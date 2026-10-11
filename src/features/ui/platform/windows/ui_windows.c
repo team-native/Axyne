@@ -140,7 +140,8 @@ enum {
     AXYNE_GIT_MODE = 5031,
     AXYNE_GIT_REFRESH_TIMER = 5120,
     AXYNE_GIT_REFRESH_DELAY = 300,
-    AXYNE_GIT_GRAPH_STEP = 200 /* commits added per "더 불러오기" */
+    AXYNE_GIT_GRAPH_STEP = 200, /* commits added per "더 불러오기" */
+    AXYNE_GIT_HSCROLL_STEP = 48 /* graph pixels per horizontal wheel notch */
 };
 
 /* Snapshot of the Git panel's data. Written only on the UI thread: worker
@@ -164,7 +165,13 @@ typedef struct AxyneGitPanelUi {
     unsigned generation; /* bumped per workspace; stale results are dropped */
     int changes_scroll;  /* first visible change row */
     int graph_scroll;    /* first visible graph row */
+    int graph_hscroll;   /* pixels the graph rows are scrolled to the left */
+    int graph_width_base; /* widest graph item without ref chips */
+    int graph_width_valid; /* graph_width_base matches the rows and expansion */
+    int graph_width;     /* scrollable width of the graph rows for graph_width_list */
+    int graph_width_list; /* list width graph_width was measured for */
     int wheel_remainder;
+    int hwheel_remainder;
     unsigned diff_serial; /* newest diff request; older results are dropped */
     char *selected_path; /* selected change (repository path) or NULL */
     char *selected_hash; /* selected commit or NULL (one selection at a time) */
@@ -6422,6 +6429,7 @@ static void axyne_git_expansion_clear(AxyneGitPanelUi *git)
     free(git->selected_cfile);
     git->selected_cfile = NULL;
     ++git->expand_serial;
+    git->graph_width_valid = 0;
 }
 
 /* Re-finds the expanded commit in a freshly loaded graph; collapses when it
@@ -6455,6 +6463,8 @@ static void axyne_git_panel_clear(AxyneGitPanelUi *git)
     git->has_staged = 0;
     git->changes_scroll = 0;
     git->graph_scroll = 0;
+    git->graph_hscroll = 0;
+    git->graph_width_valid = 0;
     free(git->selected_path);
     git->selected_path = NULL;
     free(git->selected_hash);
@@ -6697,6 +6707,7 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
                 (void)snprintf(git->expanded_error, sizeof(git->expanded_error), "%s",
                                job->error != NULL ? job->error : "Unable to run Git.");
             }
+            git->graph_width_valid = 0;
             InvalidateRect(window, NULL, FALSE);
         }
         axyne_git_panel_job_free(job);
@@ -6709,6 +6720,7 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
         state->explorer.root != NULL &&
         job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
         axyne_git_changes_free(&git->changes);
+        git->graph_width_valid = 0; /* rows may have been replaced */
         if (job->have_changes && job->kind == AXYNE_GITJOB_REFRESH) {
             int current = job->graph_count == axyne_git_graph_request(git);
             if (!job->have_graph && git->graph_loading && git->graph_ok &&
@@ -7237,21 +7249,11 @@ static COLORREF axyne_git_lane_color(int index)
     return axyne_theme_color(palette[index % AXYNE_GIT_GRAPH_PALETTE]);
 }
 
-/* Width of one lane cell: shrinks when the graph has many lanes so the lane
- * strip never takes more than 40% of the sidebar. */
-static double axyne_git_lane_width(const AxyneGitGraph *graph, int list_width)
+/* Width of the lane strip: every lane keeps AXYNE_GIT_LANE_WIDTH however
+ * many there are; a strip wider than the sidebar scrolls horizontally. */
+static int axyne_git_lane_strip(const AxyneGitGraph *graph)
 {
-    int cap = list_width * 40 / 100;
-    int lanes = graph->max_lanes > 0 ? graph->max_lanes : 1;
-    return axyne_git_graph_lane_width(lanes, AXYNE_GIT_LANE_WIDTH, cap);
-}
-
-static int axyne_git_lane_strip(const AxyneGitGraph *graph, double lane_width,
-                                int list_width)
-{
-    int cap = list_width * 40 / 100;
-    int strip = (int)((graph->max_lanes > 0 ? graph->max_lanes : 1) * lane_width + 0.5);
-    return strip < cap ? strip : cap;
+    return (int)axyne_git_graph_strip_width(graph->max_lanes, AXYNE_GIT_LANE_WIDTH);
 }
 
 /* Draws the lane cells of one row (see the contract in git_panel.h): `y` is
@@ -7339,9 +7341,10 @@ static COLORREF axyne_git_ref_color(int kind)
 
 /* One ref chip at (x, y..y+14); returns the x after it, or `x` when it does
  * not fit before `limit`. The checked-out branch / HEAD is a solid accent
- * chip, the others are tinted like file badges. */
+ * chip, the others are tinted like file badges. With `paint` 0 it only
+ * measures. */
 static int axyne_git_paint_ref(HDC dc, AxyneWindowState *state, const AxyneGitRef *ref,
-                               int x, int limit, int y, COLORREF behind)
+                               int x, int limit, int y, COLORREF behind, int paint)
 {
     wchar_t *label = axyne_wide(ref->name != NULL ? ref->name : "");
     RECT chip;
@@ -7349,9 +7352,9 @@ static int axyne_git_paint_ref(HDC dc, AxyneWindowState *state, const AxyneGitRe
     if (label == NULL) return x;
     width = axyne_git_text_width(dc, state->font_tiny, label) + 10;
     if (width > 96) width = 96;
-    if (x + width > limit) {
+    if (x + width > limit || !paint) {
         free(label);
-        return x;
+        return x + width > limit ? x : x + width + 4;
     }
     chip.left = x;
     chip.right = x + width;
@@ -7377,54 +7380,87 @@ static int axyne_git_row_is_head(const AxyneGitGraphRow *row)
     return 0;
 }
 
-static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
-                                      const AxyneGitGraphRow *row, int selected,
-                                      int right, double lane_width, int strip, int y)
+/* Drawn width of one line of row text: its full width up to
+ * AXYNE_GIT_GRAPH_TEXT_MAX (beyond that it ends in an ellipsis), plus the
+ * slack DrawText needs to show it without one. */
+static int axyne_git_row_text_width(HDC dc, HFONT font, const wchar_t *text)
+{
+    int width = axyne_git_text_width(dc, font, text);
+    if (width > (int)AXYNE_GIT_GRAPH_TEXT_MAX) width = (int)AXYNE_GIT_GRAPH_TEXT_MAX;
+    return width + 2;
+}
+
+/* Room for ref chips before the subject. It follows the visible list width,
+ * as a one-lane row had it, so chips never push the subject further away
+ * than before and the scrollable width only grows with lanes and text. */
+static int axyne_git_ref_budget(int list_width)
+{
+    int text_x = (int)(axyne_git_graph_text_x(10, AXYNE_GIT_LANE_WIDTH, 0, 1, 0, 5,
+                                              AXYNE_GIT_TEXT_GAP) + 0.5);
+    int budget = (list_width - 8 - text_x) * 6 / 10;
+    return budget > 0 ? budget : 0;
+}
+
+/* One commit row with its content scrolled `dx` pixels to the left (the
+ * selection band always spans the visible list up to `right`). With `paint`
+ * 0 nothing is drawn. Returns the right edge of the row's text in unscrolled
+ * row coordinates. */
+static int axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
+                                     const AxyneGitGraphRow *row, int selected,
+                                     int right, int ref_budget, int strip, int dx,
+                                     int y, int paint)
 {
     COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
     int is_head = axyne_git_row_is_head(row);
+    int x0 = 10 - dx; /* left edge of lane cell 0 */
     /* Text follows this row's rightmost dot or stroke: the dot (ring on HEAD)
      * reaches 5 (7) px past its centre, a 2px stroke 1 px. */
-    int text_x = (int)(axyne_git_graph_text_x(10, lane_width,
+    int text_x = (int)(axyne_git_graph_text_x(10, AXYNE_GIT_LANE_WIDTH,
                                               axyne_git_graph_last_cell(row, ~0u), 1,
                                               row->column, is_head ? 7 : 5,
-                                              AXYNE_GIT_TEXT_GAP) + 0.5);
-    int limit = right - 8;
-    int ref_limit = text_x + (limit - text_x) * 6 / 10; /* chips leave room for the subject */
+                                              AXYNE_GIT_TEXT_GAP) + 0.5) - dx;
+    int ref_limit = text_x + ref_budget; /* chips leave room for the subject */
     int x = text_x;
+    int extent;
     wchar_t *subject;
     wchar_t *meta;
     char meta_utf8[256];
     RECT rect;
     size_t i;
-    if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_GRAPH_ROW, AXYNE_SELECTION_BG);
-    {
+    if (paint && selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_GRAPH_ROW, AXYNE_SELECTION_BG);
+    if (paint) {
         int saved_dc = SaveDC(dc);
         /* Let the 2px connector overlap the adjacent row by one pixel. A
          * strict per-row clip cuts merge/fork strokes exactly at row edges. */
-        IntersectClipRect(dc, 10 - 2, y - 1, 10 + strip + 2,
+        IntersectClipRect(dc, x0 - 2, y - 1, x0 + strip + 2,
                           y + AXYNE_GIT_GRAPH_ROW + 1);
-        axyne_git_paint_lanes(dc, row, 10, lane_width, y, AXYNE_GIT_GRAPH_ROW,
+        axyne_git_paint_lanes(dc, row, x0, AXYNE_GIT_LANE_WIDTH, y, AXYNE_GIT_GRAPH_ROW,
                               is_head, behind);
         RestoreDC(dc, saved_dc);
     }
     /* Current branch / HEAD first, then the other refs. */
     for (i = 0; i < row->ref_count; ++i)
         if (row->refs[i].is_current)
-            x = axyne_git_paint_ref(dc, state, &row->refs[i], x, ref_limit, y + 4, behind);
+            x = axyne_git_paint_ref(dc, state, &row->refs[i], x, ref_limit, y + 4, behind,
+                                    paint);
     for (i = 0; i < row->ref_count; ++i)
         if (!row->refs[i].is_current)
-            x = axyne_git_paint_ref(dc, state, &row->refs[i], x, ref_limit, y + 4, behind);
+            x = axyne_git_paint_ref(dc, state, &row->refs[i], x, ref_limit, y + 4, behind,
+                                    paint);
+    extent = x;
+    /* The whole subject, however far it reaches: the list scrolls. */
     subject = axyne_wide(row->subject != NULL ? row->subject : "");
     if (subject != NULL) {
         rect.left = x;
         rect.top = y + 2;
-        rect.right = limit;
+        rect.right = x + axyne_git_row_text_width(dc, state->ui_font, subject);
         rect.bottom = y + 20;
-        axyne_text_rect(dc, state->ui_font,
-                        selected && AXYNE_REFERENCE ? RGB(255, 255, 255)
-                                                    : AXYNE_SIDEBAR_TEXT,
-                        rect, subject, DT_LEFT);
+        if (paint)
+            axyne_text_rect(dc, state->ui_font,
+                            selected && AXYNE_REFERENCE ? RGB(255, 255, 255)
+                                                        : AXYNE_SIDEBAR_TEXT,
+                            rect, subject, DT_LEFT);
+        if (rect.right > extent) extent = rect.right;
         free(subject);
     }
     (void)snprintf(meta_utf8, sizeof(meta_utf8), "%s \xc2\xb7 %s",
@@ -7434,11 +7470,14 @@ static void axyne_git_paint_graph_row(HDC dc, AxyneWindowState *state,
     if (meta != NULL) {
         rect.left = text_x;
         rect.top = y + 19;
-        rect.right = limit;
+        rect.right = text_x + axyne_git_row_text_width(dc, state->font_small, meta);
         rect.bottom = y + 33;
-        axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, meta, DT_LEFT);
+        if (paint)
+            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, meta, DT_LEFT);
+        if (rect.right > extent) extent = rect.right;
         free(meta);
     }
+    return extent + dx;
 }
 
 /* The lanes of `row` that continue below it, drawn as plain vertical lines
@@ -7461,47 +7500,50 @@ static void axyne_git_paint_lane_continuation(HDC dc, const AxyneGitGraphRow *ro
 }
 
 /* A file row (kind badge, name, dim directory) or a note row (loading,
- * failure, no files) under the expanded commit `commit`. */
-static void axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
-                                            const AxyneGitGraphRow *commit,
-                                            const AxyneGitItem *item,
-                                            const AxyneGitPanelUi *git, int right,
-                                            double lane_width, int strip, int y)
+ * failure, no files) under the expanded commit `commit`, scrolled and
+ * measured like axyne_git_paint_graph_row. */
+static int axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
+                                           const AxyneGitGraphRow *commit,
+                                           const AxyneGitItem *item,
+                                           const AxyneGitPanelUi *git, int right,
+                                           int strip, int dx, int y, int paint)
 {
     const AxyneGitChange *change = item->kind == AXYNE_GIT_ITEM_FILE
         ? &git->expanded_files.items[item->file] : NULL;
     int selected = change != NULL && git->selected_cfile != NULL &&
                    strcmp(git->selected_cfile, change->path) == 0;
     COLORREF behind = selected ? AXYNE_SELECTION_BG : AXYNE_PANEL;
+    int x0 = 10 - dx;
     /* Text follows the rightmost lane continuing through this row. */
     int x = (int)(axyne_git_graph_text_x(
-        10, lane_width,
+        10, AXYNE_GIT_LANE_WIDTH,
         axyne_git_graph_last_cell(commit, AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK), 1,
-        -1, 0, AXYNE_GIT_TEXT_GAP) + 0.5);
-    int limit = right - 14;
+        -1, 0, AXYNE_GIT_TEXT_GAP) + 0.5) - dx;
+    int extent = x;
     RECT rect;
-    if (selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_ROW, AXYNE_SELECTION_BG);
-    {
+    if (paint && selected) axyne_fill(dc, 0, y, right, y + AXYNE_GIT_ROW, AXYNE_SELECTION_BG);
+    if (paint) {
         int saved_dc = SaveDC(dc);
-        IntersectClipRect(dc, 10 - 2, y - 1, 10 + strip + 2,
+        IntersectClipRect(dc, x0 - 2, y - 1, x0 + strip + 2,
                           y + AXYNE_GIT_ROW + 1);
-        axyne_git_paint_lane_continuation(dc, commit, 10, lane_width, y, AXYNE_GIT_ROW);
+        axyne_git_paint_lane_continuation(dc, commit, x0, AXYNE_GIT_LANE_WIDTH, y,
+                                          AXYNE_GIT_ROW);
         RestoreDC(dc, saved_dc);
     }
     if (change == NULL) {
         const wchar_t *note = git->expanded_state == 1 ? L"불러오는 중..."
             : (git->expanded_state == 3 ? NULL : L"변경된 파일 없음");
         wchar_t *failure = git->expanded_state == 3 ? axyne_wide(git->expanded_error) : NULL;
+        const wchar_t *text = note != NULL ? note : (failure != NULL ? failure : L"Git 오류");
         rect.left = x;
         rect.top = y;
-        rect.right = limit;
+        rect.right = x + axyne_git_row_text_width(dc, state->font_small, text);
         rect.bottom = y + AXYNE_GIT_ROW;
-        if (rect.right > rect.left)
-            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect,
-                            note != NULL ? note : (failure != NULL ? failure : L"Git 오류"),
-                            DT_LEFT);
+        if (paint)
+            axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, text, DT_LEFT);
+        extent = rect.right;
         free(failure);
-        return;
+        return extent + dx;
     }
     {
         const char *base = axyne_ui_basename(change->path);
@@ -7511,43 +7553,118 @@ static void axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
         wchar_t kind[2];
         RECT chip = {x, y + 4, x + 16, y + AXYNE_GIT_ROW - 4};
         int text_x = x + 22;
-        int name_width;
         kind[0] = (wchar_t)(unsigned char)(change->kind != '\0' ? change->kind : '?');
         kind[1] = L'\0';
-        axyne_git_paint_chip(dc, state->tab_badge_font, chip, kind,
-                             axyne_git_kind_color(change->kind), behind);
+        if (paint)
+            axyne_git_paint_chip(dc, state->tab_badge_font, chip, kind,
+                                 axyne_git_kind_color(change->kind), behind);
+        extent = chip.right;
         if (name == NULL) name = _wcsdup(L"(invalid name)");
         if (name != NULL) {
-            name_width = axyne_git_text_width(dc, state->ui_font, name);
             rect.left = text_x;
             rect.top = y;
-            rect.right = text_x + name_width < limit ? text_x + name_width + 2 : limit;
+            rect.right = text_x + axyne_git_row_text_width(dc, state->ui_font, name);
             rect.bottom = y + AXYNE_GIT_ROW;
-            if (rect.right > rect.left)
+            if (paint)
                 axyne_text_rect(dc, state->ui_font,
                                 selected && AXYNE_REFERENCE ? RGB(255, 255, 255)
                                                             : AXYNE_SIDEBAR_TEXT,
                                 rect, name, DT_LEFT);
-            if (dir != NULL && text_x + name_width + 8 < limit - 16) {
-                rect.left = text_x + name_width + 8;
-                rect.right = limit;
-                axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, dir,
-                                DT_LEFT);
+            extent = rect.right;
+            if (dir != NULL) {
+                rect.left = rect.right + 6;
+                rect.right = rect.left + axyne_git_row_text_width(dc, state->font_small, dir);
+                if (paint)
+                    axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, rect, dir,
+                                    DT_LEFT);
+                extent = rect.right;
             }
         }
         free(name);
         free(dir);
     }
+    return extent + dx;
+}
+
+/* Scrollable width of the graph rows: the lane strip and the widest row
+ * text plus the right margin. Measured over every item (not only the visible
+ * ones) so the range does not change while scrolling vertically. Items
+ * without ref chips do not depend on the list width and are measured once
+ * per change of the rows or the expanded commit; only the few commits with
+ * chips are measured again when the list width changes. */
+static int axyne_git_graph_width(HDC dc, AxyneWindowState *state, int list_width)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    int strip = axyne_git_lane_strip(&git->graph);
+    size_t count = git->graph_ok ? git->graph.count : 0;
+    size_t i;
+    if (!git->graph_width_valid) {
+        size_t items = git->graph_ok ? axyne_git_item_count(git) : 0;
+        int widest = 10 + strip + 2;
+        for (i = 0; i < items; ++i) {
+            AxyneGitItem item = axyne_git_item_at(git, i);
+            const AxyneGitGraphRow *row = &git->graph.rows[item.commit];
+            int extent;
+            if (item.kind == AXYNE_GIT_ITEM_MORE) continue; /* fixed, never scrolls */
+            if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
+                if (row->ref_count > 0) continue;
+                extent = axyne_git_paint_graph_row(dc, state, row, 0, list_width, 0,
+                                                   strip, 0, 0, 0);
+            } else {
+                extent = axyne_git_paint_commit_file_row(dc, state, row, &item, git,
+                                                         list_width, strip, 0, 0, 0);
+            }
+            if (extent > widest) widest = extent;
+        }
+        git->graph_width_base = widest;
+        git->graph_width_valid = 1;
+        git->graph_width_list = -1;
+    }
+    if (git->graph_width_list != list_width) {
+        int budget = axyne_git_ref_budget(list_width);
+        int widest = git->graph_width_base;
+        for (i = 0; i < count; ++i) {
+            const AxyneGitGraphRow *row = &git->graph.rows[i];
+            int extent;
+            if (row->ref_count == 0) continue;
+            extent = axyne_git_paint_graph_row(dc, state, row, 0, list_width, budget,
+                                               strip, 0, 0, 0);
+            if (extent > widest) widest = extent;
+        }
+        git->graph_width = widest + 8;
+        git->graph_width_list = list_width;
+    }
+    return git->graph_width;
+}
+
+/* Keeps the horizontal offset inside the rows (after a resize, a reload or a
+ * collapsed commit). */
+static void axyne_git_graph_clamp_hscroll(HDC dc, AxyneWindowState *state, int list_width)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    git->graph_hscroll = (int)axyne_git_graph_clamp_offset(
+        git->graph_hscroll, axyne_git_graph_width(dc, state, list_width), list_width);
+}
+
+/* Thin horizontal scroll indicator along the bottom edge of the graph list,
+ * stopping short of the vertical one's corner. */
+static void axyne_git_paint_hthumb(HDC dc, const RECT *list, int offset, int content)
+{
+    int width = list->right - list->left;
+    double start, length;
+    if (!axyne_git_graph_thumb(width - 4, width, content, offset, 16, &start, &length))
+        return;
+    axyne_fill(dc, list->left + (int)start, list->bottom - 4,
+               list->left + (int)(start + length), list->bottom - 1, AXYNE_BORDER);
 }
 
 static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
                                   const AxyneGitLayout *layout)
 {
-    const AxyneGitPanelUi *git = &state->git_panel;
+    AxyneGitPanelUi *git = &state->git_panel;
     RECT label = layout->graph_label;
     int width = layout->graph_list.right - layout->graph_list.left;
-    double lane_width = axyne_git_lane_width(&git->graph, width);
-    int strip = axyne_git_lane_strip(&git->graph, lane_width, width);
+    int strip = axyne_git_lane_strip(&git->graph);
     int y = layout->graph_list.top;
     int saved_dc;
     size_t i;
@@ -7574,11 +7691,18 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
                                 layout->graph_list.bottom, L"커밋 없음");
     } else {
         size_t items = axyne_git_item_count(git);
+        int content, dx, budget = axyne_git_ref_budget(width);
+        /* "더 불러오기" stays put while the rows scroll: where it sat when the
+         * strip was at most 40% of the list. */
+        int more_x = 10 + (strip < width * 40 / 100 ? strip : width * 40 / 100) + 8;
+        axyne_git_graph_clamp_hscroll(dc, state, width);
+        content = axyne_git_graph_width(dc, state, width);
+        dx = git->graph_hscroll;
         for (i = (size_t)git->graph_scroll; i < items && y < layout->graph_list.bottom; ++i) {
             AxyneGitItem item = axyne_git_item_at(git, i);
             const AxyneGitGraphRow *row = &git->graph.rows[item.commit];
             if (item.kind == AXYNE_GIT_ITEM_MORE) {
-                RECT more = {10 + strip + 8, y, layout->graph_list.right - 14,
+                RECT more = {more_x, y, layout->graph_list.right - 14,
                              y + AXYNE_GIT_ROW};
                 if (more.right > more.left)
                     axyne_text_rect(dc, state->font_small,
@@ -7588,12 +7712,13 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
             } else if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
                 int selected = git->selected_hash != NULL && row->hash != NULL &&
                                strcmp(git->selected_hash, row->hash) == 0;
-                axyne_git_paint_graph_row(dc, state, row, selected,
-                                          layout->graph_list.right, lane_width, strip, y);
+                (void)axyne_git_paint_graph_row(dc, state, row, selected,
+                                                layout->graph_list.right, budget, strip, dx,
+                                                y, 1);
             } else {
-                axyne_git_paint_commit_file_row(dc, state, row, &item, git,
-                                                layout->graph_list.right, lane_width,
-                                                strip, y);
+                (void)axyne_git_paint_commit_file_row(dc, state, row, &item, git,
+                                                      layout->graph_list.right, strip, dx,
+                                                      y, 1);
             }
             y += axyne_git_item_height(&item);
         }
@@ -7601,6 +7726,7 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
             axyne_git_graph_items_fitting(git, git->graph_scroll,
                 layout->graph_list.bottom - layout->graph_list.top),
             (int)items, AXYNE_GIT_GRAPH_ROW);
+        axyne_git_paint_hthumb(dc, &layout->graph_list, dx, content);
     }
     RestoreDC(dc, saved_dc);
 }
@@ -8664,6 +8790,35 @@ static void axyne_problems_destroy_ui(AxyneWindowState *state)
     state->build_feed_active = 0;
 }
 
+/* Horizontal wheel (tilt, touchpad swipe, Shift+wheel) over the graph list
+ * scrolls the commit rows sideways; `delta` > 0 moves towards the right end.
+ * Returns 0 when the point is not over the graph. */
+static int axyne_git_panel_hwheel(HWND window, AxyneWindowState *state, POINT point,
+                                  int delta)
+{
+    AxyneGitPanelUi *git = &state->git_panel;
+    AxyneGitLayout layout;
+    HDC dc;
+    int pixels;
+    if (state->explorer.root == NULL || !git->loaded || !git->repo_ok) return 0;
+    axyne_git_panel_layout(state, &layout);
+    if (!layout.fits || !PtInRect(&layout.graph_list, point)) return 0;
+    git->hwheel_remainder += delta * AXYNE_GIT_HSCROLL_STEP;
+    pixels = git->hwheel_remainder / WHEEL_DELTA;
+    git->hwheel_remainder %= WHEEL_DELTA;
+    git->graph_hscroll += pixels;
+    dc = GetDC(window);
+    if (dc != NULL) {
+        axyne_git_graph_clamp_hscroll(dc, state,
+                                      layout.graph_list.right - layout.graph_list.left);
+        ReleaseDC(window, dc);
+    } else if (git->graph_hscroll < 0) {
+        git->graph_hscroll = 0;
+    }
+    InvalidateRect(window, NULL, FALSE);
+    return 1;
+}
+
 static void axyne_layout(HWND window, AxyneWindowState *state)
 {
     RECT client;
@@ -9447,15 +9602,25 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             InvalidateRect(window, NULL, FALSE);
             return 0;
         }
-        if (message == WM_MOUSEHWHEEL) break;
-        if (axyne_problems_wheel(state, point, GET_WHEEL_DELTA_WPARAM(w_param)))
+        if (message != WM_MOUSEHWHEEL &&
+            axyne_problems_wheel(state, point, GET_WHEEL_DELTA_WPARAM(w_param)))
             return 0;
         if (state->sidebar_tab == AXYNE_SIDEBAR_TAB_GIT && !state->explorer_hidden &&
             point.x >= 0 && point.x < axyne_sidebar_width(state) && point.y >= top &&
             point.y < client.bottom - AXYNE_STATUS) {
-            (void)axyne_git_panel_wheel(window, state, point, GET_WHEEL_DELTA_WPARAM(w_param));
+            int delta = GET_WHEEL_DELTA_WPARAM(w_param);
+            if (message == WM_MOUSEHWHEEL) {
+                if (axyne_git_panel_hwheel(window, state, point, delta)) return 0;
+                break;
+            }
+            /* Shift+wheel over the graph scrolls sideways (wheel down = right). */
+            if ((GET_KEYSTATE_WPARAM(w_param) & MK_SHIFT) != 0 &&
+                axyne_git_panel_hwheel(window, state, point, -delta))
+                return 0;
+            (void)axyne_git_panel_wheel(window, state, point, delta);
             return 0;
         }
+        if (message == WM_MOUSEHWHEEL) break;
         if (axyne_outline_visible(state) && point.x >= 0 &&
             point.x < axyne_sidebar_width(state)) {
             int status_top = client.bottom - AXYNE_STATUS;
@@ -9508,6 +9673,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 git->graph_ok = 0;
                 git->graph_limit = git->graph_loaded_limit = git->graph_loading = 0;
                 git->graph_scroll = 0;
+                git->graph_hscroll = 0;
                 axyne_git_panel_refresh(window, state);
                 InvalidateRect(window, NULL, FALSE);
             }
