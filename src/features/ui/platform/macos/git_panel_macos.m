@@ -22,6 +22,7 @@ static const CGFloat kGpPushWidth = 56;
 static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
 static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
 static const CGFloat kGpTextGap = 6;      /* graph mark to row text */
+static const CGFloat kGpHScrollStep = 48; /* graph points per line of a non-precise wheel */
 static const int kGpGraphStep = 200;      /* commits added per "더 불러오기" */
 static const unsigned kGpRefreshDelayMs = 500;
 
@@ -354,6 +355,17 @@ static void gp_draw_text(NSString *text, NSRect rect, NSFont *font, NSColor *col
         withAttributes:attributes];
 }
 
+/* Drawn width of one line of graph row text: its full width up to
+ * AXYNE_GIT_GRAPH_TEXT_MAX (longer text ends in an ellipsis there), plus a
+ * point of slack so tail truncation does not cut it. */
+static CGFloat gp_text_width(NSString *text, NSFont *font)
+{
+    CGFloat width;
+    if (text == nil) return 0;
+    width = ceil([text sizeWithAttributes:@{NSFontAttributeName: font}].width);
+    return MIN(width, (CGFloat)AXYNE_GIT_GRAPH_TEXT_MAX) + 1;
+}
+
 /* Chip shared with the explorer badges: rounded rect in `rgb` at low alpha (or
  * solid) with a bold label centred in it. */
 static void gp_draw_chip(NSString *label, NSRect chip, NSColor *fill, NSColor *textColor,
@@ -445,6 +457,12 @@ typedef struct GpItem {
     AxyneGitGraph _graph;
     char _graphError[160];
     CGFloat _graphScroll;
+    CGFloat _graphHScroll;        /* points the graph rows are scrolled to the left */
+    CGFloat _graphWidthBase;      /* widest graph item without ref chips */
+    BOOL _graphWidthValid;        /* _graphWidthBase matches the rows and expansion */
+    CGFloat _graphWidth;          /* scrollable width of the rows for _graphWidthFor */
+    CGFloat _graphWidthFor;       /* list width _graphWidth was measured for; -1 = stale */
+    int _scrollAxis;              /* trackpad gesture axis: 0 undecided, 1 vertical, 2 horizontal */
     int _graphLimit;              /* commits requested by reloads; 0 = default */
     AxyneGitGraphMode _graphMode;
     NSSegmentedControl *_graphSelector;
@@ -462,6 +480,12 @@ typedef struct GpItem {
     unsigned long _expandSequence;
     char *_selectedCommitFile;    /* selected file row under the expanded commit */
 }
+- (CGFloat)chipBudgetForList:(CGFloat)listWidth;
+- (CGFloat)graphContentWidthForList:(CGFloat)listWidth;
+- (CGFloat)drawGraphRow:(const AxyneGitGraphRow *)row inRect:(NSRect)rect
+                 offset:(CGFloat)dx draw:(BOOL)draw;
+- (CGFloat)drawCommitFileItem:(const GpItem *)item inRect:(NSRect)rect
+                       offset:(CGFloat)dx draw:(BOOL)draw;
 @end
 
 @implementation AxyneGitPanelView
@@ -634,6 +658,8 @@ typedef struct GpItem {
         MAX(0, (CGFloat)_changes.count * kGpRow - NSHeight(g.changes)));
     _graphScroll = gp_clamp(_graphScroll, 0,
         MAX(0, [self graphContentHeight] - NSHeight(g.graph)));
+    _graphHScroll = axyne_git_graph_clamp_offset(_graphHScroll,
+        [self graphContentWidthForList:NSWidth(g.graph)], NSWidth(g.graph));
 }
 
 /* ---- graph items (commits and the expanded commit's files) ---------------------- */
@@ -703,6 +729,64 @@ typedef struct GpItem {
            ([self moreVisible] ? kGpRow : 0);
 }
 
+/* Room for ref chips before the subject. It follows the visible list width,
+ * as a one-lane row had it, so chips never push the subject further away
+ * than before and the scrollable width only grows with lanes and text. */
+- (CGFloat)chipBudgetForList:(CGFloat)listWidth
+{
+    CGFloat textX = axyne_git_graph_text_x(10.5, kGpLane, 0, 0.75, 0, 3.5, kGpTextGap);
+    return MAX(0, listWidth - 8 - textX);
+}
+
+/* Scrollable width of the graph rows: the lane strip and the widest row text
+ * plus the right margin. Measured over every item (not only the visible ones)
+ * so the range does not change while scrolling vertically. Items without ref
+ * chips do not depend on the list width and are measured once per change of
+ * the rows or the expanded commit; only the few commits with chips are
+ * measured again when the list width changes. */
+- (CGFloat)graphContentWidthForList:(CGFloat)listWidth
+{
+    CGFloat strip = axyne_git_graph_strip_width(_graph.max_lanes, kGpLane);
+    size_t i;
+    if (!_graphWidthValid) {
+        size_t count = [self itemCount];
+        CGFloat widest = 10 + strip + 2;
+        for (i = 0; i < count; ++i) @autoreleasepool {
+            GpItem item = [self itemAtIndex:i];
+            CGFloat extent;
+            if (item.kind == GP_ITEM_MORE) continue; /* fixed, never scrolls */
+            if (item.kind == GP_ITEM_COMMIT) {
+                if (_graph.rows[item.commit].ref_count > 0) continue;
+                extent = [self drawGraphRow:&_graph.rows[item.commit]
+                                     inRect:NSMakeRect(0, 0, listWidth, kGpGraphRow)
+                                     offset:0 draw:NO];
+            } else {
+                extent = [self drawCommitFileItem:&item
+                                           inRect:NSMakeRect(0, 0, listWidth, kGpRow)
+                                           offset:0 draw:NO];
+            }
+            widest = MAX(widest, extent);
+        }
+        _graphWidthBase = widest;
+        _graphWidthValid = YES;
+        _graphWidthFor = -1;
+    }
+    if (_graphWidthFor != listWidth) {
+        CGFloat widest = _graphWidthBase;
+        for (i = 0; i < _graph.count; ++i) @autoreleasepool {
+            CGFloat extent;
+            if (_graph.rows[i].ref_count == 0) continue;
+            extent = [self drawGraphRow:&_graph.rows[i]
+                                 inRect:NSMakeRect(0, 0, listWidth, kGpGraphRow)
+                                 offset:0 draw:NO];
+            widest = MAX(widest, extent);
+        }
+        _graphWidth = ceil(widest + 8);
+        _graphWidthFor = listWidth;
+    }
+    return _graphWidth;
+}
+
 /* The item under `offset` pixels from the top of the (unscrolled) graph
  * content; NO past the last item. */
 - (BOOL)itemAtOffset:(CGFloat)offset item:(GpItem *)out
@@ -732,6 +816,7 @@ typedef struct GpItem {
     free(_selectedCommitFile);
     _selectedCommitFile = NULL;
     ++_expandSequence;
+    _graphWidthValid = NO;
 }
 
 /* Re-finds the expanded commit in a freshly loaded graph; collapses when it
@@ -783,6 +868,7 @@ typedef struct GpItem {
     [self clearExpansion];
     _graphLimit = 0;
     _graphScroll = 0;
+    _graphHScroll = 0;
     gp_set_string(&_selectedHash, NULL);
     [self refresh];
     [self setNeedsDisplay:YES];
@@ -837,6 +923,7 @@ typedef struct GpItem {
     _graphLoadedLimit = 0;
     _graphLoadingMore = NO;
     _graphError[0] = '\0';
+    _graphWidthValid = NO;
 }
 
 /* Scroll positions survive reloads; they restart only for another folder, an
@@ -845,6 +932,7 @@ typedef struct GpItem {
 {
     _changesScroll = 0;
     _graphScroll = 0;
+    _graphHScroll = 0;
 }
 
 - (void)refresh
@@ -900,6 +988,7 @@ typedef struct GpItem {
         _hasStaged = 0;
         if (load->changesStatus != AXYNE_STATUS_OK) {
             axyne_git_graph_free(&_graph);
+            _graphWidthValid = NO;
             _graphLoadedLimit = 0;
             _graphLoadingMore = NO;
         }
@@ -913,6 +1002,13 @@ typedef struct GpItem {
                 /* Loading more failed: keep the graph that is shown. */
                 if (requested) _graphLimit = _graphLoadedLimit;
             } else {
+                /* A reload with the same rows (stage, file watch, refresh)
+                 * keeps the measured width; only chip rows are measured
+                 * again. Other rows are measured once more. */
+                if (axyne_git_graph_same_rows(&_graph, &load->graph))
+                    _graphWidthFor = -1;
+                else
+                    _graphWidthValid = NO;
                 axyne_git_graph_free(&_graph);
                 _graph = load->graph; /* moved, never copied */
                 memset(&load->graph, 0, sizeof(load->graph));
@@ -1050,6 +1146,7 @@ typedef struct GpItem {
                 (void)snprintf(_expandedError, sizeof(_expandedError), "%s",
                     task->message[0] != '\0' ? task->message : "Git 실행 실패");
             }
+            _graphWidthValid = NO;
             [self clampScrolls];
             [self setNeedsDisplay:YES];
         }
@@ -1246,11 +1343,41 @@ static char *gp_diff_title(const char *prefix, const char *path)
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     GpGeometry g = [self geometry];
     CGFloat delta = [event scrollingDeltaY];
-    if (![event hasPreciseScrollingDeltas]) delta *= kGpRow;
+    CGFloat across = [event scrollingDeltaX];
+    BOOL overGraph = NSPointInRect(point, g.graph);
+    if ([event hasPreciseScrollingDeltas]) {
+        /* A trackpad gesture follows its predominant axis, decided when it
+         * begins and kept through its momentum (like NSScrollView's
+         * usesPredominantAxisScrolling). Events outside a gesture decide
+         * one by one. */
+        NSEventPhase phase = [event phase];
+        if ((phase & (NSEventPhaseBegan | NSEventPhaseMayBegin)) != 0 ||
+            (phase == NSEventPhaseNone && [event momentumPhase] == NSEventPhaseNone))
+            _scrollAxis = 0;
+        if (_scrollAxis == 0 && (delta != 0 || across != 0))
+            _scrollAxis = fabs(across) > fabs(delta) ? 2 : 1;
+        if (_scrollAxis == 1) across = 0;
+        else if (_scrollAxis == 2) delta = 0;
+    } else {
+        /* Shift+wheel over a graph wider than the list scrolls it sideways
+         * (the system may already have turned the wheel into a horizontal
+         * delta); over rows that fit it scrolls vertically as usual. */
+        if (overGraph && ([event modifierFlags] & NSEventModifierFlagShift) != 0) {
+            CGFloat wheel = across != 0 ? across : delta;
+            BOOL wide = [self graphContentWidthForList:NSWidth(g.graph)] > NSWidth(g.graph);
+            across = wide ? wheel : 0;
+            delta = wide ? 0 : wheel;
+        }
+        delta *= kGpRow;
+        across *= kGpHScrollStep;
+    }
     if (NSPointInRect(point, g.changes)) {
         _changesScroll -= delta;
-    } else if (NSPointInRect(point, g.graph)) {
+    } else if (overGraph) {
+        /* The rows scroll sideways while the header and "더 불러오기" stay
+         * put. */
         _graphScroll -= delta;
+        _graphHScroll -= across;
     } else {
         [super scrollWheel:event];
         return;
@@ -1451,6 +1578,15 @@ static char *gp_diff_title(const char *prefix, const char *path)
                      NSMakeRect(16, NSMinY(rect), NSWidth(rect) - 24, kGpRow),
                      [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
     } else {
+        CGFloat strip = axyne_git_graph_strip_width(_graph.max_lanes, kGpLane);
+        /* "더 불러오기" stays put while the rows scroll: where it sat when the
+         * lane strip was at most 100 points wide. */
+        CGFloat moreX = 10 + MIN(strip, 100) + 8;
+        CGFloat content = [self graphContentWidthForList:NSWidth(rect)];
+        CGFloat dx;
+        double thumbStart, thumbLength;
+        _graphHScroll = axyne_git_graph_clamp_offset(_graphHScroll, content, NSWidth(rect));
+        dx = _graphHScroll;
         count = [self itemCount];
         y = NSMinY(rect) - _graphScroll;
         for (i = 0; i < count; ++i) {
@@ -1460,19 +1596,26 @@ static char *gp_diff_title(const char *prefix, const char *path)
             if (y + height > NSMinY(rect)) {
                 NSRect row = NSMakeRect(0, y, NSWidth(rect), height);
                 if (item.kind == GP_ITEM_COMMIT)
-                    [self drawGraphRow:&_graph.rows[item.commit] inRect:row];
+                    (void)[self drawGraphRow:&_graph.rows[item.commit] inRect:row
+                                      offset:dx draw:YES];
                 else if (item.kind == GP_ITEM_MORE)
                     gp_draw_text(_graphLoadingMore ? @"더 불러오는 중…" : @"더 불러오기",
-                        NSMakeRect(10 + MAX(_graph.max_lanes, 1) * axyne_git_graph_lane_width(_graph.max_lanes, kGpLane, 100) + 8,
-                                   y, MAX(0, NSWidth(rect) - 16 -
-                                       (10 + MAX(_graph.max_lanes, 1) * axyne_git_graph_lane_width(_graph.max_lanes, kGpLane, 100) + 8)),
-                                   kGpRow),
+                        NSMakeRect(moreX, y, MAX(0, NSWidth(rect) - 16 - moreX), kGpRow),
                         [NSFont systemFontOfSize:11],
                         gp_color(_graphLoadingMore ? _theme.muted : _theme.accent), _leftStyle);
                 else
-                    [self drawCommitFileItem:&item inRect:row];
+                    (void)[self drawCommitFileItem:&item inRect:row offset:dx draw:YES];
             }
             y += height;
+        }
+        /* Thin horizontal indicator along the bottom edge while rows are
+         * wider than the list. */
+        if (axyne_git_graph_thumb(NSWidth(rect) - 4, NSWidth(rect), content, dx, 16,
+                                  &thumbStart, &thumbLength)) {
+            [gp_color(_theme.border) setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:
+                NSMakeRect(NSMinX(rect) + thumbStart, NSMaxY(rect) - 4, thumbLength, 3)
+                                             xRadius:1.5 yRadius:1.5] fill];
         }
     }
     [NSGraphicsContext restoreGraphicsState];
@@ -1483,7 +1626,8 @@ static char *gp_diff_title(const char *prefix, const char *path)
  * below it run through the row as plain vertical lines, so the lane strip
  * stays continuous: a lane continues when its cell leaves through the bottom
  * edge (DOWN, or the FORK connector that ends there). */
-- (void)drawCommitFileItem:(const GpItem *)item inRect:(NSRect)rect
+- (CGFloat)drawCommitFileItem:(const GpItem *)item inRect:(NSRect)rect
+                       offset:(CGFloat)dx draw:(BOOL)draw
 {
     const AxyneGitGraphRow *commit = &_graph.rows[item->commit];
     const AxyneGitChange *change = item->kind == GP_ITEM_FILE
@@ -1491,20 +1635,20 @@ static char *gp_diff_title(const char *prefix, const char *path)
     BOOL selected = change != NULL && _selectedCommitFile != NULL &&
         strcmp(_selectedCommitFile, change->path) == 0;
     int cells = MAX(_graph.max_lanes, 1);
-    CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
-    CGFloat left = 10;
+    CGFloat laneWidth = kGpLane;
+    CGFloat left = NSMinX(rect) + 10 - dx;
     /* Text follows the rightmost lane continuing through this row (centres
      * sit half a point right of the cell middle). */
     CGFloat textX = axyne_git_graph_text_x(left + 0.5, laneWidth,
         axyne_git_graph_last_cell(commit, AXYNE_GIT_LANE_DOWN | AXYNE_GIT_LANE_FORK), 0.75,
         -1, 0, kGpTextGap);
-    CGFloat textRight = NSMaxX(rect) - 8;
+    CGFloat extent;
     int i;
-    if (selected) {
+    if (draw && selected) {
         [gp_color(_theme.reference ? 0x2f343c : _theme.border) setFill];
         NSRectFill(rect);
     }
-    for (i = 0; i < commit->lane_count && i < cells; ++i) {
+    for (i = 0; draw && i < commit->lane_count && i < cells; ++i) {
         unsigned flags = commit->lanes[i].flags;
         CGFloat cx = left + i * laneWidth + laneWidth / 2 + 0.5;
         NSBezierPath *path;
@@ -1519,9 +1663,12 @@ static char *gp_diff_title(const char *prefix, const char *path)
     if (change == NULL) {
         NSString *note = _expandedState == 1 ? @"불러오는 중…"
             : (_expandedState == 3 ? gp_string(_expandedError) : @"변경된 파일 없음");
-        gp_draw_text(note, NSMakeRect(textX, NSMinY(rect), MAX(0, textRight - textX), kGpRow),
-                     [NSFont systemFontOfSize:11], gp_color(_theme.muted), _leftStyle);
-        return;
+        NSFont *noteFont = [NSFont systemFontOfSize:11];
+        CGFloat noteWidth = gp_text_width(note, noteFont);
+        if (draw)
+            gp_draw_text(note, NSMakeRect(textX, NSMinY(rect), noteWidth, kGpRow),
+                         noteFont, gp_color(_theme.muted), _leftStyle);
+        return textX + noteWidth - NSMinX(rect) + dx;
     }
     {
         NSRect chip = NSMakeRect(textX, NSMinY(rect) + floor((kGpRow - 14) / 2), 14, 14);
@@ -1533,56 +1680,71 @@ static char *gp_diff_title(const char *prefix, const char *path)
         NSFont *nameFont = [NSFont systemFontOfSize:12];
         NSFont *directoryFont = [NSFont systemFontOfSize:11];
         CGFloat nameX = textX + 20;
-        CGFloat available = MAX(0, textRight - nameX);
-        CGFloat nameWidth;
-        gp_draw_chip(kind, chip, [gp_color(kindRgb) colorWithAlphaComponent:
-            AXYNE_UI_BADGE_ALPHA_PERCENT / 100.0], gp_color(kindRgb),
-            [NSFont monospacedSystemFontOfSize:AXYNE_UI_BADGE_FONT_PT weight:NSFontWeightBold]);
-        nameWidth = ceil([name sizeWithAttributes:@{NSFontAttributeName: nameFont}].width);
-        gp_draw_text(name, NSMakeRect(nameX, NSMinY(rect), MIN(available, nameWidth), kGpRow),
-                     nameFont, selected ? gp_color(_theme.text)
-                         : gp_color(_theme.light ? 0x24272d : 0xc4c8ce), _leftStyle);
-        if (slash != NULL && available - nameWidth > 24) {
+        CGFloat nameWidth = gp_text_width(name, nameFont);
+        if (draw) {
+            gp_draw_chip(kind, chip, [gp_color(kindRgb) colorWithAlphaComponent:
+                AXYNE_UI_BADGE_ALPHA_PERCENT / 100.0], gp_color(kindRgb),
+                [NSFont monospacedSystemFontOfSize:AXYNE_UI_BADGE_FONT_PT weight:NSFontWeightBold]);
+            gp_draw_text(name, NSMakeRect(nameX, NSMinY(rect), nameWidth, kGpRow),
+                         nameFont, selected ? gp_color(_theme.text)
+                             : gp_color(_theme.light ? 0x24272d : 0xc4c8ce), _leftStyle);
+        }
+        extent = nameX + nameWidth;
+        if (slash != NULL) {
             char *directoryText = (char *)malloc((size_t)(slash - change->path) + 1);
             if (directoryText != NULL) {
+                NSString *directory;
+                CGFloat directoryWidth;
                 memcpy(directoryText, change->path, (size_t)(slash - change->path));
                 directoryText[slash - change->path] = '\0';
-                gp_draw_text(gp_string(directoryText),
-                             NSMakeRect(nameX + nameWidth + 6, NSMinY(rect),
-                                        available - nameWidth - 6, kGpRow),
-                             directoryFont, gp_color(_theme.muted), _leftStyle);
+                directory = gp_string(directoryText);
+                directoryWidth = gp_text_width(directory, directoryFont);
+                if (draw)
+                    gp_draw_text(directory,
+                                 NSMakeRect(nameX + nameWidth + 6, NSMinY(rect),
+                                            directoryWidth, kGpRow),
+                                 directoryFont, gp_color(_theme.muted), _leftStyle);
+                extent = nameX + nameWidth + 6 + directoryWidth;
                 free(directoryText);
             }
         }
     }
+    return extent - NSMinX(rect) + dx;
 }
 
 /* Lane cells (vertical lines, join/fork curves, the commit dot) followed by
- * the ref chips, subject and the dim "author · date" line. */
-- (void)drawGraphRow:(const AxyneGitGraphRow *)row inRect:(NSRect)rect
+ * the ref chips, subject and the dim "author · date" line, with the content
+ * scrolled `dx` points to the left (the selection band spans the visible
+ * row). With `draw` NO nothing is drawn. Returns the right edge of the row's
+ * text in unscrolled row coordinates. */
+- (CGFloat)drawGraphRow:(const AxyneGitGraphRow *)row inRect:(NSRect)rect
+                 offset:(CGFloat)dx draw:(BOOL)draw
 {
     BOOL selected = _selectedHash != NULL && strcmp(_selectedHash, row->hash) == 0;
     int cells = MAX(_graph.max_lanes, 1);
-    CGFloat laneWidth = axyne_git_graph_lane_width(cells, kGpLane, 100);
-    CGFloat left = 10;
+    CGFloat laneWidth = kGpLane;
+    CGFloat left = NSMinX(rect) + 10 - dx;
     CGFloat top = NSMinY(rect), bottom = NSMaxY(rect), middle = floor(top + NSHeight(rect) / 2) + 0.5;
     CGFloat textX;
-    CGFloat textRight = NSMaxX(rect) - 8;
+    CGFloat chipRight;
     CGFloat dotX;
+    CGFloat extent;
     BOOL current = NO;
     NSFont *subjectFont = [NSFont systemFontOfSize:12];
     NSFont *detailFont = [NSFont systemFontOfSize:11];
+    NSFont *chipFont = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
     NSColor *textColor = selected ? gp_color(_theme.text)
         : gp_color(_theme.light ? 0x24272d : 0xc4c8ce);
-    CGFloat chipX;
+    NSString *subject, *detail;
+    CGFloat chipX, subjectWidth, detailWidth;
     size_t shown = 0, r;
     int i;
-    if (selected) {
+    if (draw && selected) {
         [gp_color(_theme.reference ? 0x2f343c : _theme.border) setFill];
         NSRectFill(rect);
     }
     dotX = left + row->column * laneWidth + laneWidth / 2 + 0.5;
-    for (i = 0; i < row->lane_count && i < cells; ++i) {
+    for (i = 0; draw && i < row->lane_count && i < cells; ++i) {
         unsigned flags = row->lanes[i].flags;
         CGFloat cx = left + i * laneWidth + laneWidth / 2 + 0.5;
         NSColor *color = gp_color(kGpLanePalette[row->lanes[i].color % AXYNE_GIT_GRAPH_PALETTE]);
@@ -1616,7 +1778,7 @@ static char *gp_diff_title(const char *prefix, const char *path)
     textX = axyne_git_graph_text_x(left + 0.5, laneWidth,
                                    axyne_git_graph_last_cell(row, ~0u), 0.75,
                                    row->column, current ? 5.75 : 3.5, kGpTextGap);
-    {
+    if (draw) {
         NSColor *dotColor = gp_color(kGpLanePalette[row->color % AXYNE_GIT_GRAPH_PALETTE]);
         if (current) {
             /* HEAD: ring with a smaller solid centre. */
@@ -1632,38 +1794,49 @@ static char *gp_diff_title(const char *prefix, const char *path)
             [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(dotX - 3.5, middle - 3.5, 7, 7)] fill];
         }
     }
-    /* Line 1: ref chips (the current branch solid), then the subject. */
+    /* Line 1: ref chips (the current branch solid), then the whole subject,
+     * however far it reaches: the list scrolls. */
     chipX = textX;
+    chipRight = textX + [self chipBudgetForList:NSWidth(rect)];
     for (r = 0; r < row->ref_count; ++r) {
         const AxyneGitRef *ref = &row->refs[r];
         NSString *label = gp_string(ref->name);
-        NSFont *chipFont = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
         CGFloat width = ceil([label sizeWithAttributes:@{NSFontAttributeName: chipFont}].width) + 10;
         uint32_t rgb = gp_ref_color(ref);
         NSRect chip;
-        if (shown == 3 || chipX + width > textRight - 40) {
-            if (chipX + 20 <= textRight - 20) {
+        if (shown == 3 || chipX + width > chipRight - 40) {
+            if (chipX + 20 <= chipRight - 20) {
                 NSString *more = [NSString stringWithFormat:@"+%zu", row->ref_count - r];
-                gp_draw_text(more, NSMakeRect(chipX, top + 3, 24, 16), chipFont,
-                             gp_color(_theme.muted), _leftStyle);
+                if (draw)
+                    gp_draw_text(more, NSMakeRect(chipX, top + 3, 24, 16), chipFont,
+                                 gp_color(_theme.muted), _leftStyle);
                 chipX += 26;
             }
             break;
         }
         chip = NSMakeRect(chipX, top + 5, width, 14);
-        gp_draw_chip(label, chip, ref->is_current ? gp_color(_theme.accent)
-                         : [gp_color(rgb) colorWithAlphaComponent:0.2],
-                     ref->is_current ? gp_color(_theme.background) : gp_color(rgb), chipFont);
+        if (draw)
+            gp_draw_chip(label, chip, ref->is_current ? gp_color(_theme.accent)
+                             : [gp_color(rgb) colorWithAlphaComponent:0.2],
+                         ref->is_current ? gp_color(_theme.background) : gp_color(rgb), chipFont);
         chipX += width + 4;
         ++shown;
     }
-    gp_draw_text(gp_string(row->subject), NSMakeRect(chipX, top + 3, MAX(0, textRight - chipX), 16),
-                 subjectFont, textColor, _leftStyle);
+    subject = gp_string(row->subject);
+    subjectWidth = gp_text_width(subject, subjectFont);
+    if (draw)
+        gp_draw_text(subject, NSMakeRect(chipX, top + 3, subjectWidth, 16),
+                     subjectFont, textColor, _leftStyle);
+    extent = chipX + subjectWidth;
     /* Line 2: author and date, dim. */
-    gp_draw_text([NSString stringWithFormat:@"%@  ·  %@", gp_string(row->author),
-                     gp_string(row->date)],
-                 NSMakeRect(textX, top + 20, MAX(0, textRight - textX), 14),
-                 detailFont, gp_color(_theme.muted), _leftStyle);
+    detail = [NSString stringWithFormat:@"%@  ·  %@", gp_string(row->author),
+                 gp_string(row->date)];
+    detailWidth = gp_text_width(detail, detailFont);
+    if (draw)
+        gp_draw_text(detail, NSMakeRect(textX, top + 20, detailWidth, 14),
+                     detailFont, gp_color(_theme.muted), _leftStyle);
+    extent = MAX(extent, textX + detailWidth);
+    return extent - NSMinX(rect) + dx;
 }
 
 @end
