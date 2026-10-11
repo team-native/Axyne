@@ -537,7 +537,9 @@ if(WIN32 OR APPLE)
         set(CPACK_NSIS_MENU_LINKS "axyne.exe" "Axyne")
     elseif(APPLE)
         set(CPACK_GENERATOR "productbuild;DragNDrop")
-        set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications")
+        # CPack drops its automatically discovered sole Unspecified component.
+        # productbuild requires it explicitly to create a choice and payload.
+        set(CPACK_COMPONENTS_ALL Unspecified)
         set(CPACK_PRODUCTBUILD_IDENTIFIER "com.axyne.ide")
         set(CPACK_PRODUCTBUILD_INSTALL_PATH "/Applications")
         set(CPACK_DMG_VOLUME_NAME "${AXYNE_DISPLAY_NAME} ${PROJECT_VERSION}")
