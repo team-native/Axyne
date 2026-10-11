@@ -3689,7 +3689,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
  * when it is hidden. The cap is a share of the whole explorer column. */
 - (CGFloat)outlineHeight
 {
-    CGFloat explorer = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] -
+    CGFloat explorer = NSHeight([self bounds]) - AXYNE_STATUS -
         (AXYNE_CONTENT_TOP + AXYNE_TABS);
     if (![self outlineVisible] || explorer <= 0) return 0;
     return (CGFloat)axyne_outline_height(&_outline, (int)explorer);
@@ -3698,13 +3698,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
 /* The file tree ends where the outline begins. */
 - (CGFloat)explorerTreeBottom
 {
-    return NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] - [self outlineHeight];
+    return NSHeight([self bounds]) - AXYNE_STATUS - [self outlineHeight];
 }
 
 - (BOOL)pointIsInOutline:(NSPoint)point
 {
     CGFloat height = [self outlineHeight];
-    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS;
     return height > 0 && point.x >= 0 && point.x < [self sidebarWidth] &&
         point.y >= bottom - height && point.y < bottom;
 }
@@ -3713,7 +3713,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (NSInteger)outlineSymbolAtPoint:(NSPoint)point
 {
     CGFloat height = [self outlineHeight];
-    CGFloat top = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] - height;
+    CGFloat top = NSHeight([self bounds]) - AXYNE_STATUS - height;
     if (![self pointIsInOutline:point]) return -1;
     return (NSInteger)axyne_outline_symbol_at(&_outline, (int)height, (int)(point.y - top));
 }
@@ -4164,8 +4164,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         (int)NSHeight([self bounds]), AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
 }
 
-/* Splitter under `point` (view coordinates): 1 = explorer/editor border,
- * 2 = bottom panel top border, 0 = none. The panel wins at the corner. */
+/* Splitter under `point` (view coordinates): 1 = sidebar/editor border,
+ * 2 = bottom panel top border, 0 = none. The sidebar owns the left corner;
+ * the panel splitter exists only in the editor/right region. */
 - (NSInteger)splitterAtPoint:(NSPoint)point
 {
     NSRect bounds = [self bounds];
@@ -4173,7 +4174,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - panel;
     CGFloat contentTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     if (point.x < 0 || point.x >= NSWidth(bounds)) return 0;
-    if (axyne_layout_on_panel_splitter((int)floor(point.y), (int)bottomTop, (int)panel))
+    if (point.x >= [self sidebarWidth] &&
+        axyne_layout_on_panel_splitter((int)floor(point.y), (int)bottomTop, (int)panel))
         return 2;
     if (point.y >= contentTop && point.y < NSHeight(bounds) - AXYNE_STATUS &&
         axyne_layout_on_sidebar_splitter((int)floor(point.x), (int)[self sidebarWidth]))
@@ -4187,8 +4189,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (which == 2) {
         CGFloat panel = [self panelHeight];
         if (panel <= 0) return NSZeroRect;
-        return NSMakeRect(0, NSHeight(bounds) - AXYNE_STATUS - panel - AXYNE_LAYOUT_GRAB_BEFORE_PANEL,
-            NSWidth(bounds), AXYNE_LAYOUT_GRAB_BEFORE_PANEL + AXYNE_LAYOUT_GRAB_AFTER_PANEL);
+        CGFloat left = [self sidebarWidth];
+        return NSMakeRect(left, NSHeight(bounds) - AXYNE_STATUS - panel - AXYNE_LAYOUT_GRAB_BEFORE_PANEL,
+            MAX(0, NSWidth(bounds) - left),
+            AXYNE_LAYOUT_GRAB_BEFORE_PANEL + AXYNE_LAYOUT_GRAB_AFTER_PANEL);
     }
     CGFloat sidebar = [self sidebarWidth];
     if (sidebar <= 0) return NSZeroRect;
@@ -5295,7 +5299,7 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         if (_sidebarTab != 0) return;
     }
     if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
-        point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
+        point.y < NSHeight([self bounds]) - AXYNE_STATUS) {
         if ([self pointIsInOutline:point]) {
             /* Never a tree click: flush a pending rescan so the row maps to
              * the current text, then jump. */
@@ -5355,7 +5359,7 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS) return;
     if ([self pointIsInOutline:point]) return; /* no tree menu over the outline */
     if (point.x >= [self sidebarWidth] || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
-        point.y >= NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
+        point.y >= NSHeight([self bounds]) - AXYNE_STATUS) {
         [super rightMouseDown:event];
         return;
     }
@@ -6791,6 +6795,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [super layout];
     NSRect bounds = [self bounds];
     CGFloat width = NSWidth(bounds);
+    CGFloat statusTop = NSHeight(bounds) - AXYNE_STATUS;
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - [self panelHeight];
     CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
@@ -6812,7 +6817,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     CGFloat outlineHeight = [self outlineHeight];
     (void)axyne_outline_set_scroll(&_outline, (long)_outline.first_row, (int)outlineHeight);
-    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - outlineHeight - editorTop -
+    NSInteger visibleRows = MAX(1, (NSInteger)((statusTop - outlineHeight - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
     BOOL terminal = _panelMode == 2;
@@ -7071,7 +7076,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (!_explorerHidden)
         NSRectFill(NSMakeRect([self sidebarWidth] - 1, editorTop, 1, statusTop - editorTop));
     if (!_panelHidden)
-        NSRectFill(NSMakeRect(0, bottomTop, width, 1));
+        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop,
+                              MAX(0, width - [self sidebarWidth]), 1));
     if (![_searchButton isHidden]) {
     [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
         [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
