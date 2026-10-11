@@ -465,22 +465,35 @@ int axyne_problems_counts_worst(const AxyneProblemCounts *counts)
 size_t axyne_problems_tab_label(const AxyneProblemCounts *counts, char *buffer,
                                 size_t capacity)
 {
+    /* Keep the public text UTF-8 even when MSVC's execution character set is
+     * configured independently from the source file. */
+    static const char prefix[] = {
+        (char)0xEB, (char)0xAC, (char)0xB8,
+        (char)0xEC, (char)0xA0, (char)0x9C, '\0'
+    };
     char text[64];
-    int written;
-    if (counts == NULL || counts->total == 0)
-        written = snprintf(text, sizeof(text), "문제");
-    else
-        written = snprintf(text, sizeof(text), "문제  %lu",
-                           (unsigned long)counts->total);
-    if (written < 0) written = 0;
-    if ((size_t)written >= sizeof(text)) written = (int)sizeof(text) - 1;
+    size_t written = sizeof(prefix) - 1;
+    if (counts == NULL || counts->total == 0) {
+        memcpy(text, prefix, written);
+    } else {
+        int number;
+        memcpy(text, prefix, written);
+        text[written++] = ' ';
+        text[written++] = ' ';
+        number = snprintf(text + written, sizeof(text) - written, "%lu",
+                          (unsigned long)counts->total);
+        if (number < 0) number = 0;
+        if ((size_t)number >= sizeof(text) - written)
+            number = (int)(sizeof(text) - written - 1);
+        written += (size_t)number;
+    }
     text[written] = '\0';
     if (buffer != NULL && capacity != 0) {
-        size_t copy = (size_t)written < capacity - 1 ? (size_t)written : capacity - 1;
+        size_t copy = written < capacity - 1 ? written : capacity - 1;
         memcpy(buffer, text, copy);
         buffer[copy] = '\0';
     }
-    return (size_t)written;
+    return written;
 }
 
 /* ---- filter --------------------------------------------------------------- */

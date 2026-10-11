@@ -15,8 +15,11 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shlobj.h>
 #include <fcntl.h>
 #include <io.h>
+#include <share.h>
+#include <sys/stat.h>
 #include <wchar.h>
 static SRWLOCK log_lock = SRWLOCK_INIT;
 #define LOG_LOCK() AcquireSRWLockExclusive(&log_lock)
@@ -50,30 +53,66 @@ static wchar_t *wide_path(const char *utf8)
     }
     return wide;
 }
+
+static int ensure_directory(const char *path)
+{
+    wchar_t *wide = wide_path(path);
+    int result;
+    if (wide == NULL) return 0;
+    result = SHCreateDirectoryExW(NULL, wide, NULL);
+    free(wide);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS ||
+           result == ERROR_ALREADY_EXISTS;
+}
+
+static int directory_present(const char *path)
+{
+    wchar_t *wide = wide_path(path);
+    DWORD attributes;
+    if (wide == NULL) return 0;
+    attributes = GetFileAttributesW(wide);
+    free(wide);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
 #endif
 
 static FILE *open_append(const char *path)
 {
 #ifdef _WIN32
-    /* FILE_SHARE_DELETE lets another Axyne instance rotate (rename) the log
-     * while this one holds it open. */
     wchar_t *wide = wide_path(path);
-    HANDLE handle;
-    int descriptor;
-    FILE *file;
     if (wide == NULL) return NULL;
-    handle = CreateFileW(wide, FILE_APPEND_DATA,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    free(wide);
-    if (handle == INVALID_HANDLE_VALUE) return NULL;
-    descriptor = _open_osfhandle((intptr_t)handle, _O_APPEND | _O_BINARY);
-    if (descriptor == -1) {
-        CloseHandle(handle);
-        return NULL;
+    /* Use the wide CRT entry point so UTF-8 paths work without relying on
+     * the process code page.  _SH_DENYNO permits concurrent readers/writers;
+     * rotation closes the stream before renaming the file. */
+    HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    FILE *file;
+    if (handle != INVALID_HANDLE_VALUE) {
+        int descriptor = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_BINARY);
+        if (descriptor != -1) {
+            file = _fdopen(descriptor, "a+b");
+            if (file != NULL) {
+                free(wide);
+                return file;
+            }
+            _close(descriptor);
+        } else {
+            CloseHandle(handle);
+        }
     }
-    file = _fdopen(descriptor, "ab");
-    if (file == NULL) _close(descriptor);
+    file = _wfsopen(wide, L"a+b", _SH_DENYNO);
+    if (file == NULL) file = fopen(path, "a+b");
+    if (file == NULL) {
+        int descriptor = _sopen(path, _O_CREAT | _O_APPEND | _O_RDWR | _O_BINARY,
+                                _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        if (descriptor != -1) {
+            file = _fdopen(descriptor, "a+b");
+            if (file == NULL) _close(descriptor);
+        }
+    }
+    free(wide);
     return file;
 #else
     return fopen(path, "ab");
@@ -128,11 +167,24 @@ static int open_locked(void)
     } else {
         directory = axyne_app_path(AXYNE_APP_PATH_LOG_DIR);
     }
-    if (directory == NULL || axyne_app_paths_ensure_directory(directory, NULL) != AXYNE_STATUS_OK) {
+    if (directory == NULL) {
         axyne_app_path_free(directory);
         log_failed = 1;
         return 0;
     }
+#ifdef _WIN32
+    if (!ensure_directory(directory) && !directory_present(directory)) {
+        axyne_app_path_free(directory);
+        log_failed = 1;
+        return 0;
+    }
+#else
+    if (axyne_app_paths_ensure_directory(directory, NULL) != AXYNE_STATUS_OK) {
+        axyne_app_path_free(directory);
+        log_failed = 1;
+        return 0;
+    }
+#endif
     free(log_path);
     log_path = axyne_app_path_join(directory, "axyne.log");
     axyne_app_path_free(directory);
