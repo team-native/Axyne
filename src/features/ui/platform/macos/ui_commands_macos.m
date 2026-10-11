@@ -357,6 +357,23 @@ static BOOL axyne_macos_stroke_from_event(NSEvent *event, AxyneKeyStroke *stroke
     return YES;
 }
 
+/* ---- command palette rows -------------------------------------------------- */
+
+typedef struct AxyneMacPaletteCandidate {
+    AxyneCommandId command;
+    int score;
+    size_t start, length; /* title highlight (0 length = keyword match) */
+    size_t order;         /* registry order breaks ties */
+} AxyneMacPaletteCandidate;
+
+static int axyne_macos_palette_compare(const void *left, const void *right)
+{
+    const AxyneMacPaletteCandidate *a = (const AxyneMacPaletteCandidate *)left;
+    const AxyneMacPaletteCandidate *b = (const AxyneMacPaletteCandidate *)right;
+    if (a->score != b->score) return a->score > b->score ? -1 : 1;
+    return a->order < b->order ? -1 : (a->order > b->order ? 1 : 0);
+}
+
 @implementation AxyneWorkspaceView (AxyneCommandRouting)
 
 - (void)rebuildKeymap
@@ -719,6 +736,144 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
     }
     [_chordHint release];
     _chordHint = nil;
+}
+
+/* ---- command palette and shortcuts reference -------------------------------- */
+
+/* Palette payload of a registry command row: the palette id when the
+ * command has one (the controller and -paletteRunCommand: keep their
+ * behaviour for those, e.g. the mode switches of 파일 이동 / 줄로 이동 /
+ * 심볼로 이동), else AXYNE_MAC_PALETTE_REGISTRY_BASE + command id. */
+static int axyne_macos_palette_payload(const AxyneCommandInfo *info)
+{
+    return info->palette_id != 0 ? info->palette_id
+                                 : AXYNE_MAC_PALETTE_REGISTRY_BASE + (int)info->id;
+}
+
+/* Replaces the controller's command-mode rows ("> ...") with the registry
+ * commands flagged for the palette that are implemented on macOS (by a
+ * feature category or a base handler), matched on the macOS title and the
+ * English keywords like the shared builder, with the key map's key text. */
+- (void)paletteRebuildCommandRows
+{
+    size_t total = axyne_command_count(), found = 0, keep, i;
+    const char *query;
+    AxyneMacPaletteCandidate *candidates;
+    AxynePaletteList list = { NULL, 0 };
+    if (!_palette.active || _palette.mode != AXYNE_PALETTE_MODE_COMMAND) return;
+    query = _palette.input != NULL ? _palette.input + _palette.query_offset : "";
+    candidates = (AxyneMacPaletteCandidate *)calloc(total, sizeof(*candidates));
+    if (candidates == NULL) return; /* keep the controller's rows */
+    for (i = 0; i < total; ++i) {
+        const AxyneCommandInfo *info = axyne_command_at(i);
+        AxynePaletteMatch title, keywords;
+        int titleHit, keywordHit;
+        if (info == NULL || (info->flags & AXYNE_COMMAND_FLAG_PALETTE) == 0) continue;
+        if (![self commandImplemented:info->id]) continue;
+        titleHit = axyne_palette_match(axyne_command_title(info->id, axyne_platform_current()),
+                                       query, &title);
+        keywordHit = query[0] != '\0' && axyne_palette_match(info->keywords, query, &keywords);
+        if (!titleHit && !keywordHit) continue;
+        candidates[found].command = info->id;
+        candidates[found].order = i;
+        if (titleHit && (!keywordHit || title.score >= keywords.score / 2)) {
+            candidates[found].score = title.score;
+            candidates[found].start = title.start;
+            candidates[found].length = title.length;
+        } else {
+            candidates[found].score = keywords.score / 2 > 0 ? keywords.score / 2 : 1;
+        }
+        ++found;
+    }
+    qsort(candidates, found, sizeof(*candidates), axyne_macos_palette_compare);
+    keep = found < AXYNE_PALETTE_MAX_ITEMS ? found : AXYNE_PALETTE_MAX_ITEMS;
+    if (keep > 0) {
+        list.items = (AxynePaletteItem *)calloc(keep, sizeof(*list.items));
+        if (list.items == NULL) { free(candidates); return; }
+    }
+    for (i = 0; i < keep; ++i) {
+        const AxyneCommandInfo *info = axyne_command_info(candidates[i].command);
+        AxynePaletteItem *item = &list.items[i];
+        const char *keys = [[self keyTextForCommand:info->id] UTF8String];
+        item->label = strdup(axyne_command_title(info->id, axyne_platform_current()));
+        item->detail = strdup(keys != NULL ? keys : "");
+        item->badge = strdup("");
+        if (item->label == NULL || item->detail == NULL || item->badge == NULL) {
+            list.count = i + 1; /* free this partly filled row too */
+            axyne_palette_list_destroy(&list);
+            free(candidates);
+            return;
+        }
+        item->badge_color = 0x8b919b;
+        item->kind = AXYNE_PALETTE_ITEM_COMMAND;
+        item->match_start = candidates[i].start;
+        item->match_len = candidates[i].length;
+        item->payload = axyne_macos_palette_payload(info);
+        item->payload2 = 0;
+        list.count = i + 1;
+    }
+    free(candidates);
+    axyne_palette_list_destroy(&_palette.list);
+    _palette.list = list;
+    _palette.message[0] = '\0';
+    _palette.message_actionable = 0;
+    if (list.count == 0)
+        (void)snprintf(_palette.message, sizeof(_palette.message), "%s", "일치하는 명령 없음");
+    _palette.selection = 0;
+    _palette.scroll = 0;
+}
+
+/* Help > 키보드 단축키 참조 (Cmd+K Cmd+R): every macOS command with a
+ * binding in the effective key map, grouped by menu, all of its bindings. */
+- (void)showKeyboardShortcuts:(id)sender
+{
+    AxyneKeyFormat format = axyne_key_format_for(axyne_platform_current());
+    AxyneShortcutSection sections[AXYNE_COMMAND_GROUP_COUNT];
+    AxyneShortcutRow *rows;
+    char (*texts)[96];
+    size_t total = axyne_command_count(), used = 0, sectionCount = 0;
+    (void)sender;
+    if (!_keymapReady) return;
+    rows = (AxyneShortcutRow *)calloc(total, sizeof(*rows));
+    texts = (char (*)[96])calloc(total, sizeof(*texts));
+    if (rows == NULL || texts == NULL) { free(rows); free(texts); return; }
+    memset(sections, 0, sizeof(sections));
+    for (int group = 0; group < AXYNE_COMMAND_GROUP_COUNT; ++group) {
+        size_t first = used;
+        if (group == AXYNE_COMMAND_GROUP_CONTEXT) continue;
+        for (size_t i = 0; i < total; ++i) {
+            const AxyneCommandInfo *info = axyne_command_at(i);
+            AxyneKeySequence sequences[AXYNE_COMMAND_DEFAULT_KEYS];
+            size_t count, length = 0;
+            if (info == NULL || (int)info->group != group ||
+                !axyne_command_available(info->id, axyne_platform_current())) continue;
+            count = axyne_keymap_bindings(&_keymap, info->id, sequences,
+                                          AXYNE_COMMAND_DEFAULT_KEYS);
+            if (count > AXYNE_COMMAND_DEFAULT_KEYS) count = AXYNE_COMMAND_DEFAULT_KEYS;
+            if (count == 0) continue;
+            texts[used][0] = '\0';
+            for (size_t k = 0; k < count && length + 3 < sizeof(texts[used]); ++k) {
+                if (k != 0) {
+                    (void)snprintf(texts[used] + length, sizeof(texts[used]) - length, ", ");
+                    length += 2;
+                }
+                (void)axyne_key_sequence_format(&sequences[k], format,
+                    texts[used] + length, sizeof(texts[used]) - length);
+                length = strlen(texts[used]);
+            }
+            rows[used].label = axyne_command_title(info->id, axyne_platform_current());
+            rows[used].keys = texts[used];
+            ++used;
+        }
+        if (used == first) continue;
+        sections[sectionCount].title = axyne_command_group_title((AxyneCommandGroup)group);
+        sections[sectionCount].rows = &rows[first];
+        sections[sectionCount].row_count = used - first;
+        ++sectionCount;
+    }
+    axyne_shortcuts_dialog_show([self window], sections, sectionCount);
+    free(rows);
+    free(texts);
 }
 
 @end

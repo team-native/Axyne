@@ -4379,103 +4379,6 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (path != nil) [self openPath:path];
 }
 
-static NSString *axyne_macos_shortcut_text(NSString *key, NSEventModifierFlags flags)
-{
-    NSMutableString *text = [NSMutableString string];
-    unichar character;
-    if ([key length] == 0) return nil;
-    character = [key characterAtIndex:0];
-    /* AppKit treats an upper-case letter equivalent as implying Shift. */
-    if (![key isEqualToString:[key lowercaseString]]) flags |= NSEventModifierFlagShift;
-    if ((flags & NSEventModifierFlagControl) != 0) [text appendString:@"⌃"];
-    if ((flags & NSEventModifierFlagOption) != 0) [text appendString:@"⌥"];
-    if ((flags & NSEventModifierFlagShift) != 0) [text appendString:@"⇧"];
-    if ((flags & NSEventModifierFlagCommand) != 0) [text appendString:@"⌘"];
-    if (character >= NSF1FunctionKey && character <= NSF12FunctionKey)
-        [text appendFormat:@"F%d", (int)(character - NSF1FunctionKey) + 1];
-    else if (character == NSUpArrowFunctionKey) [text appendString:@"↑"];
-    else if (character == NSDownArrowFunctionKey) [text appendString:@"↓"];
-    else [text appendString:[key uppercaseString]];
-    return text;
-}
-
-/* Appends @[title, shortcut] for every menu item that carries a shortcut. */
-static void axyne_macos_collect_shortcuts(NSMenu *menu, NSMutableArray *out)
-{
-    for (NSMenuItem *item in [menu itemArray]) {
-        NSString *shortcut;
-        if ([item isSeparatorItem]) continue;
-        if ([item submenu] != nil) { axyne_macos_collect_shortcuts([item submenu], out); continue; }
-        shortcut = axyne_macos_shortcut_text([item keyEquivalent],
-            [item keyEquivalentModifierMask]);
-        if (shortcut == nil) continue;
-        [out addObject:@[[item title], shortcut]];
-    }
-}
-
-/* Shows sections (@[title, rows]; row = @[label, shortcut]) in the keyboard
- * shortcuts dialog. The C strings are borrowed from the arrays for the call. */
-static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *sections)
-{
-    size_t count = [sections count];
-    AxyneShortcutSection *converted = (AxyneShortcutSection *)calloc(
-        count != 0 ? count : 1, sizeof(*converted));
-    if (converted == NULL) return;
-    for (size_t i = 0; i < count; ++i) {
-        NSArray *section = [sections objectAtIndex:i];
-        NSArray *rows = [section objectAtIndex:1];
-        AxyneShortcutRow *convertedRows = (AxyneShortcutRow *)calloc(
-            [rows count] != 0 ? [rows count] : 1, sizeof(*convertedRows));
-        if (convertedRows == NULL) {
-            for (size_t j = 0; j < i; ++j) free((void *)converted[j].rows);
-            free(converted);
-            return;
-        }
-        for (NSUInteger row = 0; row < [rows count]; ++row) {
-            convertedRows[row].label = [[[rows objectAtIndex:row] objectAtIndex:0] UTF8String];
-            convertedRows[row].keys = [[[rows objectAtIndex:row] objectAtIndex:1] UTF8String];
-        }
-        converted[i].title = [[section objectAtIndex:0] UTF8String];
-        converted[i].rows = convertedRows;
-        converted[i].row_count = [rows count];
-    }
-    axyne_shortcuts_dialog_show(owner, converted, count);
-    for (size_t i = 0; i < count; ++i) free((void *)converted[i].rows);
-    free(converted);
-}
-
-/* Lists the shortcuts the menus actually carry, plus the effective
- * Preferences bindings (which may differ from the menu defaults). */
-- (void)showKeyboardShortcuts:(id)sender
-{
-    NSMutableArray *sections = [NSMutableArray array];
-    NSMutableArray *bindings = [NSMutableArray array];
-    (void)sender;
-    for (NSMenuItem *top in [[NSApp mainMenu] itemArray]) {
-        NSMutableArray *rows = [NSMutableArray array];
-        if ([top submenu] == nil) continue;
-        axyne_macos_collect_shortcuts([top submenu], rows);
-        if ([rows count] != 0) [sections addObject:@[[top title], rows]];
-    }
-    for (size_t i = 0; i < _preferences.binding_count; ++i) {
-        const AxyneKeyBinding *binding = &_preferences.bindings[i];
-        NSMutableString *keys = [NSMutableString string];
-        NSString *key;
-        NSString *title;
-        if (!binding->enabled || binding->key[0] == '\0') continue;
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_CONTROL) != 0) [keys appendString:@"⌃"];
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0) [keys appendString:@"⌥"];
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0) [keys appendString:@"⇧"];
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_COMMAND) != 0) [keys appendString:@"⌘"];
-        key = [NSString stringWithUTF8String:binding->key];
-        title = [NSString stringWithUTF8String:axyne_dialogs_action_title((int)binding->action)];
-        [keys appendString:key != nil ? [key uppercaseString] : @""];
-        [bindings addObject:@[title != nil ? title : @"", keys]];
-    }
-    if ([bindings count] != 0) [sections addObject:@[@"환경 설정 키 바인딩", bindings]];
-    axyne_macos_show_shortcut_sections([self window], sections);
-}
-
 - (void)reportIssue:(id)sender
 {
     (void)sender;
@@ -7064,6 +6967,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
         (const char *const *)paths, count, [initial UTF8String]);
     free(paths);
     if (status != AXYNE_STATUS_OK) return;
+    [self paletteRebuildCommandRows]; /* "> " rows come from the registry */
 
     _paletteOverlay = [[AxynePaletteOverlay alloc] initWithFrame:[self bounds]];
     [_paletteOverlay setController:&_palette];
@@ -7162,6 +7066,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     if (!_palette.active) return;
     const char *text = [[_paletteField stringValue] UTF8String];
     (void)axyne_palette_ctl_set_input(&_palette, text != NULL ? text : "");
+    [self paletteRebuildCommandRows];
     [_paletteOverlay setNeedsDisplay:YES];
 }
 
@@ -7310,6 +7215,19 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 {
     AxyneDocument *document = [self activeDocument];
     BOOL gitReady = _explorer.root != NULL && _gitProcess == NULL && !_gitBatchBusy;
+    AxyneCommandId registry;
+    /* Registry rows without a palette id, and palette commands a feature
+     * category now implements, run through the command routing. */
+    if ((int)command >= AXYNE_MAC_PALETTE_REGISTRY_BASE) {
+        (void)[self runCommand:(AxyneCommandId)((int)command - AXYNE_MAC_PALETTE_REGISTRY_BASE)];
+        return;
+    }
+    registry = axyne_command_from_palette((int)command);
+    if (registry != AXYNE_COMMAND_NONE &&
+        [self featureValidateCommand:registry item:nil] != AXYNE_MAC_COMMAND_UNHANDLED) {
+        (void)[self runCommand:registry];
+        return;
+    }
     switch (command) {
     case AXYNE_PALETTE_COMMAND_NEW_FILE: [self newDocument:nil]; break;
     case AXYNE_PALETTE_COMMAND_OPEN_FILE: [self openDocument:nil]; break;

@@ -152,6 +152,10 @@ typedef enum AxyneBottomPanelTab {
     AXYNE_BOTTOM_PANEL_TAB_COUNT
 } AxyneBottomPanelTab;
 
+/* Command palette rows built from the registry carry this base plus the
+ * AxyneCommandId as payload when the command has no palette id. */
+enum { AXYNE_MAC_PALETTE_REGISTRY_BASE = 1000 };
+
 /* Result of a feature category's validate hook. */
 typedef enum AxyneMacCommandState {
     AXYNE_MAC_COMMAND_UNHANDLED = -1, /* not implemented by this category */
@@ -659,6 +663,8 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (NSEvent *)chordMonitorEvent:(NSEvent *)event;
 - (void)syncChordHint;
 - (void)teardownKeyboard;
+/* Command mode of the palette from the registry (after every input change). */
+- (void)paletteRebuildCommandRows;
 @end
 
 /* ---- feature categories ----------------------------------------------------
