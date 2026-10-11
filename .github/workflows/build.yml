@@ -134,20 +134,16 @@ jobs:
             -DAXYNE_APP_BUNDLE=Axyne.app \
             -DAXYNE_APP_EXECUTABLE=Axyne \
             -P packaging/validation/validate-install.cmake
-          mkdir -p "$package_directory/dragndrop"
-          pkgbuild \
-            --root "$staging_directory" \
-            --identifier com.axyne.ide \
-            --version 0.1.0 \
-            --install-location /Applications \
-            "$package_directory/Axyne-0.1.0-macOS.pkg"
-          package_payload="$(pkgutil --payload-files "$package_directory/Axyne-0.1.0-macOS.pkg")"
-          if ! grep -q 'Axyne.app/' <<< "$package_payload"; then
-            echo 'The macOS pkg has no Axyne.app payload.' >&2
+          cpack --config build/CPackConfig.cmake -G productbuild -C Release \
+            -B "$package_directory"
+          packages=("$package_directory"/*.pkg)
+          if [ "${#packages[@]}" -ne 1 ] || [ ! -f "${packages[0]}" ]; then
+            echo 'CPack must produce exactly one productbuild installer.' >&2
             exit 1
           fi
+          python3 packaging/validation/validate-productbuild.py \
+            "${packages[0]}" "$staging_directory"
           cpack --config build/CPackConfig.cmake -G DragNDrop -C Release \
-            -D CPACK_PACKAGING_INSTALL_PREFIX=/ \
             -B "$package_directory/dragndrop"
 
           if cpack --config build/CPackConfig.cmake -G productbuild -C Debug -B "$package_directory/debug" >"$RUNNER_TEMP/axyne-cpack-debug.log" 2>&1; then
@@ -160,7 +156,7 @@ jobs:
             exit 1
           fi
 
-          cp "$package_directory/Axyne-0.1.0-macOS.pkg" "$artifact_directory/"
+          cp "${packages[0]}" "$artifact_directory/"
           find "$package_directory/dragndrop" \
             -maxdepth 1 -type f -name '*.dmg' \
             -exec cp {} "$artifact_directory/" \;
