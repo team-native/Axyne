@@ -1,9 +1,12 @@
 #include "ui_windows_internal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "axyne/palette.h"
 #include "axyne/ui_design.h"
+#include "../../app_dialogs.h"
 
 /* Base registry/feature glue of the Windows UI: the feature table and the
  * hook fan-out that ui_windows.c calls at fixed points, registry command
@@ -627,4 +630,181 @@ int axyne_win_palette_key(AxyneWindowState *state, WPARAM virtual_key)
         return 0;
     (void)axyne_win_dispatch(state, command);
     return 1;
+}
+
+/* ---- command palette and shortcut reference ------------------------------- */
+
+/* Registry title without a trailing "..." / "…" (menus keep it). */
+static void axyne_win_plain_title(AxyneCommandId id, char *buffer, size_t capacity)
+{
+    size_t length;
+    (void)snprintf(buffer, capacity, "%s", axyne_command_title(id, AXYNE_WIN_COMMAND_PLATFORM));
+    length = strlen(buffer);
+    if (length >= 3 && strcmp(buffer + length - 3, "...") == 0) buffer[length - 3] = '\0';
+    else if (length >= 3 && strcmp(buffer + length - 3, "\xe2\x80\xa6") == 0)
+        buffer[length - 3] = '\0';
+    length = strlen(buffer);
+    while (length > 0 && buffer[length - 1] == ' ') buffer[--length] = '\0';
+}
+
+typedef struct AxyneWinPaletteCandidate {
+    AxyneCommandId id;
+    int score;
+    size_t order;
+    size_t start, length;
+} AxyneWinPaletteCandidate;
+
+static int axyne_win_palette_compare(const void *left, const void *right)
+{
+    const AxyneWinPaletteCandidate *a = (const AxyneWinPaletteCandidate *)left;
+    const AxyneWinPaletteCandidate *b = (const AxyneWinPaletteCandidate *)right;
+    if (a->score != b->score) return a->score > b->score ? -1 : 1;
+    if (a->order != b->order) return a->order < b->order ? -1 : 1;
+    return 0;
+}
+
+static char *axyne_win_strdup(const char *text)
+{
+    size_t length = strlen(text);
+    char *copy = (char *)malloc(length + 1);
+    if (copy != NULL) memcpy(copy, text, length + 1);
+    return copy;
+}
+
+void axyne_win_palette_commands(AxyneWindowState *state)
+{
+    AxynePaletteController *palette;
+    AxyneWinPaletteCandidate *candidates;
+    const char *query;
+    size_t i, count = 0, keep;
+    if (state == NULL) return;
+    palette = &state->palette;
+    if (!palette->active || palette->mode != AXYNE_PALETTE_MODE_COMMAND) return;
+    query = palette->input != NULL ? palette->input + palette->query_offset : "";
+    candidates = (AxyneWinPaletteCandidate *)calloc(axyne_command_count() + 1,
+                                                    sizeof(*candidates));
+    if (candidates == NULL) return;
+    for (i = 0; i < axyne_command_count(); ++i) {
+        const AxyneCommandInfo *info = axyne_command_at(i);
+        AxynePaletteMatch title_match, keyword_match;
+        char title[160];
+        int title_hit, keyword_hit;
+        if (info == NULL || (info->flags & AXYNE_COMMAND_FLAG_PALETTE) == 0 ||
+            !axyne_command_available(info->id, AXYNE_WIN_COMMAND_PLATFORM) ||
+            !axyne_win_command_state(state, info->id, NULL))
+            continue;
+        axyne_win_plain_title(info->id, title, sizeof(title));
+        memset(&title_match, 0, sizeof(title_match));
+        memset(&keyword_match, 0, sizeof(keyword_match));
+        title_hit = axyne_palette_match(title, query, &title_match);
+        keyword_hit = query[0] != '\0' && info->keywords != NULL &&
+                      axyne_palette_match(info->keywords, query, &keyword_match);
+        if (!title_hit && !keyword_hit) continue;
+        candidates[count].id = info->id;
+        candidates[count].order = i;
+        /* Same ranking as the shared palette: the title match unless the
+         * keyword match is clearly better (keywords count half). */
+        if (title_hit && (!keyword_hit || title_match.score >= keyword_match.score / 2)) {
+            candidates[count].score = title_match.score;
+            candidates[count].start = title_match.start;
+            candidates[count].length = title_match.length;
+        } else {
+            candidates[count].score = keyword_match.score / 2 > 0 ? keyword_match.score / 2 : 1;
+        }
+        ++count;
+    }
+    if (count > 1) qsort(candidates, count, sizeof(*candidates), axyne_win_palette_compare);
+    keep = count < AXYNE_PALETTE_MAX_ITEMS ? count : AXYNE_PALETTE_MAX_ITEMS;
+    axyne_palette_list_destroy(&palette->list);
+    palette->message[0] = '\0';
+    palette->message_actionable = 0;
+    palette->selection = 0;
+    palette->scroll = 0;
+    if (keep > 0)
+        palette->list.items = (AxynePaletteItem *)calloc(keep, sizeof(*palette->list.items));
+    for (i = 0; i < keep && palette->list.items != NULL; ++i) {
+        const AxyneCommandInfo *info = axyne_command_info(candidates[i].id);
+        AxynePaletteItem *item = &palette->list.items[i];
+        char title[160], keys[64];
+        axyne_win_plain_title(candidates[i].id, title, sizeof(title));
+        (void)axyne_win_command_key_text(state, candidates[i].id, keys, sizeof(keys));
+        item->label = axyne_win_strdup(title);
+        item->detail = axyne_win_strdup(keys);
+        item->badge = axyne_win_strdup("");
+        if (item->label == NULL || item->detail == NULL || item->badge == NULL) {
+            free(item->label);
+            free(item->detail);
+            free(item->badge);
+            memset(item, 0, sizeof(*item));
+            break;
+        }
+        item->badge_color = 0x8b919b;
+        item->kind = AXYNE_PALETTE_ITEM_COMMAND;
+        item->match_start = candidates[i].length != 0 ? candidates[i].start : 0;
+        item->match_len = candidates[i].length;
+        item->payload = info->palette_id != 0
+            ? info->palette_id : AXYNE_WIN_PALETTE_REGISTRY_PAYLOAD + (int)info->id;
+        ++palette->list.count;
+    }
+    if (palette->list.count == 0) {
+        free(palette->list.items);
+        palette->list.items = NULL;
+        (void)snprintf(palette->message, sizeof(palette->message), "%s", "일치하는 명령 없음");
+    }
+    free(candidates);
+}
+
+void axyne_win_show_shortcuts(AxyneWindowState *state)
+{
+    enum { ROW_TEXT = 160, KEY_TEXT = 64 };
+    size_t total = axyne_command_count() * AXYNE_COMMAND_DEFAULT_KEYS;
+    AxyneShortcutRow *rows;
+    char (*labels)[ROW_TEXT];
+    char (*keys)[KEY_TEXT];
+    AxyneShortcutSection sections[AXYNE_COMMAND_GROUP_CONTEXT];
+    size_t section_count = 0, used = 0;
+    int group;
+    if (state == NULL || !state->keymap_ready) return;
+    rows = (AxyneShortcutRow *)calloc(total, sizeof(*rows));
+    labels = (char (*)[ROW_TEXT])calloc(total, sizeof(*labels));
+    keys = (char (*)[KEY_TEXT])calloc(total, sizeof(*keys));
+    if (rows == NULL || labels == NULL || keys == NULL) {
+        free(rows); free(labels); free(keys);
+        return;
+    }
+    for (group = 0; group < (int)AXYNE_COMMAND_GROUP_CONTEXT; ++group) {
+        size_t first = used, i;
+        for (i = 0; i < axyne_command_count() && used < total; ++i) {
+            const AxyneCommandInfo *info = axyne_command_at(i);
+            AxyneKeySequence bindings[AXYNE_COMMAND_DEFAULT_KEYS];
+            size_t count, k;
+            if (info == NULL || (int)info->group != group ||
+                !axyne_command_available(info->id, AXYNE_WIN_COMMAND_PLATFORM))
+                continue;
+            count = axyne_keymap_bindings(&state->keymap, info->id, bindings,
+                                          AXYNE_COMMAND_DEFAULT_KEYS);
+            if (count > AXYNE_COMMAND_DEFAULT_KEYS) count = AXYNE_COMMAND_DEFAULT_KEYS;
+            for (k = 0; k < count && used < total; ++k) {
+                char *text = keys[used];
+                size_t c;
+                (void)axyne_key_sequence_format(&bindings[k], AXYNE_KEY_FORMAT_WINDOWS,
+                                                text, KEY_TEXT);
+                /* The dialog splits chips at '+': a chord reads Ctrl+K+Ctrl+O. */
+                for (c = 0; text[c] != '\0'; ++c) if (text[c] == ' ') text[c] = '+';
+                axyne_win_plain_title(info->id, labels[used], ROW_TEXT);
+                rows[used].label = labels[used];
+                rows[used].keys = text;
+                ++used;
+            }
+        }
+        if (used == first) continue;
+        sections[section_count].title = axyne_command_group_title((AxyneCommandGroup)group);
+        sections[section_count].rows = rows + first;
+        sections[section_count].row_count = used - first;
+        ++section_count;
+    }
+    axyne_shortcuts_dialog_show(state->main_window, sections, section_count);
+    free(rows);
+    free(labels);
+    free(keys);
 }

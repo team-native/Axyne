@@ -460,6 +460,18 @@ void axyne_win_chord_timer(AxyneWindowState *state);
 int axyne_win_debugging(AxyneWindowState *state);
 /* Sets (NULL or "" clears) the transient status-bar text. */
 void axyne_win_show_status_text(AxyneWindowState *state, const char *utf8);
+
+/* Command palette ">" mode lists the registry: Windows commands flagged
+ * PALETTE that somebody implements, titles without the trailing "...",
+ * key text from the key map. Rows of the 25 palette-table commands carry
+ * their AxynePaletteCommandId (so 파일/줄/심볼 이동 switch the mode as before);
+ * the others carry AXYNE_WIN_PALETTE_REGISTRY_PAYLOAD + AxyneCommandId.
+ * Called after the controller rebuilt its list (open, input change). */
+enum { AXYNE_WIN_PALETTE_REGISTRY_PAYLOAD = 1000 };
+void axyne_win_palette_commands(AxyneWindowState *state);
+/* Help > 키보드 단축키 참조: every bound command per menu group, from the
+ * effective key map. */
+void axyne_win_show_shortcuts(AxyneWindowState *state);
 /* Fills the popup of menu-bar item `index` (0 파일 ... 6 도움말). */
 void axyne_win_menu_bar_fill(AxyneWindowState *state, int index, AxyneWinMenu *menu);
 

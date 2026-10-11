@@ -2984,67 +2984,6 @@ static void axyne_toggle_fullscreen(HWND window, AxyneWindowState *state)
     }
 }
 
-/* Appends a row whose chips are `keys` (UTF-8, "Ctrl+Shift+S"). */
-static void axyne_shortcut_row(AxyneShortcutRow *rows, size_t *count,
-                               const char *label, const char *keys)
-{
-    rows[*count].label = label;
-    rows[*count].keys = keys;
-    ++*count;
-}
-
-/* Lists the shortcuts implemented here plus the effective Preferences
- * bindings (which can differ from the defaults shown in the menus). */
-static void axyne_show_shortcuts(HWND window, AxyneWindowState *state)
-{
-    static const AxyneShortcutRow fixed[] = {
-        {"줄로 이동", "Ctrl+G"}, {"줄 주석 토글", "Ctrl+/"},
-        {"줄 복제", "Ctrl+D"}, {"줄 위로 이동", "Alt+Up"},
-        {"줄 아래로 이동", "Alt+Down"}, {"들여쓰기", "Tab"},
-        {"내어쓰기", "Shift+Tab"}, {"폴더 열기", "Ctrl+Shift+O"},
-        {"탐색기", "Ctrl+Shift+E"}, {"Git 패널", "Ctrl+Shift+G"},
-        {"하단 패널", "Ctrl+J"},
-        {"출력", "Ctrl+Shift+U"}, {"문제", "Ctrl+Shift+M"},
-        {"터미널", "Ctrl+`"}, {"확대", "Ctrl+="}, {"축소", "Ctrl+-"},
-        {"기본 크기", "Ctrl+0"}, {"자동 줄 바꿈", "Alt+Z"},
-        {"전체 화면 (디버깅 중에는 한 단계씩 코드 실행)", "F11"},
-        {"프로시저 나가기", "Shift+F11"}, {"디버깅 중지", "Shift+F5"},
-        {"모든 중단점 삭제", "Ctrl+Shift+F9"},
-        {"다른 이름으로 저장", "Ctrl+Shift+S"},
-        {"정의로 이동", "Ctrl+Alt+D"}, {"참조 찾기", "Ctrl+Alt+R"}
-    };
-    AxyneShortcutRow bindings[AXYNE_ACTION_COUNT];
-    char keys[AXYNE_ACTION_COUNT][64];
-    size_t binding_rows = 0;
-    AxyneShortcutSection sections[2];
-    size_t i;
-    for (i = 0; i < state->preferences.binding_count && binding_rows < AXYNE_ACTION_COUNT; ++i) {
-        const AxyneKeyBinding *binding = &state->preferences.bindings[i];
-        char *text = keys[binding_rows];
-        size_t k, used = 0;
-        if (!binding->enabled || binding->key[0] == '\0') continue;
-        text[0] = '\0';
-        if ((binding->modifiers & (AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_COMMAND)) != 0)
-            used += (size_t)snprintf(text + used, 64 - used, "Ctrl+");
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_ALT) != 0)
-            used += (size_t)snprintf(text + used, 64 - used, "Alt+");
-        if ((binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0)
-            used += (size_t)snprintf(text + used, 64 - used, "Shift+");
-        for (k = 0; binding->key[k] != '\0' && used + 1 < 64; ++k)
-            text[used++] = (char)toupper((unsigned char)binding->key[k]);
-        text[used] = '\0';
-        axyne_shortcut_row(bindings, &binding_rows,
-                           axyne_dialogs_action_title((int)binding->action), text);
-    }
-    sections[0].title = "단축키";
-    sections[0].rows = fixed;
-    sections[0].row_count = sizeof(fixed) / sizeof(fixed[0]);
-    sections[1].title = "환경 설정 키 바인딩";
-    sections[1].rows = bindings;
-    sections[1].row_count = binding_rows;
-    axyne_shortcuts_dialog_show(window, sections, 2);
-}
-
 static int axyne_action_command(HWND window, AxyneWindowState *state, UINT command)
 {
     void *editor = state->editor;
@@ -3131,7 +3070,7 @@ static int axyne_action_command(HWND window, AxyneWindowState *state, UINT comma
     case AXYNE_CMD_OPEN_PREFERENCES_FILE:
         axyne_open_settings_json(window, state);
         break;
-    case AXYNE_CMD_SHORTCUTS: axyne_show_shortcuts(window, state); break;
+    case AXYNE_CMD_SHORTCUTS: axyne_win_show_shortcuts(state); break;
     case AXYNE_CMD_REPORT_ISSUE:
         if ((INT_PTR)ShellExecuteW(window, L"open",
                 L"https://github.com/team-native/Axyne/issues/new", NULL, NULL,
@@ -5143,6 +5082,7 @@ static void axyne_palette_text_changed(HWND window, AxyneWindowState *state)
     if (text == NULL) return;
     (void)axyne_palette_ctl_set_input(&state->palette, text);
     free(text);
+    axyne_win_palette_commands(state);
     axyne_palette_refresh(window, state);
 }
 
@@ -5198,6 +5138,10 @@ static void axyne_palette_execute(HWND window, AxyneWindowState *state, size_t r
         axyne_open_document(window, state, action.path);
     else if (action.kind == AXYNE_PALETTE_ACTION_GOTO)
         axyne_palette_goto(state, action.line, action.column);
+    else if (action.kind == AXYNE_PALETTE_ACTION_COMMAND &&
+             (int)action.command >= AXYNE_WIN_PALETTE_REGISTRY_PAYLOAD)
+        (void)axyne_win_execute(state, (AxyneCommandId)((int)action.command -
+                                                        AXYNE_WIN_PALETTE_REGISTRY_PAYLOAD));
     else if (action.kind == AXYNE_PALETTE_ACTION_COMMAND)
         axyne_palette_run_command(window, state, action.command);
     axyne_palette_action_destroy(&action);
@@ -5452,6 +5396,7 @@ static void axyne_palette_open(HWND window, AxyneWindowState *state, const char 
         return;
     }
     free(paths);
+    axyne_win_palette_commands(state);
     state->palette_wheel_remainder = 0;
     axyne_palette_set_text(state, initial);
     axyne_palette_refresh(window, state);
