@@ -6720,7 +6720,6 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
         state->explorer.root != NULL &&
         job->workspace != NULL && strcmp(job->workspace, state->explorer.root) == 0) {
         axyne_git_changes_free(&git->changes);
-        git->graph_width_valid = 0; /* rows may have been replaced */
         if (job->have_changes && job->kind == AXYNE_GITJOB_REFRESH) {
             int current = job->graph_count == axyne_git_graph_request(git);
             if (!job->have_graph && git->graph_loading && git->graph_ok &&
@@ -6728,6 +6727,14 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
                 /* Loading more failed: keep the graph that is shown. */
                 if (current) git->graph_limit = git->graph_loaded_limit;
             } else {
+                /* A reload with the same rows (stage, file watch, refresh)
+                 * keeps the measured width; only chip rows are measured
+                 * again. Other rows are measured once more. */
+                if (git->graph_ok == job->have_graph &&
+                    axyne_git_graph_same_rows(&git->graph, &job->graph))
+                    git->graph_width_list = -1;
+                else
+                    git->graph_width_valid = 0;
                 axyne_git_graph_free(&git->graph);
                 git->graph = job->graph; /* moved, never copied */
                 memset(&job->graph, 0, sizeof(job->graph));
@@ -6752,6 +6759,7 @@ static void axyne_git_panel_done(HWND window, AxyneWindowState *state,
             }
         } else if (!job->have_changes) {
             axyne_git_graph_free(&git->graph);
+            git->graph_width_valid = 0;
             git->graph_ok = 0;
             git->graph_loaded_limit = 0;
             git->graph_loading = 0;
@@ -8792,29 +8800,35 @@ static void axyne_problems_destroy_ui(AxyneWindowState *state)
 
 /* Horizontal wheel (tilt, touchpad swipe, Shift+wheel) over the graph list
  * scrolls the commit rows sideways; `delta` > 0 moves towards the right end.
- * Returns 0 when the point is not over the graph. */
+ * Returns 0 when the point is not over the graph or the rows fit the list
+ * (Shift+wheel then scrolls vertically as usual). */
 static int axyne_git_panel_hwheel(HWND window, AxyneWindowState *state, POINT point,
                                   int delta)
 {
     AxyneGitPanelUi *git = &state->git_panel;
     AxyneGitLayout layout;
     HDC dc;
-    int pixels;
-    if (state->explorer.root == NULL || !git->loaded || !git->repo_ok) return 0;
+    int pixels, list_width, content;
+    if (state->explorer.root == NULL || !git->loaded || !git->repo_ok ||
+        !git->graph_ok || git->graph.count == 0) return 0;
     axyne_git_panel_layout(state, &layout);
     if (!layout.fits || !PtInRect(&layout.graph_list, point)) return 0;
+    list_width = layout.graph_list.right - layout.graph_list.left;
+    dc = GetDC(window);
+    if (dc == NULL) return 0;
+    content = axyne_git_graph_width(dc, state, list_width);
+    if (content <= list_width) {
+        git->graph_hscroll = 0;
+        git->hwheel_remainder = 0;
+        ReleaseDC(window, dc);
+        return 0;
+    }
     git->hwheel_remainder += delta * AXYNE_GIT_HSCROLL_STEP;
     pixels = git->hwheel_remainder / WHEEL_DELTA;
     git->hwheel_remainder %= WHEEL_DELTA;
     git->graph_hscroll += pixels;
-    dc = GetDC(window);
-    if (dc != NULL) {
-        axyne_git_graph_clamp_hscroll(dc, state,
-                                      layout.graph_list.right - layout.graph_list.left);
-        ReleaseDC(window, dc);
-    } else if (git->graph_hscroll < 0) {
-        git->graph_hscroll = 0;
-    }
+    axyne_git_graph_clamp_hscroll(dc, state, list_width);
+    ReleaseDC(window, dc);
     InvalidateRect(window, NULL, FALSE);
     return 1;
 }
@@ -9613,7 +9627,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 if (axyne_git_panel_hwheel(window, state, point, delta)) return 0;
                 break;
             }
-            /* Shift+wheel over the graph scrolls sideways (wheel down = right). */
+            /* Shift+wheel over a graph wider than the list scrolls sideways
+             * (wheel down = right); otherwise it scrolls vertically. */
             if ((GET_KEYSTATE_WPARAM(w_param) & MK_SHIFT) != 0 &&
                 axyne_git_panel_hwheel(window, state, point, -delta))
                 return 0;
@@ -9674,6 +9689,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 git->graph_limit = git->graph_loaded_limit = git->graph_loading = 0;
                 git->graph_scroll = 0;
                 git->graph_hscroll = 0;
+                git->graph_width_valid = 0;
                 axyne_git_panel_refresh(window, state);
                 InvalidateRect(window, NULL, FALSE);
             }
