@@ -462,6 +462,7 @@ typedef struct GpItem {
     BOOL _graphWidthValid;        /* _graphWidthBase matches the rows and expansion */
     CGFloat _graphWidth;          /* scrollable width of the rows for _graphWidthFor */
     CGFloat _graphWidthFor;       /* list width _graphWidth was measured for; -1 = stale */
+    int _scrollAxis;              /* trackpad gesture axis: 0 undecided, 1 vertical, 2 horizontal */
     int _graphLimit;              /* commits requested by reloads; 0 = default */
     AxyneGitGraphMode _graphMode;
     NSSegmentedControl *_graphSelector;
@@ -983,11 +984,11 @@ typedef struct GpItem {
     _loading = NO;
     if (current) {
         BOOL requested = load->graphCount == [self graphRequest];
-        _graphWidthValid = NO; /* rows may be replaced */
         axyne_git_changes_free(&_changes);
         _hasStaged = 0;
         if (load->changesStatus != AXYNE_STATUS_OK) {
             axyne_git_graph_free(&_graph);
+            _graphWidthValid = NO;
             _graphLoadedLimit = 0;
             _graphLoadingMore = NO;
         }
@@ -1001,6 +1002,13 @@ typedef struct GpItem {
                 /* Loading more failed: keep the graph that is shown. */
                 if (requested) _graphLimit = _graphLoadedLimit;
             } else {
+                /* A reload with the same rows (stage, file watch, refresh)
+                 * keeps the measured width; only chip rows are measured
+                 * again. Other rows are measured once more. */
+                if (axyne_git_graph_same_rows(&_graph, &load->graph))
+                    _graphWidthFor = -1;
+                else
+                    _graphWidthValid = NO;
                 axyne_git_graph_free(&_graph);
                 _graph = load->graph; /* moved, never copied */
                 memset(&load->graph, 0, sizeof(load->graph));
@@ -1336,22 +1344,38 @@ static char *gp_diff_title(const char *prefix, const char *path)
     GpGeometry g = [self geometry];
     CGFloat delta = [event scrollingDeltaY];
     CGFloat across = [event scrollingDeltaX];
-    if (![event hasPreciseScrollingDeltas]) {
-        /* A plain wheel with Shift held scrolls the graph sideways when the
-         * system did not already turn it into a horizontal delta. */
-        if (across == 0 && ([event modifierFlags] & NSEventModifierFlagShift) != 0 &&
-            NSPointInRect(point, g.graph)) {
-            across = delta;
-            delta = 0;
+    BOOL overGraph = NSPointInRect(point, g.graph);
+    if ([event hasPreciseScrollingDeltas]) {
+        /* A trackpad gesture follows its predominant axis, decided when it
+         * begins and kept through its momentum (like NSScrollView's
+         * usesPredominantAxisScrolling). Events outside a gesture decide
+         * one by one. */
+        NSEventPhase phase = [event phase];
+        if ((phase & (NSEventPhaseBegan | NSEventPhaseMayBegin)) != 0 ||
+            (phase == NSEventPhaseNone && [event momentumPhase] == NSEventPhaseNone))
+            _scrollAxis = 0;
+        if (_scrollAxis == 0 && (delta != 0 || across != 0))
+            _scrollAxis = fabs(across) > fabs(delta) ? 2 : 1;
+        if (_scrollAxis == 1) across = 0;
+        else if (_scrollAxis == 2) delta = 0;
+    } else {
+        /* Shift+wheel over a graph wider than the list scrolls it sideways
+         * (the system may already have turned the wheel into a horizontal
+         * delta); over rows that fit it scrolls vertically as usual. */
+        if (overGraph && ([event modifierFlags] & NSEventModifierFlagShift) != 0) {
+            CGFloat wheel = across != 0 ? across : delta;
+            BOOL wide = [self graphContentWidthForList:NSWidth(g.graph)] > NSWidth(g.graph);
+            across = wide ? wheel : 0;
+            delta = wide ? 0 : wheel;
         }
         delta *= kGpRow;
         across *= kGpHScrollStep;
     }
     if (NSPointInRect(point, g.changes)) {
         _changesScroll -= delta;
-    } else if (NSPointInRect(point, g.graph)) {
-        /* Trackpad swipes may carry both axes; the rows scroll sideways
-         * while the header and "더 불러오기" stay put. */
+    } else if (overGraph) {
+        /* The rows scroll sideways while the header and "더 불러오기" stay
+         * put. */
         _graphScroll -= delta;
         _graphHScroll -= across;
     } else {
