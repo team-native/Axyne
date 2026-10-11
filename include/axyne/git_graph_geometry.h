@@ -13,16 +13,6 @@ static inline double axyne_git_graph_strip_width(int lanes, double lane_width)
     return lanes * lane_width;
 }
 
-/* Legacy compressed cell width, kept only until the native renderers move to
- * fixed cells with horizontal scrolling. */
-static inline double axyne_git_graph_lane_width(int lanes, double preferred,
-                                               double strip_limit)
-{
-    if (lanes < 1) lanes = 1;
-    if (strip_limit < 0) strip_limit = 0;
-    return preferred * lanes <= strip_limit ? preferred : strip_limit / lanes;
-}
-
 /* Upper bound on the drawn width of one row text (subject, author line, file
  * name): longer text ends in an ellipsis there rather than widening the
  * scrollable graph without limit. */
