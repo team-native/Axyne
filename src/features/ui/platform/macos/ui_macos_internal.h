@@ -203,6 +203,13 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
      * bindings); rebuilt whenever the bindings change. */
     AxyneKeymap _keymap;
     BOOL _keymapReady;
+    /* Two-stroke chords (Cmd+K ...): status-bar hint while the second
+     * stroke is awaited, a local key monitor that catches that stroke in
+     * any control of the window, and the expiry check (assign-only boxes). */
+    NSString *_chordHint;
+    id _chordMonitor;
+    AxyneDiscoveryBox *_chordMonitorBox;
+    AxyneDiscoveryBox *_chordTimerBox;
     NSButton *_clearOutput;
     NSScrollView *_terminalScroll;
     /* Problems panel: the model (LSP diagnostics + build output) and the
@@ -645,6 +652,13 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (BOOL)runCommand:(AxyneCommandId)command;
 /* Action of every registry menu item; the sender's tag is the command. */
 - (void)performCommand:(id)sender;
+/* Keyboard: feeds a key-down to the key map (debug context while a session
+ * runs) and runs the bound command. YES when the key was consumed. */
+- (BOOL)handleKeyEvent:(NSEvent *)event;
+/* Pending-chord plumbing (hint, monitor, 1.5 s expiry). */
+- (NSEvent *)chordMonitorEvent:(NSEvent *)event;
+- (void)syncChordHint;
+- (void)teardownKeyboard;
 @end
 
 /* ---- feature categories ----------------------------------------------------

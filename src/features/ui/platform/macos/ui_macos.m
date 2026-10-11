@@ -1350,53 +1350,6 @@ static char *axyne_macos_preferences_read_path(const char *writePath)
         [[file stringByDeletingLastPathComponent] fileSystemRepresentation]));
 }
 
-static BOOL axyne_macos_binding_matches(const AxynePreferences *preferences,
-                                        AxynePreferenceAction action,
-                                        NSString *key, NSEvent *event)
-{
-    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
-        preferences, action);
-    unsigned int modifiers = 0;
-    NSString *expected;
-    if (binding == NULL || !binding->enabled) return NO;
-    if (([event modifierFlags] & NSEventModifierFlagCommand) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_COMMAND;
-    if (([event modifierFlags] & NSEventModifierFlagControl) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
-    if (([event modifierFlags] & NSEventModifierFlagShift) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
-    if (([event modifierFlags] & NSEventModifierFlagOption) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_ALT;
-    if (binding->modifiers != modifiers) return NO;
-    expected = [[NSString stringWithUTF8String:binding->key] lowercaseString];
-    if ([expected isEqualToString:@"f5"])
-        return [event keyCode] == 96;
-    return [expected isEqualToString:[key lowercaseString]];
-}
-
-/* Cmd+Shift+P: the quick-file binding plus Shift opens the palette with ">". */
-static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preferences,
-                                              NSString *key, NSEvent *event)
-{
-    const AxyneKeyBinding *binding = axyne_preferences_find_binding(
-        preferences, AXYNE_ACTION_QUICK_FILE);
-    unsigned int modifiers = 0;
-    if (binding == NULL || !binding->enabled || (binding->modifiers & AXYNE_KEY_MODIFIER_SHIFT) != 0)
-        return NO;
-    if (([event modifierFlags] & NSEventModifierFlagCommand) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_COMMAND;
-    if (([event modifierFlags] & NSEventModifierFlagControl) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
-    if (([event modifierFlags] & NSEventModifierFlagShift) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
-    if (([event modifierFlags] & NSEventModifierFlagOption) != 0)
-        modifiers |= AXYNE_KEY_MODIFIER_ALT;
-    if (modifiers != (binding->modifiers | AXYNE_KEY_MODIFIER_SHIFT)) return NO;
-    return [[[NSString stringWithUTF8String:binding->key] lowercaseString]
-        isEqualToString:[key lowercaseString]];
-}
-
-
 static int axyne_macos_palette_document(void *user, char **path, char **text,
                                         size_t *length, size_t *lineCount);
 
@@ -5026,20 +4979,12 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     [self setNeedsDisplay:YES];
 }
 
+/* Every key equivalent goes through the effective key map first (see
+ * -handleKeyEvent: in ui_commands_macos.m); unmatched keys and disabled
+ * commands fall through to AppKit and the menus. */
 - (BOOL)performKeyEquivalent:(NSEvent *)event
 {
-    NSString *key = [event charactersIgnoringModifiers];
-    if (axyne_macos_palette_shift_matches(&_preferences, key, event)) { [self openPaletteWithInput:@">"]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_SEARCH_WORKSPACE, key, event)) { [self searchFolder:NO]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_FIND, key, event)) { [self findOrReplace:NO]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_REPLACE, key, event)) { [self findOrReplace:YES]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_QUICK_FILE, key, event)) { [self openPaletteWithInput:@""]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_NEW, key, event)) { [self newDocument:nil]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_OPEN, key, event)) { [self openDocument:nil]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_SAVE, key, event)) { [self saveDocument:nil]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_CLOSE, key, event)) { [self closeDocument:nil]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_BUILD, key, event)) { [self buildDocument:nil]; return YES; }
-    if (axyne_macos_binding_matches(&_preferences, AXYNE_ACTION_RUN, key, event)) { [self runDocument:nil]; return YES; }
+    if ([self handleKeyEvent:event]) return YES;
     return [super performKeyEquivalent:event];
 }
 
@@ -6883,9 +6828,15 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
 {
     NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"✗ 실행 실패 (%d)", _lastExitCode] :
         (_activeAction != 0 ? @"● 실행 중" : (_hasExitStatus ? @"✓ 실행 완료" : @"준비"));
-    [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
-        color:_lastExitFailed ? axyne_preference_color(0xe5a445) :
-              (_hasExitStatus ? axyne_preference_color(0xa3c98a) : muted) family:@"SF Pro Text"];
+    if (_chordHint != nil) {
+        /* A pending Cmd+K chord replaces the run state until it resolves. */
+        [self drawLabel:_chordHint at:NSMakePoint(12, statusTop + 5) size:11
+            color:text family:@"SF Pro Text"];
+    } else {
+        [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
+            color:_lastExitFailed ? axyne_preference_color(0xe5a445) :
+                  (_hasExitStatus ? axyne_preference_color(0xa3c98a) : muted) family:@"SF Pro Text"];
+    }
     if (![self isEmptyState]) {
         /* No editor position in the empty state, so the whole editing
          * summary (line/column, indent style, encoding) stays blank. */
@@ -7055,6 +7006,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_editorLoadError release];
     free(_globalPreferencesPath);
     free(_workspacePreferencesPath);
+    [self teardownKeyboard];
     axyne_keymap_destroy(&_keymap);
     [super dealloc];
 }

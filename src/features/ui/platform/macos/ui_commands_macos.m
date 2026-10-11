@@ -331,6 +331,32 @@ static BOOL axyne_macos_key_equivalent(AxyneKeyStroke stroke, NSString **key,
     return YES;
 }
 
+/* ---- keyboard ------------------------------------------------------------- */
+
+static uint64_t axyne_macos_uptime_ms(void)
+{
+    return (uint64_t)([[NSProcessInfo processInfo] systemUptime] * 1000.0);
+}
+
+/* Key-down event -> key map stroke. charactersIgnoringModifiers keeps Shift
+ * applied; the key map folds shifted punctuation back to its base key. */
+static BOOL axyne_macos_stroke_from_event(NSEvent *event, AxyneKeyStroke *stroke)
+{
+    NSString *characters = [event charactersIgnoringModifiers];
+    NSEventModifierFlags flags = [event modifierFlags];
+    uint16_t key;
+    if ([characters length] == 0) return NO;
+    key = axyne_key_from_mac_character((unsigned int)[characters characterAtIndex:0]);
+    if (key == AXYNE_KEY_NONE) return NO;
+    stroke->key = key;
+    stroke->mods = 0;
+    if ((flags & NSEventModifierFlagShift) != 0) stroke->mods |= AXYNE_KEYMOD_SHIFT;
+    if ((flags & NSEventModifierFlagControl) != 0) stroke->mods |= AXYNE_KEYMOD_CTRL;
+    if ((flags & NSEventModifierFlagOption) != 0) stroke->mods |= AXYNE_KEYMOD_ALT;
+    if ((flags & NSEventModifierFlagCommand) != 0) stroke->mods |= AXYNE_KEYMOD_CMD;
+    return YES;
+}
+
 @implementation AxyneWorkspaceView (AxyneCommandRouting)
 
 - (void)rebuildKeymap
@@ -343,6 +369,7 @@ static BOOL axyne_macos_key_equivalent(AxyneKeyStroke stroke, NSString **key,
         axyne_keymap_destroy(&_keymap);
         memset(&_keymap, 0, sizeof(_keymap));
         [self refreshMenuKeyEquivalents];
+        [self syncChordHint];
         return;
     }
     _keymapReady = YES;
@@ -352,6 +379,7 @@ static BOOL axyne_macos_key_equivalent(AxyneKeyStroke stroke, NSString **key,
     status = axyne_keymap_apply_preferences(&_keymap, &_preferences);
     (void)status;
     [self refreshMenuKeyEquivalents];
+    [self syncChordHint]; /* a pending chord did not survive the rebuild */
 }
 
 /* Menu text of the command's primary binding ("" when unbound). */
@@ -547,6 +575,150 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
 - (void)performCommand:(id)sender
 {
     (void)[self dispatchCommand:(AxyneCommandId)[sender tag] sender:sender];
+}
+
+/* ---- keyboard: key map dispatch and chords --------------------------------- */
+
+- (unsigned int)keymapContext
+{
+    return axyne_debugger_is_active(&_debugger) ? AXYNE_KEYMAP_CONTEXT_DEBUGGING : 0u;
+}
+
+/* Status-bar hint follows the key map: shown while a chord waits for its
+ * second stroke, cleared once it resolves or expires. */
+- (void)syncChordHint
+{
+    char text[128];
+    uint64_t now = axyne_macos_uptime_ms();
+    NSString *hint = nil;
+    if (_keymapReady && axyne_keymap_chord_hint(&_keymap, now, text, sizeof(text)) > 0)
+        hint = [NSString stringWithUTF8String:text];
+    else if (_keymapReady)
+        axyne_keymap_cancel_pending(&_keymap);
+    if (hint == nil && _chordHint == nil) return;
+    if (hint != nil && _chordHint != nil && [hint isEqualToString:_chordHint]) return;
+    [_chordHint release];
+    _chordHint = [hint copy];
+    [self setNeedsDisplayInRect:NSMakeRect(0, NSHeight([self bounds]) - AXYNE_STATUS,
+                                           NSWidth([self bounds]), AXYNE_STATUS)];
+}
+
+/* One expiry check just after the chord timeout. The block holds only an
+ * assign-only box, never the view (dealloc clears the box's target). */
+- (void)scheduleChordExpiry
+{
+    AxyneDiscoveryBox *box;
+    if (_chordTimerBox != NULL) _chordTimerBox->target = nil; /* its block frees it */
+    box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    _chordTimerBox = box;
+    if (box == NULL) return;
+    box->target = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                       (int64_t)(AXYNE_KEYMAP_CHORD_TIMEOUT_MS + 50) * (int64_t)NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (box->target != nil) {
+            AxyneWorkspaceView *view = box->target;
+            view->_chordTimerBox = NULL;
+            [view syncChordHint];
+        }
+        free(box);
+    });
+}
+
+/* The second stroke of a chord may be a plain key that never becomes a key
+ * equivalent (and would be typed into the editor), so while a chord is
+ * pending a local monitor feeds every key-down of this window to the key map
+ * first. Installed on the first chord and kept until dealloc; it holds only
+ * an assign-only box. */
+- (void)installChordMonitor
+{
+    AxyneDiscoveryBox *box;
+    if (_chordMonitor != nil) return;
+    box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+    if (box == NULL) return;
+    box->target = self;
+    _chordMonitorBox = box;
+    _chordMonitor = [[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+        handler:^NSEvent *(NSEvent *event) {
+            AxyneWorkspaceView *view = box->target;
+            return view != nil ? [view chordMonitorEvent:event] : event;
+        }] retain];
+}
+
+/* Applies a key map result; YES when the key is consumed. A completed chord
+ * is always consumed (its second stroke must not reach a menu), even when the
+ * command is disabled; a disabled single-stroke command falls through. */
+- (BOOL)applyKeymapResult:(AxyneKeymapResult)result command:(AxyneCommandId)command
+          completesChord:(BOOL)completesChord
+{
+    BOOL consumed = NO;
+    switch (result) {
+    case AXYNE_KEYMAP_PENDING:
+        [self installChordMonitor];
+        [self scheduleChordExpiry];
+        consumed = YES;
+        break;
+    case AXYNE_KEYMAP_ABORTED:
+        consumed = YES;
+        break;
+    case AXYNE_KEYMAP_COMMAND:
+        [self syncChordHint];
+        consumed = [self runCommand:command] || completesChord;
+        break;
+    case AXYNE_KEYMAP_NONE:
+        break;
+    }
+    [self syncChordHint];
+    return consumed;
+}
+
+- (BOOL)handleKeyEvent:(NSEvent *)event
+{
+    AxyneKeyStroke stroke;
+    AxyneCommandId command = AXYNE_COMMAND_NONE;
+    AxyneKeymapResult result;
+    uint64_t now = axyne_macos_uptime_ms();
+    BOOL pending;
+    if (!_keymapReady || [event type] != NSEventTypeKeyDown) return NO;
+    if (!axyne_macos_stroke_from_event(event, &stroke)) return NO;
+    pending = axyne_keymap_pending(&_keymap, now, NULL) != 0;
+    result = axyne_keymap_feed(&_keymap, stroke, now, [self keymapContext], &command);
+    return [self applyKeymapResult:result command:command completesChord:pending];
+}
+
+- (NSEvent *)chordMonitorEvent:(NSEvent *)event
+{
+    AxyneKeyStroke stroke;
+    AxyneCommandId command = AXYNE_COMMAND_NONE;
+    AxyneKeymapResult result;
+    uint64_t now = axyne_macos_uptime_ms();
+    if (!_keymapReady || [event window] != [self window] ||
+        !axyne_keymap_pending(&_keymap, now, NULL)) {
+        if (_chordHint != nil) [self syncChordHint];
+        return event; /* not in a chord: normal key handling */
+    }
+    if (!axyne_macos_stroke_from_event(event, &stroke)) return event;
+    result = axyne_keymap_feed(&_keymap, stroke, now, [self keymapContext], &command);
+    if (result == AXYNE_KEYMAP_NONE) { [self syncChordHint]; return event; }
+    (void)[self applyKeymapResult:result command:command completesChord:YES];
+    return nil;
+}
+
+- (void)teardownKeyboard
+{
+    if (_chordMonitor != nil) {
+        [NSEvent removeMonitor:_chordMonitor];
+        [_chordMonitor release];
+        _chordMonitor = nil;
+    }
+    free(_chordMonitorBox); /* the monitor (and its block) is gone */
+    _chordMonitorBox = NULL;
+    if (_chordTimerBox != NULL) {
+        _chordTimerBox->target = nil; /* the queued block frees the box */
+        _chordTimerBox = NULL;
+    }
+    [_chordHint release];
+    _chordHint = nil;
 }
 
 @end
