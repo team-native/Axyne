@@ -1,6 +1,8 @@
 #ifndef AXYNE_GIT_GRAPH_GEOMETRY_H
 #define AXYNE_GIT_GRAPH_GEOMETRY_H
 
+#include <string.h>
+
 #include "axyne/git_panel.h"
 
 /* Lane cells keep one fixed width however many lanes the graph has: a wide
@@ -42,6 +44,27 @@ static inline int axyne_git_graph_thumb(double track, double visible, double con
     offset = axyne_git_graph_clamp_offset(offset, content, visible);
     *start = (track - len) * offset / range;
     *length = len;
+    return 1;
+}
+
+/* Whether two graph snapshots hold the same commits in the same order with
+ * the same lane cells, and ref chips on the same rows. Subject, author and
+ * (short) date follow from the hash, so a reload returning such rows changes
+ * no measured row text except the chips themselves: the cached scrollable
+ * width of the chip-less rows stays valid. */
+static inline int axyne_git_graph_same_rows(const AxyneGitGraph *a, const AxyneGitGraph *b)
+{
+    size_t i;
+    int c;
+    if (a->count != b->count || a->max_lanes != b->max_lanes) return 0;
+    for (i = 0; i < a->count; ++i) {
+        const AxyneGitGraphRow *x = &a->rows[i], *y = &b->rows[i];
+        if (x->hash == NULL || y->hash == NULL || strcmp(x->hash, y->hash) != 0) return 0;
+        if ((x->ref_count == 0) != (y->ref_count == 0)) return 0;
+        if (x->column != y->column || x->lane_count != y->lane_count) return 0;
+        for (c = 0; c < x->lane_count; ++c)
+            if (x->lanes[c].flags != y->lanes[c].flags) return 0;
+    }
     return 1;
 }
 

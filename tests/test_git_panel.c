@@ -871,6 +871,51 @@ static int axyne_test_graph_hscroll_geometry(void)
     return 1;
 }
 
+/* A reload returning the same rows keeps the measured graph width; any
+ * difference that can move or change row text does not. */
+static int axyne_test_graph_same_rows(void)
+{
+    AxyneGitGraphLane la[2] = {{AXYNE_GIT_LANE_DOT | AXYNE_GIT_LANE_DOWN, 0},
+                               {AXYNE_GIT_LANE_DOWN, 1}};
+    AxyneGitGraphLane lb[2] = {{AXYNE_GIT_LANE_DOT | AXYNE_GIT_LANE_DOWN, 0},
+                               {AXYNE_GIT_LANE_DOWN, 1}};
+    AxyneGitRef ref = {0};
+    char h1[] = "aaaa", h2[] = "aaaa", h3[] = "bbbb";
+    AxyneGitGraphRow ra = {0}, rb = {0};
+    AxyneGitGraph a = {0}, b = {0};
+    ra.hash = h1; ra.lane_count = 2; ra.lanes = la;
+    rb.hash = h2; rb.lane_count = 2; rb.lanes = lb;
+    a.rows = &ra; a.count = 1; a.max_lanes = 2;
+    b.rows = &rb; b.count = 1; b.max_lanes = 2;
+    AXYNE_TEST_CHECK(axyne_git_graph_same_rows(&a, &b));
+    /* Empty snapshots match each other but not a filled one. */
+    {
+        AxyneGitGraph e1 = {0}, e2 = {0};
+        AXYNE_TEST_CHECK(axyne_git_graph_same_rows(&e1, &e2));
+        AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&e1, &a));
+    }
+    /* Ref names may change (chip rows are always re-measured); a row gaining
+     * or losing chips may not. */
+    ra.refs = rb.refs = &ref;
+    ra.ref_count = 1; rb.ref_count = 2;
+    AXYNE_TEST_CHECK(axyne_git_graph_same_rows(&a, &b));
+    rb.ref_count = 0; rb.refs = NULL;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    ra.ref_count = 0; ra.refs = NULL;
+    rb.hash = h3;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    rb.hash = h2;
+    lb[1].flags = AXYNE_GIT_LANE_FORK;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    lb[1].flags = AXYNE_GIT_LANE_DOWN;
+    rb.column = 1;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    rb.column = 0;
+    b.max_lanes = 3;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    return 1;
+}
+
 /* Rewritten side tips can all wait for one far-away ancestor. Exercise both
  * the native renderers' shared geometry and repeated history-window growth. */
 static int axyne_test_graph_continuity(const char *root)
@@ -1162,6 +1207,7 @@ static int axyne_test_git_panel_run(const char *root)
     AXYNE_TEST_CHECK(axyne_test_panel_graph_lanes(root));
     AXYNE_TEST_CHECK(axyne_test_graph_text_position());
     AXYNE_TEST_CHECK(axyne_test_graph_hscroll_geometry());
+    AXYNE_TEST_CHECK(axyne_test_graph_same_rows());
     AXYNE_TEST_CHECK(axyne_test_graph_continuity(root));
     AXYNE_TEST_CHECK(axyne_test_panel_details(root));
     return 1;
