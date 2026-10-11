@@ -343,15 +343,17 @@ static int axyne_panel_height(const AxyneWindowState *state)
         AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
 }
 
-/* The two user-draggable borders: 1 = explorer/editor, 2 = bottom panel top,
- * 0 = none. The panel wins at the corner. The explorer, panel and menu sizes
- * are the clamped, cached values, so hit-testing matches what is painted. */
+/* The two user-draggable borders: 1 = sidebar/editor, 2 = bottom panel top,
+ * 0 = none. The sidebar owns the left corner; the panel splitter is only in
+ * the editor/right region. The sizes are clamped cached values, so hit-tests
+ * match what is painted. */
 static int axyne_splitter_at(const AxyneWindowState *state, int x, int y)
 {
     int status_top = state->client_height - AXYNE_STATUS;
     int panel = axyne_panel_height(state);
     if (x < 0 || x >= state->client_width) return 0;
-    if (axyne_layout_on_panel_splitter(y, status_top - panel, panel)) return 2;
+    if (x >= axyne_sidebar_width(state) &&
+        axyne_layout_on_panel_splitter(y, status_top - panel, panel)) return 2;
     if (y >= AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS && y < status_top &&
         axyne_layout_on_sidebar_splitter(x, axyne_sidebar_width(state)))
         return 1;
