@@ -174,7 +174,7 @@ static int axyne_test_settings_v2(const char *root)
     V2_CHECK(axyne_test_json_string_is(path, "/debugger/backend", "custom"));
 
     /* The key map honours both binding views. */
-    V2_CHECK(axyne_keymap_build(&map, AXYNE_PLATFORM_WINDOWS, loaded) == AXYNE_STATUS_OK);
+    V2_CHECK(axyne_keymap_build(&map, AXYNE_COMMAND_PLATFORM_WINDOWS, loaded) == AXYNE_STATUS_OK);
     V2_CHECK(axyne_keymap_feed(&map, axyne_test_stroke("Ctrl+Q"), 0, 0, &command) ==
                  AXYNE_KEYMAP_COMMAND && command == AXYNE_COMMAND_FILE_SAVE);
     V2_CHECK(axyne_keymap_feed(&map, axyne_test_stroke("Ctrl+S"), 0, 0, &command) == AXYNE_KEYMAP_NONE);
@@ -344,7 +344,7 @@ static int axyne_test_settings_v2(const char *root)
     {
         AxyneKeyStroke run;
         V2_CHECK(binding != NULL && axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key,
-                                                                    axyne_platform_current(), &run));
+                                                                    axyne_command_platform_current(), &run));
         V2_CHECK(axyne_key_stroke_equal(run, axyne_test_stroke("Ctrl+F5")));
     }
     V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 0);

@@ -32,20 +32,8 @@
 #include "axyne/watcher.h"
 #include "Scintilla.h"
 
-/* commands.h and build_target.h (pulled in by build_selector.h above) both
- * define `AxynePlatform` with different values (core issue, reported). The
- * registry's enum is renamed for this UI so both headers can be used in one
- * translation unit: after this block AXYNE_PLATFORM_WINDOWS is the build
- * target's value, and registry/key map calls use AXYNE_WIN_COMMAND_PLATFORM.
- * Never include commands.h or keymap.h before this header. */
-#define AxynePlatform AxyneCommandPlatform
-#define AXYNE_PLATFORM_WINDOWS AXYNE_COMMAND_PLATFORM_WINDOWS
-#define AXYNE_PLATFORM_MACOS AXYNE_COMMAND_PLATFORM_MACOS
 #include "axyne/commands.h"
 #include "axyne/keymap.h"
-#undef AxynePlatform
-#undef AXYNE_PLATFORM_WINDOWS
-#undef AXYNE_PLATFORM_MACOS
 #define AXYNE_WIN_COMMAND_PLATFORM AXYNE_COMMAND_PLATFORM_WINDOWS
 
 /* ---- feature categories -------------------------------------------------

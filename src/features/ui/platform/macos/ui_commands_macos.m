@@ -382,7 +382,7 @@ static int axyne_macos_palette_compare(const void *left, const void *right)
     axyne_keymap_destroy(&_keymap);
     memset(&_keymap, 0, sizeof(_keymap));
     _keymapReady = NO;
-    if (axyne_keymap_init(&_keymap, axyne_platform_current()) != AXYNE_STATUS_OK) {
+    if (axyne_keymap_init(&_keymap, axyne_command_platform_current()) != AXYNE_STATUS_OK) {
         axyne_keymap_destroy(&_keymap);
         memset(&_keymap, 0, sizeof(_keymap));
         [self refreshMenuKeyEquivalents];
@@ -455,7 +455,7 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
 - (NSMenuItem *)commandMenuItem:(AxyneCommandId)command
 {
     NSString *title = [NSString stringWithUTF8String:
-        axyne_command_title(command, axyne_platform_current())];
+        axyne_command_title(command, axyne_command_platform_current())];
     NSMenuItem *item = [[[NSMenuItem alloc] initWithTitle:title != nil ? title : @""
         action:@selector(performCommand:) keyEquivalent:@""] autorelease];
     [item setTarget:self];
@@ -480,7 +480,7 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
             continue;
         }
         if (entry->kind == AXYNE_MAC_MENU_ITEM) {
-            if (!axyne_command_available(entry->command, axyne_platform_current())) continue;
+            if (!axyne_command_available(entry->command, axyne_command_platform_current())) continue;
             item = [self commandMenuItem:entry->command];
         } else {
             NSString *title = [NSString stringWithUTF8String:entry->title];
@@ -529,7 +529,7 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
 {
     NSInteger tag;
     BOOL application;
-    if (!axyne_command_available(command, axyne_platform_current())) return NO;
+    if (!axyne_command_available(command, axyne_command_platform_current())) return NO;
     if ([self featureValidateCommand:command item:nil] != AXYNE_MAC_COMMAND_UNHANDLED)
         return YES;
     return axyne_macos_base_action(command, &tag, &application) != NULL;
@@ -542,7 +542,7 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
     SEL action;
     NSMenuItem *proxy;
     BOOL enabled;
-    if (!axyne_command_available(command, axyne_platform_current())) return NO;
+    if (!axyne_command_available(command, axyne_command_platform_current())) return NO;
     state = [self featureValidateCommand:command item:item];
     if (state != AXYNE_MAC_COMMAND_UNHANDLED) return state == AXYNE_MAC_COMMAND_ENABLED;
     action = axyne_macos_base_action(command, &tag, &application);
@@ -770,7 +770,7 @@ static int axyne_macos_palette_payload(const AxyneCommandInfo *info)
         int titleHit, keywordHit;
         if (info == NULL || (info->flags & AXYNE_COMMAND_FLAG_PALETTE) == 0) continue;
         if (![self commandImplemented:info->id]) continue;
-        titleHit = axyne_palette_match(axyne_command_title(info->id, axyne_platform_current()),
+        titleHit = axyne_palette_match(axyne_command_title(info->id, axyne_command_platform_current()),
                                        query, &title);
         keywordHit = query[0] != '\0' && axyne_palette_match(info->keywords, query, &keywords);
         if (!titleHit && !keywordHit) continue;
@@ -795,7 +795,7 @@ static int axyne_macos_palette_payload(const AxyneCommandInfo *info)
         const AxyneCommandInfo *info = axyne_command_info(candidates[i].command);
         AxynePaletteItem *item = &list.items[i];
         const char *keys = [[self keyTextForCommand:info->id] UTF8String];
-        item->label = strdup(axyne_command_title(info->id, axyne_platform_current()));
+        item->label = strdup(axyne_command_title(info->id, axyne_command_platform_current()));
         item->detail = strdup(keys != NULL ? keys : "");
         item->badge = strdup("");
         if (item->label == NULL || item->detail == NULL || item->badge == NULL) {
@@ -827,7 +827,7 @@ static int axyne_macos_palette_payload(const AxyneCommandInfo *info)
  * binding in the effective key map, grouped by menu, all of its bindings. */
 - (void)showKeyboardShortcuts:(id)sender
 {
-    AxyneKeyFormat format = axyne_key_format_for(axyne_platform_current());
+    AxyneKeyFormat format = axyne_key_format_for(axyne_command_platform_current());
     AxyneShortcutSection sections[AXYNE_COMMAND_GROUP_COUNT];
     AxyneShortcutRow *rows;
     char (*texts)[96];
@@ -846,7 +846,7 @@ static int axyne_macos_palette_payload(const AxyneCommandInfo *info)
             AxyneKeySequence sequences[AXYNE_COMMAND_DEFAULT_KEYS];
             size_t count, length = 0;
             if (info == NULL || (int)info->group != group ||
-                !axyne_command_available(info->id, axyne_platform_current())) continue;
+                !axyne_command_available(info->id, axyne_command_platform_current())) continue;
             count = axyne_keymap_bindings(&_keymap, info->id, sequences,
                                           AXYNE_COMMAND_DEFAULT_KEYS);
             if (count > AXYNE_COMMAND_DEFAULT_KEYS) count = AXYNE_COMMAND_DEFAULT_KEYS;
@@ -861,7 +861,7 @@ static int axyne_macos_palette_payload(const AxyneCommandInfo *info)
                     texts[used] + length, sizeof(texts[used]) - length);
                 length = strlen(texts[used]);
             }
-            rows[used].label = axyne_command_title(info->id, axyne_platform_current());
+            rows[used].label = axyne_command_title(info->id, axyne_command_platform_current());
             rows[used].keys = texts[used];
             ++used;
         }

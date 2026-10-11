@@ -97,7 +97,7 @@ before the base, so e.g. the Debug category can replace `debug.start`.
 ## Core issue found (not fixed here; shared module)
 
 `include/axyne/commands.h` and `include/axyne/build_target.h` both define
-`typedef enum AxynePlatform` with different values (commands: WINDOWS = 1,
+`typedef enum AxyneCommandPlatform` with different values (commands: WINDOWS = 1,
 MACOS = 2; build target: WINDOWS = 0, MACOS = 1, OTHER = 2), so no translation
 unit can include both (`language.h`/`build_selector.h` pull in
 `build_target.h`). `ui_windows_internal.h` works around it by renaming the

@@ -167,9 +167,9 @@ AxyneStatus axyne_key_sequence_parse(const char *text, AxyneKeySequence *sequenc
     return AXYNE_STATUS_OK;
 }
 
-AxyneKeyFormat axyne_key_format_for(AxynePlatform platform)
+AxyneKeyFormat axyne_key_format_for(AxyneCommandPlatform platform)
 {
-    return platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEY_FORMAT_MACOS
+    return platform == AXYNE_COMMAND_PLATFORM_MACOS ? AXYNE_KEY_FORMAT_MACOS
                                             : AXYNE_KEY_FORMAT_WINDOWS;
 }
 
@@ -389,15 +389,15 @@ static AxyneStatus keymap_append(AxyneKeymap *map, const AxyneKeySequence *seque
     return AXYNE_STATUS_OK;
 }
 
-AxyneStatus axyne_keymap_init(AxyneKeymap *map, AxynePlatform platform)
+AxyneStatus axyne_keymap_init(AxyneKeymap *map, AxyneCommandPlatform platform)
 {
     size_t count = axyne_command_count();
-    if (map == NULL || (platform != AXYNE_PLATFORM_WINDOWS &&
-                        platform != AXYNE_PLATFORM_MACOS))
+    if (map == NULL || (platform != AXYNE_COMMAND_PLATFORM_WINDOWS &&
+                        platform != AXYNE_COMMAND_PLATFORM_MACOS))
         return AXYNE_STATUS_INVALID_ARGUMENT;
     memset(map, 0, sizeof(*map));
     map->platform = platform;
-    map->altgr_exclusion = platform == AXYNE_PLATFORM_WINDOWS;
+    map->altgr_exclusion = platform == AXYNE_COMMAND_PLATFORM_WINDOWS;
     for (size_t i = 0; i < count; ++i) {
         const AxyneCommandInfo *info = axyne_command_at(i);
         for (size_t k = 0; k < AXYNE_COMMAND_DEFAULT_KEYS; ++k) {
@@ -679,7 +679,7 @@ AxyneCommandId axyne_keymap_find_conflict(const AxyneKeymap *map,
 /* ---- preferences -------------------------------------------------------- */
 
 int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
-                                    AxynePlatform platform, AxyneKeyStroke *stroke)
+                                    AxyneCommandPlatform platform, AxyneKeyStroke *stroke)
 {
     AxyneKeyStroke parsed;
     unsigned mods = 0;
@@ -687,7 +687,7 @@ int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
         axyne_key_stroke_parse(key, &parsed) != AXYNE_STATUS_OK || parsed.mods != 0)
         return 0;
     if (modifiers & AXYNE_KEY_MODIFIER_COMMAND)
-        mods |= platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEYMOD_CMD : AXYNE_KEYMOD_CTRL;
+        mods |= platform == AXYNE_COMMAND_PLATFORM_MACOS ? AXYNE_KEYMOD_CMD : AXYNE_KEYMOD_CTRL;
     if (modifiers & AXYNE_KEY_MODIFIER_CONTROL) mods |= AXYNE_KEYMOD_CTRL;
     if (modifiers & AXYNE_KEY_MODIFIER_SHIFT) mods |= AXYNE_KEYMOD_SHIFT;
     if (modifiers & AXYNE_KEY_MODIFIER_ALT) mods |= AXYNE_KEYMOD_ALT;
@@ -696,7 +696,7 @@ int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
     return 1;
 }
 
-int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
+int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxyneCommandPlatform platform,
                                   unsigned int *modifiers, char *key, size_t key_capacity)
 {
     AxyneKeyStroke bare;
@@ -704,11 +704,11 @@ int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
     char text[32];
     if (stroke.key == AXYNE_KEY_NONE) return 0;
     if (stroke.mods & AXYNE_KEYMOD_CMD) {
-        if (platform != AXYNE_PLATFORM_MACOS) return 0;
+        if (platform != AXYNE_COMMAND_PLATFORM_MACOS) return 0;
         legacy |= AXYNE_KEY_MODIFIER_COMMAND;
     }
     if (stroke.mods & AXYNE_KEYMOD_CTRL)
-        legacy |= platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEY_MODIFIER_CONTROL
+        legacy |= platform == AXYNE_COMMAND_PLATFORM_MACOS ? AXYNE_KEY_MODIFIER_CONTROL
                                                    : AXYNE_KEY_MODIFIER_COMMAND;
     if (stroke.mods & AXYNE_KEYMOD_SHIFT) legacy |= AXYNE_KEY_MODIFIER_SHIFT;
     if (stroke.mods & AXYNE_KEYMOD_ALT) legacy |= AXYNE_KEY_MODIFIER_ALT;
@@ -723,7 +723,7 @@ int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
 }
 
 static int legacy_binding_equal(const AxyneKeyBinding *a, const AxyneKeyBinding *b,
-                                AxynePlatform platform)
+                                AxyneCommandPlatform platform)
 {
     AxyneKeyStroke x, y;
     if (a->enabled != b->enabled) return 0;
@@ -785,7 +785,7 @@ AxyneStatus axyne_keymap_apply_preferences(AxyneKeymap *map,
     return result;
 }
 
-AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxynePlatform platform,
+AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxyneCommandPlatform platform,
                                const struct AxynePreferences *preferences)
 {
     AxyneStatus status = axyne_keymap_init(map, platform);

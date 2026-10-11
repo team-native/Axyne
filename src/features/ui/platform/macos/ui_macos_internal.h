@@ -16,21 +16,8 @@
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 
-/* include/axyne/build_target.h (pulled in by language.h and build_selector.h)
- * and include/axyne/commands.h both define AxynePlatform and
- * AXYNE_PLATFORM_WINDOWS/MACOS, with different values, so no translation
- * unit can include both as they are (core bug, reported). The registry
- * headers are included under renamed identifiers; macOS code passes
- * axyne_platform_current() wherever the registry or key map wants a
- * platform and never names the registry enumerators. */
-#define AxynePlatform AxyneRegistryPlatform
-#define AXYNE_PLATFORM_WINDOWS AXYNE_REGISTRY_PLATFORM_WINDOWS
-#define AXYNE_PLATFORM_MACOS AXYNE_REGISTRY_PLATFORM_MACOS
 #include "axyne/commands.h"
 #include "axyne/keymap.h"
-#undef AxynePlatform
-#undef AXYNE_PLATFORM_WINDOWS
-#undef AXYNE_PLATFORM_MACOS
 #include "axyne/document.h"
 #include "axyne/empty_state.h"
 #include "axyne/search.h"

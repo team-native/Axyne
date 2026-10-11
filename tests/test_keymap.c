@@ -134,7 +134,7 @@ static int test_windows_map(void)
     char buffer[96];
     size_t conflict_count;
 
-    AXYNE_TEST_STATUS(axyne_keymap_init(&map, AXYNE_PLATFORM_WINDOWS), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_keymap_init(&map, AXYNE_COMMAND_PLATFORM_WINDOWS), AXYNE_STATUS_OK);
     conflict_count = axyne_keymap_conflicts(&map, conflicts, 8);
     for (size_t i = 0; i < conflict_count && i < 8; ++i)
         fprintf(stderr, "default conflict: %s / %s\n",
@@ -306,7 +306,7 @@ static int test_macos_map(void)
 {
     AxyneKeymap map;
     char buffer[96];
-    AXYNE_TEST_STATUS(axyne_keymap_init(&map, AXYNE_PLATFORM_MACOS), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_keymap_init(&map, AXYNE_COMMAND_PLATFORM_MACOS), AXYNE_STATUS_OK);
     AXYNE_TEST_EQ_INT(axyne_keymap_conflicts(&map, NULL, 0), 0);
     AXYNE_TEST_CHECK(map.altgr_exclusion == 0);
     AXYNE_TEST_CHECK(feed_is(&map, "F5", 0, 0, AXYNE_KEYMAP_COMMAND, AXYNE_COMMAND_DEBUG_START));

@@ -60,7 +60,7 @@ Base services (`AxyneFoundation` / `AxyneCommandRouting` categories):
 |---|---|---|---|
 | Category split | one category file per later feature category with the fixed hook set above, ivars pre-declared in the internal header | USER (task) | CONFIRMED |
 | Linking categories | `-ObjC` as INTERFACE link option of `axyne_ui` (app and tests) | DELEGATED | ASSUMED |
-| `AxynePlatform` clash | `build_target.h` and `commands.h` both define `AxynePlatform`/`AXYNE_PLATFORM_*` with different values; the internal header includes the registry headers under renamed identifiers and macOS code passes `axyne_platform_current()` to the registry/key map. Core fix needed (rename one enum) | DELEGATED | ASSUMED |
+| `AxyneCommandPlatform` clash | `build_target.h` and `commands.h` both define `AxyneCommandPlatform`/`AXYNE_PLATFORM_*` with different values; the internal header includes the registry headers under renamed identifiers and macOS code passes `axyne_command_platform_current()` to the registry/key map. Core fix needed (rename one enum) | DELEGATED | ASSUMED |
 | Bottom panel tabs | enum OUTPUT/PROBLEMS/TERMINAL/DEBUG_CONSOLE, strip lists visible tabs in enum order 2 px apart (Figma widths 38/38+/50 kept); DEBUG_CONSOLE "디버그 콘솔" hidden until the debug category calls `-setBottomPanelTab:visible:`; hiding the selected tab selects Output; Output cannot be hidden | USER (task) / DELEGATED | ASSUMED |
 | Menu routing | every registry item uses `-performCommand:` (tag = command id); feature hooks first, then the old selector as base handler (validated through the old `validateMenuItem:` rules on a proxy item) | DELEGATED | ASSUMED |
 | Unimplemented items | shown in Figma position, disabled (no base handler and no feature claims them): 새 프로젝트, 모두 저장, 자동 저장, 창 닫기, 최근 항목 지우기, 블록 주석 토글, 개요/도구 모음/상태 표시줄/동작 항상 표시, 테마 submenu, 전체 화면, 다시 빌드, 정리, CMake items, 빌드 구성 submenu, 빌드 대상, 작업 실행, tasks.json 편집, 다시 시작, 실행 인수, 외부 디버거 열기 (LLDB (터미널), 디버거 경로 설정), zsh/bash/기본 프로필 선택, 외부 도구 구성, theme.json 열기, 키바인딩, 메모리 사용량 보기, 파일 연결, 시작하기, 로그 폴더 열기, 업데이트 확인, 릴리스 노트, 오픈 소스 라이선스 | USER (rule) | CONFIRMED |
@@ -81,7 +81,7 @@ Base services (`AxyneFoundation` / `AxyneCommandRouting` categories):
 
 - `ui_macos.m` and every category were only syntax-checked against GNUstep
   headers on Linux; nothing was compiled or run on macOS.
-- Core bug: `AxynePlatform` defined in both `include/axyne/build_target.h` and
+- Core bug: `AxyneCommandPlatform` defined in both `include/axyne/build_target.h` and
   `include/axyne/commands.h` (different values).
 - Toolbar labels/tooltips ("실행 F5", "⌘N") and the empty-state guide still use
   their old fixed/legacy key text.
