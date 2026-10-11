@@ -1,15 +1,19 @@
 /* Static consistency checks between the menu definitions and their handlers.
  * The native adapters cannot be built or run on every platform, so this reads
  * both adapter sources as text and verifies, for each menu entry:
- *   macOS   - every action selector installed in axyne_install_menu has an
- *             implementation in AxyneWorkspaceView (or is a system selector);
+ *   macOS   - every action selector installed in axyne_install_menu and every
+ *             base handler of the registry commands (ui_commands_macos.m) has
+ *             an implementation in AxyneWorkspaceView, in ui_macos.m or a
+ *             category file (or is a system selector); the menu labels come
+ *             from the command registry and the macOS menu layout;
  *   Windows - the menus (ui_commands_windows.c menu table) list every
  *             registry command available on Windows; the base and every
  *             feature file (ui_<feature>_windows.c) report a state only for
  *             commands they handle and vice versa (no enabled entry that does
  *             nothing); legacy ids stay unique and are handled;
  *   both    - the shared menu entries exist on both platforms (Windows:
- *             registry titles of menu commands; macOS: menu literals).
+ *             registry titles of menu commands; macOS: registry titles placed
+ *             by the macOS menu layout).
  * The repository root is the first argument. Portable C17 only (no POSIX
  * string helpers) so it runs on the MSVC, clang and gcc CI builds. */
 #include <ctype.h>
@@ -102,13 +106,79 @@ static int selector_is_system(const char *name)
            strcmp(name, "terminate:") == 0;
 }
 
+/* macOS sources that implement AxyneWorkspaceView methods besides the main
+ * @implementation in ui_macos.m: the command routing and the feature
+ * category files (one per feature category). */
+static const char *const macos_category_files[] = {
+    "src/features/ui/platform/macos/ui_commands_macos.m",
+    "src/features/ui/platform/macos/ui_file_macos.m",
+    "src/features/ui/platform/macos/ui_edit_macos.m",
+    "src/features/ui/platform/macos/ui_view_macos.m",
+    "src/features/ui/platform/macos/ui_build_macos.m",
+    "src/features/ui/platform/macos/ui_debug_macos.m",
+    "src/features/ui/platform/macos/ui_terminal_macos.m",
+    "src/features/ui/platform/macos/ui_status_macos.m",
+    "src/features/ui/platform/macos/ui_tools_macos.m",
+    "src/features/ui/platform/macos/ui_help_macos.m",
+    "src/features/ui/platform/macos/ui_lsp_nav_macos.m",
+    "src/features/ui/platform/macos/ui_diag_macos.m",
+    "src/features/ui/platform/macos/ui_release_macos.m"
+};
+#define MACOS_CATEGORY_FILE_COUNT \
+    (sizeof(macos_category_files) / sizeof(macos_category_files[0]))
+
+/* True when `signature` ("\n- (void)name:(") is implemented by the view:
+ * in the main @implementation of ui_macos.m or in a category file. */
+static int macos_view_implements(const char *implementation,
+                                 char *const *categories, const char *signature)
+{
+    size_t i;
+    if (implementation != NULL && strstr(implementation, signature) != NULL) return 1;
+    for (i = 0; i < MACOS_CATEGORY_FILE_COUNT; ++i)
+        if (categories[i] != NULL && strstr(categories[i], signature) != NULL) return 1;
+    return 0;
+}
+
+/* Every @selector(...) in `text` must be a system action or an action
+ * method (one sender argument) implemented by the workspace view. */
+static size_t check_macos_selector_text(const char *text, const char *where,
+                                        const char *implementation,
+                                        char *const *categories)
+{
+    const char *cursor = text;
+    size_t count = 0;
+    while ((cursor = strstr(cursor, "@selector(")) != NULL) {
+        char name[96];
+        char signature[128];
+        const char *close;
+        size_t length;
+        cursor += strlen("@selector(");
+        close = strchr(cursor, ')');
+        if (close == NULL) break;
+        length = (size_t)(close - cursor);
+        if (length == 0 || length >= sizeof(name)) { FAIL("bad selector text"); break; }
+        memcpy(name, cursor, length);
+        name[length] = '\0';
+        ++count;
+        if (selector_is_system(name)) continue;
+        if (name[length - 1] != ':') { FAIL("menu selector %s takes no sender", name); continue; }
+        (void)snprintf(signature, sizeof(signature), "\n- (void)%s(", name);
+        if (!macos_view_implements(implementation, categories, signature))
+            FAIL("macOS %s selector %s has no implementation", where, name);
+    }
+    return count;
+}
+
 static void check_macos_selectors(void)
 {
     char *source = read_file("src/features/ui/platform/macos/ui_macos.m");
-    char *install, *implementation;
-    const char *cursor;
-    size_t count = 0;
-    if (source == NULL) return;
+    char *categories[MACOS_CATEGORY_FILE_COUNT];
+    char *install = NULL, *implementation = NULL, *base = NULL;
+    size_t i, count = 0;
+    for (i = 0; i < MACOS_CATEGORY_FILE_COUNT; ++i)
+        categories[i] = read_file(macos_category_files[i]);
+    if (source == NULL || categories[0] == NULL) goto done;
+    /* The application menu installed by hand. */
     install = region(source, "static void axyne_install_menu(NSApplication *application,\n"
                              "                               AxyneWorkspaceView *workspace)\n{",
                      "int axyne_ui_run");
@@ -116,30 +186,118 @@ static void check_macos_selectors(void)
      * that the region already contains. */
     implementation = region(source, "@implementation AxyneWorkspaceView\n",
                             "@interface AxyneApplicationDelegate");
-    if (install != NULL && implementation != NULL) {
-        cursor = install;
-        while ((cursor = strstr(cursor, "@selector(")) != NULL) {
-            char name[96];
-            char signature[128];
-            const char *close;
-            size_t length;
-            cursor += strlen("@selector(");
-            close = strchr(cursor, ')');
-            if (close == NULL) break;
-            length = (size_t)(close - cursor);
-            if (length == 0 || length >= sizeof(name)) { FAIL("bad selector text"); break; }
-            memcpy(name, cursor, length);
-            name[length] = '\0';
-            ++count;
-            if (selector_is_system(name)) continue;
-            if (name[length - 1] != ':') { FAIL("menu selector %s takes no sender", name); continue; }
-            (void)snprintf(signature, sizeof(signature), "\n- (void)%s(", name);
-            if (strstr(implementation, signature) == NULL)
-                FAIL("macOS menu selector %s has no implementation", name);
-        }
+    /* Registry menu items run -performCommand:, whose base handlers are the
+     * selectors returned by axyne_macos_base_action. */
+    base = region(categories[0], "static SEL axyne_macos_base_action(",
+                  "/* ---- key map");
+    if (install != NULL && implementation != NULL && base != NULL) {
+        count += check_macos_selector_text(install, "menu", implementation, categories);
+        count += check_macos_selector_text(base, "command", implementation, categories);
+        CHECK(macos_view_implements(implementation, categories, "\n- (void)performCommand:("));
         CHECK(count >= 40);
     }
-    free(install); free(implementation); free(source);
+done:
+    free(install); free(implementation); free(base); free(source);
+    for (i = 0; i < MACOS_CATEGORY_FILE_COUNT; ++i) free(categories[i]);
+}
+
+/* ---- macOS: menu labels from the command registry --------------------- */
+
+/* Copies the C string literal at *cursor (blanks skipped) and advances past
+ * it. Returns 0 when there is none. */
+static int read_literal(const char **cursor, char *out, size_t capacity)
+{
+    const char *p = *cursor;
+    const char *end;
+    size_t length;
+    while (isspace((unsigned char)*p)) ++p;
+    if (*p != '"') return 0;
+    end = strchr(p + 1, '"');
+    if (end == NULL) return 0;
+    length = (size_t)(end - p - 1);
+    if (length >= capacity) length = capacity - 1;
+    memcpy(out, p + 1, length);
+    out[length] = '\0';
+    *cursor = end + 1;
+    return 1;
+}
+
+static int label_matches(const char *title, const char *label)
+{
+    size_t length = strlen(label);
+    if (strcmp(title, label) == 0) return 1;
+    if (strncmp(title, label, length) != 0) return 0;
+    return strcmp(title + length, "\xe2\x80\xa6") == 0 || strcmp(title + length, "...") == 0;
+}
+
+/* True when the macOS menus show `label`: a command of the registry table
+ * (src/features/commands/commands.c; its macOS title when it has one) whose
+ * id the macOS menu layout (ui_commands_macos.m, ITEM(...)) lists. */
+static int macos_menu_has_label(const char *registry, const char *layout,
+                                const char *label)
+{
+    const char *cursor = registry;
+    while ((cursor = strstr(cursor, "\n    E(")) != NULL) {
+        char id[80], name[80], title[160], mac[160], item[96];
+        const char *p = cursor + strlen("\n    E(");
+        size_t n = 0;
+        cursor = p;
+        while (is_identifier_char((unsigned char)*p) && n + 1 < sizeof(id)) id[n++] = *p++;
+        id[n] = '\0';
+        if (*p != ',') continue;
+        ++p;
+        if (!read_literal(&p, name, sizeof(name))) continue;
+        while (isspace((unsigned char)*p) || *p == ',') ++p;
+        if (!read_literal(&p, title, sizeof(title))) continue;
+        while (isspace((unsigned char)*p) || *p == ',') ++p;
+        mac[0] = '\0';
+        if (*p == '"') (void)read_literal(&p, mac, sizeof(mac));
+        if (!label_matches(mac[0] != '\0' ? mac : title, label)) continue;
+        (void)snprintf(item, sizeof(item), "ITEM(%s)", id);
+        if (strstr(layout, item) != NULL) return 1;
+    }
+    return 0;
+}
+
+/* Shared labels whose macOS menu entry now shows the registry title. */
+static const char *macos_label_alias(const char *label)
+{
+    if (strcmp(label, "preferences.json 열기") == 0) return "settings.json 열기";
+    if (strcmp(label, "실행") == 0) return "디버깅하지 않고 실행";
+    return label;
+}
+
+static char *macos_registry, *macos_layout;
+
+static void load_macos_labels(void)
+{
+    char *commands = read_file("src/features/commands/commands.c");
+    char *routing = read_file("src/features/ui/platform/macos/ui_commands_macos.m");
+    if (commands != NULL)
+        macos_registry = region(commands, "static const AxyneCommandInfo command_table[] = {",
+                                "\n};");
+    if (routing != NULL)
+        macos_layout = region(routing, "static const AxyneMacMenuEntry axyne_macos_file_menu[]",
+                              "/* ---- base handlers");
+    free(commands); free(routing);
+}
+
+static void free_macos_labels(void)
+{
+    free(macos_registry); free(macos_layout);
+    macos_registry = macos_layout = NULL;
+}
+
+static int macos_has_label(const char *label)
+{
+    static int loaded;
+    if (!loaded) {
+        loaded = 1;
+        load_macos_labels();
+        (void)atexit(free_macos_labels);
+    }
+    if (macos_registry == NULL || macos_layout == NULL) return 0;
+    return macos_menu_has_label(macos_registry, macos_layout, macos_label_alias(label));
 }
 
 /* ---- Windows: command ids ---------------------------------------------- */
@@ -584,7 +742,8 @@ static void check_windows_labels(void)
     free(menus); free(glue);
 }
 
-/* macOS still writes its menu labels as literals in ui_macos.m. */
+/* macOS menu labels come from the registry titles placed by the macOS layout
+ * table (ui_commands_macos.m); macos_has_label maps renamed entries. */
 static void check_macos_labels(void)
 {
     static const char *const labels[] = {
@@ -604,7 +763,7 @@ static void check_macos_labels(void)
     size_t i;
     if (mac != NULL) {
         for (i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i)
-            if (!source_has_label(mac, '@', labels[i]))
+            if (!macos_has_label(labels[i]))
                 FAIL("macOS menu lacks shared entry: %s", labels[i]);
     }
     free(mac);
