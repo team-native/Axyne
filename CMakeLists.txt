@@ -367,7 +367,7 @@ if(WIN32)
                     COPYONLY
                 )
                 string(APPEND AXYNE_MSVC_RUNTIME_NSIS_FILES
-                    "    File \"${CMAKE_CURRENT_BINARY_DIR}\\${AXYNE_MSVC_RUNTIME_NAME}\"\n")
+                    "    !insertmacro AxyneFile \"${CMAKE_CURRENT_BINARY_DIR}\\${AXYNE_MSVC_RUNTIME_NAME}\" \"${AXYNE_MSVC_RUNTIME_NAME}\"\n")
             endif()
             unset(AXYNE_MSVC_RUNTIME_FILE CACHE)
         endforeach()
