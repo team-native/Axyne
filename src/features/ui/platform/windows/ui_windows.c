@@ -349,6 +349,7 @@ static void axyne_lsp_error(AxyneLspClient *client, AxyneStatus status,
 
 static AxyneDocument *axyne_active(AxyneWindowState *state);
 static int axyne_settings_file_exists(const char *utf8_path);
+static int axyne_ensure_settings_file(HWND owner, AxyneWindowState *state, int workspace);
 static int axyne_empty_state(AxyneWindowState *state);
 static AxyneDocument *axyne_active_visible(AxyneWindowState *state);
 static void axyne_sync_empty_state(AxyneWindowState *state);
@@ -2198,6 +2199,44 @@ static int axyne_windows_preferences_save(void *context, AxynePreferences *edite
     return 1;
 }
 
+/* "settings.json 열기" needs the file written from now on (D3). When only the
+ * old preferences.json exists it is copied verbatim, so a workspace keeps
+ * every override; when no file exists at all, settings.json is created from
+ * the effective profile (a new workspace file overrides nothing). */
+static int axyne_ensure_settings_file(HWND owner, AxyneWindowState *state, int workspace)
+{
+    const char *write_path = workspace ? state->workspace_settings_write_path
+                                       : state->global_settings_write_path;
+    char *directory;
+    AxyneError error;
+    AxyneStatus status;
+    if (write_path == NULL) return 0;
+    if (axyne_settings_file_exists(write_path)) return 1;
+    directory = workspace
+        ? (state->explorer.root != NULL
+               ? axyne_preferences_workspace_directory(state->explorer.root) : NULL)
+        : axyne_app_path(AXYNE_APP_PATH_CONFIG_DIR);
+    memset(&error, 0, sizeof(error));
+    status = directory != NULL ? axyne_preferences_adopt_legacy_file(directory, &error)
+                               : AXYNE_STATUS_NOT_FOUND;
+    free(directory);
+    if (status == AXYNE_STATUS_NOT_FOUND) {
+        AxynePreferences created = workspace ? state->preferences : state->global_preferences;
+        if (workspace) {
+            created.present_fields = 0;
+            memset(created.binding_present, 0, sizeof(created.binding_present));
+        }
+        status = workspace ? axyne_preferences_save_workspace(&created, write_path, &error)
+                           : axyne_preferences_save_global(&created, write_path, &error);
+    }
+    if (status != AXYNE_STATUS_OK) {
+        axyne_workspace_show_error(owner, "Unable to create settings file", &error);
+        return 0;
+    }
+    axyne_refresh_settings_read_paths(state);
+    return 1;
+}
+
 /* Opens the Figma preferences window. The "settings.json 열기" link closes it
  * and opens the profile's file as an editor document; a profile that was
  * never saved is created first so there is something to open. */
@@ -2225,16 +2264,7 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
         }
     }
     if (!axyne_preferences_window_show(owner, workspace, &initial, &hooks)) return 1;
-    /* "settings.json 열기": the file written from now on; it is created from
-     * the effective profile when missing (an old preferences.json stays). */
-    if (!axyne_settings_file_exists(write_path)) {
-        AxynePreferences created = workspace ? state->preferences : state->global_preferences;
-        AxyneStatus status;
-        if (workspace) { created.present_fields = 0; memset(created.binding_present, 0, sizeof(created.binding_present)); }
-        status = workspace ? axyne_preferences_save_workspace(&created, write_path, &error) : axyne_preferences_save_global(&created, write_path, &error);
-        if (status != AXYNE_STATUS_OK) { axyne_workspace_show_error(owner, "Unable to create settings file", &error); return 0; }
-        axyne_refresh_settings_read_paths(state);
-    }
+    if (!axyne_ensure_settings_file(owner, state, workspace)) return 0;
     axyne_open_document(owner, state, write_path);
     return 1;
 }
@@ -2835,20 +2865,13 @@ static int axyne_preferences_file_exists(const AxyneWindowState *state)
     return axyne_settings_file_exists(state->global_preferences_path);
 }
 
-/* Tools > settings.json 열기: opens the global settings.json, writing it from
- * the loaded profile first when only the old preferences.json exists. */
+/* Tools > settings.json 열기: opens the global settings.json (copied from the
+ * old preferences.json first when only that exists). */
 static void axyne_open_settings_json(HWND window, AxyneWindowState *state)
 {
-    AxyneError error;
-    if (state->global_settings_write_path == NULL) return;
-    if (!axyne_settings_file_exists(state->global_settings_write_path)) {
-        if (axyne_preferences_save_global(&state->global_preferences,
-                state->global_settings_write_path, &error) != AXYNE_STATUS_OK) {
-            axyne_workspace_show_error(window, "Unable to create settings file", &error);
-            return;
-        }
-        axyne_refresh_settings_read_paths(state);
-    }
+    if (state->global_settings_write_path == NULL ||
+        !axyne_ensure_settings_file(window, state, 0))
+        return;
     axyne_open_document(window, state, state->global_settings_write_path);
 }
 

@@ -1506,6 +1506,39 @@ char *axyne_preferences_write_path(const char *directory)
     return axyne_join_path(directory, "settings.json");
 }
 
+AxyneStatus axyne_preferences_adopt_legacy_file(const char *directory, AxyneError *error)
+{
+    char *settings = axyne_join_path(directory, "settings.json");
+    char *legacy = axyne_join_path(directory, "preferences.json");
+    char *contents = NULL;
+    size_t length = 0;
+    AxyneStatus status;
+    if (settings == NULL || legacy == NULL) {
+        free(settings);
+        free(legacy);
+        if (error != NULL) {
+            error->code = directory == NULL ? AXYNE_STATUS_INVALID_ARGUMENT
+                                              : AXYNE_STATUS_OUT_OF_MEMORY;
+            (void)snprintf(error->message, sizeof(error->message), "%s",
+                           "Unable to build the settings path");
+        }
+        return directory == NULL ? AXYNE_STATUS_INVALID_ARGUMENT : AXYNE_STATUS_OUT_OF_MEMORY;
+    }
+    if (axyne_file_exists(settings)) {
+        status = AXYNE_STATUS_OK;
+    } else {
+        status = axyne_fs_read_file(legacy, &contents, &length, error);
+        /* The old file stays; its bytes (every override and unknown member)
+         * become settings.json. */
+        if (status == AXYNE_STATUS_OK)
+            status = axyne_fs_write_file(settings, contents, length, error);
+        axyne_fs_free(contents);
+    }
+    free(settings);
+    free(legacy);
+    return status;
+}
+
 char *axyne_preferences_workspace_directory(const char *workspace_root)
 {
     return axyne_join_path(workspace_root, ".axyne");

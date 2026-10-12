@@ -409,6 +409,13 @@ char *axyne_preferences_read_path(const char *directory);
 char *axyne_preferences_write_path(const char *directory);
 char *axyne_preferences_workspace_directory(const char *workspace_root);
 void axyne_preferences_free_path(char *path);
+/* Makes <dir>/settings.json exist without losing anything (D3): when only the
+ * old preferences.json exists its bytes are copied verbatim (every override,
+ * present-field set and unknown member is kept; the old file stays). OK when
+ * settings.json exists afterwards; NOT_FOUND (from the read) when neither file
+ * exists, in which case nothing is written. */
+AxyneStatus axyne_preferences_adopt_legacy_file(const char *directory,
+                                                AxyneError *error);
 
 #ifdef __cplusplus
 }
