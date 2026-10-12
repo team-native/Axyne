@@ -1,6 +1,9 @@
 #include "test_support.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+#include "axyne/preferences.h"
 
 #include "axyne/keymap.h"
 
@@ -122,6 +125,65 @@ static int test_parse_format(void)
     AXYNE_TEST_EQ_INT(axyne_key_from_mac_character(0xF700), AXYNE_KEY_UP);
     AXYNE_TEST_EQ_INT(axyne_key_from_mac_character(0x7F), AXYNE_KEY_BACKSPACE);
     AXYNE_TEST_EQ_INT(axyne_key_from_mac_character(0x00E9), AXYNE_KEY_NONE);
+    return 1;
+}
+
+/* User bindings win over registry defaults (legacy action bindings from
+ * the preferences included); hard-native keys (Tab) stay native. */
+static int test_user_bindings_win(void)
+{
+    AxyneKeymap map;
+    AxynePreferences *preferences = (AxynePreferences *)malloc(sizeof(*preferences));
+    AxyneKeyBinding *binding;
+    AXYNE_TEST_CHECK(preferences != NULL);
+    axyne_preferences_defaults(preferences);
+    binding = (AxyneKeyBinding *)axyne_preferences_find_binding(preferences, AXYNE_ACTION_RUN);
+    AXYNE_TEST_CHECK(binding != NULL);
+    binding->modifiers = AXYNE_KEY_MODIFIER_CONTROL;
+    (void)snprintf(binding->key, sizeof(binding->key), "%s", "D");
+    binding->enabled = 1;
+    binding = (AxyneKeyBinding *)axyne_preferences_find_binding(preferences, AXYNE_ACTION_NEW);
+    AXYNE_TEST_CHECK(binding != NULL);
+    binding->modifiers = AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_SHIFT;
+    (void)snprintf(binding->key, sizeof(binding->key), "%s", "N");
+    AXYNE_TEST_STATUS(axyne_keymap_build(&map, AXYNE_COMMAND_PLATFORM_WINDOWS, preferences),
+                      AXYNE_STATUS_OK);
+    /* Run = Ctrl+D beats 줄 복제; New = Ctrl+Shift+N beats 새 프로젝트. */
+    AXYNE_TEST_CHECK(feed_is(&map, "Ctrl+D", 0, 0, AXYNE_KEYMAP_COMMAND,
+                             AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING));
+    AXYNE_TEST_EQ_INT(axyne_keymap_bindings(&map, AXYNE_COMMAND_EDIT_DUPLICATE_LINE, NULL, 0), 0);
+    AXYNE_TEST_CHECK(feed_is(&map, "Ctrl+Shift+N", 0, 0, AXYNE_KEYMAP_COMMAND,
+                             AXYNE_COMMAND_FILE_NEW));
+    AXYNE_TEST_EQ_INT(axyne_keymap_bindings(&map, AXYNE_COMMAND_FILE_NEW_PROJECT, NULL, 0), 0);
+    /* The custom binding replaced New's own default key. */
+    AXYNE_TEST_CHECK(feed_is(&map, "Ctrl+N", 0, 0, AXYNE_KEYMAP_NONE, AXYNE_COMMAND_NONE));
+    AXYNE_TEST_EQ_INT(axyne_keymap_conflicts(&map, NULL, 0), 0);
+    {
+        const char *undo[] = {"Ctrl+Z"};
+        const char *tab[] = {"Tab"};
+        /* A native key the user chose explicitly works ... */
+        AXYNE_TEST_STATUS(axyne_keymap_set_command_text(&map, "file.save", undo, 1),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(feed_is(&map, "Ctrl+Z", 0, 0, AXYNE_KEYMAP_COMMAND,
+                                 AXYNE_COMMAND_FILE_SAVE));
+        /* ... but Tab stays with the text control. */
+        AXYNE_TEST_STATUS(axyne_keymap_set_command_text(&map, "file.close", tab, 1),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(feed_is(&map, "Tab", 0, 0, AXYNE_KEYMAP_NONE, AXYNE_COMMAND_NONE));
+        AXYNE_TEST_EQ_INT(axyne_keymap_bindings(&map, AXYNE_COMMAND_EDIT_INDENT, NULL, 0), 1);
+    }
+    /* Debug-context defaults are not taken by plain user bindings. */
+    {
+        const char *f10[] = {"F10"};
+        AXYNE_TEST_STATUS(axyne_keymap_set_command_text(&map, "view.outline", f10, 1),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(feed_is(&map, "F10", 0, AXYNE_KEYMAP_CONTEXT_DEBUGGING,
+                                 AXYNE_KEYMAP_COMMAND, AXYNE_COMMAND_DEBUG_STEP_OVER));
+        AXYNE_TEST_CHECK(feed_is(&map, "F10", 0, 0, AXYNE_KEYMAP_COMMAND,
+                                 AXYNE_COMMAND_VIEW_OUTLINE));
+    }
+    axyne_keymap_destroy(&map);
+    free(preferences);
     return 1;
 }
 
@@ -252,8 +314,15 @@ static int test_windows_map(void)
                                  AXYNE_COMMAND_FILE_SAVE));
         AXYNE_TEST_STATUS(axyne_keymap_set_command_text(&map, "file.nope", keys, 1),
                           AXYNE_STATUS_NOT_FOUND);
-        /* Binding Save to Ctrl+O collides with Open. */
+        /* Binding Save to Ctrl+O takes the key from Open's default. */
         AXYNE_TEST_STATUS(axyne_keymap_set_command_text(&map, "file.save", open_keys, 1),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_EQ_INT(axyne_keymap_conflicts(&map, NULL, 0), 0);
+        AXYNE_TEST_EQ_INT(axyne_keymap_bindings(&map, AXYNE_COMMAND_FILE_OPEN, NULL, 0), 0);
+        AXYNE_TEST_CHECK(feed_is(&map, "Ctrl+O", 0, 0, AXYNE_KEYMAP_COMMAND,
+                                 AXYNE_COMMAND_FILE_SAVE));
+        /* Two user bindings on the same keys collide. */
+        AXYNE_TEST_STATUS(axyne_keymap_set_command_text(&map, "file.open", open_keys, 1),
                           AXYNE_STATUS_OK);
         conflict_count = axyne_keymap_conflicts(&map, conflicts, 8);
         AXYNE_TEST_EQ_INT(conflict_count, 1);
@@ -299,6 +368,7 @@ static int test_windows_map(void)
     }
     axyne_keymap_destroy(&map);
     axyne_keymap_destroy(&map); /* safe twice */
+    AXYNE_TEST_CHECK(test_user_bindings_win());
     return 1;
 }
 
