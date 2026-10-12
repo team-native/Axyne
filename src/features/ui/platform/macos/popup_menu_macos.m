@@ -699,6 +699,8 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     NSEventModifierFlags flags = [event modifierFlags];
     AxynePopupMenu *active = [self deepest];
     NSInteger selected = [active->_view selectedIndex];
+    /* Keyboard navigation owns the selection until the pointer enters again. */
+    _pointerInside = NO;
     /* Command/Control chords belong to the key equivalents: close and let
      * the event through to the native menu. */
     if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0) {
