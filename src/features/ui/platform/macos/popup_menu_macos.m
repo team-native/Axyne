@@ -23,6 +23,25 @@ static unsigned axyne_popup_modifiers(NSEventModifierFlags flags)
     return mods;
 }
 
+/* Accelerator text with a thin space between keys ("⇧ ⌘ O") so the
+ * small key glyphs do not run into each other. */
+static NSString *axyne_popup_spaced_keys(NSString *text)
+{
+    NSMutableString *spaced;
+    __block BOOL first = YES;
+    if ([text length] < 2) return text;
+    spaced = [NSMutableString stringWithCapacity:[text length] * 2];
+    [text enumerateSubstringsInRange:NSMakeRange(0, [text length])
+                             options:NSStringEnumerationByComposedCharacterSequences
+                          usingBlock:^(NSString *piece, NSRange range, NSRange enclosing, BOOL *stop) {
+        (void)range; (void)enclosing; (void)stop;
+        if (!first) [spaced appendString:@"\u2009"];
+        [spaced appendString:piece];
+        first = NO;
+    }];
+    return spaced;
+}
+
 /* Whether a row can be highlighted and chosen. A submenu parent counts as
  * enabled when the menu auto-enables items, as AppKit does. */
 static BOOL axyne_popup_item_enabled(NSMenuItem *item)
@@ -128,7 +147,8 @@ static BOOL axyne_popup_item_enabled(NSMenuItem *item)
                     uint32_t key = (uint32_t)[equivalent characterAtIndex:0];
                     if (axyne_popup_accelerator(text, sizeof(text), key,
                             axyne_popup_modifiers([item keyEquivalentModifierMask])) > 0) {
-                        NSString *shown = [NSString stringWithUTF8String:text];
+                        NSString *shown = axyne_popup_spaced_keys(
+                            [NSString stringWithUTF8String:text]);
                         if (shown != nil) {
                             CGFloat width = ceil([shown sizeWithAttributes:accelAttributes].width);
                             if (width > trailing) trailing = width;
@@ -579,6 +599,10 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     NSInteger row;
     if (level == nil) {
         id<AxynePopupMenuDelegate> delegate = _delegate;
+        /* Leaving every panel closes the open submenus (the top level stays
+         * open, like a menu bar dropdown) and drops the hover highlight. */
+        if (_child != nil) [self closeChild];
+        [_view setSelectedIndex:-1];
         if ([delegate respondsToSelector:@selector(popupMenu:pointerMovedOutsideToScreenPoint:)])
             [delegate popupMenu:self pointerMovedOutsideToScreenPoint:point];
         return;
