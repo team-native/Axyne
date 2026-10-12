@@ -458,6 +458,7 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     [self showPanelAtOrigin:NSMakePoint(placed.x, placed.y)];
     if (selectFirst) [_view moveSelection:AXYNE_POPUP_NAV_FIRST];
     _open = YES;
+    _pointerInside = NO;
     _localMonitor = [[NSEvent addLocalMonitorForEventsMatchingMask:
         NSEventMaskMouseMoved | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
         NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown | NSEventMaskKeyDown
