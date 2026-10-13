@@ -3,6 +3,7 @@
 enable_language(CXX)
 FetchContent_Declare(axyne_vterm_source
     URL https://www.leonerd.org.uk/code/libvterm/libvterm-0.3.3.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     URL_HASH SHA256=09156f43dd2128bd347cbeebe50d9a571d32c64e0cf18d211197946aff7226e0)
 FetchContent_GetProperties(axyne_vterm_source)
 if(NOT axyne_vterm_source_POPULATED)
@@ -35,10 +36,15 @@ if(MSVC)
     target_compile_options(axyne_vterm PRIVATE /utf-8)
 endif()
 if(APPLE)
+    add_custom_command(TARGET axyne POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${axyne_vterm_source_SOURCE_DIR}/LICENSE"
+        "$<TARGET_BUNDLE_CONTENT_DIR:axyne>/Resources/libvterm-LICENSE.txt")
     install(FILES "${axyne_vterm_source_SOURCE_DIR}/LICENSE"
         DESTINATION "${AXYNE_MACOS_BUNDLE_NAME}/Contents/Resources"
         RENAME libvterm-LICENSE.txt CONFIGURATIONS Release)
 elseif(WIN32)
+    add_custom_command(TARGET axyne POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${axyne_vterm_source_SOURCE_DIR}/LICENSE" "$<TARGET_FILE_DIR:axyne>/libvterm-LICENSE.txt")
     install(FILES "${axyne_vterm_source_SOURCE_DIR}/LICENSE"
         DESTINATION . RENAME libvterm-LICENSE.txt CONFIGURATIONS Release)
 endif()
