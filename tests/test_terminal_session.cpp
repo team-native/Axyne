@@ -7,6 +7,7 @@
 #include <thread>
 #include <atomic>
 struct Events { std::atomic<int> changed{0}, exits{0}, code{-1}; };
+static Events *current_events;
 static void changed(AxyneTerminal *, void *p) { auto *e = static_cast<Events *>(p); assert(e->exits == 0); ++e->changed; }
 static void exited(AxyneTerminal *, int code, void *p) { auto *e = static_cast<Events *>(p); e->code = code; ++e->exits; }
 using Clock = std::chrono::steady_clock;
@@ -24,6 +25,7 @@ static void await_text(AxyneTerminal *t, const char *expected) {
     while (text(t).find(expected) == std::string::npos && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     if (text(t).find(expected) == std::string::npos) {
         std::cerr << "Terminal wait failed: marker=" << expected << " running=" << axyne_terminal_running(t) << "\n" << text(t) << std::flush;
+        if(current_events) std::cerr<<"callbacks: changed="<<current_events->changed<<" exits="<<current_events->exits<<" code="<<current_events->code<<"\n"<<std::flush;
         axyne_terminal_release(t); std::exit(EXIT_FAILURE);
     }
 }
@@ -40,6 +42,10 @@ static void command(AxyneTerminal *t, const char *s) {
 #endif
 int main() {
     Events events;
+    current_events=&events;
+#ifdef _WIN32
+    _putenv_s("AXYNE_TERMINAL_TRACE","1");
+#endif
     AxyneTerminal *t; assert(axyne_terminal_create(24, 100, 2000, &t, nullptr) == AXYNE_STATUS_OK);
 #ifdef _WIN32
     const char *args[] = {"/Q"}; AxyneTerminalSpec spec{"C:\\Windows\\System32\\cmd.exe", args, 1, nullptr, nullptr, nullptr, nullptr};

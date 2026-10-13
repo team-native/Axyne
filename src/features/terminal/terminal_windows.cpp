@@ -3,6 +3,8 @@
 #include "terminal_internal.hpp"
 #include <chrono>
 #include <memory>
+#include <cstdio>
+#include <cstdlib>
 
 using CreatePC = HRESULT (WINAPI *)(COORD, HANDLE, HANDLE, DWORD, HANDLE *);
 using ResizePC = HRESULT (WINAPI *)(HANDLE, COORD);
@@ -14,6 +16,8 @@ struct WindowsTerminal {
     std::thread closer;
     std::atomic<bool> closed{false};
     DWORD exit_code = 0;
+    bool trace = false;
+    std::atomic<unsigned long long> read_bytes{0}, written_bytes{0};
 };
 static AxyneStatus failure(AxyneError *e, const char *message) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, message); }
 static std::wstring wide(const char *s) {
@@ -40,7 +44,11 @@ static void writer(AxyneTerminal *t, WindowsTerminal *p) {
         size_t at = 0;
         while (at < data.size() && !t->stopping) {
             DWORD n = 0;
-            if (!WriteFile(p->input, data.data()+at, static_cast<DWORD>(data.size()-at), &n, nullptr) || !n) break;
+            if (!WriteFile(p->input, data.data()+at, static_cast<DWORD>(data.size()-at), &n, nullptr) || !n) {
+                if(p->trace) std::fprintf(stderr,"terminal writer stopped: Win32=%lu\n",GetLastError());
+                break;
+            }
+            p->written_bytes += n;
             at += n;
         }
         { std::lock_guard<std::mutex> lock(t->queue_mutex); t->queued_bytes -= data.size(); }
@@ -49,11 +57,15 @@ static void writer(AxyneTerminal *t, WindowsTerminal *p) {
 static void reader(AxyneTerminal *t, WindowsTerminal *p) {
     for (;;) {
         DWORD available = 0;
-        if (!PeekNamedPipe(p->output, nullptr, 0, nullptr, &available, nullptr)) break;
+        if (!PeekNamedPipe(p->output, nullptr, 0, nullptr, &available, nullptr)) {
+            if(p->trace) std::fprintf(stderr,"terminal reader EOF: Win32=%lu\n",GetLastError());
+            break;
+        }
         if (available) {
             char buffer[16384]; DWORD n = 0;
             if (!ReadFile(p->output, buffer, sizeof buffer, &n, nullptr) || !n) break;
             axyne_terminal_feed(t, buffer, n);
+            p->read_bytes += n;
             if (t->changed) t->changed(t, t->context);
         } else {
             // ClosePseudoConsole can return before its final output on newer
@@ -64,6 +76,7 @@ static void reader(AxyneTerminal *t, WindowsTerminal *p) {
     // Exit is serialized behind the final frame and ClosePseudoConsole.
     while (!p->closed) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     t->running = false;
+    if(p->trace) std::fprintf(stderr,"terminal exit: code=%lu read=%llu written=%llu\n",p->exit_code,p->read_bytes.load(),p->written_bytes.load());
     if (t->exited) t->exited(t, static_cast<int>(p->exit_code), t->context);
 }
 static void closer(AxyneTerminal *t, WindowsTerminal *p) {
@@ -95,26 +108,34 @@ AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *
     SIZE_T bytes = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
     std::vector<unsigned char> storage(bytes);
     auto *p = new WindowsTerminal; p->resize = resize; p->close = closepc; t->transport = p;
+    p->trace = std::getenv("AXYNE_TERMINAL_TRACE") != nullptr;
     HANDLE inread = nullptr, outwrite = nullptr;
     if (!CreatePipe(&inread, &p->input, nullptr, 0) || !CreatePipe(&p->output, &outwrite, nullptr, 0)) {
         if (inread) CloseHandle(inread); if (outwrite) CloseHandle(outwrite); terminal_transport_destroy(t); return failure(e, "Cannot create ConPTY channels");
     }
     int rows, cols; { std::lock_guard<std::mutex> lock(t->model_mutex); vterm_get_size(t->vt, &rows, &cols); }
     HRESULT hr = create({static_cast<SHORT>(cols), static_cast<SHORT>(rows)}, inread, outwrite, 0, &p->pc);
+    if(p->trace) std::fprintf(stderr,"terminal create-pc: HRESULT=%08lx\n",static_cast<unsigned long>(hr));
     if (FAILED(hr)) { CloseHandle(inread); CloseHandle(outwrite); terminal_transport_destroy(t); return failure(e, "Cannot create pseudoconsole"); }
     // Start the drain thread before any startup error can close the console.
     try { t->reader = std::thread(reader, t, p); }
     catch (...) { CloseHandle(inread); CloseHandle(outwrite); CloseHandle(p->output); p->output = nullptr; terminal_transport_destroy(t); return failure(e, "Cannot create terminal reader"); }
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof si;
+    // Windows otherwise duplicates redirected parent standard handles even
+    // with bInheritHandles=FALSE. Null std handles are filled from ConPTY.
+    // https://github.com/microsoft/terminal/discussions/15814
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
     bool initialized = InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &bytes) != 0;
     bool ready = initialized && UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, p->pc, sizeof p->pc, nullptr, nullptr);
+    if(p->trace) std::fprintf(stderr,"terminal attributes: initialized=%d attached=%d Win32=%lu\n",initialized,ready,ready?0:GetLastError());
     p->job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     ready = ready && p->job && SetInformationJobObject(p->job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
     PROCESS_INFORMATION pi{};
     bool spawned = ready && CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si.StartupInfo, &pi);
+    if(p->trace) std::fprintf(stderr,"terminal create-process: ok=%d Win32=%lu pid=%lu\n",spawned,spawned?0:GetLastError(),pi.dwProcessId);
     if (initialized) DeleteProcThreadAttributeList(si.lpAttributeList);
     CloseHandle(inread); CloseHandle(outwrite);
     if (!spawned) { terminal_transport_destroy(t); return failure(e, "Cannot start terminal shell"); }
