@@ -5,6 +5,10 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <atomic>
+struct Events { std::atomic<int> changed{0}, exits{0}, code{-1}; };
+static void changed(AxyneTerminal *, void *p) { auto *e = static_cast<Events *>(p); assert(e->exits == 0); ++e->changed; }
+static void exited(AxyneTerminal *, int code, void *p) { auto *e = static_cast<Events *>(p); e->code = code; ++e->exits; }
 using Clock = std::chrono::steady_clock;
 static std::string text(AxyneTerminal *t) {
     AxyneTerminalSnapshot s{}; assert(axyne_terminal_snapshot(t, &s, nullptr) == AXYNE_STATUS_OK);
@@ -22,30 +26,41 @@ static void await_text(AxyneTerminal *t, const char *expected) {
 }
 static void send(AxyneTerminal *t, const char *s) { assert(axyne_terminal_write(t, s, std::strlen(s), nullptr) == AXYNE_STATUS_OK); }
 int main() {
+    Events events;
     AxyneTerminal *t; assert(axyne_terminal_create(24, 100, 2000, &t, nullptr) == AXYNE_STATUS_OK);
 #ifdef _WIN32
     const char *args[] = {"/Q"}; AxyneTerminalSpec spec{"C:\\Windows\\System32\\cmd.exe", args, 1, nullptr, nullptr, nullptr, nullptr};
 #else
     const char *args[] = {"-f", "-i"}; AxyneTerminalSpec spec{"/bin/zsh", args, 2, "/tmp", nullptr, nullptr, nullptr};
 #endif
+    spec.on_changed = changed; spec.on_exit = exited; spec.user_data = &events;
     AxyneError e{}; assert(axyne_terminal_start(t, &spec, &e) == AXYNE_STATUS_OK);
 #ifdef _WIN32
     send(t, "echo AXYNE_READY\r"); await_text(t, "AXYNE_READY");
 #else
     send(t, "unsetopt zle; PS1='AXYNE_PROMPT> '; setopt zle\r"); await_text(t, "AXYNE_PROMPT>");
-    send(t, "[[ -t 0 && -t 1 && -t 2 ]] && print TTY_OK; print CWD:$PWD\r"); await_text(t, "TTY_OK"); await_text(t, "CWD:/");
-    send(t, "print HISTORY_OK\r"); await_text(t, "HISTORY_OK");
+    send(t, "[[ -t 0 && -t 1 && -t 2 ]] && printf '%s%s\\n' TTY_ OK; print CWD:$PWD\r"); await_text(t, "TTY_OK"); await_text(t, "CWD:/");
+    send(t, "printf '%s%s\\n' HISTORY_ OK\r"); await_text(t, "HISTORY_OK");
     assert(axyne_terminal_key(t, AXYNE_TERMINAL_UP, 0, nullptr) == AXYNE_STATUS_OK);
     assert(axyne_terminal_key(t, AXYNE_TERMINAL_ENTER, 0, nullptr) == AXYNE_STATUS_OK);
+    auto history_deadline = Clock::now() + std::chrono::seconds(5);
+    while (Clock::now() < history_deadline) { auto value = text(t); auto first = value.find("HISTORY_OK"); if (first != std::string::npos && value.find("HISTORY_OK", first+1) != std::string::npos) break; std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
+    { auto value = text(t); auto first = value.find("HISTORY_OK"); assert(first != std::string::npos && value.find("HISTORY_OK", first+1) != std::string::npos); }
     send(t, "sleep 20\r"); std::this_thread::sleep_for(std::chrono::milliseconds(150));
     assert(axyne_terminal_unichar(t, 'c', AXYNE_TERMINAL_CTRL, nullptr) == AXYNE_STATUS_OK);
-    send(t, "print INTERRUPT_OK\r"); await_text(t, "INTERRUPT_OK"); assert(axyne_terminal_running(t));
+    send(t, "printf '%s%s\\n' INTERRUPT_ OK\r"); await_text(t, "INTERRUPT_OK"); assert(axyne_terminal_running(t));
 #endif
     assert(axyne_terminal_resize(t, 30, 120, nullptr) == AXYNE_STATUS_OK);
-    send(t, "echo FINAL_DRAIN; exit\r");
+#ifdef _WIN32
+    send(t, "set AXYNE_A=FINAL_\r\necho %AXYNE_A%DRAIN\r\nexit 7\r\n");
+#else
+    send(t, "printf '%s%s\\n' FINAL_ DRAIN; exit 7\r");
+#endif
     auto deadline = Clock::now() + std::chrono::seconds(5);
     while (axyne_terminal_running(t) && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     assert(!axyne_terminal_running(t)); await_text(t, "FINAL_DRAIN"); axyne_terminal_release(t);
+    assert(events.exits == 1 && events.code == 7 && events.changed > 0);
+    spec.on_changed = nullptr; spec.on_exit = nullptr; spec.user_data = nullptr;
     for (int i = 0; i < 8; ++i) {
         assert(axyne_terminal_create(24, 80, 20, &t, nullptr) == AXYNE_STATUS_OK);
         assert(axyne_terminal_start(t, &spec, &e) == AXYNE_STATUS_OK);

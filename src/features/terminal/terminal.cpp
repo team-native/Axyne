@@ -27,7 +27,10 @@ AxyneStatus terminal_enqueue(AxyneTerminal *t, const char *data, size_t len, Axy
 }
 static void output(const char *s, size_t n, void *context) {
     auto *t = static_cast<AxyneTerminal *>(context);
-    if (t->encoding) t->encoded.append(s, n);
+    if (t->encoding) {
+        try { t->encoded.append(s, n); }
+        catch (...) { t->encoding_failed = true; }
+    }
     else if (t->running) terminal_enqueue(t, s, n, nullptr);
 }
 static int property(VTermProp prop, VTermValue *v, void *context) {
@@ -68,7 +71,7 @@ static const VTermScreenCallbacks callbacks = {
     nullptr, nullptr, nullptr, property, nullptr, nullptr, pushline, popline, clear_history
 };
 extern "C" AxyneStatus axyne_terminal_create(int rows, int cols, size_t limit,
-                                              AxyneTerminal **out, AxyneError *e) {
+                                              AxyneTerminal **out, AxyneError *e) try {
     if (!out || !dimensions(rows, cols) || limit > 2000)
         return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT, "Terminal dimensions exceed 512 rows / 1024 columns or history exceeds 2000 lines");
     *out = nullptr;
@@ -85,65 +88,78 @@ extern "C" AxyneStatus axyne_terminal_create(int rows, int cols, size_t limit,
     vterm_screen_reset(t->screen, 1);
     *out = t;
     return terminal_result(e, AXYNE_STATUS_OK);
+} catch (...) {
+    if (out) *out = nullptr;
+    return terminal_result(e, AXYNE_STATUS_OUT_OF_MEMORY, "Cannot allocate terminal model");
 }
-extern "C" void axyne_terminal_feed(AxyneTerminal *t, const char *s, size_t n) {
+extern "C" void axyne_terminal_feed(AxyneTerminal *t, const char *s, size_t n) try {
     if (!t || (!s && n)) return;
     std::lock_guard<std::mutex> lock(t->model_mutex);
     vterm_input_write(t->vt, s, n); vterm_screen_flush_damage(t->screen);
 }
-extern "C" AxyneStatus axyne_terminal_write(AxyneTerminal *t, const char *s, size_t n, AxyneError *e) {
+catch (...) {}
+extern "C" AxyneStatus axyne_terminal_write(AxyneTerminal *t, const char *s, size_t n, AxyneError *e) try {
     if (!t || (!s && n)) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     return terminal_enqueue(t, s, n, e);
 }
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
 template<class F> static AxyneStatus encode(AxyneTerminal *t, F f, AxyneError *e) {
     if (!t) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     std::lock_guard<std::mutex> lock(t->model_mutex);
-    t->encoding = true; t->encoded.clear();
+    t->encoding = true; t->encoding_failed = false; t->encoded.clear();
     try { f(); }
     catch (const std::bad_alloc &) { t->encoding = false; return terminal_result(e, AXYNE_STATUS_OUT_OF_MEMORY); }
     t->encoding = false; t->scroll = 0;
+    if (t->encoding_failed) return terminal_result(e, AXYNE_STATUS_OUT_OF_MEMORY);
     return terminal_enqueue(t, t->encoded.data(), t->encoded.size(), e);
 }
-extern "C" AxyneStatus axyne_terminal_key(AxyneTerminal *t, AxyneTerminalKey k, unsigned mods, AxyneError *e) {
+extern "C" AxyneStatus axyne_terminal_key(AxyneTerminal *t, AxyneTerminalKey k, unsigned mods, AxyneError *e) try {
     if ((k < 1 || k > AXYNE_TERMINAL_PAGEDOWN) && (k < 257 || k > 280))
         return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     return encode(t, [&]{ vterm_keyboard_key(t->vt, static_cast<VTermKey>(k), static_cast<VTermModifier>(mods & 7)); }, e);
 }
-extern "C" AxyneStatus axyne_terminal_unichar(AxyneTerminal *t, uint32_t c, unsigned mods, AxyneError *e) {
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
+extern "C" AxyneStatus axyne_terminal_unichar(AxyneTerminal *t, uint32_t c, unsigned mods, AxyneError *e) try {
     if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     return encode(t, [&]{ vterm_keyboard_unichar(t->vt, c, static_cast<VTermModifier>(mods & 7)); }, e);
 }
-extern "C" AxyneStatus axyne_terminal_paste(AxyneTerminal *t, const char *s, size_t n, AxyneError *e) {
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
+extern "C" AxyneStatus axyne_terminal_paste(AxyneTerminal *t, const char *s, size_t n, AxyneError *e) try {
     if ((!s && n) || n > input_limit - 12) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     return encode(t, [&]{ vterm_keyboard_start_paste(t->vt); t->encoded.append(s ? s : "", n); vterm_keyboard_end_paste(t->vt); }, e);
 }
-extern "C" AxyneStatus axyne_terminal_resize(AxyneTerminal *t, int rows, int cols, AxyneError *e) {
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
+extern "C" AxyneStatus axyne_terminal_resize(AxyneTerminal *t, int rows, int cols, AxyneError *e) try {
     if (!t || !dimensions(rows, cols)) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     std::lock_guard<std::mutex> lock(t->model_mutex);
     vterm_set_size(t->vt, rows, cols); vterm_screen_flush_damage(t->screen);
     return t->running ? terminal_transport_resize(t, rows, cols, e) : terminal_result(e, AXYNE_STATUS_OK);
 }
-extern "C" void axyne_terminal_scroll(AxyneTerminal *t, int lines) {
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
+extern "C" void axyne_terminal_scroll(AxyneTerminal *t, int lines) try {
     if (!t) return;
     std::lock_guard<std::mutex> lock(t->model_mutex);
     t->scroll = t->alternate ? 0 : static_cast<int>(std::clamp(static_cast<long long>(t->scroll) + lines, 0LL, static_cast<long long>(t->history.size())));
 }
-extern "C" void axyne_terminal_clear(AxyneTerminal *t) {
+catch (...) {}
+extern "C" void axyne_terminal_clear(AxyneTerminal *t) try {
     if (!t) return;
     std::lock_guard<std::mutex> lock(t->model_mutex);
     t->history.clear(); t->scroll = 0; vterm_screen_reset(t->screen, 1);
 }
-extern "C" void axyne_terminal_set_colors(AxyneTerminal *t, uint32_t fg, uint32_t bg) {
+catch (...) {}
+extern "C" void axyne_terminal_set_colors(AxyneTerminal *t, uint32_t fg, uint32_t bg) try {
     if (!t) return;
     std::lock_guard<std::mutex> lock(t->model_mutex);
     VTermColor f, b; vterm_color_rgb(&f, fg >> 16, fg >> 8, fg); vterm_color_rgb(&b, bg >> 16, bg >> 8, bg);
     vterm_screen_set_default_colors(t->screen, &f, &b);
 }
+catch (...) {}
 static uint32_t rgb(AxyneTerminal *t, VTermColor color) {
     vterm_screen_convert_color_to_rgb(t->screen, &color);
     return (color.rgb.red << 16) | (color.rgb.green << 8) | color.rgb.blue;
 }
-extern "C" AxyneStatus axyne_terminal_snapshot(AxyneTerminal *t, AxyneTerminalSnapshot *s, AxyneError *e) {
+extern "C" AxyneStatus axyne_terminal_snapshot(AxyneTerminal *t, AxyneTerminalSnapshot *s, AxyneError *e) try {
     if (!t || !s) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     std::lock_guard<std::mutex> lock(t->model_mutex);
     *s = {}; vterm_get_size(t->vt, &s->rows, &s->columns);
@@ -169,9 +185,12 @@ extern "C" AxyneStatus axyne_terminal_snapshot(AxyneTerminal *t, AxyneTerminalSn
     }
     return terminal_result(e, AXYNE_STATUS_OK);
 }
-extern "C" void axyne_terminal_snapshot_free(AxyneTerminalSnapshot *s) { if (s) { std::free(s->cells); *s = {}; } }
-extern "C" int axyne_terminal_running(AxyneTerminal *t) { return t && t->running; }
-extern "C" AxyneStatus axyne_terminal_start(AxyneTerminal *t, const AxyneTerminalSpec *spec, AxyneError *e) {
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
+extern "C" void axyne_terminal_snapshot_free(AxyneTerminalSnapshot *s) try { if (s) { std::free(s->cells); *s = {}; } }
+catch (...) {}
+extern "C" int axyne_terminal_running(AxyneTerminal *t) try { return t && t->running; }
+catch (...) { return 0; }
+extern "C" AxyneStatus axyne_terminal_start(AxyneTerminal *t, const AxyneTerminalSpec *spec, AxyneError *e) try {
     if (!t || !spec || !spec->executable || (spec->argument_count && !spec->arguments)) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     if (t->running) return terminal_result(e, AXYNE_STATUS_BUSY);
     terminal_transport_destroy(t);
@@ -179,12 +198,20 @@ extern "C" AxyneStatus axyne_terminal_start(AxyneTerminal *t, const AxyneTermina
     t->stopping = false;
     { std::lock_guard<std::mutex> lock(t->queue_mutex); t->writes.clear(); t->queued_bytes = 0; }
     return terminal_transport_start(t, spec, e);
+} catch (const std::bad_alloc &) {
+    if (t) terminal_transport_destroy(t);
+    return terminal_result(e, AXYNE_STATUS_OUT_OF_MEMORY, "Cannot allocate terminal session");
+} catch (...) {
+    if (t) terminal_transport_destroy(t);
+    return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Cannot initialize terminal session");
 }
-extern "C" AxyneStatus axyne_terminal_terminate(AxyneTerminal *t, AxyneError *e) {
+extern "C" AxyneStatus axyne_terminal_terminate(AxyneTerminal *t, AxyneError *e) try {
     if (!t) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
     terminal_transport_stop(t); return terminal_result(e, AXYNE_STATUS_OK);
 }
-extern "C" void axyne_terminal_release(AxyneTerminal *t) {
+catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
+extern "C" void axyne_terminal_release(AxyneTerminal *t) try {
     if (!t) return;
     terminal_transport_destroy(t); vterm_free(t->vt); delete t;
 }
+catch (...) {}

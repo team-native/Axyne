@@ -19,7 +19,7 @@ struct AxyneTerminal {
     int scroll = 0, cursor_visible = 1, alternate = 0;
     std::deque<std::string> writes;
     std::string encoded;
-    bool encoding = false;
+    bool encoding = false, encoding_failed = false;
     std::atomic<bool> running{false}, stopping{false};
     std::thread reader, writer;
     AxyneTerminalChangedFn changed = nullptr;
