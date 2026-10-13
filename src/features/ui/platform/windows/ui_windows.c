@@ -1347,7 +1347,7 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
     state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->action_process != NULL) {
-        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\r\n";
+        const char *message = "Debugger is unavailable while a build or run is active. Stop that action first.\r\n";
         axyne_terminal_append(state->terminal_output, message, strlen(message),
                               AXYNE_PROCESS_STDERR);
         return;
@@ -2202,7 +2202,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     axyne_layout(window, state);
     if (state->action_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
-        const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
+        const char *busy = "Build or run is unavailable while another action or debugger session is active. Stop it first.\n";
         axyne_terminal_append(state->terminal_output, busy, strlen(busy),
                               AXYNE_PROCESS_STDERR);
         return;

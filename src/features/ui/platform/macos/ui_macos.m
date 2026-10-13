@@ -6112,7 +6112,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
         ![self captureEditor]) return;
     [self selectOutputPanel];
     if (_actionProcess != NULL) {
-        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
+        const char *message = "Debugger is unavailable while a build or run is active. Stop that action first.\n";
         [self terminalAppend:message length:strlen(message)
                        stream:AXYNE_PROCESS_STDERR];
         return;
@@ -6320,7 +6320,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     AxyneStatus status;
     [self selectOutputPanel];
     if (_actionProcess != NULL || axyne_debugger_is_active(&_debugger)) {
-        const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
+        const char *busy = "Build or run is unavailable while another action or debugger session is active. Stop it first.\n";
         [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
         return;
     }
