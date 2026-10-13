@@ -91,6 +91,9 @@ AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *
         if (!s->arguments[i]) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
         command += L" " + quote(wide(s->arguments[i]));
     }
+    // Finish every allocating preparation before handles or workers exist.
+    SIZE_T bytes = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+    std::vector<unsigned char> storage(bytes);
     auto *p = new WindowsTerminal; p->resize = resize; p->close = closepc; t->transport = p;
     HANDLE inread = nullptr, outwrite = nullptr;
     if (!CreatePipe(&inread, &p->input, nullptr, 0) || !CreatePipe(&p->output, &outwrite, nullptr, 0)) {
@@ -102,8 +105,6 @@ AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *
     // Start the drain thread before any startup error can close the console.
     try { t->reader = std::thread(reader, t, p); }
     catch (...) { CloseHandle(inread); CloseHandle(outwrite); CloseHandle(p->output); p->output = nullptr; terminal_transport_destroy(t); return failure(e, "Cannot create terminal reader"); }
-    SIZE_T bytes = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
-    std::vector<unsigned char> storage(bytes);
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof si;
     si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
     bool initialized = InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &bytes) != 0;
