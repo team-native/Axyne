@@ -1,4 +1,5 @@
 #include "axyne/ui_design.h"
+#include "axyne/git_selection.h"
 
 #include <stdio.h>
 
@@ -43,9 +44,47 @@ static void check_menu_titles(void)
     }
 }
 
+static void check_select_all(void)
+{
+    AxyneGitChange rows[4] = {0};
+    AxyneGitChanges changes = {0};
+    char **paths = NULL;
+    size_t count = 0, i;
+    CHECK(!axyne_git_has_unselected(&changes));
+    CHECK(!axyne_git_copy_unselected_paths(&changes, &paths, &count));
+    CHECK(paths == NULL && count == 0);
+    rows[0].path = "already.txt"; rows[0].staged = 1;
+    rows[1].path = "partial.txt"; rows[1].partially = 1;
+    rows[2].path = "new.txt"; rows[2].worktree_status = '?';
+    rows[3].path = "renamed.txt"; rows[3].orig_path = "old.txt";
+    rows[3].worktree_status = 'R';
+    changes.items = rows; changes.count = 4;
+    CHECK(axyne_git_has_unselected(&changes));
+    CHECK(axyne_git_copy_unselected_paths(&changes, &paths, &count));
+    CHECK(count == 4);
+    if (count == 4) {
+        CHECK(strcmp(paths[0], "partial.txt") == 0);
+        CHECK(strcmp(paths[1], "new.txt") == 0);
+        CHECK(strcmp(paths[2], "renamed.txt") == 0);
+        CHECK(strcmp(paths[3], "old.txt") == 0);
+        CHECK(paths[0] != rows[1].path);
+    }
+    for (i = 0; i < count; ++i) free(paths[i]);
+    free(paths);
+    for (i = 0; i < 4; ++i) rows[i].staged = 1;
+    CHECK(!axyne_git_has_unselected(&changes));
+    CHECK(!axyne_git_copy_unselected_paths(&changes, &paths, &count));
+    CHECK(paths == NULL && count == 0);
+    CHECK(axyne_git_select_all_width(131) > 48);
+    CHECK(axyne_git_select_all_width(131) < 131);
+    CHECK(axyne_git_select_all_width(292) == 68);
+    CHECK(axyne_git_select_all_width(-1) == 0);
+}
+
 int main(void)
 {
     check_menu_titles();
+    check_select_all();
     static const char *names[] = { "a.c", "a.h", "a.cpp", "a.m", "a.mm",
         "a.md", "a.txt", "a.html", "a.css", "a.sh", "a.java", "a.tsx",
         "a.jsx", "a.yml", "a.yaml", "a.xml", "a.kt", "a.kts", "a.slint", "a.swift", "a.go", "a.rs",

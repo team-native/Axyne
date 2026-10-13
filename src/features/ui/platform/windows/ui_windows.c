@@ -29,6 +29,7 @@
 #include "axyne/git.h"
 #include "axyne/git_graph_geometry.h"
 #include "axyne/git_panel.h"
+#include "axyne/git_selection.h"
 #include "axyne/lsp.h"
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
@@ -6989,12 +6990,38 @@ static void axyne_git_panel_message(HDC dc, AxyneWindowState *state, int top,
     SelectObject(dc, previous);
 }
 
+static int axyne_git_panel_can_select_all(const AxyneWindowState *state)
+{
+    const AxyneGitPanelUi *git = &state->git_panel;
+    return state->explorer.root != NULL && git->loaded && git->repo_ok &&
+           axyne_git_panel_idle(state) &&
+           axyne_git_has_unselected(&git->changes);
+}
+
+static void axyne_git_panel_select_all(HWND window, AxyneWindowState *state)
+{
+    AxyneGitPanelJob *job;
+    if (!axyne_git_panel_can_select_all(state)) return;
+    job = (AxyneGitPanelJob *)calloc(1, sizeof(*job));
+    if (job == NULL) return;
+    job->kind = AXYNE_GITJOB_STAGE;
+    if (!axyne_git_copy_unselected_paths(&state->git_panel.changes,
+                                        &job->paths, &job->path_count)) {
+        axyne_git_panel_job_free(job); return;
+    }
+    if (axyne_git_panel_start_job(window, state, job)) {
+        state->git_panel.job_busy = 1;
+        InvalidateRect(window, NULL, FALSE);
+    }
+}
+
 typedef struct AxyneGitLayout {
     RECT changes_label;
     RECT changes_list;
     RECT message_label;
     RECT message_box;   /* border box of the commit message */
     RECT message_edit;  /* the EDIT control inside it */
+    RECT select_all_button;
     RECT commit_button;
     RECT push_button;
     RECT graph_label;
@@ -7051,10 +7078,20 @@ static void axyne_git_panel_layout(const AxyneWindowState *state, AxyneGitLayout
     out->message_edit = out->message_box;
     InflateRect(&out->message_edit, -6, -4);
     button_top = out->message_box.bottom + AXYNE_GIT_GAP;
-    button_width = (right - 2 * AXYNE_GIT_PAD - AXYNE_GIT_GAP) * 60 / 100;
-    out->commit_button.left = AXYNE_GIT_PAD;
+    {
+        int usable = right - 2 * AXYNE_GIT_PAD - 2 * AXYNE_GIT_GAP;
+        int select_width;
+        if (usable < 0) usable = 0;
+        select_width = (int)axyne_git_select_all_width(usable);
+        button_width = (usable - select_width) / 2;
+        out->select_all_button.left = AXYNE_GIT_PAD;
+        out->select_all_button.right = AXYNE_GIT_PAD + select_width;
+        out->select_all_button.top = button_top;
+        out->select_all_button.bottom = button_top + AXYNE_GIT_BUTTON;
+    }
+    out->commit_button.left = out->select_all_button.right + AXYNE_GIT_GAP;
     out->commit_button.top = button_top;
-    out->commit_button.right = AXYNE_GIT_PAD + button_width;
+    out->commit_button.right = out->commit_button.left + button_width;
     out->commit_button.bottom = button_top + AXYNE_GIT_BUTTON;
     out->push_button = out->commit_button;
     out->push_button.left = out->commit_button.right + AXYNE_GIT_GAP;
@@ -7937,6 +7974,8 @@ static void axyne_git_paint_commit_box(HDC dc, AxyneWindowState *state,
                      AXYNE_OUTPUT_BG,
                      state->git_panel.message_focus ? AXYNE_ACCENT : AXYNE_BORDER);
     RestoreDC(dc, saved_dc);
+    axyne_git_paint_button(dc, state->ui_font, layout->select_all_button, L"전체 선택",
+                           axyne_git_panel_can_select_all(state), 0);
     axyne_git_paint_button(dc, state->font_bold, layout->commit_button, L"커밋",
                            axyne_git_panel_can_commit(state), 1);
     axyne_git_paint_button(dc, state->ui_font, layout->push_button, L"푸시",
@@ -7985,6 +8024,10 @@ static void axyne_git_panel_click(HWND window, AxyneWindowState *state, int x, i
     POINT point = {x, y};
     if (state->explorer.root == NULL || !git->loaded || !git->repo_ok) return;
     axyne_git_panel_layout(state, &layout);
+    if (layout.fits && PtInRect(&layout.select_all_button, point)) {
+        axyne_git_panel_select_all(window, state);
+        return;
+    }
     if (layout.fits && PtInRect(&layout.commit_button, point)) {
         axyne_git_panel_commit(window, state);
         return;
