@@ -1,7 +1,9 @@
 #import "terminal_view_macos.h"
+#include <stdatomic.h>
 @class AxyneTerminalView;
 @interface AxyneTerminalLife : NSObject {
 @public AxyneTerminalView *view; // Main-thread-only weak target; blocks own the box.
+    atomic_int pending;
 }
 @end
 @implementation AxyneTerminalLife
@@ -31,7 +33,9 @@ static NSString *cellString(const AxyneTerminalCell *cell) {
 static void changed(AxyneTerminal *terminal, void *context) {
     (void)terminal;
     AxyneTerminalLife *life = (AxyneTerminalLife *)context;
+    if (atomic_exchange(&life->pending, 1)) return;
     dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&life->pending, 0);
         [life->view setNeedsDisplay:YES];
         NSView *parent = [life->view superview];
         if ([parent respondsToSelector:@selector(refreshActionControls)])
@@ -46,6 +50,7 @@ static void exited(AxyneTerminal *terminal, int code, void *context) {
     self = [super initWithFrame:frame];
     if (self) {
         _life = [AxyneTerminalLife new]; _life->view = self;
+        atomic_init(&_life->pending, 0);
         _marked = [[NSMutableAttributedString alloc] init];
         _selectionStart = _selectionEnd = -1;
         axyne_terminal_create(24, 80, 2000, &_terminal, NULL);

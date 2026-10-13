@@ -8,6 +8,7 @@ typedef struct TerminalView {
     AxyneTerminal *terminal;
     HWND volatile window;
     LONG generation;
+    volatile LONG pending;
     HFONT fonts[8];
     int width, height, first, last;
     uint32_t foreground, background;
@@ -18,8 +19,9 @@ static COLORREF color(uint32_t value) { return RGB(value>>16, (value>>8)&255, va
 static TerminalView *view(HWND w) { return (TerminalView *)GetWindowLongPtrW(w,GWLP_USERDATA); }
 static void changed(AxyneTerminal *terminal, void *context) {
     TerminalView *v=(TerminalView *)context; (void)terminal;
+    if(InterlockedExchange(&v->pending,1))return;
     HWND w=(HWND)InterlockedCompareExchangePointer((PVOID volatile *)&v->window,NULL,NULL);
-    if(w) PostMessageW(w,TERMINAL_CHANGED,(WPARAM)v->generation,0);
+    if(!w||!PostMessageW(w,TERMINAL_CHANGED,(WPARAM)v->generation,0))InterlockedExchange(&v->pending,0);
 }
 static void exited(AxyneTerminal *terminal,int code,void *context) { (void)code;changed(terminal,context); }
 static int cell_text(const AxyneTerminalCell *cell,wchar_t *text) {
@@ -64,7 +66,7 @@ static LRESULT CALLBACK proc(HWND w,UINT message,WPARAM wp,LPARAM lp) {
     if(!v)return DefWindowProcW(w,message,wp,lp);
     switch(message) {
     case WM_GETDLGCODE:return DLGC_WANTALLKEYS|DLGC_WANTCHARS|DLGC_WANTARROWS;
-    case TERMINAL_CHANGED:if((LONG)wp==v->generation) {InvalidateRect(w,NULL,FALSE);PostMessageW(GetParent(w),WM_APP+202,0,0);}return 0;
+    case TERMINAL_CHANGED:if((LONG)wp==v->generation) {InterlockedExchange(&v->pending,0);InvalidateRect(w,NULL,FALSE);PostMessageW(GetParent(w),WM_APP+202,0,0);}return 0;
     case WM_SIZE:resize(w,v);return 0;
     case WM_SETFOCUS:case WM_KILLFOCUS:InvalidateRect(w,NULL,FALSE);return 0;
     case WM_MOUSEWHEEL:axyne_terminal_scroll(v->terminal,GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*3);v->first=v->last=-1;InvalidateRect(w,NULL,FALSE);return 0;
