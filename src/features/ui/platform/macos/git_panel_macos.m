@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "axyne/git_panel.h"
+#include "axyne/git_selection.h"
 #include "axyne/git_graph_geometry.h"
 #include "axyne/ui_design.h"
 
@@ -18,7 +19,6 @@ static const CGFloat kGpGap = 6;
 static const CGFloat kGpPad = 8;
 static const CGFloat kGpMessage = 56;     /* commit message box */
 static const CGFloat kGpButton = 24;
-static const CGFloat kGpPushWidth = 56;
 static const CGFloat kGpGraphRow = 38;    /* two text lines per commit */
 static const CGFloat kGpLane = 10;        /* width of one graph lane cell */
 static const CGFloat kGpTextGap = 6;      /* graph mark to row text */
@@ -414,7 +414,7 @@ static uint32_t gp_ref_color(const AxyneGitRef *ref)
 /* Rectangles of the panel's parts, from the bounds and the change count. */
 typedef struct GpGeometry {
     NSRect refresh, changes;
-    NSRect message, commit, push;
+    NSRect message, selectAll, commit, push;
     NSRect graphHeader, graph;
 } GpGeometry;
 
@@ -637,11 +637,14 @@ typedef struct GpItem {
     y = NSMaxY(g.changes);
     {
         CGFloat inner = MAX(0, width - 2 * kGpPad);
-        CGFloat commitWidth = MAX(0, inner - kGpGap - kGpPushWidth);
+        CGFloat usable = MAX(0, inner - 2 * kGpGap);
+        CGFloat selectWidth = axyne_git_select_all_width(usable);
+        CGFloat commitWidth = (usable - selectWidth) / 2;
         g.message = NSMakeRect(kGpPad, y + kGpGap, inner, kGpMessage);
         y = NSMaxY(g.message) + kGpGap;
-        g.commit = NSMakeRect(kGpPad, y, commitWidth, kGpButton);
-        g.push = NSMakeRect(kGpPad + commitWidth + kGpGap, y, MIN(kGpPushWidth, inner), kGpButton);
+        g.selectAll = NSMakeRect(kGpPad, y, selectWidth, kGpButton);
+        g.commit = NSMakeRect(NSMaxX(g.selectAll) + kGpGap, y, commitWidth, kGpButton);
+        g.push = NSMakeRect(NSMaxX(g.commit) + kGpGap, y, commitWidth, kGpButton);
         y = NSMaxY(g.commit) + kGpGap;
     }
     g.graphHeader = NSMakeRect(0, y, width, kGpHeader + 18);
@@ -1275,11 +1278,35 @@ static char *gp_diff_title(const char *prefix, const char *path)
     [self setNeedsDisplay:YES];
 }
 
+- (BOOL)canSelectAll
+{
+    return _loaded && !_loading && !_stageBusy && !_noWorkspace && _notice == nil &&
+        ![_delegate gitPanelBusy:self] && axyne_git_has_unselected(&_changes);
+}
+
+- (void)selectAllChanges
+{
+    const char *workspace;
+    AxyneGitPanelTask *task;
+    if (![self canSelectAll]) return;
+    workspace = [_delegate gitPanelWorkspace:self];
+    if (workspace == NULL) return;
+    task = gp_task_create(GP_TASK_STAGE, workspace);
+    if (task == NULL) return;
+    if (!axyne_git_copy_unselected_paths(&_changes, &task->paths, &task->pathCount)) {
+        gp_task_free(task); return;
+    }
+    _stageBusy = YES;
+    [self startTask:task];
+    [self setNeedsDisplay:YES];
+}
+
 - (BOOL)canCommit
 {
     NSString *trimmed = [[_messageView string] stringByTrimmingCharactersInSet:
         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return _hasStaged != 0 && [trimmed length] > 0 && ![_delegate gitPanelBusy:self];
+    return _hasStaged != 0 && [trimmed length] > 0 && !_stageBusy && !_loading &&
+        ![_delegate gitPanelBusy:self];
 }
 
 - (void)textDidChange:(NSNotification *)notification
@@ -1312,12 +1339,17 @@ static char *gp_diff_title(const char *prefix, const char *path)
         [self showDiffForChange:&_changes.items[row]];
         return;
     }
+    if (NSPointInRect(point, g.selectAll)) {
+        [self selectAllChanges];
+        return;
+    }
     if (NSPointInRect(point, g.commit)) {
         if ([self canCommit]) [_delegate gitPanel:self commitMessage:[_messageView string]];
         return;
     }
     if (NSPointInRect(point, g.push)) {
-        if (![_delegate gitPanelBusy:self]) [_delegate gitPanelPush:self];
+        if (!_stageBusy && !_loading && ![_delegate gitPanelBusy:self])
+            [_delegate gitPanelPush:self];
         return;
     }
     if (NSPointInRect(point, g.graph)) {
@@ -1538,8 +1570,10 @@ static char *gp_diff_title(const char *prefix, const char *path)
                      NSMakeRect(NSMinX(g->message) + 8, NSMinY(g->message) + 4,
                                 NSWidth(g->message) - 16, 16),
                      [NSFont systemFontOfSize:12], gp_color(_theme.muted), _leftStyle);
+    [self drawButton:g->selectAll title:@"전체 선택" enabled:[self canSelectAll] primary:NO];
     [self drawButton:g->commit title:@"커밋" enabled:[self canCommit] primary:YES];
-    [self drawButton:g->push title:@"푸시" enabled:![_delegate gitPanelBusy:self] primary:NO];
+    [self drawButton:g->push title:@"푸시" enabled:!_stageBusy && !_loading &&
+        ![_delegate gitPanelBusy:self] primary:NO];
 }
 
 - (void)drawButton:(NSRect)rect title:(NSString *)title enabled:(BOOL)enabled

@@ -10,6 +10,7 @@
 
 #include "axyne/git.h"
 #include "axyne/git_panel.h"
+#include "axyne/git_selection.h"
 #include "axyne/git_graph_geometry.h"
 
 #ifdef _WIN32
@@ -102,6 +103,45 @@ static void axyne_test_setup_environment(const char *root)
     (void)setenv("GIT_COMMITTER_DATE", "2024-03-05T12:00:00+0000", 1);
     (void)unsetenv("GIT_DIR");
     (void)unsetenv("GIT_WORK_TREE");
+}
+
+static int axyne_test_select_all(const char *root)
+{
+    char repo[1024], out[4096], before[128];
+    AxyneGitChanges changes = {0};
+    AxyneError error = {0};
+    char **paths = NULL;
+    size_t count = 0, i;
+    AXYNE_TEST_CHECK(axyne_test_path(repo, sizeof(repo), root, "select-all"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(repo));
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "printf base > partial.txt && printf base > staged.txt && "
+        "printf base > deleted.txt && printf base > old.txt && "
+        "printf ignored.txt > .gitignore && git add . && git commit -qm base && "
+        "printf changed > partial.txt && git add partial.txt && printf extra >> partial.txt && "
+        "printf changed > staged.txt && git add staged.txt && "
+        "rm deleted.txt && mv old.txt renamed.txt && printf new > untracked.txt && "
+        "printf ignored > ignored.txt && git rev-parse HEAD", repo), 0);
+    (void)snprintf(before, sizeof(before), "%s", out);
+    AXYNE_TEST_STATUS(axyne_git_changes(repo, &changes, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(axyne_git_has_unselected(&changes));
+    AXYNE_TEST_CHECK(axyne_git_copy_unselected_paths(&changes, &paths, &count));
+    AXYNE_TEST_STATUS(axyne_git_stage_paths(repo, (const char *const *)paths,
+                                            count, &error), AXYNE_STATUS_OK);
+    for (i = 0; i < count; ++i) free(paths[i]);
+    free(paths);
+    axyne_git_changes_free(&changes);
+    AXYNE_TEST_STATUS(axyne_git_changes(repo, &changes, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(changes.count > 0 && !axyne_git_has_unselected(&changes));
+    for (i = 0; i < changes.count; ++i) {
+        AXYNE_TEST_CHECK(changes.items[i].staged);
+        AXYNE_TEST_CHECK(strcmp(changes.items[i].path, "ignored.txt") != 0);
+    }
+    axyne_git_changes_free(&changes);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "cd '%s' && git rev-parse HEAD", repo), 0);
+    AXYNE_TEST_STREQ(before, out);
+    return 1;
 }
 
 static int axyne_test_panel_changes(const char *root)
@@ -1202,6 +1242,7 @@ static int axyne_test_git_panel_run(const char *root)
         return 1;
     }
     axyne_test_setup_environment(root);
+    AXYNE_TEST_CHECK(axyne_test_select_all(root));
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph_lanes(root));
