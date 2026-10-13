@@ -22,9 +22,22 @@ static std::string text(AxyneTerminal *t) {
 static void await_text(AxyneTerminal *t, const char *expected) {
     auto deadline = Clock::now() + std::chrono::seconds(5);
     while (text(t).find(expected) == std::string::npos && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    if (text(t).find(expected) == std::string::npos) { std::cerr << text(t); std::abort(); }
+    if (text(t).find(expected) == std::string::npos) {
+        std::cerr << "Terminal wait failed: marker=" << expected << " running=" << axyne_terminal_running(t) << "\n" << text(t) << std::flush;
+        axyne_terminal_release(t); std::exit(EXIT_FAILURE);
+    }
 }
 static void send(AxyneTerminal *t, const char *s) { assert(axyne_terminal_write(t, s, std::strlen(s), nullptr) == AXYNE_STATUS_OK); }
+#ifdef _WIN32
+static void command(AxyneTerminal *t, const char *s) {
+    AxyneError error{};
+    for (;*s;++s) {
+        auto status=axyne_terminal_unichar(t,static_cast<unsigned char>(*s),0,&error);
+        if(status!=AXYNE_STATUS_OK) {std::cerr<<"ConPTY typing failed: "<<error.message<<"\n";axyne_terminal_release(t);std::exit(EXIT_FAILURE);}
+    }
+    assert(axyne_terminal_key(t,AXYNE_TERMINAL_ENTER,0,&error)==AXYNE_STATUS_OK);
+}
+#endif
 int main() {
     Events events;
     AxyneTerminal *t; assert(axyne_terminal_create(24, 100, 2000, &t, nullptr) == AXYNE_STATUS_OK);
@@ -36,7 +49,11 @@ int main() {
     spec.on_changed = changed; spec.on_exit = exited; spec.user_data = &events;
     AxyneError e{}; assert(axyne_terminal_start(t, &spec, &e) == AXYNE_STATUS_OK);
 #ifdef _WIN32
-    send(t, "set AXYNE_PREFIX=AXYNE_\r\necho %AXYNE_PREFIX%READY\r\n"); await_text(t, "AXYNE_READY");
+    // A console application can flush early input during startup. Establish
+    // its prompt before typing; exercise libvterm characters and Enter.
+    await_text(t, ">");
+    command(t, "set AXYNE_PREFIX=AXYNE_");
+    command(t, "echo %AXYNE_PREFIX%READY"); await_text(t, "AXYNE_READY");
 #else
     send(t, "unsetopt zle; PS1='AXYNE_PROMPT> '; setopt zle\r"); await_text(t, "AXYNE_PROMPT>");
     send(t, "[[ -t 0 && -t 1 && -t 2 ]] && printf '%s%s\\n' TTY_ OK; print CWD:$PWD\r"); await_text(t, "TTY_OK"); await_text(t, "CWD:/");
@@ -52,7 +69,7 @@ int main() {
 #endif
     assert(axyne_terminal_resize(t, 30, 120, nullptr) == AXYNE_STATUS_OK);
 #ifdef _WIN32
-    send(t, "set AXYNE_A=FINAL_\r\necho %AXYNE_A%DRAIN\r\nexit 7\r\n");
+    command(t, "set AXYNE_A=FINAL_"); command(t, "echo %AXYNE_A%DRAIN"); command(t,"exit 7");
 #else
     send(t, "printf '%s%s\\n' FINAL_ DRAIN; exit 7\r");
 #endif

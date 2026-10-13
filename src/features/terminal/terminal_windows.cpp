@@ -98,11 +98,10 @@ AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *
     }
     int rows, cols; { std::lock_guard<std::mutex> lock(t->model_mutex); vterm_get_size(t->vt, &rows, &cols); }
     HRESULT hr = create({static_cast<SHORT>(cols), static_cast<SHORT>(rows)}, inread, outwrite, 0, &p->pc);
-    CloseHandle(inread); CloseHandle(outwrite);
-    if (FAILED(hr)) { terminal_transport_destroy(t); return failure(e, "Cannot create pseudoconsole"); }
+    if (FAILED(hr)) { CloseHandle(inread); CloseHandle(outwrite); terminal_transport_destroy(t); return failure(e, "Cannot create pseudoconsole"); }
     // Start the drain thread before any startup error can close the console.
     try { t->reader = std::thread(reader, t, p); }
-    catch (...) { CloseHandle(p->output); p->output = nullptr; terminal_transport_destroy(t); return failure(e, "Cannot create terminal reader"); }
+    catch (...) { CloseHandle(inread); CloseHandle(outwrite); CloseHandle(p->output); p->output = nullptr; terminal_transport_destroy(t); return failure(e, "Cannot create terminal reader"); }
     SIZE_T bytes = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
     std::vector<unsigned char> storage(bytes);
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof si;
@@ -116,6 +115,7 @@ AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *
     bool spawned = ready && CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si.StartupInfo, &pi);
     if (initialized) DeleteProcThreadAttributeList(si.lpAttributeList);
+    CloseHandle(inread); CloseHandle(outwrite);
     if (!spawned) { terminal_transport_destroy(t); return failure(e, "Cannot start terminal shell"); }
     p->process = pi.hProcess;
     if (!AssignProcessToJobObject(p->job, pi.hProcess)) {
