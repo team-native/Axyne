@@ -131,8 +131,8 @@ extern "C" AxyneStatus axyne_terminal_paste(AxyneTerminal *t, const char *s, siz
 catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }
 extern "C" AxyneStatus axyne_terminal_resize(AxyneTerminal *t, int rows, int cols, AxyneError *e) try {
     if (!t || !dimensions(rows, cols)) return terminal_result(e, AXYNE_STATUS_INVALID_ARGUMENT);
-    std::lock_guard<std::mutex> lock(t->model_mutex);
-    vterm_set_size(t->vt, rows, cols); vterm_screen_flush_damage(t->screen);
+    { std::lock_guard<std::mutex> lock(t->model_mutex);
+      vterm_set_size(t->vt, rows, cols); vterm_screen_flush_damage(t->screen); }
     return t->running ? terminal_transport_resize(t, rows, cols, e) : terminal_result(e, AXYNE_STATUS_OK);
 }
 catch (...) { return terminal_result(e, AXYNE_STATUS_IO_ERROR, "Terminal operation failed"); }

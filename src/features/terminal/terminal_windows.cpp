@@ -56,7 +56,8 @@ static void reader(AxyneTerminal *t, WindowsTerminal *p) {
             axyne_terminal_feed(t, buffer, n);
             if (t->changed) t->changed(t, t->context);
         } else {
-            if (p->closed) break;
+            // ClosePseudoConsole can return before its final output on newer
+            // Windows versions. Only a broken pipe is stream EOF.
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
@@ -72,8 +73,11 @@ static void closer(AxyneTerminal *t, WindowsTerminal *p) {
     // Cancel synchronous writer I/O before joining, keeping the reader alive
     // while ClosePseudoConsole emits its final frame (Microsoft's contract).
     if (t->writer.joinable()) CancelSynchronousIo(t->writer.native_handle());
-    GetExitCodeProcess(p->process, &p->exit_code);
-    { std::lock_guard<std::mutex> lock(p->pc_mutex); if (p->pc) { p->close(p->pc); p->pc = nullptr; } }
+    WaitForSingleObject(p->process, INFINITE);
+    if (!GetExitCodeProcess(p->process, &p->exit_code)) p->exit_code = static_cast<DWORD>(-1);
+    HANDLE pc;
+    { std::lock_guard<std::mutex> lock(p->pc_mutex); pc = p->pc; p->pc = nullptr; }
+    if (pc) p->close(pc); // No mutex held while the reader drains the last frame.
     p->closed = true;
 }
 AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *s, AxyneError *e) {
