@@ -36,7 +36,7 @@ int main() {
     spec.on_changed = changed; spec.on_exit = exited; spec.user_data = &events;
     AxyneError e{}; assert(axyne_terminal_start(t, &spec, &e) == AXYNE_STATUS_OK);
 #ifdef _WIN32
-    send(t, "echo AXYNE_READY\r"); await_text(t, "AXYNE_READY");
+    send(t, "set AXYNE_PREFIX=AXYNE_\r\necho %AXYNE_PREFIX%READY\r\n"); await_text(t, "AXYNE_READY");
 #else
     send(t, "unsetopt zle; PS1='AXYNE_PROMPT> '; setopt zle\r"); await_text(t, "AXYNE_PROMPT>");
     send(t, "[[ -t 0 && -t 1 && -t 2 ]] && printf '%s%s\\n' TTY_ OK; print CWD:$PWD\r"); await_text(t, "TTY_OK"); await_text(t, "CWD:/");
@@ -61,6 +61,15 @@ int main() {
     assert(!axyne_terminal_running(t)); await_text(t, "FINAL_DRAIN"); axyne_terminal_release(t);
     assert(events.exits == 1 && events.code == 7 && events.changed > 0);
     spec.on_changed = nullptr; spec.on_exit = nullptr; spec.user_data = nullptr;
+#ifndef _WIN32
+    assert(axyne_terminal_create(24, 80, 20, &t, nullptr) == AXYNE_STATUS_OK);
+    const char *eofArgs[] = {"-f", "-c", "exec </dev/null >/dev/null 2>&1; sleep 1; exit 7"};
+    Events eofEvents;
+    AxyneTerminalSpec eofSpec{"/bin/zsh",eofArgs,3,"/tmp",changed,exited,&eofEvents};
+    assert(axyne_terminal_start(t,&eofSpec,&e)==AXYNE_STATUS_OK);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    axyne_terminal_release(t); assert(eofEvents.exits==1&&eofEvents.code==7);
+#endif
     for (int i = 0; i < 8; ++i) {
         assert(axyne_terminal_create(24, 80, 20, &t, nullptr) == AXYNE_STATUS_OK);
         assert(axyne_terminal_start(t, &spec, &e) == AXYNE_STATUS_OK);

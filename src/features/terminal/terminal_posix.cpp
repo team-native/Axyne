@@ -85,12 +85,10 @@ static void reader(AxyneTerminal *t, PosixTerminal *p) {
         }
         if (Clock::now() >= end) break;
     }
-    t->running = false; t->stopping = true; t->queue_ready.notify_all();
     // EOF may race the first WNOHANG check. Observe the root after draining,
     // retaining its zombie rather than reaping the session/group identity.
     if (code == -1) {
         siginfo_t info{};
-        auto status_deadline = Clock::now() + std::chrono::milliseconds(500);
         for (;;) {
             { std::lock_guard<std::mutex> lock(p->child_mutex);
               int result = waitid(P_PID, p->child, &info, WEXITED | WNOHANG | WNOWAIT);
@@ -100,10 +98,10 @@ static void reader(AxyneTerminal *t, PosixTerminal *p) {
                   break;
               }
             }
-            if (Clock::now() >= status_deadline) terminal_transport_stop(t);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
+    t->running = false; t->stopping = true; t->queue_ready.notify_all();
     if (t->exited) t->exited(t, code, t->context);
 }
 AxyneStatus terminal_transport_start(AxyneTerminal *t, const AxyneTerminalSpec *s, AxyneError *e) {
