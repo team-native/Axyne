@@ -1,3 +1,21 @@
+add_executable(axyne_terminal_model_tests test_terminal_model.cpp)
+target_link_libraries(axyne_terminal_model_tests PRIVATE axyne_terminal axyne_vterm)
+set_target_properties(axyne_terminal_model_tests PROPERTIES CXX_STANDARD 17)
+add_test(NAME axyne-terminal-model COMMAND axyne_terminal_model_tests)
+set_tests_properties(axyne-terminal-model PROPERTIES TIMEOUT 30)
+add_executable(axyne_terminal_session_tests test_terminal_session.cpp)
+target_link_libraries(axyne_terminal_session_tests PRIVATE axyne_terminal)
+set_target_properties(axyne_terminal_session_tests PROPERTIES CXX_STANDARD 17)
+add_test(NAME axyne-terminal-session COMMAND axyne_terminal_session_tests)
+set_tests_properties(axyne-terminal-session PROPERTIES TIMEOUT 40)
+if(MSVC)
+    target_compile_options(axyne_terminal_model_tests PRIVATE /UNDEBUG)
+    target_compile_options(axyne_terminal_session_tests PRIVATE /UNDEBUG)
+else()
+    target_compile_options(axyne_terminal_model_tests PRIVATE -UNDEBUG)
+    target_compile_options(axyne_terminal_session_tests PRIVATE -UNDEBUG)
+endif()
+
 add_executable(axyne_tests
     test_main.c
     test_documents_search.c

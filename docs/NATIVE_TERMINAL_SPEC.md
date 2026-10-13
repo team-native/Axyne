@@ -34,6 +34,12 @@ Validate this base before implementing its native consumers.
 
 ## Required audit
 
+Private terminal implementation uses C++17 standard mutexes, worker threads and
+RAII behind the frozen C ABI; existing C17 modules and native C/Objective-C
+adapters are unchanged. This is an IMPLEMENTATION choice. Screen bounds are
+512 rows and 1024 columns (AGENT_PARAMETER / ASSUMED). Manual model operations
+never notify; reader notifications run after releasing model and queue locks.
+
 Prove isatty/prompt, direct input, Tab/history, Ctrl+C without killing the shell,
 screen cursor/ANSI semantics, resizing, shell exit/stop/restart and teardown.
 Keep actual terminal output free of `[stderr]` prefixes. Unsupported Windows
