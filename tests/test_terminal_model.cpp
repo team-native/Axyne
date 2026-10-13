@@ -29,7 +29,7 @@ int main() {
     s = snapshot(t); assert(s.history_lines == 2); axyne_terminal_snapshot_free(&s);
     axyne_terminal_scroll(t, 2); s = snapshot(t); assert(s.cells[0].chars[0] == 'o' && !s.cursor_visible); axyne_terminal_snapshot_free(&s);
     assert(axyne_terminal_resize(t, 6, 30, nullptr) == AXYNE_STATUS_OK);
-    s = snapshot(t); assert(s.rows == 6 && s.columns == 30); axyne_terminal_snapshot_free(&s);
+    s = snapshot(t); assert(s.rows == 6 && s.columns == 30 && s.cells[0].chars[0]=='o'); axyne_terminal_snapshot_free(&s);
     assert(axyne_terminal_resize(t, 513, 20, nullptr) == AXYNE_STATUS_INVALID_ARGUMENT);
     axyne_terminal_set_colors(t, 0xabcdef, 0x123456); axyne_terminal_clear(t);
     s = snapshot(t); assert(s.cells[0].foreground == 0xabcdef && s.cells[0].background == 0x123456); axyne_terminal_snapshot_free(&s);

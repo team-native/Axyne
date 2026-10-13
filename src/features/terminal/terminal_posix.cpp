@@ -10,6 +10,10 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#include <mach/mach.h>
+#endif
 
 extern char **environ;
 struct PosixTerminal {
@@ -17,7 +21,45 @@ struct PosixTerminal {
     int master = -1;
     pid_t child = -1; // Kept unreaped until session teardown; cannot be reused.
     bool child_exited = false;
+    std::chrono::steady_clock::time_point stop_started = std::chrono::steady_clock::time_point::max();
 };
+#ifdef __APPLE__
+static bool process_token(pid_t pid, audit_token_t *token) {
+    mach_port_t task = MACH_PORT_NULL;
+    if (task_name_for_pid(mach_task_self(),pid,&task) != KERN_SUCCESS) return false;
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    kern_return_t result = task_info(task,TASK_AUDIT_TOKEN,reinterpret_cast<task_info_t>(token),&count);
+    mach_port_deallocate(mach_task_self(),task);
+    return result == KERN_SUCCESS && token->val[5] == static_cast<unsigned>(pid);
+}
+static void kill_owned_descendants(pid_t root) {
+    // Kernel audit tokens include the PID generation. Never signal a sampled
+    // numeric PID/PGID that could have been reused after enumeration.
+    struct Identity {pid_t pid; audit_token_t token;};
+    Identity pending[1024]{};
+    pid_t children[1024]{};
+    int count = 1; pending[0].pid = root;
+    for(int at=0;at<count;++at) {
+        if(at) {audit_token_t current{};if(!process_token(pending[at].pid,&current)||std::memcmp(&current,&pending[at].token,sizeof current))continue;}
+        int bytes=proc_listpids(PROC_PPID_ONLY,static_cast<uint32_t>(pending[at].pid),children,sizeof children);
+        for(int i=0;i<bytes/static_cast<int>(sizeof(pid_t)) && count<1024;++i) {
+            audit_token_t token{};proc_bsdinfo info{};pid_t pid=children[i];
+            if(pid<=0||!process_token(pid,&token))continue;
+            if(proc_pidinfo(pid,PROC_PIDTBSDINFO,0,&info,sizeof info)!=sizeof info||info.pbi_ppid!=static_cast<uint32_t>(pending[at].pid))continue;
+            pending[count++]={pid,token};
+        }
+    }
+    for(int i=count-1;i>0;--i) (void)proc_signal_with_audittoken(&pending[i].token,SIGKILL);
+}
+#endif
+static void escalate_stop(AxyneTerminal *t, PosixTerminal *p) {
+    if (!t->stopping) return;
+    std::lock_guard<std::mutex> lock(p->child_mutex);
+    if (p->child <= 0 || std::chrono::steady_clock::now() - p->stop_started < std::chrono::milliseconds(200)) return;
+    siginfo_t info{};
+    if (waitid(P_PID,p->child,&info,WEXITED|WNOHANG|WNOWAIT)<0 && errno==ECHILD) {p->child=-1;return;}
+    kill(-p->child,SIGKILL); kill(p->child,SIGKILL);
+}
 static void nonblocking(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
 static void cloexec(int fd) { fcntl(fd, F_SETFD, FD_CLOEXEC); }
 static AxyneStatus failure(AxyneError *e, const char *what) {
@@ -55,6 +97,7 @@ static void reader(AxyneTerminal *t, PosixTerminal *p) {
     bool eof = false;
     int code = -1;
     while (!eof) {
+        escalate_stop(t,p);
         // WNOWAIT deliberately retains PID/session ownership until stop and join.
         siginfo_t info{};
         { std::lock_guard<std::mutex> lock(p->child_mutex);
@@ -90,6 +133,7 @@ static void reader(AxyneTerminal *t, PosixTerminal *p) {
     if (code == -1) {
         siginfo_t info{};
         for (;;) {
+            escalate_stop(t,p);
             { std::lock_guard<std::mutex> lock(p->child_mutex);
               int result = waitid(P_PID, p->child, &info, WEXITED | WNOHANG | WNOWAIT);
               if (result < 0 || info.si_pid) {
@@ -175,7 +219,7 @@ AxyneStatus terminal_transport_resize(AxyneTerminal *t, int rows, int cols, Axyn
 }
 void terminal_transport_stop(AxyneTerminal *t) {
     auto *p = static_cast<PosixTerminal *>(t->transport);
-    t->stopping = true; t->queue_ready.notify_all();
+    bool already = t->stopping.exchange(true); t->queue_ready.notify_all();
     if (!p || p->child <= 0) return;
     std::lock_guard<std::mutex> lock(p->child_mutex);
     siginfo_t info{};
@@ -185,9 +229,18 @@ void terminal_transport_stop(AxyneTerminal *t) {
     // The shell's session/process-group leader remains owned and unreaped.
     // A terminal hangup reaches its foreground group via the tty driver;
     // do not signal a numeric foreground PGID which might have been reused.
-    if (!p->child_exited) kill(p->child, SIGHUP);
-    kill(-p->child, SIGKILL);
-    kill(p->child, SIGKILL);
+    if (p->stop_started == std::chrono::steady_clock::time_point::max()) {
+        p->stop_started = std::chrono::steady_clock::now();
+#ifdef __APPLE__
+        kill_owned_descendants(p->child);
+#endif
+        if (!p->child_exited) kill(p->child, SIGHUP);
+    }
+    // zsh owns job identities and can hang up its foreground/background jobs
+    // on SIGHUP. Allow that cleanup before escalation on the polling reader.
+    if (already || !t->reader.joinable()) {
+        kill(-p->child,SIGKILL); kill(p->child,SIGKILL);
+    }
 }
 void terminal_transport_destroy(AxyneTerminal *t) {
     terminal_transport_stop(t);

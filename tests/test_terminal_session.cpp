@@ -6,6 +6,13 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#ifndef _WIN32
+#include <signal.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#endif
+#endif
 struct Events { std::atomic<int> changed{0}, exits{0}, code{-1}; };
 static Events *current_events;
 static void changed(AxyneTerminal *, void *p) { auto *e = static_cast<Events *>(p); assert(e->exits == 0); ++e->changed; }
@@ -63,6 +70,12 @@ int main() {
 #else
     send(t, "unsetopt zle; PS1='AXYNE_PROMPT> '; setopt zle\r"); await_text(t, "AXYNE_PROMPT>");
     send(t, "[[ -t 0 && -t 1 && -t 2 ]] && printf '%s%s\\n' TTY_ OK; print CWD:$PWD\r"); await_text(t, "TTY_OK"); await_text(t, "CWD:/");
+    send(t,"axyne_tab_probe(){ printf '%s%s\\n' TAB_ OK; }\r");
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    send(t,"axyne_tab_pro");
+    assert(axyne_terminal_key(t,AXYNE_TERMINAL_TAB,0,nullptr)==AXYNE_STATUS_OK);
+    assert(axyne_terminal_key(t,AXYNE_TERMINAL_ENTER,0,nullptr)==AXYNE_STATUS_OK);
+    await_text(t,"TAB_OK");
     send(t, "printf '%s%s\\n' HISTORY_ OK\r"); await_text(t, "HISTORY_OK");
     assert(axyne_terminal_key(t, AXYNE_TERMINAL_UP, 0, nullptr) == AXYNE_STATUS_OK);
     assert(axyne_terminal_key(t, AXYNE_TERMINAL_ENTER, 0, nullptr) == AXYNE_STATUS_OK);
@@ -92,6 +105,21 @@ int main() {
     assert(axyne_terminal_start(t,&eofSpec,&e)==AXYNE_STATUS_OK);
     std::this_thread::sleep_for(std::chrono::milliseconds(1300));
     axyne_terminal_release(t); assert(eofEvents.exits==1&&eofEvents.code==7);
+    assert(axyne_terminal_create(24,100,20,&t,nullptr)==AXYNE_STATUS_OK);
+    assert(axyne_terminal_start(t,&spec,&e)==AXYNE_STATUS_OK);
+    send(t,"/bin/zsh -f -c 'trap \"\" HUP; sleep 30' & printf '%s%s\\n' CHILD_ $!\r");
+    pid_t child=0;auto child_deadline=Clock::now()+std::chrono::seconds(5);
+    while(!child&&Clock::now()<child_deadline) {
+        std::string value=text(t);size_t at=0;
+        while((at=value.find("CHILD_",at))!=std::string::npos){at+=6;if(at<value.size()&&value[at]>='0'&&value[at]<='9'){child=static_cast<pid_t>(std::strtol(value.c_str()+at,nullptr,10));break;}}
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    assert(child>0); std::this_thread::sleep_for(std::chrono::milliseconds(100));axyne_terminal_release(t);
+#ifdef __APPLE__
+    proc_bsdinfo info{};
+    for(int i=0;i<100;++i){int result=proc_pidinfo(child,PROC_PIDTBSDINFO,0,&info,sizeof info);if(result==0||info.pbi_status==5)break;std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+    assert(proc_pidinfo(child,PROC_PIDTBSDINFO,0,&info,sizeof info)==0||info.pbi_status==5);
+#endif
 #endif
     for (int i = 0; i < 8; ++i) {
         assert(axyne_terminal_create(24, 80, 20, &t, nullptr) == AXYNE_STATUS_OK);
