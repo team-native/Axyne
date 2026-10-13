@@ -3,4 +3,6 @@
 .vs/
 *.user
 *.suo
+/artifacts/
+.DS_Store
 
