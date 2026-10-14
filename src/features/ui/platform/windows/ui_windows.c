@@ -17,6 +17,7 @@
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "axyne/completion.h"
+#include "axyne/memory_usage.h"
 #include "axyne/document.h"
 #include "axyne/empty_state.h"
 #include "axyne/search.h"
@@ -140,6 +141,7 @@ enum {
     AXYNE_GIT_MESSAGE = 5030, /* commit message EDIT control id */
     AXYNE_GIT_MODE = 5031,
     AXYNE_GIT_REFRESH_TIMER = 5120,
+    AXYNE_STATUS_TIMER = 5123,
     AXYNE_GIT_REFRESH_DELAY = 300,
     AXYNE_GIT_GRAPH_STEP = 200, /* commits added per "더 불러오기" */
     AXYNE_GIT_HSCROLL_STEP = 48 /* graph pixels per horizontal wheel notch */
@@ -8987,6 +8989,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     int status_top = height - AXYNE_STATUS;
     int bottom_top = status_top - axyne_panel_height(state);
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
+    int status_metadata_left = max(axyne_sidebar_width(state) + 8, width - 620);
 
     /* Paint the shell as one frame while sidebar child controls are moved.
      * This prevents the class background from flashing during tab switches. */
@@ -9204,20 +9207,97 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     if (state->lsp_status[0] != '\0') {
         wchar_t *lsp_status = axyne_wide(state->lsp_status);
         if (lsp_status != NULL) {
-            RECT rect = {axyne_sidebar_size(state) + 8, status_top, width - 250, height};
+            RECT rect = {axyne_sidebar_size(state) + 8, status_top,
+                         max(axyne_sidebar_size(state) + 8, status_metadata_left - 8), height};
             axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, lsp_status, DT_LEFT);
             free(lsp_status);
         }
     }
-    if (state->editor != NULL && axyne_active_visible(state) != NULL) {
-        wchar_t position[96];
-        LRESULT caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
-        LRESULT line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-        LRESULT column = SendMessageA(state->editor, SCI_GETCOLUMN, (WPARAM)caret, 0);
-        RECT rect = {width - 246, status_top, width - 12, height};
-        (void)swprintf_s(position, 96, L"줄 %lld, 열 %lld     UTF-8",
-                       (long long)line + 1, (long long)column + 1);
-        axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, position, DT_RIGHT);
+    {
+        AxyneDocument *document = axyne_active_visible(state);
+        AxyneLanguageId language = axyne_active_language(state);
+        const char *language_name = language != AXYNE_LANGUAGE_NONE
+            ? axyne_language_name(language) : "Plain Text";
+        const char *toolchain = "MSVC";
+        char target[96], gauge[64];
+        wchar_t metadata[384], gauge_wide[96], language_wide[64], target_wide[96], encoding[32];
+        AxyneMemoryUsage memory;
+        LRESULT line = 0, column = 0, eol = SC_EOL_LF, codepage = SC_CP_UTF8;
+        const wchar_t *eol_name = L"LF";
+        int bar_width = 96;
+        int bar_left = width - 12 - bar_width;
+        int metadata_right;
+        int metadata_left;
+        RECT rect;
+        if (state->editor != NULL && document != NULL) {
+            LRESULT caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+            line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+            column = SendMessageA(state->editor, SCI_GETCOLUMN, (WPARAM)caret, 0);
+            eol = SendMessageA(state->editor, SCI_GETEOLMODE, 0, 0);
+            codepage = SendMessageA(state->editor, SCI_GETCODEPAGE, 0, 0);
+        }
+        if (eol == SC_EOL_CRLF) eol_name = L"CRLF";
+        else if (eol == SC_EOL_CR) eol_name = L"CR";
+        if (state->runtimes_discovered && language != AXYNE_LANGUAGE_NONE &&
+            document != NULL && document->path != NULL) {
+            AxyneLanguagePlan plan;
+            char message[256];
+            memset(&plan, 0, sizeof(plan));
+            if (axyne_language_resolve_runner(language, &state->runtimes,
+                    &state->build_target, document->path, NULL, &plan,
+                    message, sizeof(message)) == AXYNE_STATUS_OK &&
+                plan.toolchain_name != NULL && plan.toolchain_name[0] != '\0')
+                toolchain = plan.toolchain_name;
+            axyne_language_plan_free(&plan);
+        }
+        (void)snprintf(target, sizeof(target), "%s %s %s", toolchain,
+            axyne_architecture_name(state->build_target.platform,
+                                    state->build_target.architecture),
+            axyne_configuration_name(state->build_target.configuration));
+        memset(&memory, 0, sizeof(memory));
+        (void)axyne_memory_usage_sample(&memory, NULL);
+        (void)axyne_memory_format_gauge(memory.resident_bytes,
+            AXYNE_MEMORY_BUDGET_BYTES, gauge, sizeof(gauge));
+        (void)swprintf_s(language_wide, 64, L"%hs", language_name);
+        (void)swprintf_s(target_wide, 96, L"%hs", target);
+        (void)swprintf_s(gauge_wide, 96, L"%hs", gauge);
+        if (codepage == SC_CP_UTF8)
+            (void)swprintf_s(encoding, 32, L"UTF-8");
+        else
+            (void)swprintf_s(encoding, 32, L"CP%lld", (long long)codepage);
+        (void)swprintf_s(metadata, 384,
+            L"줄 %lld, 열 %lld    %s: %u    %s    %s    %s    %s",
+            (long long)line + 1, (long long)column + 1,
+            state->preferences.editor.insert_spaces ? L"공백" : L"탭",
+            state->preferences.editor.tab_width,
+            encoding,
+            eol_name, language_wide, target_wide);
+        metadata_right = bar_left - 16 - axyne_measure_text(state->font_small, gauge_wide);
+        metadata_left = max(status_metadata_left,
+                            metadata_right - axyne_measure_text(state->font_small, metadata) - 4);
+        rect.left = metadata_left;
+        rect.top = status_top;
+        rect.right = metadata_right;
+        rect.bottom = height;
+        axyne_text_rect(dc, state->font_small, AXYNE_TEXT, rect, metadata, DT_RIGHT);
+        rect.left = metadata_right + 4;
+        rect.right = bar_left - 4;
+        axyne_text_rect(dc, state->font_small, AXYNE_TEXT, rect, gauge_wide, DT_RIGHT);
+        axyne_round_fill(dc, bar_left, status_top + 8, width - 12, status_top + 16,
+                         4, axyne_blend(AXYNE_STATUS_BG, AXYNE_TEXT, 20),
+                         axyne_blend(AXYNE_STATUS_BG, AXYNE_TEXT, 20));
+        {
+            int fill = (int)((double)bar_width * (double)memory.resident_bytes /
+                             (double)AXYNE_MEMORY_BUDGET_BYTES);
+            if (fill > bar_width) fill = bar_width;
+            if (fill > 0)
+                axyne_round_fill(dc, bar_left, status_top + 8, bar_left + fill,
+                                 status_top + 16, 4,
+                                 axyne_memory_usage_level(memory.resident_bytes) ==
+                                     AXYNE_MEMORY_LEVEL_NORMAL ? AXYNE_ACCENT : AXYNE_RUN_TEXT,
+                                 axyne_memory_usage_level(memory.resident_bytes) ==
+                                     AXYNE_MEMORY_LEVEL_NORMAL ? AXYNE_ACCENT : AXYNE_RUN_TEXT);
+        }
     }
 
     if (axyne_empty_state(state))
@@ -9281,6 +9361,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
         state->main_window = window;
+        (void)SetTimer(window, AXYNE_STATUS_TIMER, 2000, NULL);
         state->problem_selected = -1;
         axyne_outline_init(&state->outline);
         axyne_open_scintilla(state, window, instance);
@@ -9369,6 +9450,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (state != NULL && w_param == AXYNE_GIT_REFRESH_TIMER) {
             KillTimer(window, AXYNE_GIT_REFRESH_TIMER);
             axyne_git_panel_refresh(window, state);
+            return 0;
+        }
+        if (state != NULL && w_param == AXYNE_STATUS_TIMER) {
+            InvalidateRect(window, NULL, FALSE);
             return 0;
         }
         break;
@@ -10107,6 +10192,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         /* WM_PAINT covers the complete client area. */
         return 1;
     case WM_DESTROY:
+        KillTimer(window, AXYNE_STATUS_TIMER);
         if (state != NULL) axyne_cancel_outline_timer(state);
         /* Child controls still exist during the parent's WM_DESTROY. Their
          * handles are already invalid by WM_NCDESTROY, so release every tab's
