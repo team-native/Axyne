@@ -1312,7 +1312,7 @@ static int axyne_terminal_configure_default(AxyneWindowState *state)
     return 1;
 }
 
-static void axyne_terminal_start(HWND window, AxyneWindowState *state)
+static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state)
 {
     state->terminal_panel_selected = 1; state->problems_panel_selected = 0; state->panel_hidden = 0;
     axyne_layout(window, state);
@@ -9728,7 +9728,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             state->problems_panel_selected = command == AXYNE_CMD_PANEL_PROBLEMS;
             state->panel_hidden = 0;
             axyne_layout(window, state);
-            if (state->terminal_panel_selected) axyne_terminal_start(window, state);
+            if (state->terminal_panel_selected) axyne_start_terminal_panel(window, state);
             else if (state->problems_panel_selected) SetFocus(window);
             else if (state->editor != NULL) SetFocus(state->editor);
         }
@@ -9752,7 +9752,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 MessageBoxA(window, "Open a workspace folder before editing workspace settings.", "Axyne - Preferences", MB_OK | MB_ICONINFORMATION);
             else (void)axyne_preferences_dialog(window, state, 1);
         }
-        else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
+        else if (command == AXYNE_TERMINAL_START) axyne_start_terminal_panel(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
         else if (command == AXYNE_CMD_CANCEL_BUILD && state->action_process != NULL) axyne_process_terminate(state->action_process, NULL);
         else if (command == AXYNE_DEBUG_START) axyne_windows_debugger_start(window, state);
