@@ -11,6 +11,8 @@
 #include "axyne/problems.h"
 #include "axyne/outline.h"
 #include "axyne/lsp.h"
+#include "axyne/runner.h"
+#import "../src/features/ui/platform/macos/terminal_view_macos.h"
 
 @interface NSView (AxyneWorkspaceLayoutTest)
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
@@ -224,19 +226,27 @@ int main(void)
         CHECK(NSMaxY([output frame]) <= 842 - AXYNE_UI_STATUS);
         CHECK([output hasVerticalScroller]);
         fprintf(stderr, "Checking terminal controls\n");
+        /* Native UI tests never source user shell startup files. */
+        AxyneRunnerConfig *shellRunner = value_field(view, "_terminalRunner");
+        const char *safeArgs[] = {"-f", "-i"};
+        AxyneRunnerSpec safeShell = {0}; safeShell.executable = "/bin/zsh";
+        safeShell.arguments = safeArgs; safeShell.argument_count = 2;
+        CHECK(axyne_runner_configure(shellRunner, &safeShell, NULL) == AXYNE_STATUS_OK);
         NSButton *terminal = field(view, "_terminalTab");
         [terminal performClick:nil];
         [view layoutSubtreeIfNeeded];
-        CHECK(![field(view, "_terminalInput") isHidden]);
-        CHECK(![field(view, "_terminalSend") isHidden]);
-        CHECK(NSMaxY([output frame]) <= NSMinY([field(view, "_terminalInput") frame]));
-        CHECK([field(view, "_terminalInput") action] == NSSelectorFromString(@"sendTerminal:"));
+        AxyneTerminalView *shell = field(view, "_shellView");
+        CHECK(shell != nil && ![shell isHidden] && [output isHidden]);
+        CHECK(class_getInstanceVariable([view class], "_terminalInput") == NULL);
+        CHECK(class_getInstanceVariable([view class], "_terminalSend") == NULL);
+        CHECK([shell acceptsFirstResponder] && [shell running]);
+        CHECK(NSEqualRects([shell frame], [output frame]));
         [field(view, "_problemsTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
         NSView *problemsView = field(view, "_problemsView");
         CHECK(problemsView != nil);
         CHECK([output isHidden] && ![problemsView isHidden]);
-        CHECK([field(view, "_terminalInput") isHidden] && [field(view, "_terminalSend") isHidden]);
+        CHECK([shell isHidden] && [shell running]);
         {
             /* The list fills the panel below its 32px tab header. */
             NSRect list = [problemsView frame];
@@ -328,7 +338,7 @@ int main(void)
         }
         [field(view, "_outputTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
-        CHECK(![output isHidden] && [field(view, "_terminalInput") isHidden]);
+            CHECK(![output isHidden] && [shell isHidden]);
         CHECK([field(view, "_problemsView") isHidden]);
         /* The Git selector must fit the minimum supported sidebar, and
          * shrink safely below it instead of intercepting editor clicks. */

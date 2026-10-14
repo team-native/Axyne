@@ -12,6 +12,7 @@
 #include <shellapi.h>
 
 #include "axyne/ui.h"
+#include "terminal_view_windows.h"
 #include "axyne/ui_design.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
@@ -52,10 +53,9 @@ enum {
 
 enum {
     AXYNE_TERMINAL_OUTPUT = 5001,
-    AXYNE_TERMINAL_INPUT,
     AXYNE_TERMINAL_START,
     AXYNE_TERMINAL_STOP,
-    AXYNE_TERMINAL_SEND,
+    AXYNE_CMD_CANCEL_BUILD,
     AXYNE_RUNNER_CONFIGURE,
     AXYNE_DEBUG_START,
     AXYNE_DEBUG_PAUSE,
@@ -243,15 +243,14 @@ typedef struct AxyneWindowState {
     AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
     int pending_run;
     AxyneDebugger debugger;
-    AxyneProcess *terminal_process;
+    AxyneProcess *action_process;
     AxyneProcess *git_process;
     AxyneGitUiRun *git_run;
     int git_batch_busy; /* a commit, push or pull runs on a worker thread */
     HWND terminal_output;
-    HWND terminal_input;
+    HWND shell_view;
     HWND terminal_start;
     HWND terminal_stop;
-    HWND terminal_send;
     HWND debug_start;
     HWND debug_pause;
     HWND debug_continue;
@@ -1089,6 +1088,9 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
 static void axyne_refresh_terminal_theme(AxyneWindowState *state)
 {
     if (state == NULL || state->terminal_output == NULL) return;
+    axyne_terminal_view_theme(state->shell_view,
+        state->font_output != NULL ? state->font_output : state->code_font,
+        state->preferences.theme.text, state->preferences.theme.background);
     InvalidateRect(state->terminal_output, NULL, TRUE);
     UpdateWindow(state->terminal_output);
 }
@@ -1217,14 +1219,13 @@ static void axyne_refresh_action_controls(AxyneWindowState *state)
     if (state == NULL) return;
     axyne_sync_empty_state(state);
     document = axyne_active_visible(state);
-    terminal_active = state->terminal_process != NULL;
+    terminal_active = state->action_process != NULL;
     debugger_active = axyne_debugger_is_active(&state->debugger);
     saved_document = document != NULL && !document->is_untitled &&
         document->path != NULL && !document->is_dirty;
-    EnableWindow(state->terminal_start,
-                 !terminal_active && !debugger_active);
-    EnableWindow(state->terminal_stop, terminal_active);
-    EnableWindow(state->terminal_send, terminal_active);
+    EnableWindow(state->terminal_start, !axyne_terminal_view_running(state->shell_view));
+    EnableWindow(state->terminal_stop, state->terminal_panel_selected ?
+        axyne_terminal_view_running(state->shell_view) : terminal_active);
     EnableWindow(state->debug_start,
                  axyne_debugger_can_start(debugger_active, terminal_active,
                                           saved_document));
@@ -1311,66 +1312,27 @@ static int axyne_terminal_configure_default(AxyneWindowState *state)
     return 1;
 }
 
-static void axyne_terminal_start(HWND window, AxyneWindowState *state)
+static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state)
 {
-    AxyneProcessSpec spec;
-    AxyneError error;
-    AxyneStatus status;
-    state->terminal_panel_selected = 1;
-    state->problems_panel_selected = 0;
-    state->panel_hidden = 0;
+    state->terminal_panel_selected = 1; state->problems_panel_selected = 0; state->panel_hidden = 0;
     axyne_layout(window, state);
-    if (state->terminal_process != NULL ||
-        axyne_debugger_is_active(&state->debugger)) {
-        const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\r\n";
-        axyne_terminal_append(state->terminal_output, message, strlen(message),
-                              AXYNE_PROCESS_STDERR);
-        return;
+    if (axyne_terminal_view_running(state->shell_view)) { SetFocus(state->shell_view); return; }
+    AxyneProcessSpec process_spec = {0}; AxyneError error = {0};
+    AxyneStatus status = axyne_runner_process_spec(&state->terminal_runner, NULL, NULL, NULL, &process_spec, &error);
+    if (status == AXYNE_STATUS_OK) {
+        AxyneTerminalSpec spec = {0}; spec.executable = process_spec.executable;
+        spec.arguments = process_spec.arguments; spec.argument_count = process_spec.argument_count;
+        char *home = NULL;
+        if (state->explorer.root == NULL) { wchar_t path[MAX_PATH]; if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, path))) home = axyne_utf8(path); }
+        spec.working_directory = state->explorer.root != NULL ? state->explorer.root : home;
+        status = axyne_terminal_view_start(state->shell_view, &spec, &error); free(home);
     }
-    status = axyne_runner_process_spec(&state->terminal_runner,
-        axyne_terminal_output, axyne_terminal_exit, state, &spec, &error);
-    if (status == AXYNE_STATUS_OK)
-        status = axyne_process_start(&spec, &state->terminal_process, &error);
-    if (status != AXYNE_STATUS_OK) {
-        state->last_exit_failed = 0;
-        state->has_exit_status = 0;
-        axyne_terminal_append(state->terminal_output, error.message,
-                              strlen(error.message), AXYNE_PROCESS_STDERR);
-        InvalidateRect(window, NULL, FALSE);
-        return;
-    }
-    EnableWindow(state->terminal_start, FALSE);
-    EnableWindow(state->terminal_stop, TRUE);
-    state->active_action = 3;
-    state->last_exit_failed = 0;
-    axyne_refresh_action_controls(state);
-    (void)window;
+    if (status != AXYNE_STATUS_OK) MessageBoxA(window, error.message, "Unable to start terminal", MB_OK | MB_ICONERROR);
+    SetFocus(state->shell_view); axyne_refresh_action_controls(state);
 }
-
-static void axyne_terminal_stop(AxyneWindowState *state)
-{
-    if (state->terminal_process != NULL)
-        (void)axyne_process_terminate(state->terminal_process, NULL);
-}
-
-static void axyne_terminal_send(AxyneWindowState *state)
-{
-    int length;
-    char *text;
-    AxyneError error;
-    if (state->terminal_process == NULL || state->terminal_input == NULL) return;
-    length = GetWindowTextLengthA(state->terminal_input);
-    if (length <= 0) return;
-    text = (char *)malloc((size_t)length + 3);
-    if (text == NULL) return;
-    GetWindowTextA(state->terminal_input, text, length + 1);
-    text[length] = '\r'; text[length + 1] = '\n'; text[length + 2] = '\0';
-    if (axyne_process_write(state->terminal_process, text, (size_t)length + 2,
-                            &error) != AXYNE_STATUS_OK)
-        axyne_terminal_append(state->terminal_output, error.message,
-                              strlen(error.message), AXYNE_PROCESS_STDERR);
-    else SetWindowTextA(state->terminal_input, "");
-    free(text);
+static void axyne_terminal_stop(AxyneWindowState *state) {
+    if (state->terminal_panel_selected) axyne_terminal_view_stop(state->shell_view);
+    else if (state->action_process) axyne_process_terminate(state->action_process, NULL);
 }
 
 static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
@@ -1384,8 +1346,8 @@ static void axyne_windows_debugger_start(HWND window, AxyneWindowState *state)
     state->problems_panel_selected = 0;
     state->panel_hidden = 0;
     axyne_layout(window, state);
-    if (state->terminal_process != NULL) {
-        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\r\n";
+    if (state->action_process != NULL) {
+        const char *message = "Debugger is unavailable while a build or run is active. Stop that action first.\r\n";
         axyne_terminal_append(state->terminal_output, message, strlen(message),
                               AXYNE_PROCESS_STDERR);
         return;
@@ -1920,18 +1882,13 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
         WS_VSCROLL, 0, 0, 0, 0, window, (HMENU)AXYNE_TERMINAL_OUTPUT,
         instance, NULL);
     axyne_theme_editor_scrollbars(state->terminal_output, AXYNE_OUTPUT_BG);
-    state->terminal_input = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0,
-        window, (HMENU)AXYNE_TERMINAL_INPUT, instance, NULL);
+    state->shell_view = axyne_terminal_view_create(window, instance);
     state->terminal_start = CreateWindowA("BUTTON", "Start",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_START, instance, NULL);
     state->terminal_stop = CreateWindowA("BUTTON", "Stop",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_STOP, instance, NULL);
-    state->terminal_send = CreateWindowA("BUTTON", "Send",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
-        (HMENU)AXYNE_TERMINAL_SEND, instance, NULL);
     state->debug_start = CreateWindowA("BUTTON", "Debug",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
         (HMENU)AXYNE_DEBUG_START, instance, NULL);
@@ -1958,14 +1915,10 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
                                                        : state->code_font), TRUE);
     if (state->terminal_output != NULL) SendMessageA(state->terminal_output,
         EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
-    if (state->terminal_input != NULL) SendMessageA(state->terminal_input,
-        WM_SETFONT, (WPARAM)(state->font_output != NULL ? state->font_output
-                                                       : state->code_font), TRUE);
+    axyne_terminal_view_theme(state->shell_view, state->font_output != NULL ? state->font_output : state->code_font, state->preferences.theme.text, state->preferences.theme.background);
     if (state->terminal_start != NULL) SendMessageA(state->terminal_start,
         WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     if (state->terminal_stop != NULL) SendMessageA(state->terminal_stop,
-        WM_SETFONT, (WPARAM)state->ui_font, TRUE);
-    if (state->terminal_send != NULL) SendMessageA(state->terminal_send,
         WM_SETFONT, (WPARAM)state->ui_font, TRUE);
     (void)axyne_terminal_configure_default(state);
     (void)axyne_debugger_initialize(&state->debugger, NULL);
@@ -2207,7 +2160,7 @@ static int axyne_start_step(HWND window, AxyneWindowState *state,
     process_spec.on_output = axyne_terminal_output;
     process_spec.on_exit = axyne_terminal_exit;
     process_spec.user_data = state;
-    if (axyne_process_start(&process_spec, &state->terminal_process, &error) !=
+    if (axyne_process_start(&process_spec, &state->action_process, &error) !=
         AXYNE_STATUS_OK) {
         const char *message = error.message[0] != '\0' ? error.message :
             "Build or run could not be started.\n";
@@ -2247,9 +2200,9 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     state->problems_panel_selected = 0;
     state->panel_hidden = 0;
     axyne_layout(window, state);
-    if (state->terminal_process != NULL ||
+    if (state->action_process != NULL ||
         axyne_debugger_is_active(&state->debugger)) {
-        const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
+        const char *busy = "Build or run is unavailable while another action or debugger session is active. Stop it first.\n";
         axyne_terminal_append(state->terminal_output, busy, strlen(busy),
                               AXYNE_PROCESS_STDERR);
         return;
@@ -2476,6 +2429,7 @@ static int axyne_palette_handle_open_key(HWND window, AxyneWindowState *state,
 
 static int axyne_handle_key(HWND window, AxyneWindowState *state, WPARAM key)
 {
+    if (GetFocus() == state->shell_view) return 0;
     /* Document commands are consumed but do nothing in the empty state. */
     int empty = axyne_empty_state(state);
     if (axyne_palette_handle_open_key(window, state, key)) return 1;
@@ -3061,7 +3015,7 @@ static int axyne_editor_actionable(AxyneWindowState *state)
 {
     HWND focus = GetFocus();
     return state->editor != NULL && axyne_active_visible(state) != NULL &&
-           focus != state->terminal_input && focus != state->terminal_output;
+           focus != state->shell_view && focus != state->terminal_output;
 }
 
 static int axyne_preferences_file_exists(const AxyneWindowState *state)
@@ -3130,6 +3084,7 @@ static UINT axyne_action_flags(AxyneWindowState *state, UINT command)
 static HWND axyne_edit_field_focused(const AxyneWindowState *state)
 {
     HWND focus = GetFocus();
+    if (focus == state->shell_view) return focus;
     wchar_t class_name[16];
     if (focus == NULL || focus == state->editor) return NULL;
     if (GetClassNameW(focus, class_name, 16) <= 0 ||
@@ -3140,6 +3095,8 @@ static HWND axyne_edit_field_focused(const AxyneWindowState *state)
 
 static int axyne_edit_command_enabled(AxyneWindowState *state, UINT command)
 {
+    if (GetFocus() == state->shell_view)
+        return command == AXYNE_CMD_COPY || command == AXYNE_CMD_PASTE || command == AXYNE_CMD_SELECT_ALL;
     HWND field = axyne_edit_field_focused(state);
     if (field != NULL) {
         /* Edit controls have no redo; a read-only field only copies. */
@@ -4416,7 +4373,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_FULLSCREEN, L"전체 화면", L"F11",
                        MF_ENABLED | (state->fullscreen ? MF_CHECKED : 0));
     } else if (menu_index == 3) {
-        UINT flags = axyne_active_visible(state) != NULL && state->terminal_process == NULL &&
+        UINT flags = axyne_active_visible(state) != NULL && state->action_process == NULL &&
             !axyne_debugger_is_active(&state->debugger) ? MF_ENABLED : MF_GRAYED;
         axyne_menu_add(menu, &pool, AXYNE_CMD_BUILD, L"빌드", L"Ctrl+B", flags);
         axyne_menu_separator(menu, &pool);
@@ -4424,8 +4381,8 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_CMD_CONFIGURE_RUNNER, L"Runner 설정...", NULL,
                        MF_ENABLED);
         axyne_menu_separator(menu, &pool);
-        axyne_menu_add(menu, &pool, AXYNE_TERMINAL_STOP, L"빌드 취소", NULL,
-                       state->active_action == 1 && state->terminal_process != NULL
+        axyne_menu_add(menu, &pool, AXYNE_CMD_CANCEL_BUILD, L"빌드 취소", NULL,
+                       state->active_action == 1 && state->action_process != NULL
                            ? MF_ENABLED : MF_GRAYED);
     } else if (menu_index == 4) {
         axyne_refresh_action_controls(state);
@@ -4456,8 +4413,7 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
                          !state->git_batch_busy
             ? MF_ENABLED : MF_GRAYED;
         axyne_menu_add(menu, &pool, AXYNE_TERMINAL_START, L"새 터미널", NULL,
-                       state->terminal_process == NULL &&
-                               !axyne_debugger_is_active(&state->debugger)
+                       !axyne_terminal_view_running(state->shell_view)
                            ? MF_ENABLED : MF_GRAYED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
@@ -4749,7 +4705,7 @@ static int axyne_toolbar_enabled(AxyneWindowState *state, UINT command)
             SendMessageA(state->editor,
             command == AXYNE_CMD_UNDO ? 2174 : 2016, 0, 0) != 0;
     if (command == AXYNE_CMD_BUILD || command == AXYNE_CMD_RUN)
-        return axyne_active_visible(state) != NULL && state->terminal_process == NULL &&
+        return axyne_active_visible(state) != NULL && state->action_process == NULL &&
             !axyne_debugger_is_active(&state->debugger);
     return 1;
 }
@@ -8900,27 +8856,21 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     }
     if (state->terminal_output != NULL) {
         int terminal_top = bottom_top + AXYNE_UI_PANEL_HEADER + 6;
-        int input_top = status_top - 28;
-        int terminal_bottom = state->terminal_panel_selected ? input_top - 6 : status_top - 6;
+        int terminal_bottom = status_top - 6;
         int terminal_width = width - axyne_sidebar_width(state) - 32;
         if (terminal_width < 0) terminal_width = 0;
         SetWindowPos(state->terminal_output, NULL, axyne_sidebar_width(state) + 16, terminal_top,
                      terminal_width, terminal_bottom > terminal_top ? terminal_bottom - terminal_top : 0,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_input, NULL, axyne_sidebar_width(state) + 16, input_top,
-                     terminal_width, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->shell_view, NULL, axyne_sidebar_width(state) + 16, terminal_top,
+            terminal_width, max(0, terminal_bottom-terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->terminal_start, NULL, width - 172, bottom_top + 5,
                      52, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->terminal_stop, NULL, width - 116, bottom_top + 5,
                      48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_send, NULL, width - 64, bottom_top + 5,
-                     48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(state->terminal_output,
-                   state->problems_panel_selected || state->panel_hidden ? SW_HIDE : SW_SHOW);
-        ShowWindow(state->terminal_input,
-                   state->terminal_panel_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
-        ShowWindow(state->terminal_send,
-                   state->terminal_panel_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
+                   state->terminal_panel_selected || state->problems_panel_selected || state->panel_hidden ? SW_HIDE : SW_SHOW);
+        ShowWindow(state->shell_view, state->terminal_panel_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
         ShowWindow(state->terminal_start, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->terminal_stop, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->debug_start, SW_HIDE);
@@ -9778,7 +9728,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             state->problems_panel_selected = command == AXYNE_CMD_PANEL_PROBLEMS;
             state->panel_hidden = 0;
             axyne_layout(window, state);
-            if (state->terminal_panel_selected) SetFocus(state->terminal_input);
+            if (state->terminal_panel_selected) axyne_start_terminal_panel(window, state);
             else if (state->problems_panel_selected) SetFocus(window);
             else if (state->editor != NULL) SetFocus(state->editor);
         }
@@ -9802,9 +9752,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 MessageBoxA(window, "Open a workspace folder before editing workspace settings.", "Axyne - Preferences", MB_OK | MB_ICONINFORMATION);
             else (void)axyne_preferences_dialog(window, state, 1);
         }
-        else if (command == AXYNE_TERMINAL_START) axyne_terminal_start(window, state);
+        else if (command == AXYNE_TERMINAL_START) axyne_start_terminal_panel(window, state);
         else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
-        else if (command == AXYNE_TERMINAL_SEND) axyne_terminal_send(state);
+        else if (command == AXYNE_CMD_CANCEL_BUILD && state->action_process != NULL) axyne_process_terminate(state->action_process, NULL);
         else if (command == AXYNE_DEBUG_START) axyne_windows_debugger_start(window, state);
         else if (command == AXYNE_DEBUG_PAUSE)
             axyne_debugger_command_ui(state, AXYNE_DEBUGGER_PAUSE);
@@ -9903,8 +9853,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             SetBkColor(dc, AXYNE_OUTPUT_BG);
             return (LRESULT)AXYNE_EDIT_BACKGROUND_BRUSH;
         }
-        if ((HWND)l_param == state->terminal_output ||
-            (HWND)l_param == state->terminal_input) {
+        if ((HWND)l_param == state->terminal_output) {
             HDC dc = (HDC)w_param;
             /* Figma build output text is #a9aeb6 on #1d1f23. */
             SetTextColor(dc, AXYNE_REFERENCE ? axyne_theme_color(0xa9aeb6)
@@ -9932,7 +9881,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         if (item != NULL && item->CtlType == ODT_BUTTON &&
             (item->CtlID == AXYNE_TERMINAL_START || item->CtlID == AXYNE_TERMINAL_STOP ||
-             item->CtlID == AXYNE_TERMINAL_SEND)) {
+             item->CtlID == AXYNE_CMD_CANCEL_BUILD)) {
             wchar_t label[32];
             RECT rect = item->rcItem;
             int disabled = (item->itemState & ODS_DISABLED) != 0;
@@ -9952,7 +9901,6 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_CTLCOLORBTN:
         if ((HWND)l_param == state->terminal_start ||
             (HWND)l_param == state->terminal_stop ||
-            (HWND)l_param == state->terminal_send ||
             (HWND)l_param == state->debug_start ||
             (HWND)l_param == state->debug_pause ||
             (HWND)l_param == state->debug_continue ||
@@ -9995,6 +9943,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         return 0;
     }
+    case WM_APP + 202:
+        if (state != NULL) axyne_refresh_action_controls(state);
+        return 0;
     case AXYNE_WM_TERMINAL_EXIT: {
         AxyneTerminalExitMessage *exit_message =
             (AxyneTerminalExitMessage *)l_param;
@@ -10012,9 +9963,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_terminal_append(state->terminal_output, message,
                                   strlen(message), AXYNE_PROCESS_STDOUT);
         }
-        if (state->terminal_process == exit_message->process) {
-            axyne_process_release(state->terminal_process);
-            state->terminal_process = NULL;
+        if (state->action_process == exit_message->process) {
+            axyne_process_release(state->action_process);
+            state->action_process = NULL;
         }
         axyne_debugger_release(&state->debugger);
         free(exit_message);
@@ -10027,7 +9978,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         EnableWindow(state->debug_step_over, FALSE);
         EnableWindow(state->debug_breakpoint, FALSE);
         if (state->pending_run) {
-            if (state->last_exit_code == 0 && state->terminal_process == NULL) {
+            if (state->last_exit_code == 0 && state->action_process == NULL) {
                 /* The build succeeded: start the run step of the same plan. */
                 AxyneLanguagePlan plan = state->pending_plan;
                 memset(&state->pending_plan, 0, sizeof(state->pending_plan));
@@ -10177,9 +10128,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 0;
     case WM_NCDESTROY:
         if (state != NULL) {
-            if (state->terminal_process != NULL) {
-                axyne_process_release(state->terminal_process);
-                state->terminal_process = NULL;
+            if (state->action_process != NULL) {
+                axyne_process_release(state->action_process);
+                state->action_process = NULL;
             }
             axyne_debugger_destroy(&state->debugger);
             if (state->git_process != NULL) {
@@ -10390,15 +10341,8 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                 DispatchMessageW(&message);
                 continue;
             }
-            if (current != NULL && message.hwnd == current->terminal_input) {
-                if (message.message == WM_KEYDOWN && message.wParam == VK_RETURN) {
-                    axyne_terminal_send(current);
-                    continue;
-                }
-                /* Editor shortcuts must not consume typing in the input. */
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-                continue;
+            if (current != NULL && message.hwnd == current->shell_view) {
+                TranslateMessage(&message); DispatchMessageW(&message); continue;
             }
             if (current != NULL && axyne_handle_key(window, current,
                                                     message.wParam)) continue;

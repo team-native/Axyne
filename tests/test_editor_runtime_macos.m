@@ -184,8 +184,9 @@ static int run_tests(NSString *pngPath)
         Ivar bundleIvar = class_getInstanceVariable(workspaceClass, "_scintillaBundle");
         NSBundle *bundle = object_getIvar(workspace, bundleIvar);
         CHECK([bundle isLoaded]);
-        CHECK([[bundle bundlePath] isEqualToString:[[[NSBundle mainBundle]
-            privateFrameworksPath] stringByAppendingPathComponent:@"Scintilla.framework"]]);
+        CHECK([[[bundle bundlePath] stringByResolvingSymlinksInPath]
+            isEqualToString:[[[[NSBundle mainBundle] privateFrameworksPath]
+                stringByAppendingPathComponent:@"Scintilla.framework"] stringByResolvingSymlinksInPath]]);
 
         Ivar lexillaIvar = class_getInstanceVariable(workspaceClass, "_lexillaModule");
         void *lexilla = *(void **)((char *)workspace + ivar_getOffset(lexillaIvar));
@@ -197,15 +198,16 @@ static int run_tests(NSString *pngPath)
         preferences->editor.tab_width = 6;
         preferences->editor.insert_spaces = 1;
         [workspace applyPreferences];
-        // Figma chrome: no focus ring around the editor or the terminal input,
-        // and the terminal input draws no field box of its own.
+        // Terminal input and output share a native grid, with no entry field.
         CHECK([editor focusRingType] == NSFocusRingTypeNone);
         Ivar terminalInputIvar = class_getInstanceVariable(workspaceClass, "_terminalInput");
-        CHECK(terminalInputIvar != NULL);
-        NSTextField *terminalInput = object_getIvar(workspace, terminalInputIvar);
-        CHECK(terminalInput != nil);
-        CHECK(![terminalInput drawsBackground] && ![terminalInput isBezeled]);
-        CHECK([terminalInput focusRingType] == NSFocusRingTypeNone);
+        CHECK(terminalInputIvar == NULL);
+        CHECK(class_getInstanceVariable(workspaceClass, "_terminalSend") == NULL);
+        Ivar shellIvar = class_getInstanceVariable(workspaceClass, "_shellView");
+        CHECK(shellIvar != NULL);
+        NSView *shell = object_getIvar(workspace, shellIvar);
+        CHECK([shell isKindOfClass:NSClassFromString(@"AxyneTerminalView")]);
+        CHECK([shell acceptsFirstResponder]);
 
         // Load bytes on the very first bind, before the view moves to a window.
         // Includes UTF-8, CRLF and embedded text so NSString/strlen conversion
