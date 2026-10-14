@@ -34,6 +34,7 @@
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "axyne/completion.h"
+#include "axyne/memory_usage.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
@@ -1481,6 +1482,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxynePaletteController _palette;
     AxynePaletteOverlay *_paletteOverlay;
     NSTextField *_paletteField;
+    NSTimer *_statusTimer;
     NSTimer *_paletteTimer;
 }
 @end
@@ -2285,6 +2287,12 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self refreshActionControls];
     }
     return self;
+}
+
+- (void)statusTimerTick:(NSTimer *)timer
+{
+    (void)timer;
+    [self setNeedsDisplay:YES];
 }
 
 - (void)updateChromeTitles
@@ -5226,6 +5234,11 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
 - (void)viewDidMoveToWindow
 {
     [super viewDidMoveToWindow];
+    [_statusTimer invalidate];
+    _statusTimer = nil;
+    if ([self window] != nil)
+        _statusTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self
+            selector:@selector(statusTimerTick:) userInfo:nil repeats:YES];
     [self loadScintillaView];
     [self applyPreferences];
     [self loadActiveDocument];
@@ -7134,16 +7147,77 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [self drawLabel:status at:NSMakePoint(12, statusTop + 5) size:11
         color:_lastExitFailed ? axyne_preference_color(0xe5a445) :
               (_hasExitStatus ? axyne_preference_color(0xa3c98a) : muted) family:@"SF Pro Text"];
-    if (![self isEmptyState]) {
-        /* No editor position in the empty state, so the whole editing
-         * summary (line/column, indent style, encoding) stays blank. */
-        NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
-        NSInteger line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
-        NSInteger column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
-        NSString *editing = [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    UTF-8",
+    {
+        AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
+        NSInteger line = 1, column = 1, eol = SC_EOL_LF, codepage = SC_CP_UTF8;
+        AxyneLanguageId language = document != NULL && document->path != NULL
+            ? axyne_language_for_path(document->path) : AXYNE_LANGUAGE_NONE;
+        const char *languageName = language != AXYNE_LANGUAGE_NONE
+            ? axyne_language_name(language) : "Plain Text";
+        const char *toolchain = _buildTarget.platform == AXYNE_PLATFORM_WINDOWS ? "MSVC" : "Clang";
+        char target[96];
+        AxyneMemoryUsage memory;
+        char gauge[64];
+        NSString *encoding;
+        NSString *eolName;
+        NSString *metadata;
+        NSFont *statusFont = [NSFont fontWithName:@"SF Pro Text" size:11];
+        NSDictionary *statusAttributes;
+        CGFloat memoryWidth, metadataWidth, barWidth = 96;
+        CGFloat cursorX;
+        CGFloat fillWidth;
+
+        if (document != NULL && _editorView != nil) {
+            NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+            line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
+            column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
+            eol = [self sendEditorMessage:SCI_GETEOLMODE wParam:0 lParam:0];
+            codepage = [self sendEditorMessage:SCI_GETCODEPAGE wParam:0 lParam:0];
+        }
+        if (_runtimesDiscovered && language != AXYNE_LANGUAGE_NONE && document != NULL &&
+            document->path != NULL) {
+            AxyneLanguagePlan plan;
+            char message[256];
+            memset(&plan, 0, sizeof(plan));
+            if (axyne_language_resolve_runner(language, &_runtimes, &_buildTarget,
+                    document->path, NULL, &plan, message, sizeof(message)) == AXYNE_STATUS_OK &&
+                plan.toolchain_name != NULL && plan.toolchain_name[0] != '\0')
+                toolchain = plan.toolchain_name;
+            axyne_language_plan_free(&plan);
+        }
+        (void)snprintf(target, sizeof(target), "%s %s %s", toolchain,
+            axyne_architecture_name(_buildTarget.platform, _buildTarget.architecture),
+            axyne_configuration_name(_buildTarget.configuration));
+        encoding = codepage == SC_CP_UTF8 ? @"UTF-8" :
+            [NSString stringWithFormat:@"CP%ld", (long)codepage];
+        eolName = eol == SC_EOL_CRLF ? @"CRLF" : (eol == SC_EOL_CR ? @"CR" : @"LF");
+        if (axyne_memory_usage_sample(&memory, NULL) != AXYNE_STATUS_OK)
+            memset(&memory, 0, sizeof(memory));
+        (void)axyne_memory_format_gauge(memory.resident_bytes,
+            AXYNE_MEMORY_BUDGET_BYTES, gauge, sizeof(gauge));
+        metadata = [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    %@    %@    %s    %s",
             (long)line, (long)column, _preferences.editor.insert_spaces ? @"공백" : @"탭",
-            _preferences.editor.tab_width];
-        [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
+            _preferences.editor.tab_width, encoding, eolName, languageName, target];
+        statusAttributes = @{NSFontAttributeName: statusFont != nil ? statusFont : [NSFont systemFontOfSize:11]};
+        memoryWidth = [[NSString stringWithUTF8String:gauge] sizeWithAttributes:statusAttributes].width;
+        cursorX = width - 12 - barWidth;
+        metadata = [self label:metadata fittingWidth:MAX(0, cursorX - 18 - 180)
+            size:11 family:@"SF Pro Text"];
+        metadataWidth = [metadata sizeWithAttributes:statusAttributes].width;
+        [[axyne_preference_color(0x343942) colorWithAlphaComponent:1.0] setFill];
+        NSRectFill(NSMakeRect(cursorX, statusTop + 8, barWidth, 8));
+        fillWidth = MIN(barWidth, barWidth * (CGFloat)memory.resident_bytes /
+            (CGFloat)AXYNE_MEMORY_BUDGET_BYTES);
+        if (fillWidth > 0) {
+            [axyne_preference_color(axyne_memory_usage_level(memory.resident_bytes) ==
+                AXYNE_MEMORY_LEVEL_NORMAL ? 0xa66bf0 : 0xe5a445) setFill];
+            NSRectFill(NSMakeRect(cursorX, statusTop + 8, fillWidth, 8));
+        }
+        cursorX -= 10 + memoryWidth;
+        [self drawLabel:[NSString stringWithUTF8String:gauge]
+            at:NSMakePoint(cursorX, statusTop + 5) size:11 color:text family:@"SF Pro Text"];
+        cursorX -= 18 + metadataWidth;
+        [self drawLabel:metadata at:NSMakePoint(MAX(180, cursorX), statusTop + 5)
             size:11 color:text family:@"SF Pro Text"];
     }
     if (_editorView == nil)
@@ -7152,6 +7226,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
 }
 - (void)dealloc
 {
+    [_statusTimer invalidate];
+    _statusTimer = nil;
     if (_popup != nil) {
         [_popup setDelegate:nil];
         [_popup close];
