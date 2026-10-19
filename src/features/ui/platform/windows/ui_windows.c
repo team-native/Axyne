@@ -9391,13 +9391,16 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_create_terminal_controls(window, state, instance);
         axyne_git_panel_create_controls(window, state, instance);
         axyne_problems_create_filter(window, state, instance);
+        /* Features create their data once the base controls exist and before
+         * anything (document activation, layout, messages) runs their hooks;
+         * the fan-out ignores hooks until this has run. */
+        axyne_win_hooks_create(state);
         axyne_problems_refresh(state);
         if (state->documents.count != 0)
             axyne_show_document(state, state->documents.active_index);
         else
             axyne_refresh_action_controls(state);
         axyne_update_title(window, state);
-        axyne_win_hooks_create(state);
         axyne_layout(window, state);
         if (state->editor != NULL) SetFocus(state->editor);
         return 0;

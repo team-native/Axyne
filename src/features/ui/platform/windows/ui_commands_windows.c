@@ -33,18 +33,25 @@ const AxyneWinFeature *axyne_win_feature(AxyneWinFeatureId id)
     return axyne_win_features[id];
 }
 
+/* Hooks other than create/destroy run only while the features exist. */
+#define AXYNE_WIN_HOOKS_LIVE(state) ((state) != NULL && (state)->features_created)
+
 void axyne_win_hooks_create(AxyneWindowState *state)
 {
+    if (state == NULL || state->features_created) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->create != NULL) f->create(state);
     }
+    state->features_created = 1;
 }
 
 void axyne_win_hooks_destroy(AxyneWindowState *state)
 {
     /* Reverse order: later features may depend on earlier ones. */
     size_t i = AXYNE_WIN_FEATURE_COUNT;
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
+    state->features_created = 0;
     while (i-- > 0)
         if (axyne_win_features[i]->destroy != NULL) axyne_win_features[i]->destroy(state);
 }
@@ -52,6 +59,7 @@ void axyne_win_hooks_destroy(AxyneWindowState *state)
 int axyne_win_hooks_message(AxyneWindowState *state, HWND window, UINT message,
                             WPARAM w_param, LPARAM l_param, LRESULT *result)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return 0;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->message != NULL && f->message(state, window, message, w_param, l_param, result))
@@ -62,6 +70,7 @@ int axyne_win_hooks_message(AxyneWindowState *state, HWND window, UINT message,
 
 int axyne_win_hooks_command(AxyneWindowState *state, AxyneCommandId id)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return 0;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->command != NULL && f->command(state, id)) return 1;
@@ -72,7 +81,7 @@ int axyne_win_hooks_command(AxyneWindowState *state, AxyneCommandId id)
 int axyne_win_hooks_command_state(AxyneWindowState *state, AxyneCommandId id,
                                   AxyneWinCommandState *out)
 {
-    for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
+    for (size_t i = 0; AXYNE_WIN_HOOKS_LIVE(state) && i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->command_state == NULL) continue;
         out->enabled = 0;
@@ -87,6 +96,7 @@ int axyne_win_hooks_command_state(AxyneWindowState *state, AxyneCommandId id,
 void axyne_win_hooks_menu_populate(AxyneWindowState *state, AxyneWinMenuSlot slot,
                                    AxyneWinMenu *menu)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->menu_populate != NULL) f->menu_populate(state, slot, menu);
@@ -95,6 +105,7 @@ void axyne_win_hooks_menu_populate(AxyneWindowState *state, AxyneWinMenuSlot slo
 
 int axyne_win_hooks_timer(AxyneWindowState *state, UINT_PTR timer_id)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return 0;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->timer != NULL && f->timer(state, timer_id)) return 1;
@@ -105,6 +116,7 @@ int axyne_win_hooks_timer(AxyneWindowState *state, UINT_PTR timer_id)
 void axyne_win_hooks_editor_notify(AxyneWindowState *state,
                                    const SCNotification *notification)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->editor_notify != NULL) f->editor_notify(state, notification);
@@ -113,6 +125,7 @@ void axyne_win_hooks_editor_notify(AxyneWindowState *state,
 
 void axyne_win_hooks_document_activated(AxyneWindowState *state, AxyneDocument *document)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->document_activated != NULL) f->document_activated(state, document);
@@ -121,6 +134,7 @@ void axyne_win_hooks_document_activated(AxyneWindowState *state, AxyneDocument *
 
 void axyne_win_hooks_document_closed(AxyneWindowState *state, const AxyneDocument *document)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->document_closed != NULL) f->document_closed(state, document);
@@ -129,6 +143,7 @@ void axyne_win_hooks_document_closed(AxyneWindowState *state, const AxyneDocumen
 
 void axyne_win_hooks_document_saved(AxyneWindowState *state, AxyneDocument *document)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->document_saved != NULL) f->document_saved(state, document);
@@ -137,6 +152,7 @@ void axyne_win_hooks_document_saved(AxyneWindowState *state, AxyneDocument *docu
 
 int axyne_win_hooks_status_paint(AxyneWindowState *state, HDC dc, RECT area)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return 0;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->status_paint != NULL && f->status_paint(state, dc, area)) return 1;
@@ -147,6 +163,7 @@ int axyne_win_hooks_status_paint(AxyneWindowState *state, HDC dc, RECT area)
 int axyne_win_hooks_panel_paint(AxyneWindowState *state, HDC dc, AxyneWinPanelTab tab,
                                 RECT body)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return 0;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->panel_paint != NULL && f->panel_paint(state, dc, tab, body)) return 1;
@@ -157,6 +174,7 @@ int axyne_win_hooks_panel_paint(AxyneWindowState *state, HDC dc, AxyneWinPanelTa
 void axyne_win_hooks_panel_layout(AxyneWindowState *state, AxyneWinPanelTab tab,
                                   RECT body, int visible)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->panel_layout != NULL) f->panel_layout(state, tab, body, visible);
@@ -165,6 +183,7 @@ void axyne_win_hooks_panel_layout(AxyneWindowState *state, AxyneWinPanelTab tab,
 
 void axyne_win_hooks_layout(AxyneWindowState *state, int width, int height)
 {
+    if (!AXYNE_WIN_HOOKS_LIVE(state)) return;
     for (size_t i = 0; i < AXYNE_WIN_FEATURE_COUNT; ++i) {
         const AxyneWinFeature *f = axyne_win_features[i];
         if (f->layout != NULL) f->layout(state, width, height);

@@ -285,6 +285,7 @@ typedef struct AxyneWindowState {
      * axyne_win_apply_preferences). */
     AxyneKeymap keymap;
     int keymap_ready;
+    int features_created;    /* feature create hooks have run (hooks live) */
     /* Set by the Debug category while its session runs: debug-context keys
      * (F5 계속, F10/F11 steps) apply. The base debugger counts as well. */
     int debug_context;
