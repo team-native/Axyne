@@ -61,9 +61,10 @@ jobs:
           config=""
           if [ "$RUNNER_OS" = "Windows" ]; then config="--build-config Release"; fi
           ctest --test-dir build $config --rerun-failed --output-on-failure 2>&1 \
-            | head -150 \
-            | sed -e 's/%/%25/g' -e 's/\r//g' \
-            | while IFS= read -r line; do echo "::error::$line"; done || true
+            > rerun.txt || true
+          grep -v -E "^ *(Start|[0-9]+/[0-9]+ Test)" rerun.txt | grep -v "^$" | tail -120 > tail.txt || true
+          body=$(sed -e 's/%/%25/g' -e 's/\r//g' tail.txt | awk '{printf "%s%%0A", $0}')
+          echo "::error::${body}"
 
       - name: Install NSIS
         if: runner.os == 'Windows'
