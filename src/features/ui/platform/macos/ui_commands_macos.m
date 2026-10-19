@@ -713,15 +713,20 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
  * equivalent (and would be typed into the editor), so while a chord is
  * pending a local monitor feeds every key-down of this window to the key map
  * first. Installed on the first chord and kept until dealloc; it holds only
- * an assign-only box. */
+ * an assign-only box. The box is allocated once and reused when AppKit
+ * returns no monitor (the next chord tries again); -teardownKeyboard frees
+ * it. */
 - (void)installChordMonitor
 {
     AxyneDiscoveryBox *box;
     if (_chordMonitor != nil) return;
-    box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
-    if (box == NULL) return;
+    box = _chordMonitorBox;
+    if (box == NULL) {
+        box = (AxyneDiscoveryBox *)calloc(1, sizeof(*box));
+        if (box == NULL) return;
+        _chordMonitorBox = box;
+    }
     box->target = self;
-    _chordMonitorBox = box;
     _chordMonitor = [[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
         handler:^NSEvent *(NSEvent *event) {
             AxyneWorkspaceView *view = box->target;
@@ -736,6 +741,9 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
           completesChord:(BOOL)completesChord
 {
     BOOL consumed = NO;
+    /* The command may close the window and release this view; keep it alive
+     * until the current event has been handled. */
+    [[self retain] autorelease];
     switch (result) {
     case AXYNE_KEYMAP_PENDING:
         [self installChordMonitor];
@@ -776,6 +784,10 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
     AxyneCommandId command = AXYNE_COMMAND_NONE;
     AxyneKeymapResult result;
     uint64_t now = axyne_macos_uptime_ms();
+    /* The monitor holds only an assign-only box: a chord command that
+     * releases the view must not leave this method running on a freed
+     * object. */
+    [[self retain] autorelease];
     if (!_keymapReady || [event window] != [self window] ||
         !axyne_keymap_pending(&_keymap, now, NULL)) {
         if (_chordHint != nil) [self syncChordHint];
