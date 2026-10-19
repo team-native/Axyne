@@ -286,6 +286,69 @@ static void axyne_macos_keymap_keep_current_keys(AxyneKeymap *map)
     (void)axyne_keymap_set_command_text(map, "debug.continue", NULL, 0);
 }
 
+/* The built-in menu keys (single ⌘ strokes) of the legacy-action commands
+ * before the user's bindings are applied: before the key map, ⌘N/⌘O/⌘S/⌘W/
+ * ⌘F/⌘H/⌘B/⌘R were fixed menu key equivalents that kept working whatever
+ * the legacy preference binding said. */
+typedef struct AxyneMacMenuKeys {
+    AxyneCommandId command;
+    AxyneKeySequence keys[AXYNE_COMMAND_DEFAULT_KEYS];
+    size_t count;
+} AxyneMacMenuKeys;
+
+static size_t axyne_macos_capture_menu_keys(const AxyneKeymap *map, AxyneMacMenuKeys *out)
+{
+    size_t used = 0;
+    for (int action = 0; action < (int)AXYNE_ACTION_COUNT; ++action) {
+        AxyneCommandId command = axyne_command_from_legacy_action(action);
+        AxyneKeySequence bound[AXYNE_COMMAND_DEFAULT_KEYS];
+        size_t count;
+        AxyneMacMenuKeys *slot = &out[used];
+        if (command == AXYNE_COMMAND_NONE ||
+            !axyne_command_available(command, axyne_command_platform_current()))
+            continue;
+        count = axyne_keymap_bindings(map, command, bound, AXYNE_COMMAND_DEFAULT_KEYS);
+        if (count > AXYNE_COMMAND_DEFAULT_KEYS) count = AXYNE_COMMAND_DEFAULT_KEYS;
+        memset(slot, 0, sizeof(*slot));
+        slot->command = command;
+        for (size_t i = 0; i < count; ++i)
+            if (bound[i].count == 1 && (bound[i].strokes[0].mods & AXYNE_KEYMOD_CMD) != 0)
+                slot->keys[slot->count++] = bound[i];
+        if (slot->count != 0) ++used;
+    }
+    return used;
+}
+
+/* A custom or disabled legacy binding replaced the command's bindings; its
+ * built-in ⌘ menu key comes back as an extra (non-primary) binding, so the
+ * menu shortcut keeps working and the user's key stays the one shown. Not
+ * when the user now binds that key to another command (the user wins, as in
+ * the core key map) or names the command in a command-keyed binding (an
+ * explicit choice of all its keys). */
+static void axyne_macos_restore_menu_keys(AxyneKeymap *map, const AxynePreferences *preferences,
+                                          const AxyneMacMenuKeys *saved, size_t savedCount)
+{
+    for (size_t i = 0; i < savedCount; ++i) {
+        AxyneKeySequence merged[2 * AXYNE_COMMAND_DEFAULT_KEYS];
+        size_t count, added = 0;
+        AxyneCommandId command = saved[i].command;
+        if (axyne_preferences_find_command_binding(preferences,
+                                                   axyne_command_name(command)) != NULL)
+            continue;
+        count = axyne_keymap_bindings(map, command, merged, AXYNE_COMMAND_DEFAULT_KEYS);
+        if (count > AXYNE_COMMAND_DEFAULT_KEYS) count = AXYNE_COMMAND_DEFAULT_KEYS;
+        for (size_t k = 0; k < saved[i].count; ++k) {
+            AxyneCommandId owner = axyne_keymap_lookup(map, &saved[i].keys[k], 0);
+            BOOL present = NO;
+            for (size_t j = 0; j < count && !present; ++j)
+                present = axyne_key_sequence_equal(&merged[j], &saved[i].keys[k]) != 0;
+            if (present || (owner != AXYNE_COMMAND_NONE && owner != command)) continue;
+            merged[count + added++] = saved[i].keys[k];
+        }
+        if (added != 0) (void)axyne_keymap_set_command(map, command, merged, count + added);
+    }
+}
+
 /* AppKit key equivalent of one stroke. Letters are lower case with an
  * explicit modifier mask (Shift is never implied); Shift+/ is shown as ⌘?
  * like the old Help menu. NO when AppKit cannot express the key. */
@@ -379,6 +442,8 @@ static int axyne_macos_palette_compare(const void *left, const void *right)
 - (void)rebuildKeymap
 {
     AxyneStatus status;
+    AxyneMacMenuKeys menuKeys[AXYNE_ACTION_COUNT];
+    size_t menuKeyCount;
     axyne_keymap_destroy(&_keymap);
     memset(&_keymap, 0, sizeof(_keymap));
     _keymapReady = NO;
@@ -391,10 +456,12 @@ static int axyne_macos_palette_compare(const void *left, const void *right)
     }
     _keymapReady = YES;
     axyne_macos_keymap_keep_current_keys(&_keymap);
+    menuKeyCount = axyne_macos_capture_menu_keys(&_keymap, menuKeys);
     /* User bindings (legacy actions and command-keyed entries) win; a
      * malformed entry is skipped (the settings loader logged it). */
     status = axyne_keymap_apply_preferences(&_keymap, &_preferences);
     (void)status;
+    axyne_macos_restore_menu_keys(&_keymap, &_preferences, menuKeys, menuKeyCount);
     [self refreshMenuKeyEquivalents];
     [self syncChordHint]; /* a pending chord did not survive the rebuild */
 }
