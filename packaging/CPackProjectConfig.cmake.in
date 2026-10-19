@@ -6,6 +6,16 @@ if(DEFINED CPACK_BUILD_CONFIG AND NOT CPACK_BUILD_CONFIG STREQUAL "Release")
         "Axyne packaging is Release-only; requested CPack configuration is '${CPACK_BUILD_CONFIG}'.")
 endif()
 
+# A disk image places the app beside CPack's Applications shortcut. An
+# installer stages the same complete tree below the system Applications path.
+if(CPACK_GENERATOR STREQUAL "DragNDrop")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+elseif(CPACK_GENERATOR STREQUAL "productbuild")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications")
+    set(CPACK_COMPONENT_UNSPECIFIED_DISPLAY_NAME "Axyne")
+    set(CPACK_COMPONENT_UNSPECIFIED_HIDDEN FALSE)
+endif()
+
 set(_axyne_packaging_configured_build_type
     "@AXYNE_PACKAGING_CONFIGURED_BUILD_TYPE@")
 set(_axyne_packaging_multi_config "@AXYNE_PACKAGING_MULTI_CONFIG@")

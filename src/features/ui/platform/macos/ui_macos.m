@@ -1635,7 +1635,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         }
         {
             AxyneRunnerSpec spec = {0};
-            spec.executable = "/bin/sh";
+            const char *shellArgs[] = {"-l", "-i"};
+            spec.executable = "/bin/zsh";
+            spec.arguments = shellArgs; spec.argument_count = 2;
             if (axyne_runner_initialize(&_terminalRunner, NULL) != AXYNE_STATUS_OK ||
                 axyne_runner_configure(&_terminalRunner, &spec, NULL) != AXYNE_STATUS_OK ||
                 axyne_runner_initialize(&_actionRunner, NULL) != AXYNE_STATUS_OK) {
@@ -1691,6 +1693,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
          * only what is scrolled into view. */
         [[_terminalOutput layoutManager] setAllowsNonContiguousLayout:YES];
         [self addSubview:_terminalScroll];
+        _shellView = [[AxyneTerminalView alloc] initWithFrame:NSZeroRect];
+        [_shellView setHidden:YES]; [self addSubview:_shellView];
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
@@ -1739,10 +1743,6 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_problemsView setDelegate:self];
         [_problemsView setHidden:YES];
         [self addSubview:_problemsView];
-        _terminalInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
-        [_terminalInput setPlaceholderString:@"Terminal input"];
-        [_terminalInput setTarget:self]; [_terminalInput setAction:@selector(sendTerminal:)];
-        [self addSubview:_terminalInput];
         _terminalStart = axyne_macos_toolbar_button(@"▷", self, @selector(startTerminal:));
         [_terminalStart setToolTip:@"터미널 시작"];
         [_terminalStart setTarget:self]; [_terminalStart setAction:@selector(startTerminal:)];
@@ -1751,10 +1751,6 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_terminalStop setToolTip:@"프로세스 중지"]; [_terminalStop setTarget:self];
         [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
         [self addSubview:_terminalStop];
-        _terminalSend = axyne_macos_toolbar_button(@"전송", self, @selector(sendTerminal:));
-        [_terminalSend setTarget:self];
-        [_terminalSend setAction:@selector(sendTerminal:)];
-        [self addSubview:_terminalSend];
         _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
         [_debugStart setTitle:@"Debug"]; [_debugStart setTarget:self];
         [_debugStart setAction:@selector(startDebugger:)];
@@ -1925,13 +1921,12 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [self updateEmptyState];
     /* The hidden placeholder is not a document the user can act on. */
     AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
-    BOOL terminalActive = _terminalProcess != NULL;
+    BOOL terminalActive = _actionProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     BOOL savedDocument = document != NULL && !document->is_untitled &&
         document->path != NULL && !document->is_dirty;
-    [_terminalStart setEnabled:!terminalActive && !debuggerActive];
-    [_terminalStop setEnabled:terminalActive];
-    [_terminalSend setEnabled:terminalActive];
+    [_terminalStart setEnabled:![_shellView running]];
+    [_terminalStop setEnabled:_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL ? [_shellView running] : terminalActive];
     /* A breakpoint is keyed by path and line, so any source file with a path
      * can carry one, saved or not. */
     BOOL fileDocument = document != NULL && !document->is_image &&
@@ -2083,7 +2078,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     memset(&_pendingPlan, 0, sizeof(_pendingPlan));
     _pendingRun = NO;
 }
-- (void)clearOutput:(id)sender { (void)sender; [_terminalOutput setString:@""]; }
+- (void)clearOutput:(id)sender { (void)sender; if (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL) { axyne_terminal_clear([_shellView terminal]); [_shellView setNeedsDisplay:YES]; } else [_terminalOutput setString:@""]; }
 - (void)selectPanel:(id)sender
 {
     [self selectBottomPanelTab:(AxyneBottomPanelTab)[sender tag]];
@@ -2129,6 +2124,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     /* The list takes the keyboard (Up/Down/Enter) when its tab is chosen. */
     if (_panelMode == AXYNE_BOTTOM_PANEL_PROBLEMS && [self window] != nil)
         [[self window] makeFirstResponder:_problemsView];
+    if (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL) [self startTerminal:nil];
 }
 
 /* Width of a tab button: its title plus padding; the Figma sizes for the
@@ -2160,7 +2156,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     BOOL textDocument = hasDocument && !document->is_image;
     BOOL savedDocument = textDocument && !document->is_untitled &&
         document->path != NULL && !document->is_dirty;
-    BOOL terminalActive = _terminalProcess != NULL;
+    BOOL terminalActive = _actionProcess != NULL;
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     if (action == @selector(saveDocument:) ||
         action == @selector(saveDocumentAs:))
@@ -2177,10 +2173,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (action == @selector(toggleBreakpoint:))
         return axyne_debugger_can_toggle_breakpoint(textDocument &&
             !document->is_untitled && document->path != NULL);
-    if (action == @selector(startTerminal:))
-        return !terminalActive && !debuggerActive;
-    if (action == @selector(stopTerminal:) ||
-        action == @selector(sendTerminal:)) return terminalActive;
+    if (action == @selector(startTerminal:)) return ![_shellView running];
+    if (action == @selector(stopTerminal:)) return [_shellView running];
     if (action == @selector(showWorkspacePreferences:))
         return _workspacePreferencesPath != NULL;
     if (action == @selector(showGitStatus:) ||
@@ -2231,7 +2225,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return YES;
     }
     if (action == @selector(cancelBuild:))
-        return _activeAction == 1 && _terminalProcess != NULL;
+        return _activeAction == 1 && _actionProcess != NULL;
     if (action == @selector(stopDebugger:)) return debuggerActive;
     if (action == @selector(clearBreakpoints:))
         return axyne_debugger_enabled_breakpoints(&_debugger) != 0;
@@ -2271,6 +2265,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
      * windows whose field editors must receive Edit commands. */
     NSWindow *keyWindow = [NSApp keyWindow] != nil ? [NSApp keyWindow] : [self window];
     NSResponder *responder = [keyWindow firstResponder];
+    if (responder == _shellView) return responder;
     if (responder == nil || ![responder isKindOfClass:[NSText class]]) return nil;
     if (_editorView != nil && [responder isKindOfClass:[NSView class]] &&
         [(NSView *)responder isDescendantOf:_editorView]) return nil;
@@ -2499,15 +2494,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         axyne_macos_output_background(&_preferences.theme))];
     [_terminalScroll setBackgroundColor:[_terminalOutput backgroundColor]];
     [self applyProblemsTheme];
-    [_terminalInput setTextColor:axyne_preference_color(_preferences.theme.text)];
-    [_terminalInput setBackgroundColor:axyne_preference_color(_preferences.theme.panel)];
-    /* Figma: the input line sits directly on the terminal surface as plain
-     * monospaced text, with no field box or focus ring. */
-    [_terminalInput setDrawsBackground:NO];
-    [_terminalInput setBezeled:NO];
-    [_terminalInput setFocusRingType:NSFocusRingTypeNone];
-    [_terminalInput setFont:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular]];
-    for (NSButton *button in @[_terminalStart, _terminalStop, _terminalSend,
+    [_shellView setFont:terminalFont foreground:_preferences.theme.text
+        background:axyne_macos_output_background(&_preferences.theme)];
+    for (NSButton *button in @[_terminalStart, _terminalStop,
                                _debugStart, _debugPause, _debugContinue,
                                _debugNext, _debugBreakpoint]) {
         [button setBezelStyle:NSBezelStyleTexturedRounded];
@@ -2517,7 +2506,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
                                _undoButton, _redoButton, _buildButton,
                                _runButton, _targetButton, _searchButton,
                                _outputTab, _problemsTab, _terminalTab, _debugConsoleTab,
-                               _terminalStart, _terminalStop, _terminalSend, _clearOutput]) {
+                               _terminalStart, _terminalStop, _clearOutput]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(_preferences.theme.muted)];
         [(AxyneChromeButton *)button setFillColor:nil];
         [button setFont:[NSFont systemFontOfSize:11]];
@@ -3266,7 +3255,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
  * when it is hidden. The cap is a share of the whole explorer column. */
 - (CGFloat)outlineHeight
 {
-    CGFloat explorer = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] -
+    CGFloat explorer = NSHeight([self bounds]) - AXYNE_STATUS -
         (AXYNE_CONTENT_TOP + AXYNE_TABS);
     if (![self outlineVisible] || explorer <= 0) return 0;
     return (CGFloat)axyne_outline_height(&_outline, (int)explorer);
@@ -3275,13 +3264,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
 /* The file tree ends where the outline begins. */
 - (CGFloat)explorerTreeBottom
 {
-    return NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] - [self outlineHeight];
+    return NSHeight([self bounds]) - AXYNE_STATUS - [self outlineHeight];
 }
 
 - (BOOL)pointIsInOutline:(NSPoint)point
 {
     CGFloat height = [self outlineHeight];
-    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight];
+    CGFloat bottom = NSHeight([self bounds]) - AXYNE_STATUS;
     return height > 0 && point.x >= 0 && point.x < [self sidebarWidth] &&
         point.y >= bottom - height && point.y < bottom;
 }
@@ -3290,7 +3279,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (NSInteger)outlineSymbolAtPoint:(NSPoint)point
 {
     CGFloat height = [self outlineHeight];
-    CGFloat top = NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight] - height;
+    CGFloat top = NSHeight([self bounds]) - AXYNE_STATUS - height;
     if (![self pointIsInOutline:point]) return -1;
     return (NSInteger)axyne_outline_symbol_at(&_outline, (int)height, (int)(point.y - top));
 }
@@ -3741,8 +3730,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         (int)NSHeight([self bounds]), AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
 }
 
-/* Splitter under `point` (view coordinates): 1 = explorer/editor border,
- * 2 = bottom panel top border, 0 = none. The panel wins at the corner. */
+/* Splitter under `point` (view coordinates): 1 = sidebar/editor border,
+ * 2 = bottom panel top border, 0 = none. The sidebar owns the left corner;
+ * the panel splitter exists only in the editor/right region. */
 - (NSInteger)splitterAtPoint:(NSPoint)point
 {
     NSRect bounds = [self bounds];
@@ -3750,7 +3740,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - panel;
     CGFloat contentTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     if (point.x < 0 || point.x >= NSWidth(bounds)) return 0;
-    if (axyne_layout_on_panel_splitter((int)floor(point.y), (int)bottomTop, (int)panel))
+    if (point.x >= [self sidebarWidth] &&
+        axyne_layout_on_panel_splitter((int)floor(point.y), (int)bottomTop, (int)panel))
         return 2;
     if (point.y >= contentTop && point.y < NSHeight(bounds) - AXYNE_STATUS &&
         axyne_layout_on_sidebar_splitter((int)floor(point.x), (int)[self sidebarWidth]))
@@ -3764,8 +3755,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (which == 2) {
         CGFloat panel = [self panelHeight];
         if (panel <= 0) return NSZeroRect;
-        return NSMakeRect(0, NSHeight(bounds) - AXYNE_STATUS - panel - AXYNE_LAYOUT_GRAB_BEFORE_PANEL,
-            NSWidth(bounds), AXYNE_LAYOUT_GRAB_BEFORE_PANEL + AXYNE_LAYOUT_GRAB_AFTER_PANEL);
+        CGFloat left = [self sidebarWidth];
+        return NSMakeRect(left, NSHeight(bounds) - AXYNE_STATUS - panel - AXYNE_LAYOUT_GRAB_BEFORE_PANEL,
+            MAX(0, NSWidth(bounds) - left),
+            AXYNE_LAYOUT_GRAB_BEFORE_PANEL + AXYNE_LAYOUT_GRAB_AFTER_PANEL);
     }
     CGFloat sidebar = [self sidebarWidth];
     if (sidebar <= 0) return NSZeroRect;
@@ -4336,7 +4329,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 
 - (void)cancelBuild:(id)sender
 {
-    if (_activeAction == 1) [self stopTerminal:sender];
+    (void)sender; if (_activeAction == 1 && _actionProcess) axyne_process_terminate(_actionProcess, NULL);
 }
 
 - (void)stopDebugger:(id)sender
@@ -4797,7 +4790,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         if (_sidebarTab != 0) return;
     }
     if (_sidebarTab == 0 && point.x < [self sidebarWidth] && point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS &&
-        point.y < NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
+        point.y < NSHeight([self bounds]) - AXYNE_STATUS) {
         if ([self pointIsInOutline:point]) {
             /* Never a tree click: flush a pending rescan so the row maps to
              * the current text, then jump. */
@@ -4857,7 +4850,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         point.y >= AXYNE_CONTENT_TOP + AXYNE_TABS) return;
     if ([self pointIsInOutline:point]) return; /* no tree menu over the outline */
     if (point.x >= [self sidebarWidth] || point.y < AXYNE_CONTENT_TOP + AXYNE_TABS ||
-        point.y >= NSHeight([self bounds]) - AXYNE_STATUS - [self panelHeight]) {
+        point.y >= NSHeight([self bounds]) - AXYNE_STATUS) {
         [super rightMouseDown:event];
         return;
     }
@@ -4887,6 +4880,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
  * commands fall through to AppKit and the menus. */
 - (BOOL)performKeyEquivalent:(NSEvent *)event
 {
+    /* The focused terminal grid takes Cmd+C/V/A and every key without
+     * Command (direct shell input) before the key map. */
+    if ([[self window] firstResponder] == _shellView && [_shellView performKeyEquivalent:event])
+        return YES;
     if ([self handleKeyEvent:event]) return YES;
     return [super performKeyEquivalent:event];
 }
@@ -5585,9 +5582,9 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
         _lastExitFailed ? "[failed: exit %d]\n" : "[exit %d]\n", exitCode);
     [self terminalAppend:message length:strlen(message)
                    stream:AXYNE_PROCESS_STDOUT];
-    if (_terminalProcess == process) {
-        axyne_process_release(_terminalProcess);
-        _terminalProcess = NULL;
+    if (_actionProcess == process) {
+        axyne_process_release(_actionProcess);
+        _actionProcess = NULL;
     }
     axyne_debugger_release(&_debugger);
     _activeAction = 0;
@@ -5599,7 +5596,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     [_debugNext setEnabled:NO];
     [_debugBreakpoint setEnabled:NO];
     if (_pendingRun) {
-        if (exitCode == 0 && _terminalProcess == NULL) {
+        if (exitCode == 0 && _actionProcess == NULL) {
             /* The build succeeded: start the run step of the same plan. */
             AxyneLanguagePlan plan = _pendingPlan;
             memset(&_pendingPlan, 0, sizeof(_pendingPlan));
@@ -5622,8 +5619,8 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     if (axyne_debugger_is_active(&_debugger) || [self activeIsImage] ||
         ![self captureEditor]) return;
     [self selectOutputPanel];
-    if (_terminalProcess != NULL) {
-        const char *message = "Debugger is unavailable while a terminal session is active. Stop the terminal first.\n";
+    if (_actionProcess != NULL) {
+        const char *message = "Debugger is unavailable while a build or run is active. Stop that action first.\n";
         [self terminalAppend:message length:strlen(message)
                        stream:AXYNE_PROCESS_STDERR];
         return;
@@ -5678,61 +5675,31 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 
 - (void)startTerminal:(id)sender
 {
-    AxyneProcessSpec spec;
-    AxyneError error;
-    AxyneStatus status;
     (void)sender;
-    /* Show the terminal even if the panel was hidden or on another tab. */
+    /* Show the terminal even if the panel was hidden or on another tab;
+     * start the native shell when none runs. */
     _panelMode = AXYNE_BOTTOM_PANEL_TERMINAL;
     _panelHidden = NO;
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
-    if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
-        const char *message = "Terminal is unavailable while the debugger session is active. Stop the debugger first.\n";
-        [self terminalAppend:message length:strlen(message)
-                       stream:AXYNE_PROCESS_STDERR];
-        return;
+    if ([_shellView running]) { [[self window] makeFirstResponder:_shellView]; return; }
+    AxyneProcessSpec processSpec = {0}; AxyneError error = {0};
+    AxyneStatus status = axyne_runner_process_spec(&_terminalRunner, NULL, NULL, NULL, &processSpec, &error);
+    if (status == AXYNE_STATUS_OK) {
+        AxyneTerminalSpec spec = {0};
+        spec.executable = processSpec.executable; spec.arguments = processSpec.arguments;
+        spec.argument_count = processSpec.argument_count;
+        spec.working_directory = _explorer.root != NULL ? _explorer.root : [NSHomeDirectory() UTF8String];
+        status = [_shellView start:&spec error:&error];
     }
-    status = axyne_runner_process_spec(&_terminalRunner,
-        axyne_macos_terminal_output, axyne_macos_terminal_exit, self,
-        &spec, &error);
-    if (status == AXYNE_STATUS_OK)
-        status = axyne_process_start(&spec, &_terminalProcess, &error);
-    if (status != AXYNE_STATUS_OK) {
-        _lastExitFailed = NO;
-        _hasExitStatus = NO;
-        [self terminalAppend:error.message length:strlen(error.message)
-                       stream:AXYNE_PROCESS_STDERR];
-        [self setNeedsDisplay:YES];
-        return;
-    }
-    [_terminalStart setEnabled:NO];
-    [_terminalStop setEnabled:YES];
-    _activeAction = 3;
-    _lastExitFailed = NO;
+    if (status != AXYNE_STATUS_OK) [self showWorkspaceError:@"Unable to start terminal" error:&error];
+    [[self window] makeFirstResponder:_shellView]; [self refreshActionControls];
+}
+- (void)stopTerminal:(id)sender {
+    (void)sender;
+    if (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL) [_shellView stop];
+    else if (_actionProcess) axyne_process_terminate(_actionProcess, NULL);
     [self refreshActionControls];
-}
-
-- (void)stopTerminal:(id)sender
-{
-    (void)sender;
-    if (_terminalProcess != NULL) (void)axyne_process_terminate(_terminalProcess, NULL);
-}
-
-- (void)sendTerminal:(id)sender
-{
-    const char *value;
-    NSMutableData *data;
-    AxyneError error;
-    (void)sender;
-    if (_terminalProcess == NULL || [[_terminalInput stringValue] length] == 0) return;
-    value = [[_terminalInput stringValue] UTF8String];
-    data = [NSMutableData dataWithBytes:value length:strlen(value)];
-    [data appendBytes:"\n" length:1];
-    if (axyne_process_write(_terminalProcess, [data bytes], [data length], &error) != AXYNE_STATUS_OK)
-        [self terminalAppend:error.message length:strlen(error.message)
-                       stream:AXYNE_PROCESS_STDERR];
-else [_terminalInput setStringValue:@""];
 }
 
 static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogValues *values,
@@ -5833,7 +5800,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     processSpec.on_output = axyne_macos_terminal_output;
     processSpec.on_exit = axyne_macos_terminal_exit;
     processSpec.user_data = self;
-    if (axyne_process_start(&processSpec, &_terminalProcess, &error) != AXYNE_STATUS_OK) {
+    if (axyne_process_start(&processSpec, &_actionProcess, &error) != AXYNE_STATUS_OK) {
         _lastExitFailed = NO;
         _hasExitStatus = NO;
         [self terminalAppend:error.message length:strlen(error.message)
@@ -5864,8 +5831,8 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     char message[256];
     AxyneStatus status;
     [self selectOutputPanel];
-    if (_terminalProcess != NULL || axyne_debugger_is_active(&_debugger)) {
-        const char *busy = "Build or run is unavailable while a terminal or debugger session is active. Stop it first.\n";
+    if (_actionProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *busy = "Build or run is unavailable while another action or debugger session is active. Stop it first.\n";
         [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
         return;
     }
@@ -6295,6 +6262,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [super layout];
     NSRect bounds = [self bounds];
     CGFloat width = NSWidth(bounds);
+    CGFloat statusTop = NSHeight(bounds) - AXYNE_STATUS;
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - [self panelHeight];
     CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
@@ -6316,23 +6284,19 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     CGFloat outlineHeight = [self outlineHeight];
     (void)axyne_outline_set_scroll(&_outline, (long)_outline.first_row, (int)outlineHeight);
-    NSInteger visibleRows = MAX(1, (NSInteger)((bottomTop - outlineHeight - editorTop -
+    NSInteger visibleRows = MAX(1, (NSInteger)((statusTop - outlineHeight - editorTop -
         AXYNE_UI_EXPLORER_HEADER) / AXYNE_UI_ROW));
     _explorerFirstRow = MIN(_explorerFirstRow, MAX(0, (NSInteger)_explorer.count - visibleRows));
+    /* Output tab: build/run/debugger text; Terminal tab: the native shell
+     * grid in the same rect. */
     BOOL terminal = _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL;
-    CGFloat inputTop = NSHeight(bounds) - AXYNE_STATUS - 28;
     [_terminalScroll setFrame:NSMakeRect([self sidebarWidth] + 16, bottomTop + 32,
-        MAX(0, width - [self sidebarWidth] - 24),
-        MAX(0, [self panelHeight] - 32 - (terminal ? 34 : 0)))];
-    [_terminalScroll setHidden:_panelMode != AXYNE_BOTTOM_PANEL_OUTPUT && !terminal];
+        MAX(0, width - [self sidebarWidth] - 24), MAX(0, [self panelHeight] - 32))];
+    [_terminalScroll setHidden:_panelMode != AXYNE_BOTTOM_PANEL_OUTPUT];
+    [_shellView setFrame:[_terminalScroll frame]]; [_shellView setHidden:!terminal];
     [_problemsView setFrame:NSMakeRect([self sidebarWidth], bottomTop + 32,
         MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32))];
     [_problemsView setHidden:_panelMode != AXYNE_BOTTOM_PANEL_PROBLEMS];
-    [_terminalInput setFrame:NSMakeRect([self sidebarWidth] + 16, inputTop,
-        MAX(0, width - [self sidebarWidth] - 88), 22)];
-    [_terminalSend setFrame:NSMakeRect(width - 64, inputTop, 52, 22)];
-    [_terminalInput setHidden:!terminal]; [_terminalSend setHidden:!terminal];
-    [_terminalInput setBezeled:NO];
     {
         /* Tab strip from the tab model: visible tabs left to right, 2px
          * apart (the "문제  N" label grows with the count and pushes the
@@ -6394,7 +6358,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     {
         /* Feature categories lay out their own panel content; a category
          * that shows its own view for the selected tab replaces the default
-         * output, terminal input and problems views. */
+         * output, terminal grid and problems views. */
         NSRect content = _panelHidden ? NSZeroRect :
             NSMakeRect([self sidebarWidth], bottomTop + 32,
                 MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32));
@@ -6405,8 +6369,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
 #undef AXYNE_MAC_HOOK
         if (_panelHidden || ownedTab || selectedTab == AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE) {
-            [_terminalScroll setHidden:YES]; [_terminalInput setHidden:YES];
-            [_terminalSend setHidden:YES]; [_problemsView setHidden:YES];
+            [_terminalScroll setHidden:YES]; [_shellView setHidden:YES];
+            [_problemsView setHidden:YES];
         }
     }
 #define AXYNE_MAC_HOOK(feature) [self feature##Layout];
@@ -6595,7 +6559,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (!_explorerHidden)
         NSRectFill(NSMakeRect([self sidebarWidth] - 1, editorTop, 1, statusTop - editorTop));
     if (!_panelHidden)
-        NSRectFill(NSMakeRect(0, bottomTop, width, 1));
+        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop,
+                              MAX(0, width - [self sidebarWidth]), 1));
     if (![_searchButton isHidden]) {
     [axyne_preference_color(reference ? 0x3a3d44 : _preferences.theme.border) setStroke];
         [[NSBezierPath bezierPathWithRoundedRect:[_searchButton frame] xRadius:4 yRadius:4] stroke];
@@ -6823,9 +6788,9 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         axyne_lsp_destroy(_lsp);
         _lsp = NULL;
     }
-    if (_terminalProcess != NULL) {
-        axyne_process_release(_terminalProcess);
-        _terminalProcess = NULL;
+    if (_actionProcess != NULL) {
+        axyne_process_release(_actionProcess);
+        _actionProcess = NULL;
     }
     axyne_runner_destroy(&_terminalRunner);
     axyne_runner_destroy(&_actionRunner);
@@ -6892,10 +6857,9 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     axyne_build_feed_destroy(&_buildFeed);
     [_terminalScroll release];
     [_terminalOutput release];
-    [_terminalInput release];
+    [_shellView shutdown]; [_shellView release];
     [_terminalStart release];
     [_terminalStop release];
-    [_terminalSend release];
     [_debugStart release];
     [_debugPause release];
     [_debugContinue release];
@@ -7264,6 +7228,8 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
         _panelMode = command == AXYNE_PALETTE_COMMAND_PANEL_OUTPUT ? AXYNE_BOTTOM_PANEL_OUTPUT :
             (command == AXYNE_PALETTE_COMMAND_PANEL_PROBLEMS ? AXYNE_BOTTOM_PANEL_PROBLEMS
                                                               : AXYNE_BOTTOM_PANEL_TERMINAL);
+        _panelHidden = NO;
+        if (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL) [self startTerminal:nil];
         [self setNeedsLayout:YES];
         [self setNeedsDisplay:YES];
         break;

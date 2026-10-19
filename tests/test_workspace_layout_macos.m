@@ -11,6 +11,8 @@
 #include "axyne/problems.h"
 #include "axyne/outline.h"
 #include "axyne/lsp.h"
+#include "axyne/runner.h"
+#import "../src/features/ui/platform/macos/terminal_view_macos.h"
 
 @interface NSView (AxyneWorkspaceLayoutTest)
 - (BOOL)selectWorkspaceURL:(NSURL *)url;
@@ -40,6 +42,16 @@
 - (NSInteger)rowIndexAtPoint:(NSPoint)point;
 - (BOOL)pointIsInOutline:(NSPoint)point;
 - (NSInteger)outlineSymbolAtPoint:(NSPoint)point;
+- (CGFloat)sidebarWidth;
+- (CGFloat)panelHeight;
+- (CGFloat)outlineHeight;
+- (CGFloat)explorerTreeBottom;
+- (NSInteger)explorerVisibleRows;
+- (void)scrollWheel:(NSEvent *)event;
+- (NSInteger)splitterAtPoint:(NSPoint)point;
+- (NSRect)splitterRect:(NSInteger)which;
+- (void)togglePanel:(id)sender;
+- (void)selectSidebarTab:(NSInteger)tab;
 @end
 
 static id field(id view, const char *name)
@@ -52,6 +64,29 @@ static void *value_field(id view, const char *name)
 {
     Ivar ivar = class_getInstanceVariable([view class], name);
     return ivar == NULL ? NULL : (char *)view + ivar_getOffset(ivar);
+}
+
+/* The fixture has no window. Supply deterministic window coordinates and
+ * line deltas while exercising the production scrollWheel: handler. */
+@interface AxyneLayoutScrollEvent : NSEvent {
+@public
+    NSPoint testLocation;
+    CGFloat testDelta;
+}
+@end
+@implementation AxyneLayoutScrollEvent
+- (NSPoint)locationInWindow { return testLocation; }
+- (CGFloat)scrollingDeltaY { return testDelta; }
+- (CGFloat)scrollingDeltaX { return 0; }
+- (BOOL)hasPreciseScrollingDeltas { return NO; }
+@end
+
+static NSEvent *scroll_event(NSView *view, NSPoint point, CGFloat delta_y)
+{
+    AxyneLayoutScrollEvent *event = [[[AxyneLayoutScrollEvent alloc] init] autorelease];
+    event->testLocation = [view convertPoint:point toView:nil];
+    event->testDelta = delta_y;
+    return event;
 }
 
 /* Failure diagnostics: every failed check dumps the document set, the tab
@@ -191,19 +226,27 @@ int main(void)
         CHECK(NSMaxY([output frame]) <= 842 - AXYNE_UI_STATUS);
         CHECK([output hasVerticalScroller]);
         fprintf(stderr, "Checking terminal controls\n");
+        /* Native UI tests never source user shell startup files. */
+        AxyneRunnerConfig *shellRunner = value_field(view, "_terminalRunner");
+        const char *safeArgs[] = {"-f", "-i"};
+        AxyneRunnerSpec safeShell = {0}; safeShell.executable = "/bin/zsh";
+        safeShell.arguments = safeArgs; safeShell.argument_count = 2;
+        CHECK(axyne_runner_configure(shellRunner, &safeShell, NULL) == AXYNE_STATUS_OK);
         NSButton *terminal = field(view, "_terminalTab");
         [terminal performClick:nil];
         [view layoutSubtreeIfNeeded];
-        CHECK(![field(view, "_terminalInput") isHidden]);
-        CHECK(![field(view, "_terminalSend") isHidden]);
-        CHECK(NSMaxY([output frame]) <= NSMinY([field(view, "_terminalInput") frame]));
-        CHECK([field(view, "_terminalInput") action] == NSSelectorFromString(@"sendTerminal:"));
+        AxyneTerminalView *shell = field(view, "_shellView");
+        CHECK(shell != nil && ![shell isHidden] && [output isHidden]);
+        CHECK(class_getInstanceVariable([view class], "_terminalInput") == NULL);
+        CHECK(class_getInstanceVariable([view class], "_terminalSend") == NULL);
+        CHECK([shell acceptsFirstResponder] && [shell running]);
+        CHECK(NSEqualRects([shell frame], [output frame]));
         [field(view, "_problemsTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
         NSView *problemsView = field(view, "_problemsView");
         CHECK(problemsView != nil);
         CHECK([output isHidden] && ![problemsView isHidden]);
-        CHECK([field(view, "_terminalInput") isHidden] && [field(view, "_terminalSend") isHidden]);
+        CHECK([shell isHidden] && [shell running]);
         {
             /* The list fills the panel below its 32px tab header. */
             NSRect list = [problemsView frame];
@@ -295,7 +338,7 @@ int main(void)
         }
         [field(view, "_outputTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
-        CHECK(![output isHidden] && [field(view, "_terminalInput") isHidden]);
+            CHECK(![output isHidden] && [shell isHidden]);
         CHECK([field(view, "_problemsView") isHidden]);
         /* The Git selector must fit the minimum supported sidebar, and
          * shrink safely below it instead of intercepting editor clicks. */
@@ -342,7 +385,7 @@ int main(void)
         [view layoutSubtreeIfNeeded];
         CGFloat top = AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS +
             AXYNE_UI_EXPLORER_HEADER;
-        CGFloat bottom = 842 - AXYNE_UI_STATUS - AXYNE_UI_PANEL;
+        CGFloat bottom = 842 - AXYNE_UI_STATUS;
         CHECK_ROW(NSMakePoint(80, top), 0);
         CHECK_ROW(NSMakePoint(80, top + AXYNE_UI_ROW - 1), 0);
         CHECK_ROW(NSMakePoint(80, top + AXYNE_UI_ROW), 1);
@@ -356,12 +399,20 @@ int main(void)
         fprintf(stderr, "Checking explorer outline\n");
         {
             AxyneOutline *outline = value_field(view, "_outline");
-            const char outlineText[] = "int a;\nint b;\nint f(void) { return 0; }\n"
-                "struct S { int x; };\n";
+            const char outlineText[] = "int a;\nint b;\nint f00(void) { return 0; }\n"
+                "int f01(void) { return 1; }\nint f02(void) { return 2; }\n"
+                "int f03(void) { return 3; }\nint f04(void) { return 4; }\n"
+                "int f05(void) { return 5; }\nint f06(void) { return 6; }\n"
+                "int f07(void) { return 7; }\nint f08(void) { return 8; }\n"
+                "int f09(void) { return 9; }\nint f10(void) { return 10; }\n"
+                "int f11(void) { return 11; }\nint f12(void) { return 12; }\n"
+                "int f13(void) { return 13; }\nint f14(void) { return 14; }\n"
+                "int f15(void) { return 15; }\nstruct S { int x; };\n";
             CGFloat explorerHeight = bottom - AXYNE_UI_MENU - AXYNE_UI_TOOLBAR - AXYNE_UI_TABS;
             int section;
             CGFloat treeBottom;
             NSInteger lastRow;
+            size_t outlineRows;
             CHECK(outline != NULL);
             /* No document is open: the section is hidden. */
             CHECK(outline->state == AXYNE_OUTLINE_HIDDEN);
@@ -372,10 +423,12 @@ int main(void)
             CHECK(outline->symbols.count >= 3);
             [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
             section = axyne_outline_height(outline, (int)explorerHeight);
+            outlineRows = outline->symbols.count < AXYNE_OUTLINE_DEFAULT_ROWS
+                ? outline->symbols.count : AXYNE_OUTLINE_DEFAULT_ROWS;
             CHECK(section == AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER +
-                  (int)outline->symbols.count * AXYNE_OUTLINE_ROW);
+                  (int)outlineRows * AXYNE_OUTLINE_ROW);
             CHECK(section <= explorerHeight * 0.4);
-            treeBottom = bottom - section;
+            treeBottom = 842 - AXYNE_UI_STATUS - section;
             lastRow = (NSInteger)((treeBottom - top) / AXYNE_UI_ROW) - 1;
             CHECK(lastRow > 0);
             CHECK_ROW(NSMakePoint(80, top + lastRow * AXYNE_UI_ROW), lastRow);
@@ -395,6 +448,104 @@ int main(void)
             axyne_outline_clear(outline);
             [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
             CHECK_ROW(NSMakePoint(80, top + (lastRow + 1) * AXYNE_UI_ROW), lastRow + 1);
+            CHECK(axyne_outline_prepare(outline, "main.c", sizeof(outlineText) - 1) != 0);
+            CHECK(axyne_outline_scan(outline, outlineText, sizeof(outlineText) - 1, NULL) ==
+                  AXYNE_STATUS_OK);
+            [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
+        }
+
+        /* The sidebar is independent of the bottom panel. Resizing and hiding
+         * the panel must leave the tree, outline, divider, and Git column at
+         * the status-bar top; only the editor/right panel moves. */
+        fprintf(stderr, "Checking sidebar/panel independence and splitters\n");
+        {
+            CGFloat statusTop = 842 - AXYNE_UI_STATUS;
+            CGFloat sidebar = [view sidebarWidth];
+            CGFloat outlineBefore = [view outlineHeight];
+            CGFloat treeBefore = [view explorerTreeBottom];
+            CGFloat *panelSize = value_field(view, "_panelSize");
+            NSRect sidebarSplitter = [view splitterRect:1];
+            NSRect panelSplitter = [view splitterRect:2];
+            CHECK(panelSize != NULL);
+            CHECK(treeBefore == statusTop - outlineBefore);
+            CHECK(NSMaxY(sidebarSplitter) == statusTop);
+            CHECK(NSMinX(panelSplitter) == sidebar);
+            CHECK(NSMaxX(panelSplitter) == 1440);
+            CHECK([view splitterAtPoint:NSMakePoint(sidebar - 1,
+                statusTop - [view panelHeight])] == 1);
+            CHECK([view splitterAtPoint:NSMakePoint(sidebar + 1,
+                statusTop - [view panelHeight])] == 2);
+            *panelSize = 150;
+            [view setNeedsLayout:YES]; [view layoutSubtreeIfNeeded];
+            CHECK([view panelHeight] == 150);
+            CHECK([view explorerTreeBottom] == treeBefore);
+            CHECK([view outlineHeight] == outlineBefore);
+            [view togglePanel:nil];
+            [view layoutSubtreeIfNeeded];
+            CHECK([view panelHeight] == 0);
+            CHECK([view explorerTreeBottom] == treeBefore);
+            CHECK([view outlineHeight] == outlineBefore);
+            NSInteger hiddenVisible = [view explorerVisibleRows];
+            CHECK(hiddenVisible == (NSInteger)((statusTop - outlineBefore - top) /
+                                               AXYNE_UI_ROW));
+            CHECK_ROW(NSMakePoint(80, top + (hiddenVisible - 1) * AXYNE_UI_ROW),
+                      hiddenVisible - 1);
+            CHECK(NSMaxY([view splitterRect:1]) == statusTop);
+            CHECK([view splitterAtPoint:NSMakePoint(sidebar - 1, statusTop - 1)] == 1);
+            CHECK([view splitterAtPoint:NSMakePoint(sidebar + 1, statusTop - 1)] == 0);
+            [view togglePanel:nil];
+            [view layoutSubtreeIfNeeded];
+            CHECK([view explorerTreeBottom] == treeBefore);
+            CHECK([view outlineHeight] == outlineBefore);
+
+            [view selectSidebarTab:1];
+            [view layoutSubtreeIfNeeded];
+            NSView *gitPanel = field(view, "_gitPanel");
+            CHECK(gitPanel != nil && NSMinY([gitPanel frame]) ==
+                AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS + AXYNE_UI_EXPLORER_HEADER);
+            CHECK(NSMaxY([gitPanel frame]) == statusTop);
+            [view selectSidebarTab:0];
+            [view layoutSubtreeIfNeeded];
+        }
+
+        /* With a large fixture, the last complete tree row remains clickable
+         * and tree/outline wheel ranges are based on the full sidebar. */
+        {
+            CGFloat statusTop = 842 - AXYNE_UI_STATUS;
+            NSInteger visible = [view explorerVisibleRows];
+            CGFloat treeBottom = [view explorerTreeBottom];
+            CHECK(visible == (NSInteger)((treeBottom - top) / AXYNE_UI_ROW));
+            CHECK_ROW(NSMakePoint(80, top + (visible - 1) * AXYNE_UI_ROW),
+                      visible - 1);
+            CHECK_ROW(NSMakePoint(80, treeBottom), NSNotFound);
+            CHECK([view outlineSymbolAtPoint:NSMakePoint(80,
+                treeBottom + AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER + 1)] >= 0);
+            CHECK([view outlineSymbolAtPoint:NSMakePoint(80, statusTop)] == -1);
+
+            /* Exercise actual wheel handling, not only the computed ranges. */
+            NSInteger *firstRow = value_field(view, "_explorerFirstRow");
+            AxyneOutline *outline = value_field(view, "_outline");
+            CHECK(firstRow != NULL && outline != NULL);
+            *firstRow = 0;
+            outline->first_row = 0;
+            NSEvent *wheel = scroll_event(view, NSMakePoint(80, top + AXYNE_UI_ROW), -3);
+            CHECK(wheel != nil);
+            [view scrollWheel:wheel];
+            CHECK(*firstRow > 0);
+            wheel = scroll_event(view, NSMakePoint(80, top + AXYNE_UI_ROW), 3);
+            CHECK(wheel != nil);
+            [view scrollWheel:wheel];
+            CHECK(*firstRow == 0);
+            wheel = scroll_event(view, NSMakePoint(80, treeBottom +
+                AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER + AXYNE_OUTLINE_ROW), -3);
+            CHECK(wheel != nil);
+            [view scrollWheel:wheel];
+            CHECK(outline->first_row > 0);
+            wheel = scroll_event(view, NSMakePoint(80, treeBottom +
+                AXYNE_OUTLINE_SEPARATOR + AXYNE_OUTLINE_HEADER + AXYNE_OUTLINE_ROW), 3);
+            CHECK(wheel != nil);
+            [view scrollWheel:wheel];
+            CHECK(outline->first_row == 0);
         }
 
         /* The command palette replaces the toolbar search field while open. */

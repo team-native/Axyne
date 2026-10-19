@@ -1,3 +1,36 @@
+add_executable(axyne_terminal_model_tests test_terminal_model.cpp)
+target_link_libraries(axyne_terminal_model_tests PRIVATE axyne_terminal axyne_vterm)
+set_target_properties(axyne_terminal_model_tests PROPERTIES CXX_STANDARD 17)
+add_test(NAME axyne-terminal-model COMMAND axyne_terminal_model_tests)
+set_tests_properties(axyne-terminal-model PROPERTIES TIMEOUT 30)
+add_executable(axyne_terminal_session_tests test_terminal_session.cpp)
+target_link_libraries(axyne_terminal_session_tests PRIVATE axyne_terminal)
+set_target_properties(axyne_terminal_session_tests PROPERTIES CXX_STANDARD 17)
+add_test(NAME axyne-terminal-session COMMAND axyne_terminal_session_tests)
+set_tests_properties(axyne-terminal-session PROPERTIES TIMEOUT 40)
+if(MSVC)
+    target_compile_options(axyne_terminal_model_tests PRIVATE /UNDEBUG)
+    target_compile_options(axyne_terminal_session_tests PRIVATE /UNDEBUG)
+else()
+    target_compile_options(axyne_terminal_model_tests PRIVATE -UNDEBUG)
+    target_compile_options(axyne_terminal_session_tests PRIVATE -UNDEBUG)
+endif()
+if(APPLE)
+    add_executable(axyne_terminal_view_tests test_terminal_view_macos.m
+        "${PROJECT_SOURCE_DIR}/src/features/ui/platform/macos/terminal_view_macos.m")
+    target_link_libraries(axyne_terminal_view_tests PRIVATE axyne_terminal "-framework AppKit")
+    target_compile_options(axyne_terminal_view_tests PRIVATE -UNDEBUG)
+    add_test(NAME axyne-terminal-view COMMAND axyne_terminal_view_tests)
+    set_tests_properties(axyne-terminal-view PROPERTIES TIMEOUT 30)
+elseif(WIN32)
+    add_executable(axyne_terminal_view_tests test_terminal_view_windows.c
+        "${PROJECT_SOURCE_DIR}/src/features/ui/platform/windows/terminal_view_windows.c")
+    target_link_libraries(axyne_terminal_view_tests PRIVATE axyne_terminal user32 gdi32 imm32)
+    target_compile_options(axyne_terminal_view_tests PRIVATE /UNDEBUG /utf-8)
+    add_test(NAME axyne-terminal-view COMMAND axyne_terminal_view_tests)
+    set_tests_properties(axyne-terminal-view PROPERTIES TIMEOUT 30)
+endif()
+
 add_executable(axyne_tests
     test_main.c
     test_documents_search.c

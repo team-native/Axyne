@@ -10,6 +10,7 @@
 
 #include "axyne/git.h"
 #include "axyne/git_panel.h"
+#include "axyne/git_selection.h"
 #include "axyne/git_graph_geometry.h"
 
 #ifdef _WIN32
@@ -102,6 +103,45 @@ static void axyne_test_setup_environment(const char *root)
     (void)setenv("GIT_COMMITTER_DATE", "2024-03-05T12:00:00+0000", 1);
     (void)unsetenv("GIT_DIR");
     (void)unsetenv("GIT_WORK_TREE");
+}
+
+static int axyne_test_select_all(const char *root)
+{
+    char repo[1024], out[4096], before[128];
+    AxyneGitChanges changes = {0};
+    AxyneError error = {0};
+    char **paths = NULL;
+    size_t count = 0, i;
+    AXYNE_TEST_CHECK(axyne_test_path(repo, sizeof(repo), root, "select-all"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(repo));
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
+        "cd '%s' && git init -q -b main . && "
+        "printf base > partial.txt && printf base > staged.txt && "
+        "printf base > deleted.txt && printf base > old.txt && "
+        "printf ignored.txt > .gitignore && git add . && git commit -qm base && "
+        "printf changed > partial.txt && git add partial.txt && printf extra >> partial.txt && "
+        "printf changed > staged.txt && git add staged.txt && "
+        "rm deleted.txt && mv old.txt renamed.txt && printf new > untracked.txt && "
+        "printf ignored > ignored.txt && git rev-parse HEAD", repo), 0);
+    (void)snprintf(before, sizeof(before), "%s", out);
+    AXYNE_TEST_STATUS(axyne_git_changes(repo, &changes, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(axyne_git_has_unselected(&changes));
+    AXYNE_TEST_CHECK(axyne_git_copy_unselected_paths(&changes, &paths, &count));
+    AXYNE_TEST_STATUS(axyne_git_stage_paths(repo, (const char *const *)paths,
+                                            count, &error), AXYNE_STATUS_OK);
+    for (i = 0; i < count; ++i) free(paths[i]);
+    free(paths);
+    axyne_git_changes_free(&changes);
+    AXYNE_TEST_STATUS(axyne_git_changes(repo, &changes, &error), AXYNE_STATUS_OK);
+    AXYNE_TEST_CHECK(changes.count > 0 && !axyne_git_has_unselected(&changes));
+    for (i = 0; i < changes.count; ++i) {
+        AXYNE_TEST_CHECK(changes.items[i].staged);
+        AXYNE_TEST_CHECK(strcmp(changes.items[i].path, "ignored.txt") != 0);
+    }
+    axyne_git_changes_free(&changes);
+    AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out), "cd '%s' && git rev-parse HEAD", repo), 0);
+    AXYNE_TEST_STREQ(before, out);
+    return 1;
 }
 
 static int axyne_test_panel_changes(const char *root)
@@ -838,6 +878,84 @@ static int axyne_test_graph_text_position(void)
     return 1;
 }
 
+/* Fixed lane cells with horizontal scrolling: strip width, offset clamping
+ * and the thin horizontal indicator. */
+static int axyne_test_graph_hscroll_geometry(void)
+{
+    double start = -1, length = -1;
+    /* No lanes still reserve one cell; cell width never depends on count. */
+    AXYNE_TEST_CHECK(axyne_git_graph_strip_width(0, 12) == 12);
+    AXYNE_TEST_CHECK(axyne_git_graph_strip_width(1, 12) == 12);
+    AXYNE_TEST_CHECK(axyne_git_graph_strip_width(1000, 12) == 12000);
+    AXYNE_TEST_CHECK(axyne_git_graph_strip_width(3, -1) == 0);
+    /* Offsets stay within [0, content - visible]; content that fits pins 0,
+     * so a widened panel pulls a stale offset back. */
+    AXYNE_TEST_CHECK(axyne_git_graph_clamp_offset(50, 500, 200) == 50);
+    AXYNE_TEST_CHECK(axyne_git_graph_clamp_offset(400, 500, 200) == 300);
+    AXYNE_TEST_CHECK(axyne_git_graph_clamp_offset(-5, 500, 200) == 0);
+    AXYNE_TEST_CHECK(axyne_git_graph_clamp_offset(80, 180, 200) == 0);
+    AXYNE_TEST_CHECK(axyne_git_graph_clamp_offset(80, 200, 200) == 0);
+    /* Indicator only when something is hidden. */
+    AXYNE_TEST_CHECK(!axyne_git_graph_thumb(200, 200, 200, 0, 16, &start, &length));
+    AXYNE_TEST_CHECK(!axyne_git_graph_thumb(0, 200, 400, 0, 16, &start, &length));
+    AXYNE_TEST_CHECK(start == -1 && length == -1);
+    AXYNE_TEST_CHECK(axyne_git_graph_thumb(200, 200, 400, 0, 16, &start, &length));
+    AXYNE_TEST_CHECK(start == 0 && length == 100);
+    AXYNE_TEST_CHECK(axyne_git_graph_thumb(200, 200, 400, 200, 16, &start, &length));
+    AXYNE_TEST_CHECK(start == 100 && length == 100);
+    AXYNE_TEST_CHECK(axyne_git_graph_thumb(200, 200, 400, 999, 16, &start, &length));
+    AXYNE_TEST_CHECK(start == 100);
+    /* Very wide content keeps a grabbable minimum and ends at the track end. */
+    AXYNE_TEST_CHECK(axyne_git_graph_thumb(200, 200, 100000, 99800, 16, &start, &length));
+    AXYNE_TEST_CHECK(length == 16 && start == 184);
+    return 1;
+}
+
+/* A reload returning the same rows keeps the measured graph width; any
+ * difference that can move or change row text does not. */
+static int axyne_test_graph_same_rows(void)
+{
+    AxyneGitGraphLane la[2] = {{AXYNE_GIT_LANE_DOT | AXYNE_GIT_LANE_DOWN, 0},
+                               {AXYNE_GIT_LANE_DOWN, 1}};
+    AxyneGitGraphLane lb[2] = {{AXYNE_GIT_LANE_DOT | AXYNE_GIT_LANE_DOWN, 0},
+                               {AXYNE_GIT_LANE_DOWN, 1}};
+    AxyneGitRef ref = {0};
+    char h1[] = "aaaa", h2[] = "aaaa", h3[] = "bbbb";
+    AxyneGitGraphRow ra = {0}, rb = {0};
+    AxyneGitGraph a = {0}, b = {0};
+    ra.hash = h1; ra.lane_count = 2; ra.lanes = la;
+    rb.hash = h2; rb.lane_count = 2; rb.lanes = lb;
+    a.rows = &ra; a.count = 1; a.max_lanes = 2;
+    b.rows = &rb; b.count = 1; b.max_lanes = 2;
+    AXYNE_TEST_CHECK(axyne_git_graph_same_rows(&a, &b));
+    /* Empty snapshots match each other but not a filled one. */
+    {
+        AxyneGitGraph e1 = {0}, e2 = {0};
+        AXYNE_TEST_CHECK(axyne_git_graph_same_rows(&e1, &e2));
+        AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&e1, &a));
+    }
+    /* Ref names may change (chip rows are always re-measured); a row gaining
+     * or losing chips may not. */
+    ra.refs = rb.refs = &ref;
+    ra.ref_count = 1; rb.ref_count = 2;
+    AXYNE_TEST_CHECK(axyne_git_graph_same_rows(&a, &b));
+    rb.ref_count = 0; rb.refs = NULL;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    ra.ref_count = 0; ra.refs = NULL;
+    rb.hash = h3;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    rb.hash = h2;
+    lb[1].flags = AXYNE_GIT_LANE_FORK;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    lb[1].flags = AXYNE_GIT_LANE_DOWN;
+    rb.column = 1;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    rb.column = 0;
+    b.max_lanes = 3;
+    AXYNE_TEST_CHECK(!axyne_git_graph_same_rows(&a, &b));
+    return 1;
+}
+
 /* Rewritten side tips can all wait for one far-away ancestor. Exercise both
  * the native renderers' shared geometry and repeated history-window growth. */
 static int axyne_test_graph_continuity(const char *root)
@@ -864,13 +982,16 @@ static int axyne_test_graph_continuity(const char *root)
         AXYNE_TEST_EQ_INT(graph.count, limits[i]);
         AXYNE_TEST_EQ_INT(graph.max_lanes, 25);
         AXYNE_TEST_EQ_INT(axyne_test_graph_invariants(&graph), i == 2 ? 0 : 25);
-        mac = axyne_git_graph_lane_width(graph.max_lanes, 10, 100);
-        win = axyne_git_graph_lane_width(graph.max_lanes, 12, 120);
-        /* All 25 lane centres, including dots past the old column-9 cutoff,
-         * fit in their strip without changing logical columns. */
+        /* Lane cells keep their native width (macOS 10 pt, Windows 12 px)
+         * however many lanes the window has; the strip grows instead and
+         * every lane centre, including dots past the old column-9 cutoff,
+         * stays inside it without changing logical columns. */
+        mac = axyne_git_graph_strip_width(graph.max_lanes, 10);
+        win = axyne_git_graph_strip_width(graph.max_lanes, 12);
+        AXYNE_TEST_CHECK(mac == 250 && win == 300);
         for (j = 0; j < (size_t)graph.max_lanes; ++j) {
-            AXYNE_TEST_CHECK((j + 0.5) * mac < 100);
-            AXYNE_TEST_CHECK((j + 0.5) * win < 120);
+            AXYNE_TEST_CHECK((j + 0.5) * 10 < mac);
+            AXYNE_TEST_CHECK((j + 0.5) * 12 < win);
         }
         AXYNE_TEST_CHECK(graph.rows[24].column > 9);
         for (j = 0; j < prefix.count; ++j) {
@@ -888,12 +1009,12 @@ static int axyne_test_graph_continuity(const char *root)
         memset(&graph, 0, sizeof(graph));
     }
     axyne_git_graph_free(&prefix);
-    AXYNE_TEST_CHECK(axyne_git_graph_lane_width(10, 10, 100) == 10);
-    AXYNE_TEST_CHECK(axyne_git_graph_lane_width(1000, 12, 120) < 1);
-    /* The rewritten Axyne history measured 64 lanes, highest dot column 63.
-     * Even after Windows integer rasterization that endpoint stays inside. */
-    AXYNE_TEST_CHECK(63.5 * axyne_git_graph_lane_width(64, 10, 100) < 100);
-    AXYNE_TEST_CHECK((int)(63.5 * axyne_git_graph_lane_width(64, 12, 120)) < 120);
+    /* The rewritten Axyne history measured 64 lanes, highest dot column 63:
+     * its strip is wider than any sidebar and scrolls rather than shrinking
+     * cells, and the last dot stays inside the strip. */
+    AXYNE_TEST_CHECK(axyne_git_graph_strip_width(64, 12) == 768);
+    AXYNE_TEST_CHECK((int)(63.5 * 12) < (int)axyne_git_graph_strip_width(64, 12));
+    AXYNE_TEST_CHECK(63.5 * 10 < axyne_git_graph_strip_width(64, 10));
     /* More than 1 MiB is valid. Beyond the existing 16 MiB capture budget,
      * reject the partial result rather than presenting a false history end. */
     AXYNE_TEST_EQ_INT(axyne_test_sh(out, sizeof(out),
@@ -1121,10 +1242,13 @@ static int axyne_test_git_panel_run(const char *root)
         return 1;
     }
     axyne_test_setup_environment(root);
+    AXYNE_TEST_CHECK(axyne_test_select_all(root));
     AXYNE_TEST_CHECK(axyne_test_panel_changes(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph(root));
     AXYNE_TEST_CHECK(axyne_test_panel_graph_lanes(root));
     AXYNE_TEST_CHECK(axyne_test_graph_text_position());
+    AXYNE_TEST_CHECK(axyne_test_graph_hscroll_geometry());
+    AXYNE_TEST_CHECK(axyne_test_graph_same_rows());
     AXYNE_TEST_CHECK(axyne_test_graph_continuity(root));
     AXYNE_TEST_CHECK(axyne_test_panel_details(root));
     return 1;

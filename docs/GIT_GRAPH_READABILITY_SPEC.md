@@ -16,7 +16,10 @@
 | ci-budget | Give only the Git panel integration suite a 180-second CTest timeout | AGENT_PARAMETER | ASSUMED |
 
 Compact is a filtered history, not a representation of the full DAG. Full
-continues to use `--all`, excluding stash, with existing lane geometry.
+continues to use `--all`, excluding stash, with existing lane geometry
+(fixed-width lanes with horizontal scrolling, see
+`docs/specs/git-graph-hscroll.md`; each row's text still starts beside its
+own rightmost mark).
 The compact query uses `--first-parent` from HEAD, preserves decorations,
 and removes secondary parent hashes before layout. No Git history is changed.
 

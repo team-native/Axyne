@@ -126,7 +126,13 @@ typedef struct AxyneGitPanelUi {
     unsigned generation; /* bumped per workspace; stale results are dropped */
     int changes_scroll;  /* first visible change row */
     int graph_scroll;    /* first visible graph row */
+    int graph_hscroll;   /* pixels the graph rows are scrolled to the left */
+    int graph_width_base; /* widest graph item without ref chips */
+    int graph_width_valid; /* graph_width_base matches the rows and expansion */
+    int graph_width;     /* scrollable width of the graph rows for graph_width_list */
+    int graph_width_list; /* list width graph_width was measured for */
     int wheel_remainder;
+    int hwheel_remainder;
     unsigned diff_serial; /* newest diff request; older results are dropped */
     char *selected_path; /* selected change (repository path) or NULL */
     char *selected_hash; /* selected commit or NULL (one selection at a time) */
@@ -199,15 +205,16 @@ typedef struct AxyneWindowState {
     AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
     int pending_run;
     AxyneDebugger debugger;
-    AxyneProcess *terminal_process;
+    /* Build/run/single-step process (output panel); the interactive shell
+     * lives in shell_view (native terminal, terminal_view_windows.c). */
+    AxyneProcess *action_process;
     AxyneProcess *git_process;
     AxyneGitUiRun *git_run;
     int git_batch_busy; /* a commit, push or pull runs on a worker thread */
     HWND terminal_output;
-    HWND terminal_input;
+    HWND shell_view;
     HWND terminal_start;
     HWND terminal_stop;
-    HWND terminal_send;
     HWND debug_start;
     HWND debug_pause;
     HWND debug_continue;

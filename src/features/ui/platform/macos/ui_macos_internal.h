@@ -39,6 +39,7 @@
 #include "axyne/popup_menu_layout.h"
 #include "popup_menu_macos.h"
 #include "git_panel_macos.h"
+#import "terminal_view_macos.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "axyne/completion.h"
@@ -251,7 +252,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneLanguagePlan _pendingPlan;
     BOOL _pendingRun;
     AxyneDebugger _debugger;
-    AxyneProcess *_terminalProcess;
+    /* Build/run process (Output tab); the interactive shell is _shellView. */
+    AxyneProcess *_actionProcess;
     AxyneProcess *_gitProcess;
     AxyneMacGitRun *_gitRun;
     /* A commit, push or pull is running on a worker thread. */
@@ -263,10 +265,9 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _sidebarTab;
     AxyneGitPanelView *_gitPanel;
     NSTextView *_terminalOutput;
-    NSTextField *_terminalInput;
+    AxyneTerminalView *_shellView; /* native terminal grid (Terminal tab) */
     NSButton *_terminalStart;
     NSButton *_terminalStop;
-    NSButton *_terminalSend;
     NSButton *_debugStart;
     NSButton *_debugPause;
     NSButton *_debugContinue;
@@ -511,7 +512,6 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (NSString *)askForText:(NSString *)title label:(NSString *)label;
 - (void)startTerminal:(id)sender;
 - (void)stopTerminal:(id)sender;
-- (void)sendTerminal:(id)sender;
 - (void)terminalAppend:(const char *)bytes length:(size_t)length
                 stream:(AxyneProcessStream)stream;
 - (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode;

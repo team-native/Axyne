@@ -40,6 +40,25 @@ static unsigned axyne_popup_modifiers(NSEventModifierFlags flags)
     return mods;
 }
 
+/* Accelerator text with a thin space after each modifier glyph ("⇧ ⌘ O",
+ * "⇧ F11") so the small glyphs do not run into each other; multi-letter key
+ * names (F11, Space) stay whole. */
+static NSString *axyne_popup_spaced_keys(NSString *text)
+{
+    NSMutableString *spaced;
+    NSUInteger length = [text length];
+    NSUInteger i;
+    if (length < 2) return text;
+    spaced = [NSMutableString stringWithCapacity:length * 2];
+    for (i = 0; i < length; ++i) {
+        unichar c = [text characterAtIndex:i];
+        [spaced appendFormat:@"%C", c];
+        if ((c == 0x2303 || c == 0x2325 || c == 0x21E7 || c == 0x2318) && i + 1 < length)
+            [spaced appendString:@"\u2009"];
+    }
+    return spaced;
+}
+
 /* Whether a row can be highlighted and chosen. A submenu parent counts as
  * enabled when the menu auto-enables items, as AppKit does. */
 static BOOL axyne_popup_item_enabled(NSMenuItem *item)
@@ -154,7 +173,8 @@ static BOOL axyne_popup_item_enabled(NSMenuItem *item)
                     uint32_t key = (uint32_t)[equivalent characterAtIndex:0];
                     if (axyne_popup_accelerator(text, sizeof(text), key,
                             axyne_popup_modifiers([item keyEquivalentModifierMask])) > 0) {
-                        NSString *shown = [NSString stringWithUTF8String:text];
+                        NSString *shown = axyne_popup_spaced_keys(
+                            [NSString stringWithUTF8String:text]);
                         if (shown != nil) {
                             CGFloat width = ceil([shown sizeWithAttributes:accelAttributes].width);
                             if (width > trailing) trailing = width;
@@ -329,6 +349,7 @@ static BOOL axyne_popup_item_enabled(NSMenuItem *item)
     AxynePopupMenuView *_view;
     NSPanel *_panel;
     AxynePopupMenu *_child;    /* retained submenu level */
+    BOOL _pointerInside;       /* root: pointer was over the open levels */
     AxynePopupMenu *_parent;   /* not retained */
     NSInteger _childRow;
     id _localMonitor;
@@ -463,6 +484,7 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     [self showPanelAtOrigin:NSMakePoint(placed.x, placed.y)];
     if (selectFirst) [_view moveSelection:AXYNE_POPUP_NAV_FIRST];
     _open = YES;
+    _pointerInside = NO;
     _localMonitor = [[NSEvent addLocalMonitorForEventsMatchingMask:
         NSEventMaskMouseMoved | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
         NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown | NSEventMaskKeyDown
@@ -605,12 +627,35 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     NSInteger row;
     if (level == nil) {
         id<AxynePopupMenuDelegate> delegate = _delegate;
+        /* Moving out of the area spanned by the open levels (after having been
+         * inside it) closes the submenus and drops the hover highlight; the
+         * top level stays open like a menu bar dropdown. A pointer that never
+         * entered (keyboard navigation) leaves the selection alone, and the
+         * bounding area keeps a diagonal path to a submenu from closing it. */
+        BOOL inside = NSPointInRect(point, [self levelsBounds]);
+        if (_pointerInside && !inside) {
+            if (_child != nil) [self closeChild];
+            [_view setSelectedIndex:-1];
+        }
+        _pointerInside = inside;
         if ([delegate respondsToSelector:@selector(popupMenu:pointerMovedOutsideToScreenPoint:)])
             [delegate popupMenu:self pointerMovedOutsideToScreenPoint:point];
         return;
     }
+    _pointerInside = YES;
     row = [level rowAtScreenPoint:point];
     if (row >= 0) [level hoverRow:row];
+}
+
+/* Bounding rectangle of every open level's panel (screen coordinates). */
+- (NSRect)levelsBounds
+{
+    NSRect bounds = NSZeroRect;
+    for (AxynePopupMenu *level = self; level != nil; level = level->_child)
+        if (level->_panel != nil)
+            bounds = NSIsEmptyRect(bounds) ? [level->_panel frame]
+                                           : NSUnionRect(bounds, [level->_panel frame]);
+    return bounds;
 }
 
 - (NSEvent *)handleMouseDown
@@ -680,6 +725,8 @@ static AxynePopupRect axyne_popup_rect(NSRect rect)
     NSEventModifierFlags flags = [event modifierFlags];
     AxynePopupMenu *active = [self deepest];
     NSInteger selected = [active->_view selectedIndex];
+    /* Keyboard navigation owns the selection until the pointer enters again. */
+    _pointerInside = NO;
     /* Command/Control chords belong to the key equivalents: close and let
      * the event through to the native menu. */
     if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0) {
