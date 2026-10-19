@@ -42,9 +42,10 @@ elseif(APPLE)
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_release_macos.m")
     target_link_libraries(axyne_ui PRIVATE "-framework AppKit")
     # The feature files only add categories to AxyneWorkspaceView; nothing
-    # references their symbols, so every consumer of the static library must
-    # load all Objective-C members.
-    target_link_options(axyne_ui INTERFACE "-ObjC")
+    # references their symbols, so the app must load all Objective-C members
+    # (-ObjC). Not an INTERFACE option: test targets that -force_load axyne_ui
+    # would then load its members twice. Tests opt in themselves.
+    target_link_options(axyne PRIVATE "-ObjC")
 endif()
 
 target_include_directories(axyne_ui
