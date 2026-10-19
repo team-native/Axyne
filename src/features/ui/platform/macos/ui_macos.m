@@ -4363,13 +4363,49 @@ static BOOL axyne_macos_is_image_path(const char *path)
     return [self existingGlobalPreferencesPath] != nil;
 }
 
-/* Tools > settings.json 열기: opens the existing global settings file as a
- * tab (disabled until one exists). */
+/* "settings.json 열기" needs the file written from now on (D3). When only the
+ * old preferences.json exists its bytes are copied verbatim, so a workspace
+ * keeps every override (never an empty profile); when no file exists at all,
+ * settings.json is created from the effective profile (a new workspace file
+ * overrides nothing). Same rule as the Windows adapter. */
+- (BOOL)ensureSettingsFile:(BOOL)workspace
+{
+    const char *path = workspace ? _workspacePreferencesPath : _globalPreferencesPath;
+    NSString *file;
+    AxyneError error;
+    AxyneStatus status;
+    if (path == NULL) return NO;
+    if (access(path, F_OK) == 0) return YES;
+    file = [NSString stringWithUTF8String:path];
+    if (file == nil) return NO;
+    memset(&error, 0, sizeof(error));
+    status = axyne_preferences_adopt_legacy_file(
+        [[file stringByDeletingLastPathComponent] fileSystemRepresentation], &error);
+    if (status == AXYNE_STATUS_NOT_FOUND) {
+        AxynePreferences created = workspace ? _preferences : _globalPreferences;
+        memset(&error, 0, sizeof(error));
+        if (workspace) {
+            created.present_fields = 0;
+            memset(created.binding_present, 0, sizeof(created.binding_present));
+        }
+        status = workspace ? axyne_preferences_save_workspace(&created, path, &error)
+                           : axyne_preferences_save_global(&created, path, &error);
+    }
+    if (status != AXYNE_STATUS_OK) {
+        [self showWorkspaceError:@"Unable to create settings file" error:&error];
+        return NO;
+    }
+    return YES;
+}
+
+/* Tools > settings.json 열기: opens the global settings.json, copied from the
+ * old preferences.json first when only that exists (disabled while neither
+ * exists). */
 - (void)openPreferencesFile:(id)sender
 {
-    NSString *path = [self existingGlobalPreferencesPath];
     (void)sender;
-    if (path != nil) [self openPath:path];
+    if (_globalPreferencesPath == NULL || ![self ensureSettingsFile:NO]) return;
+    [self openPath:[NSString stringWithUTF8String:_globalPreferencesPath]];
 }
 
 - (void)reportIssue:(id)sender
@@ -4940,10 +4976,9 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
 }
 
 /* Opens the Figma preferences window. The "settings.json 열기" link closes it
- * and opens the profile's file as an editor document: the file a load reads
- * (settings.json, or the old preferences.json while no settings.json exists,
- * D3); a profile that was never saved is created as settings.json first so
- * there is something to open. */
+ * and opens the profile's settings.json as an editor document; it is made
+ * by -ensureSettingsFile: first (copy of the old preferences.json, or the
+ * profile when neither file exists, D3). */
 - (BOOL)showPreferences:(BOOL)workspace
 {
     AxynePreferences initial = workspace ? _preferences : _globalPreferences;
@@ -4969,22 +5004,9 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
     }
     if (!axyne_preferences_window_show([self window], workspace ? 1 : 0, &initial, &hooks))
         return YES;
-    readPath = axyne_macos_preferences_read_path(path);
-    if (readPath != NULL && access(readPath, F_OK) == 0) {
-        NSString *existing = [NSString stringWithUTF8String:readPath];
-        free(readPath);
-        if (existing != nil) [self openPath:existing];
-        return YES;
-    }
-    free(readPath);
-    if (access(path, F_OK) != 0) {
-        AxynePreferences created = workspace ? _preferences : _globalPreferences;
-        AxyneStatus status;
-        if (workspace) { created.present_fields = 0; memset(created.binding_present, 0, sizeof(created.binding_present)); }
-        status = workspace ? axyne_preferences_save_workspace(&created, path, &error)
-                           : axyne_preferences_save_global(&created, path, &error);
-        if (status != AXYNE_STATUS_OK) { [self showWorkspaceError:@"Unable to create settings file" error:&error]; return NO; }
-    }
+    /* The window's save hook may have replaced the profile paths. */
+    path = workspace ? _workspacePreferencesPath : _globalPreferencesPath;
+    if (path == NULL || ![self ensureSettingsFile:workspace]) return NO;
     [self openPath:[NSString stringWithUTF8String:path]];
     return YES;
 }

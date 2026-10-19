@@ -470,6 +470,7 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)clearBreakpoints:(id)sender;
 - (BOOL)preferencesFileExists;
 - (NSString *)existingGlobalPreferencesPath;
+- (BOOL)ensureSettingsFile:(BOOL)workspace;
 - (void)openPreferencesFile:(id)sender;
 - (void)showKeyboardShortcuts:(id)sender;
 - (void)reportIssue:(id)sender;
