@@ -42,7 +42,15 @@ jobs:
 
       - name: Build macOS
         if: runner.os == 'macOS'
-        run: cmake --build build --config Release --parallel
+        run: |
+          set +e
+          cmake --build build --config Release --parallel > build.txt 2>&1
+          rc=$?
+          grep -E 'error:|Error [0-9]|undefined symbol|ld: ' build.txt | sort -u | head -60 > errs.txt
+          body=$(sed -e 's/%/%25/g' errs.txt | awk '{printf "%s%%0A", $0}')
+          [ -s errs.txt ] && echo "::error::${body}"
+          tail -5 build.txt
+          exit $rc
 
       - name: Run CTest on Windows
         if: runner.os == 'Windows'
