@@ -1423,6 +1423,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     BOOL _loadingEditor;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
+    AxyneRunnerProfiles _runnerProfiles;
     /* Build target selector. Lives in memory for the session; runtimes are
      * discovered lazily (first editor file, click or build), never at startup. */
     AxyneBuildTarget _buildTarget;
@@ -2179,6 +2180,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
                 axyne_preferences_load_global(_globalPreferencesPath,
                                                &_globalPreferences,
                                                &preferenceError);
+            if (_globalPreferencesPath != NULL)
+                (void)axyne_runner_profiles_load(&_runnerProfiles, _globalPreferencesPath, NULL);
             _preferences = _globalPreferences;
             if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
                 [self showWorkspaceError:@"Unable to load preferences" error:&preferenceError];
@@ -6201,25 +6204,24 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
  * open on a rejected configuration and shows the reason. */
 - (BOOL)configureRunner
 {
-    NSString *executable = _actionRunner.executable != NULL
-        ? [NSString stringWithUTF8String:_actionRunner.executable] : nil;
-    NSString *workingDirectory = _actionRunner.working_directory != NULL
-        ? [NSString stringWithUTF8String:_actionRunner.working_directory] : nil;
-    NSString *arguments = axyne_macos_runner_lines(_actionRunner.arguments,
-                                                    _actionRunner.argument_count);
-    NSString *environment = axyne_macos_runner_lines(_actionRunner.environment,
-                                                      _actionRunner.environment_count);
+    AxyneDocument *doc = [self activeDocument];
+    AxyneLanguageId language = doc != NULL ? axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
+    const AxyneRunnerConfig empty = {0};
+    const AxyneRunnerConfig *config = axyne_runner_profiles_get(&_runnerProfiles, language, &_actionRunner);
+    if (config == NULL) config = &empty;
+    NSString *arguments = axyne_macos_runner_lines(config->arguments, config->argument_count);
+    NSString *environment = axyne_macos_runner_lines(config->environment, config->environment_count);
     AxyneRunnerDialogValues initial = {
-        executable != nil ? [executable UTF8String] : "",
+        config->executable != NULL ? config->executable : "",
         [arguments UTF8String],
-        workingDirectory != nil ? [workingDirectory UTF8String] : "",
-        [environment UTF8String]
+        config->working_directory != NULL ? config->working_directory : "",
+        [environment UTF8String], language, &_runnerProfiles, &_actionRunner
     };
     AxyneRunnerDialogHooks hooks = { self, axyne_macos_runner_save_hook };
     return axyne_runner_dialog_show([self window], &initial, &hooks) != 0;
 }
 
-/* Validates and stores the dialog's values in _actionRunner. On failure the
+/* Validates and persists the selected Runner profile. On failure the
  * Korean reason is written to `message`. */
 - (BOOL)applyRunnerValues:(const AxyneRunnerDialogValues *)values
                     error:(char *)message capacity:(size_t)capacity
@@ -6255,7 +6257,8 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         spec.working_directory = workingDirectory[0] != '\0' ? workingDirectory : NULL;
         spec.environment = (const char *const *)environmentValues;
         spec.environment_count = environmentCount;
-        status = axyne_runner_configure(&_actionRunner, &spec, &error);
+        status = axyne_runner_profiles_save(&_runnerProfiles, values->language,
+            &spec, _globalPreferencesPath, &error);
         if (status == AXYNE_STATUS_OK)
             accepted = YES;
         else
@@ -6340,7 +6343,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     [self clearPendingRun];
     memset(&plan, 0, sizeof(plan));
     status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &_runtimes, &_buildTarget,
-        doc->path, _actionRunner.executable != NULL ? &_actionRunner : NULL,
+        doc->path, axyne_runner_profiles_get(&_runnerProfiles, axyne_language_for_path(doc->path), &_actionRunner),
         &plan, message, sizeof(message));
     if (status != AXYNE_STATUS_OK) {
         /* Missing runtime or unknown language: the resolver's text goes to the
@@ -7186,6 +7189,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         _actionProcess = NULL;
     }
     axyne_runner_destroy(&_terminalRunner);
+    axyne_runner_profiles_destroy(&_runnerProfiles);
     axyne_runner_destroy(&_actionRunner);
     [self clearPendingRun];
     axyne_runtime_free(&_runtimes);

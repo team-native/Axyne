@@ -1312,6 +1312,8 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
 @interface AxyneRunnerDialog : NSObject <NSTextFieldDelegate, NSTextViewDelegate, AxyneDlgActions> {
     AxyneDlgPanel *_panel;
     AxyneRunnerDialogHooks _hooks;
+    AxyneRunnerDialogValues _initial;
+    NSPopUpButton *_language;
     NSTextField *_executable, *_workingDirectory, *_error; /* owned by the panel's views */
     NSTextView *_arguments, *_environment;
     AxynePWButton *_browse, *_cancelButton, *_saveButton;
@@ -1335,7 +1337,22 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     self = [super init];
     if (self == nil) return nil;
     _hooks = *hooks;
+    _initial = *values;
     _panel = axyne_dlg_panel(@"Runner 설정", width, height, self, &root);
+
+    caption = axyne_dlg_label(@"Language", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+    _language = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(AXYNE_DLG_PAD,
+        y + AXYNE_DLG_LABEL_BLOCK, inner, AXYNE_PW_FIELD_HEIGHT) pullsDown:NO] autorelease];
+    [_language addItemWithTitle:@"Global (fallback)"];
+    for (int i = 0; i < AXYNE_LANGUAGE_COUNT; ++i)
+        [_language addItemWithTitle:axyne_dlg_string(axyne_language_name((AxyneLanguageId)i))];
+    [_language selectItemAtIndex:values->language + 1];
+    [_language setTarget:self];
+    [_language setAction:@selector(languageChanged:)];
+    [root addSubview:_language];
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
 
     caption = axyne_dlg_label(@"실행 파일", AXYNE_PW_COLOR_MUTED, 11, NO);
     [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
@@ -1403,7 +1420,8 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     [_workingDirectory setNextKeyView:_environment];
     [_environment setNextKeyView:_cancelButton];
     [_cancelButton setNextKeyView:_saveButton];
-    [_saveButton setNextKeyView:_executable];
+    [_saveButton setNextKeyView:_language];
+    [_language setNextKeyView:_executable];
     [_panel setInitialFirstResponder:_executable];
     return self;
 }
@@ -1448,6 +1466,7 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     utf8 = [[_arguments string] UTF8String];              values.arguments = utf8 != NULL ? utf8 : "";
     utf8 = [[_workingDirectory stringValue] UTF8String];  values.working_directory = utf8 != NULL ? utf8 : "";
     utf8 = [[_environment string] UTF8String];            values.environment = utf8 != NULL ? utf8 : "";
+    values.language = (AxyneLanguageId)([_language indexOfSelectedItem] - 1);
     if (_hooks.save != NULL && _hooks.save(_hooks.context, &values, error, sizeof(error))) {
         [self finish:1];
         return;
@@ -1455,6 +1474,21 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     [self showError:error[0] != '\0' ? axyne_dlg_string(error)
                                      : @"Runner 설정이 올바르지 않습니다."];
     if ([[_executable stringValue] length] == 0) [_panel makeFirstResponder:_executable];
+}
+
+- (void)languageChanged:(id)sender
+{
+    (void)sender;
+    const AxyneRunnerConfig *config = axyne_runner_profiles_get(_initial.profiles,
+        (AxyneLanguageId)([_language indexOfSelectedItem] - 1), _initial.fallback);
+    char *args = config != NULL ? axyne_runner_dialog_lines(config->arguments, config->argument_count) : NULL;
+    char *env = config != NULL ? axyne_runner_dialog_lines(config->environment, config->environment_count) : NULL;
+    [_executable setStringValue:axyne_dlg_string(config != NULL ? config->executable : NULL)];
+    [_workingDirectory setStringValue:axyne_dlg_string(config != NULL ? config->working_directory : NULL)];
+    [_arguments setString:axyne_dlg_string(args)];
+    [_environment setString:axyne_dlg_string(env)];
+    free(args); free(env);
+    [self showError:@""];
 }
 
 - (void)browse:(id)sender

@@ -1,5 +1,6 @@
 add_library(axyne_runner STATIC
     "${CMAKE_CURRENT_LIST_DIR}/runner.c"
+    "${CMAKE_CURRENT_LIST_DIR}/runner_profiles.c"
     "${CMAKE_CURRENT_LIST_DIR}/build_target.c"
     "${CMAKE_CURRENT_LIST_DIR}/language.c"
     "${CMAKE_CURRENT_LIST_DIR}/build_selector.c"

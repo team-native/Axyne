@@ -1038,7 +1038,7 @@ cleanup:
 
 enum {
     DLG_ID_EXE = 301, DLG_ID_BROWSE, DLG_ID_ARGS, DLG_ID_WD, DLG_ID_ENV,
-    DLG_ID_CLOSE, DLG_ID_MSG, DLG_ID_STAGE
+    DLG_ID_CLOSE, DLG_ID_MSG, DLG_ID_STAGE, DLG_ID_LANGUAGE
 };
 enum { DLG_RUNNER = 0, DLG_SHORTCUTS = 1, DLG_COMMIT = 2 };
 
@@ -1057,7 +1057,7 @@ typedef struct DlgState {
     int kind, width, height;
     int done, result;
     /* runner */
-    HWND exe, browse, args, wd, env;
+    HWND exe, browse, args, wd, env, language;
     AxyneRunnerDialogHooks hooks;
     const AxyneRunnerDialogValues *initial;
     wchar_t error[256];
@@ -1164,6 +1164,7 @@ static void dlg_paint_chrome(DlgState *d, HDC dc, const wchar_t *title)
 static void dlg_runner_rows(int *exe, int *args, int *wd, int *env, int *note)
 {
     int y = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD;
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
     *exe = y;
     y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
     *args = y;
@@ -1187,6 +1188,8 @@ static void dlg_paint_runner(DlgState *d, HDC dc)
     pw_fill(dc, 0, 0, d->width, d->height, pw_rgb(AXYNE_PW_COLOR_CONTENT));
     dlg_paint_chrome(d, dc, L"Runner 설정");
     pw_text(dc, f->font11, muted, L"실행 파일", AXYNE_DLG_PAD, exe_y, 200, 14, DT_LEFT);
+    pw_text(dc, f->font11, muted, L"Language", AXYNE_DLG_PAD,
+        AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD, inner, 14, DT_LEFT);
     dlg_frame(dc, AXYNE_DLG_PAD, exe_y + AXYNE_DLG_LABEL_BLOCK,
               inner - AXYNE_DLG_BROWSE_WIDTH - 8, AXYNE_PW_FIELD_HEIGHT, d->exe);
     pw_text(dc, f->font11, muted, L"인자 (한 줄에 하나)", AXYNE_DLG_PAD, args_y, 300, 14, DT_LEFT);
@@ -1504,6 +1507,7 @@ static void dlg_runner_save(DlgState *d)
     values.arguments = args != NULL ? args : "";
     values.working_directory = wd != NULL ? wd : "";
     values.environment = env != NULL ? env : "";
+    values.language = (AxyneLanguageId)((int)SendMessageW(d->language, CB_GETCURSEL, 0, 0) - 1);
     if (d->hooks.save != NULL)
         saved = d->hooks.save(d->hooks.context, &values, error, sizeof(error));
     free(exe); free(args); free(wd); free(env);
@@ -1535,6 +1539,25 @@ static void dlg_commit_accept(DlgState *d)
     d->done = 1;
 }
 
+static void dlg_runner_language(DlgState *d)
+{
+    AxyneLanguageId language = (AxyneLanguageId)((int)SendMessageW(d->language, CB_GETCURSEL, 0, 0) - 1);
+    const AxyneRunnerConfig *config = axyne_runner_profiles_get(d->initial->profiles, language, d->initial->fallback);
+    char *args = config != NULL ? axyne_runner_dialog_lines(config->arguments, config->argument_count) : NULL;
+    char *env = config != NULL ? axyne_runner_dialog_lines(config->environment, config->environment_count) : NULL;
+    const char *texts[4] = {config != NULL ? config->executable : NULL, args,
+        config != NULL ? config->working_directory : NULL, env};
+    HWND fields[4] = {d->exe, d->args, d->wd, d->env};
+    for (int i = 0; i < 4; ++i) {
+        wchar_t *wide = dlg_wide_crlf(texts[i]);
+        if (wide != NULL) SetWindowTextW(fields[i], wide);
+        free(wide);
+    }
+    free(args); free(env);
+    d->error[0] = L'\0';
+    InvalidateRect(d->window, NULL, FALSE);
+}
+
 static void dlg_command(DlgState *d, int id, int code)
 {
     if (id == IDCANCEL || id == DLG_ID_CLOSE || (id == IDOK && d->kind == DLG_SHORTCUTS)) {
@@ -1544,6 +1567,8 @@ static void dlg_command(DlgState *d, int id, int code)
         dlg_commit_accept(d);
     } else if (id == IDOK) {
         dlg_runner_save(d);
+    } else if (id == DLG_ID_LANGUAGE && code == CBN_SELCHANGE) {
+        dlg_runner_language(d);
     } else if (id == DLG_ID_BROWSE) {
         dlg_browse(d);
     } else if (d->kind == DLG_COMMIT && id == DLG_ID_STAGE) {
@@ -1804,6 +1829,17 @@ static void dlg_build_runner(DlgState *d)
     int cancel_x = save_x - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
     dlg_runner_rows(&exe_y, &args_y, &wd_y, &env_y, &note_y);
     /* Creation order is the Tab order. */
+    d->language = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        CBS_DROPDOWNLIST | WS_VSCROLL, AXYNE_DLG_PAD, AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD +
+        AXYNE_DLG_LABEL_BLOCK, inner, 260, d->window, (HMENU)(INT_PTR)DLG_ID_LANGUAGE, NULL, NULL);
+    SendMessageW(d->language, WM_SETFONT, (WPARAM)d->fonts->font11, TRUE);
+    SendMessageW(d->language, CB_ADDSTRING, 0, (LPARAM)L"Global (fallback)");
+    for (int i = 0; i < AXYNE_LANGUAGE_COUNT; ++i) {
+        wchar_t *name = pw_wide(axyne_language_name((AxyneLanguageId)i));
+        SendMessageW(d->language, CB_ADDSTRING, 0, (LPARAM)name);
+        free(name);
+    }
+    SendMessageW(d->language, CB_SETCURSEL, (WPARAM)(d->initial->language + 1), 0);
     d->exe = dlg_edit(d, DLG_ID_EXE, AXYNE_DLG_PAD, exe_y + AXYNE_DLG_LABEL_BLOCK,
                       inner - AXYNE_DLG_BROWSE_WIDTH - 8, d->initial->executable, d->fonts->font11);
     d->browse = dlg_button(d, DLG_ID_BROWSE, AXYNE_DLG_PAD + inner - AXYNE_DLG_BROWSE_WIDTH,

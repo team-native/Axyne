@@ -233,6 +233,7 @@ typedef struct AxyneWindowState {
     int empty_shown; /* shortcut guide replaces the editor (no open document) */
     AxyneRunnerConfig terminal_runner;
     AxyneRunnerConfig action_runner;
+    AxyneRunnerProfiles runner_profiles;
     /* Build target selector. Kept in memory for the session; runtimes are
      * discovered lazily (first editor file, click or build), never at startup. */
     AxyneBuildTarget build_target;
@@ -1143,6 +1144,8 @@ static void axyne_load_global_preferences(AxyneWindowState *state)
     status = state->global_preferences_path == NULL ? AXYNE_STATUS_NOT_FOUND :
         axyne_preferences_load_global(state->global_preferences_path,
                                       &state->global_preferences, &error);
+    if (state->global_preferences_path != NULL)
+        (void)axyne_runner_profiles_load(&state->runner_profiles, state->global_preferences_path, NULL);
     state->preferences = state->global_preferences;
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
         MessageBoxA(NULL, error.message, "Axyne - Preferences", MB_OK | MB_ICONERROR);
@@ -2016,7 +2019,7 @@ static char *axyne_runner_join_lines(char **values, size_t count)
 static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues *values,
                                     char *message, size_t capacity)
 {
-    AxyneRunnerConfig *config = (AxyneRunnerConfig *)context;
+    AxyneWindowState *state = (AxyneWindowState *)context;
     char *executable = _strdup(values->executable != NULL ? values->executable : "");
     char *arguments = _strdup(values->arguments != NULL ? values->arguments : "");
     char *working_directory = _strdup(
@@ -2047,7 +2050,8 @@ static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues
         spec.working_directory = working_directory[0] != '\0' ? working_directory : NULL;
         spec.environment = (const char *const *)environment_values;
         spec.environment_count = environment_count;
-        status = axyne_runner_configure(config, &spec, &error);
+        status = axyne_runner_profiles_save(&state->runner_profiles, values->language,
+            &spec, state->global_preferences_path, &error);
         if (status == AXYNE_STATUS_OK)
             accepted = 1;
         else
@@ -2066,11 +2070,17 @@ static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues
 }
 
 /* Build > Runner 설정: the preferences-style dialog (app_dialogs.h). */
-static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
+static int axyne_configure_runner(HWND owner, AxyneWindowState *state)
 {
     char *arguments, *environment;
-    AxyneRunnerDialogValues initial;
+    AxyneRunnerDialogValues initial = {0};
     AxyneRunnerDialogHooks hooks;
+    AxyneDocument *doc = axyne_active_visible(state);
+    AxyneLanguageId language = doc != NULL ? axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
+    const AxyneRunnerConfig empty = {0};
+    const AxyneRunnerConfig *config = axyne_runner_profiles_get(
+        &state->runner_profiles, language, &state->action_runner);
+    if (config == NULL) config = &empty;
     int accepted;
     if (config == NULL) return 0;
     arguments = axyne_runner_join_lines(config->arguments, config->argument_count);
@@ -2080,7 +2090,10 @@ static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
     initial.working_directory = config->working_directory != NULL
         ? config->working_directory : "";
     initial.environment = environment != NULL ? environment : "";
-    hooks.context = config;
+    initial.language = language;
+    initial.profiles = &state->runner_profiles;
+    initial.fallback = &state->action_runner;
+    hooks.context = state;
     hooks.save = axyne_runner_dialog_save;
     accepted = axyne_runner_dialog_show(owner, &initial, &hooks);
     free(arguments);
@@ -2224,7 +2237,8 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
     memset(&plan, 0, sizeof(plan));
     status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &state->runtimes,
         &state->build_target, doc->path,
-        state->action_runner.executable != NULL ? &state->action_runner : NULL,
+        axyne_runner_profiles_get(&state->runner_profiles, axyne_active_language(state),
+                                  &state->action_runner),
         &plan, message, sizeof(message));
     if (status != AXYNE_STATUS_OK) {
         /* Missing runtime or unknown language: the resolver's text goes to the
@@ -9742,7 +9756,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (command == AXYNE_CMD_RUN) axyne_start_action(window, state, 1);
         else if (command == AXYNE_CMD_BUILD_TARGET) axyne_build_target_popup(window, state);
         else if (command == AXYNE_CMD_CONFIGURE_RUNNER) {
-            (void)axyne_configure_runner(window, &state->action_runner);
+            (void)axyne_configure_runner(window, state);
             InvalidateRect(window, NULL, FALSE);
         }
         else if (command == AXYNE_CMD_PREFERENCES)
@@ -10184,6 +10198,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_git_panel_clear(&state->git_panel);
             axyne_palette_destroy_ui(state);
             axyne_runner_destroy(&state->terminal_runner);
+            axyne_runner_profiles_destroy(&state->runner_profiles);
             axyne_runner_destroy(&state->action_runner);
             axyne_clear_pending_run(state);
             axyne_runtime_free(&state->runtimes);
