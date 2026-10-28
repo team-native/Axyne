@@ -32,6 +32,7 @@
 #include "axyne/git_panel.h"
 #include "axyne/git_selection.h"
 #include "axyne/lsp.h"
+#include "axyne/lsp_servers.h"
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
 #include "axyne/palette_controller.h"
@@ -268,10 +269,10 @@ typedef struct AxyneWindowState {
     char *global_preferences_path;
     char *workspace_preferences_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
-    AxyneLspClient *lsp;
     /* state.json: persistent recent files/folders (loaded at WM_CREATE). */
     AxyneAppState app_state;
     char *app_state_path;
+    AxyneLspClient *lsp[AXYNE_LANGUAGE_COUNT]; /* one per language, started lazily */
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */
@@ -563,6 +564,7 @@ static void axyne_problems_refresh(AxyneWindowState *state);
 static void axyne_problems_begin_build(AxyneWindowState *state, const char *directory,
                                        int clear);
 static void axyne_problems_clear_lsp(AxyneWindowState *state, const char *path);
+static void axyne_problems_schedule_refresh(AxyneWindowState *state);
 static void axyne_refresh_outline(AxyneWindowState *state);
 static void axyne_git_panel_refresh(HWND window, AxyneWindowState *state);
 static void axyne_git_panel_reset(HWND window, AxyneWindowState *state);
@@ -2525,56 +2527,131 @@ static int axyne_command_needs_document(UINT command)
     }
 }
 
-static int axyne_lsp_ensure(AxyneWindowState *state)
+/* LSP language of a document: the runner's registry, plus C/C++ headers. */
+static AxyneLanguageId axyne_lsp_language(const AxyneDocument *doc)
 {
-    const char *command = getenv("AXYNE_LSP_COMMAND");
+    AxyneLanguageId language;
+    const char *dot;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) return AXYNE_LANGUAGE_NONE;
+    language = axyne_language_for_path(doc->path);
+    if (language != AXYNE_LANGUAGE_NONE) return language;
+    dot = strrchr(doc->path, '.');
+    if (dot == NULL) return AXYNE_LANGUAGE_NONE;
+    if (_stricmp(dot, ".h") == 0) return AXYNE_LANGUAGE_C;
+    if (_stricmp(dot, ".hpp") == 0 || _stricmp(dot, ".hh") == 0 ||
+        _stricmp(dot, ".hxx") == 0) return AXYNE_LANGUAGE_CPP;
+    return AXYNE_LANGUAGE_NONE;
+}
+
+/* Client slot of a saved document, -1 when it has none: one shared slot
+ * while AXYNE_LSP_COMMAND is set, otherwise the language's own (C shares
+ * C++'s clangd). */
+static int axyne_lsp_slot(const AxyneDocument *doc)
+{
+    AxyneLanguageId language;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) return -1;
+    if (axyne_lsp_server_overridden()) return 0;
+    language = axyne_lsp_language(doc);
+    return language == AXYNE_LANGUAGE_NONE ? -1 : (int)axyne_lsp_server_slot(language);
+}
+
+/* Starts (lazily) the detected server for `doc`; NULL with lsp_status set
+ * when the file type has no server or none is installed. */
+static AxyneLspClient *axyne_lsp_ensure(AxyneWindowState *state, const AxyneDocument *doc)
+{
+    AxyneLanguageId language = axyne_lsp_language(doc);
+    int slot = axyne_lsp_slot(doc);
+    const char *language_id;
+    AxyneLspServerCommand server;
     AxyneLspConfig config;
     AxyneError error;
-    if (state->lsp != NULL) return 1;
-    if (command == NULL || command[0] == '\0') {
+    AxyneStatus status;
+    if (slot < 0) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
-                       "LSP: set AXYNE_LSP_COMMAND to a local server executable");
-        return 0;
+                       "LSP: no language server for this file type");
+        return NULL;
     }
+    if (state->lsp[slot] != NULL) return state->lsp[slot];
+    if (axyne_lsp_server_resolve(language, &server, &error) != AXYNE_STATUS_OK) {
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s",
+                       error.message);
+        return NULL;
+    }
+    language_id = axyne_lsp_language_id(language);
     memset(&config, 0, sizeof(config));
-    config.command = command;
-    config.language_id = "plaintext";
+    config.command = server.executable;
+    config.arguments = (const char *const *)server.arguments;
+    config.argument_count = server.argument_count;
+    config.root_path = state->explorer.root;
+    config.working_directory = state->explorer.root;
+    config.language_id = language_id != NULL ? language_id : "plaintext";
     config.on_diagnostics = axyne_lsp_diagnostics;
     config.on_navigation = axyne_lsp_navigation;
     config.on_error = axyne_lsp_error;
     config.user_data = state;
-    if (axyne_lsp_create(&config, &state->lsp, &error) != AXYNE_STATUS_OK) {
-        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
-                       "LSP: %s", error.message);
-        return 0;
-    }
-    return 1;
+    status = axyne_lsp_create(&config, &state->lsp[slot], &error);
+    if (status != AXYNE_STATUS_OK)
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s",
+                       error.message);
+    else
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s",
+                       server.name);
+    axyne_lsp_server_command_clear(&server);
+    return status == AXYNE_STATUS_OK ? state->lsp[slot] : NULL;
 }
 
-static int axyne_lsp_open_active(AxyneWindowState *state)
+static void axyne_lsp_close_document(AxyneWindowState *state, const AxyneDocument *doc)
+{
+    int slot = axyne_lsp_slot(doc);
+    if (slot >= 0 && state->lsp[slot] != NULL)
+        (void)axyne_lsp_did_close(state->lsp[slot], doc, NULL); /* NOT_FOUND is fine */
+}
+
+/* Servers are rooted at the workspace they started in: stop them all when it
+ * changes (or on teardown) and let the next request start fresh ones. Their
+ * diagnostics go with them so the Problems list does not keep stale rows. */
+static void axyne_lsp_shutdown_all(AxyneWindowState *state, int clear_problems)
+{
+    size_t i, before = state->problems.count;
+    for (i = 0; i < AXYNE_LANGUAGE_COUNT; ++i) {
+        if (state->lsp[i] != NULL) {
+            axyne_lsp_destroy(state->lsp[i]);
+            state->lsp[i] = NULL;
+        }
+    }
+    if (!clear_problems) return; /* teardown */
+    axyne_problems_clear_source(&state->problems, AXYNE_PROBLEM_ORIGIN_LSP, NULL);
+    if (state->problems.count != before) axyne_problems_schedule_refresh(state);
+}
+
+static AxyneLspClient *axyne_lsp_open_active(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
+    AxyneLspClient *client;
     AxyneError error;
     AxyneStatus status;
-    if (doc == NULL || doc->is_untitled || doc->path == NULL) return 0;
-    if (!axyne_lsp_ensure(state)) return 0;
-    status = axyne_lsp_did_open(state->lsp, doc, &error);
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) return NULL;
+    client = axyne_lsp_ensure(state, doc);
+    if (client == NULL) return NULL;
+    status = axyne_lsp_did_open(client, doc, &error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                        "LSP: %s", error.message);
-        return 0;
+        return NULL;
     }
-    return 1;
+    return client;
 }
 
 static void axyne_lsp_sync_active(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
+    int slot = axyne_lsp_slot(doc);
     AxyneError error;
     AxyneStatus status;
-    if (state->lsp == NULL || doc == NULL || doc->is_untitled || doc->path == NULL) return;
-    status = axyne_lsp_did_change(state->lsp, doc, &error);
-    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(state->lsp, doc, &error);
+    if (slot < 0 || state->lsp[slot] == NULL) return;
+    status = axyne_lsp_did_change(state->lsp[slot], doc, &error);
+    if (status == AXYNE_STATUS_NOT_FOUND)
+        status = axyne_lsp_did_open(state->lsp[slot], doc, &error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
 }
@@ -2582,13 +2659,19 @@ static void axyne_lsp_sync_active(AxyneWindowState *state)
 static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int references)
 {
     AxyneDocument *doc;
+    AxyneLspClient *client;
     AxyneLspPosition position;
     AxyneError error;
     AxyneStatus status;
     uint64_t request_id = 0;
     LRESULT current, line_start;
     (void)window;
-    if (!axyne_capture_editor(state) || !axyne_lsp_open_active(state)) return;
+    if (!axyne_capture_editor(state)) return;
+    client = axyne_lsp_open_active(state);
+    if (client == NULL) {
+        InvalidateRect((HWND)GetParent(state->editor), NULL, FALSE);
+        return;
+    }
     doc = axyne_active(state);
     current = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION, current, 0);
@@ -2596,9 +2679,9 @@ static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int referen
     position.character = axyne_lsp_utf16_character(
         doc->contents + (size_t)line_start, (size_t)(current - line_start),
         (size_t)(current - line_start));
-    status = references ? axyne_lsp_references(state->lsp, doc, position,
+    status = references ? axyne_lsp_references(client, doc, position,
                                                 &request_id, &error) :
-        axyne_lsp_definition(state->lsp, doc, position, &request_id, &error);
+        axyne_lsp_definition(client, doc, position, &request_id, &error);
     if (status != AXYNE_STATUS_OK)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
     else
@@ -2697,11 +2780,11 @@ static void axyne_after_save_as(AxyneWindowState *state, const char *old_path)
     AxyneDocument *doc = axyne_active(state);
     if (old_path != NULL && old_path[0] != '\0' &&
         (doc == NULL || doc->path == NULL || !axyne_problems_path_equal(old_path, doc->path))) {
-        if (state->lsp != NULL) {
+        {
             AxyneDocument closed;
             memset(&closed, 0, sizeof(closed));
             closed.path = (char *)old_path;
-            (void)axyne_lsp_did_close(state->lsp, &closed, NULL); /* NOT_FOUND is fine */
+            axyne_lsp_close_document(state, &closed);
         }
         axyne_problems_clear_lsp(state, old_path);
     }
@@ -2906,7 +2989,7 @@ static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
     /* Explorer previews are browsing, not opening: only real tabs are recent. */
     if (!preview) axyne_remember_recent_file(state, state->documents.documents[index].path);
     if (replaced) {
-        if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
+        axyne_lsp_close_document(state, &evicted);
         axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
             SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
@@ -2947,7 +3030,7 @@ static int axyne_open_virtual_document(HWND window, AxyneWindowState *state,
         return 0;
     }
     if (replaced) {
-        if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
+        axyne_lsp_close_document(state, &evicted);
         axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
             SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
@@ -2993,7 +3076,7 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
         if (!axyne_show_document(state, successor)) return;
     }
     AxyneDocument *doc = &state->documents.documents[index];
-    if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
+    axyne_lsp_close_document(state, doc);
     axyne_problems_clear_lsp(state, doc->path);
     if (doc->owns_native_editor_document && state->editor != NULL)
         SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
@@ -3539,6 +3622,7 @@ static int axyne_workspace_open_root(HWND window, AxyneWindowState *state,
     axyne_load_workspace_preferences(state, root);
     if (axyne_app_state_add_recent_folder(&state->app_state, root) == AXYNE_STATUS_OK)
         axyne_app_state_persist(state);
+    axyne_lsp_shutdown_all(state, 1);
     axyne_git_panel_reset(window, state);
     InvalidateRect(window, NULL, FALSE);
     return 1;
@@ -10278,10 +10362,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->git_process = NULL;
                 state->git_run = NULL;
             }
-            if (state->lsp != NULL) {
-                axyne_lsp_destroy(state->lsp);
-                state->lsp = NULL;
-            }
+            axyne_lsp_shutdown_all(state, 0);
             {
                 MSG pending_message;
                 while (PeekMessageW(&pending_message, window,
