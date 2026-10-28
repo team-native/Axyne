@@ -10,6 +10,7 @@ elseif(APPLE)
     add_library(axyne_ui STATIC
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/terminal_view_macos.m"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/macos/splash_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/syntax.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/preferences_window_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/popup_menu_macos.m"

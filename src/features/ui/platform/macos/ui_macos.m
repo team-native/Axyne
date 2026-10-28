@@ -23,6 +23,8 @@
 #include "axyne/git.h"
 #include "axyne/lsp.h"
 #include "axyne/app_state.h"
+#include "axyne/build_config.h"
+#import "splash_macos.h"
 #include "axyne/app_paths.h"
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
@@ -2196,8 +2198,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         _appStatePath = axyne_app_path(AXYNE_APP_PATH_STATE);
         if (_appStatePath != NULL)
             (void)axyne_app_state_load(_appStatePath, &_appState, NULL);
-        /* Reopen the last workspace once the window is up. */
-        dispatch_async(dispatch_get_main_queue(), ^{ [self restoreWorkspace]; });
+
         _terminalOutput = [[NSTextView alloc] initWithFrame:NSZeroRect];
         [_terminalOutput setEditable:NO];
         [_terminalOutput setSelectable:YES];
@@ -7742,6 +7743,14 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 {
     (void)notification;
     NSRect frame = NSMakeRect(0, 0, 1440, 900);
+    NSDate *started = [NSDate date];
+    NSRect visible = [[NSScreen mainScreen] visibleFrame];
+    NSRect splashFrame = NSMakeRect(NSMidX(visible) - 720, NSMidY(visible) - 450, 1440, 900);
+    /* Loading screen (Figma 134:2451) over the spot the main window takes. */
+    AxyneSplashController *splash = [[AxyneSplashController alloc]
+        initWithFrame:NSIntersectionRect(splashFrame, visible)
+              version:@AXYNE_CONFIG_VERSION];
+    [splash setStep:AXYNE_STARTUP_SETTINGS];
     _window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
@@ -7756,7 +7765,24 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     [_window setDelegate:self];
     axyne_install_menu([NSApplication sharedApplication], workspace);
     [_window center];
-    [_window makeKeyAndOrderFront:nil];
+    [splash setStep:AXYNE_STARTUP_WORKSPACE];
+    [workspace restoreWorkspace];
+    [splash setStep:AXYNE_STARTUP_EDITOR];
+    [workspace layoutSubtreeIfNeeded];
+    [splash setStep:AXYNE_STARTUP_STEP_COUNT];
+    {
+        /* At least 450 ms from launch so a fast start reads as a short
+         * loading state rather than a flicker; the run loop keeps going. */
+        NSTimeInterval remaining = 0.45 + [started timeIntervalSinceNow];
+        NSWindow *window = _window;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(remaining > 0 ? remaining * NSEC_PER_SEC : 0)),
+                       dispatch_get_main_queue(), ^{
+            [window makeKeyAndOrderFront:nil];
+            [splash close];
+            [splash release];
+        });
+    }
     /* Without explicit activation a binary started from a terminal or a
      * fresh build keeps another app's menu bar and ignores menu clicks. */
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
