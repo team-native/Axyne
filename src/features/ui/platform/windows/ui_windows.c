@@ -38,6 +38,7 @@
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
 #include "axyne/release_notes.h"
+#include "axyne/release_ui.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
@@ -9743,20 +9744,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         else if (axyne_action_command(window, state, command)) { /* handled */ }
         else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
         else if (command == AXYNE_CMD_CHECK_FOR_UPDATES ||
-                 command == AXYNE_CMD_RELEASE_NOTES) {
-            wchar_t *notes = axyne_wide(axyne_release_notes_text());
-            wchar_t *version = axyne_wide(axyne_release_notes_version());
-            if (notes != NULL && version != NULL) {
-                wchar_t title[128];
-                _snwprintf(title, sizeof(title) / sizeof(title[0]),
-                           L"Axyne %s%s", version,
-                           command == AXYNE_CMD_CHECK_FOR_UPDATES
-                               ? L" - Offline Update Check" : L" - Release Notes");
-                MessageBoxW(window, notes, title, MB_OK | MB_ICONINFORMATION);
-            }
-            free(notes);
-            free(version);
-        }
+                 command == AXYNE_CMD_RELEASE_NOTES)
+            axyne_release_ui_open(window,
+                command == AXYNE_CMD_CHECK_FOR_UPDATES);
         else if (command == AXYNE_CMD_ABOUT)
             MessageBoxW(window,
                 L"Axyne\nLightweight native IDE\n\nhttps://github.com/team-native/Axyne",
@@ -10130,6 +10120,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         /* WM_PAINT covers the complete client area. */
         return 1;
     case WM_DESTROY:
+        axyne_release_ui_close_owner(window);
         if (state != NULL) axyne_cancel_outline_timer(state);
         /* Child controls still exist during the parent's WM_DESTROY. Their
          * handles are already invalid by WM_NCDESTROY, so release every tab's

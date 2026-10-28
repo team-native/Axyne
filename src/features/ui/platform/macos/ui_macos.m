@@ -28,6 +28,7 @@
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
 #include "axyne/release_notes.h"
+#include "axyne/release_ui.h"
 #include "axyne/ui_design.h"
 #include "axyne/popup_menu_layout.h"
 #include "popup_menu_macos.h"
@@ -4895,27 +4896,13 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
 - (void)showReleaseNotes:(id)sender
 {
     (void)sender;
-    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    NSString *version = [NSString stringWithUTF8String:axyne_release_notes_version()];
-    NSString *notes = [NSString stringWithUTF8String:axyne_release_notes_text()];
-    [alert setMessageText:[NSString stringWithFormat:@"Axyne %@ — Release Notes", version]];
-    [alert setInformativeText:notes];
-    [alert addButtonWithTitle:@"Close"];
-    [alert beginSheetModalForWindow:[self window] completionHandler:nil];
+    axyne_release_ui_open([self window], 0);
 }
 
 - (void)checkForUpdates:(id)sender
 {
     (void)sender;
-    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    NSString *version = [NSString stringWithUTF8String:axyne_release_notes_version()];
-    NSString *notes = [NSString stringWithUTF8String:axyne_release_notes_text()];
-    [alert setMessageText:@"Update check unavailable offline"];
-    [alert setInformativeText:[NSString stringWithFormat:
-        @"Axyne does not contact an online update service. The installed "
-         "package is version %@.\n\n%@", version, notes]];
-    [alert addButtonWithTitle:@"Close"];
-    [alert beginSheetModalForWindow:[self window] completionHandler:nil];
+    axyne_release_ui_open([self window], 1);
 }
 
 - (void)openHelp:(id)sender
@@ -7181,6 +7168,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
 }
 - (void)dealloc
 {
+    axyne_release_ui_close_owner([self window]);
     if (_popup != nil) {
         [_popup setDelegate:nil];
         [_popup close];
