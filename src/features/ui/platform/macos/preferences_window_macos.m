@@ -990,9 +990,41 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
     return NO;
 }
 
+/* Captures before AppKit handles menu equivalents or edits the field text. */
+- (BOOL)captureKeyEvent:(NSEvent *)event
+{
+    if ([event window] != _panel) return NO;
+    NSString *characters = [event charactersIgnoringModifiers];
+    if ([characters length] == 0) return NO;
+    unichar key = [characters characterAtIndex:0];
+    if (key == 9 || key == 27) return NO;
+    for (size_t i = 0; i < _draft.binding_count; ++i) {
+        AxynePreferenceAction action = _draft.bindings[i].action;
+        NSTextField *field = _keyField[action];
+        if (field == nil || ([field currentEditor] != [_panel firstResponder] &&
+            (id)field != [_panel firstResponder])) continue;
+        unsigned int modifiers = 0;
+        NSEventModifierFlags flags = [event modifierFlags];
+        if (flags & NSEventModifierFlagControl) modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+        if (flags & NSEventModifierFlagShift) modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+        if (flags & NSEventModifierFlagOption) modifiers |= AXYNE_KEY_MODIFIER_ALT;
+        if (flags & NSEventModifierFlagCommand) modifiers |= AXYNE_KEY_MODIFIER_COMMAND;
+        if (axyne_preferences_capture_key(&_draft, action, key, modifiers, 1) == AXYNE_STATUS_OK) {
+            const AxyneKeyBinding *binding = axyne_preferences_find_binding(&_draft, action);
+            [field setStringValue:[NSString stringWithUTF8String:binding->key]];
+            [self refreshKeyRow:action];
+            [self updateButtons];
+        }
+        return YES;
+    }
+    return NO;
+}
+
 - (NSInteger)runOverOwner:(NSWindow *)owner
 {
     NSInteger result;
+    id monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+        handler:^NSEvent *(NSEvent *event) { return [self captureKeyEvent:event] ? nil : event; }];
     if (owner != nil) {
         NSRect o = [owner frame];
         [_panel setFrameOrigin:NSMakePoint(NSMidX(o) - AXYNE_PW_WIDTH / 2.0,
@@ -1002,6 +1034,7 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
     }
     [_panel makeKeyAndOrderFront:nil];
     result = [NSApp runModalForWindow:_panel];
+    if (monitor != nil) [NSEvent removeMonitor:monitor];
     [_panel orderOut:nil];
     if (owner != nil) [owner makeKeyAndOrderFront:nil];
     return result;

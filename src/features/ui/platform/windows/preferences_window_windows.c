@@ -913,6 +913,24 @@ static int pw_key(PwState *st, const MSG *msg)
 {
     HWND focus = GetFocus();
     int id = focus != NULL ? GetDlgCtrlID(focus) : 0;
+    if (id >= PW_ID_KEY && id < PW_ID_KEY + AXYNE_ACTION_COUNT * 4 &&
+        (id - PW_ID_KEY) % 4 == 0 && msg->wParam != VK_TAB && msg->wParam != VK_ESCAPE) {
+        unsigned int modifiers = 0;
+        AxynePreferenceAction action = (AxynePreferenceAction)((id - PW_ID_KEY) / 4);
+        if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+        if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+        if (GetKeyState(VK_MENU) & 0x8000) modifiers |= AXYNE_KEY_MODIFIER_ALT;
+        if (axyne_preferences_capture_key(&st->draft, action, (unsigned int)msg->wParam, modifiers, 0) == AXYNE_STATUS_OK) {
+            const AxyneKeyBinding *binding = axyne_preferences_find_binding(&st->draft, action);
+            st->loading = 1;
+            pw_set_text_utf8(st->key_edit[action], binding->key);
+            st->loading = 0;
+            pw_invalidate_id(st, PW_ID_KEY + action * 4 + 1);
+            InvalidateRect(st->window, NULL, FALSE);
+            pw_update_buttons(st);
+        }
+        return 1; /* Modifier-only presses wait for a key. */
+    }
     if (msg->wParam == VK_ESCAPE) {
         st->result = 0; st->done = 1;
         return 1;
@@ -1007,7 +1025,7 @@ int axyne_preferences_window_show(void *native_owner, int workspace,
     UpdateWindow(st->window);
     SetFocus(st->edit_font);
     while (!st->done && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (msg.message == WM_KEYDOWN && (msg.hwnd == st->window || IsChild(st->window, msg.hwnd)) &&
+        if ((msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && (msg.hwnd == st->window || IsChild(st->window, msg.hwnd)) &&
             pw_key(st, &msg))
             continue;
         if (!IsDialogMessageW(st->window, &msg)) {

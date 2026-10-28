@@ -7,6 +7,54 @@
 #include "axyne/preferences.h"
 #include "axyne/settings.h"
 
+static int axyne_test_shortcut_capture(const char *root)
+{
+    AxynePreferences *draft = malloc(sizeof(*draft));
+    AxynePreferences *loaded = malloc(sizeof(*loaded));
+    unsigned int modifiers = AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT;
+    const char *old_keys[] = {"Ctrl+K Ctrl+S"};
+    const AxyneKeyBinding *binding;
+    char path[1024];
+    AXYNE_TEST_CHECK(draft != NULL && loaded != NULL);
+    axyne_preferences_defaults(draft);
+    AXYNE_TEST_STATUS(axyne_preferences_set_command_binding(draft,
+        axyne_command_name(axyne_command_from_legacy_action(AXYNE_ACTION_SAVE)), old_keys, 1), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 'P', modifiers, 0), AXYNE_STATUS_OK);
+    binding = axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE);
+    AXYNE_TEST_CHECK(binding != NULL && binding->enabled);
+    AXYNE_TEST_STREQ(binding->key, "P");
+    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_platform_current() == AXYNE_PLATFORM_MACOS ?
+        AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND) |
+        AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT);
+    /* The old chord cannot shadow the captured single-stroke binding. */
+    for (size_t i = 0; i < draft->command_binding_count; ++i)
+        AXYNE_TEST_CHECK(strcmp(draft->command_bindings[i].command,
+            axyne_command_name(axyne_command_from_legacy_action(AXYNE_ACTION_SAVE))) != 0);
+    AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), root, "capture.json"));
+    AXYNE_TEST_STATUS(axyne_preferences_save_global(draft, path, NULL), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_preferences_load_global(path, loaded, NULL), AXYNE_STATUS_OK);
+    binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
+    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_platform_current() == AXYNE_PLATFORM_MACOS ?
+        AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND) |
+        AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT);
+    AXYNE_TEST_STREQ(binding->key, "P");
+    modifiers = 0;
+    AXYNE_TEST_STATUS(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 'P', modifiers, 0), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE)->modifiers, 0);
+    /* Modifier-only key must leave the row unchanged. */
+    AXYNE_TEST_EQ_INT(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 0x10, modifiers, 0),
+        AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STREQ(axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE)->key, "P");
+    /* Native event converters feed the same portable capture path. */
+    AXYNE_TEST_EQ_INT(axyne_key_from_windows_vk('P'), 'P');
+    AXYNE_TEST_STATUS(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 'p',
+        AXYNE_KEY_MODIFIER_COMMAND | AXYNE_KEY_MODIFIER_SHIFT, 1), AXYNE_STATUS_OK);
+    AXYNE_TEST_STREQ(axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE)->key, "P");
+    free(draft);
+    free(loaded);
+    return 1;
+}
+
 static int axyne_test_json_has(const char *path, const char *pointer)
 {
     AxyneSettings *document = NULL;
@@ -670,6 +718,7 @@ int axyne_test_settings_preferences(const char *root)
                          out.binding_present[AXYNE_ACTION_NEW] == 1);
     }
 
+    AXYNE_TEST_CHECK(axyne_test_shortcut_capture(root));
     AXYNE_TEST_CHECK(axyne_test_settings_v2(root));
     axyne_test_remove_tree(root);
     return 1;
