@@ -290,6 +290,7 @@ typedef struct AxyneWindowState {
     uint64_t lsp_completion_request;
     LRESULT lsp_completion_caret;
     uint64_t lsp_definition_request;
+    uint64_t lsp_references_request;
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */
@@ -570,6 +571,11 @@ static void axyne_lsp_completion_items(AxyneLspClient *client, uint64_t request_
             ? items[i].insert_text : items[i].label;
         size_t length = 0;
         if (word == NULL) continue;
+        /* clangd prefixes labels with a space or "\xE2\x80\xA2" (include hint). */
+        while (*word == ' ' || *word == '\t') ++word;
+        if ((unsigned char)word[0] == 0xE2 && (unsigned char)word[1] == 0x80 &&
+            (unsigned char)word[2] == 0xA2) word += 3;
+        while (*word == ' ') ++word;
         while (word[length] != '\0' && word[length] != '\n' && word[length] != '(' &&
                word[length] != ' ' && word[length] != '$') ++length;
         if (length == 0) continue;
@@ -621,9 +627,15 @@ static char *axyne_lsp_uri_path(const char *uri)
     if (uri == NULL || _strnicmp(uri, "file://", 7) != 0) return NULL;
     p = uri + 7;
     if (p[0] == '/' && isalpha((unsigned char)p[1]) && p[2] == ':') ++p; /* drive path */
-    path = (char *)malloc(strlen(p) + 1);
+    path = (char *)malloc(strlen(p) + 3);
     if (path == NULL) return NULL;
-    for (out = path; *p != '\0'; ++p) {
+    out = path;
+    if (p[0] != '/' && !(isalpha((unsigned char)p[0]) && p[1] == ':')) {
+        /* file://server/share/x -> \\server\share\x */
+        *out++ = '\\';
+        *out++ = '\\';
+    }
+    for (; *p != '\0'; ++p) {
         if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
             char hex[3] = { p[1], p[2], '\0' };
             *out++ = (char)strtol(hex, NULL, 16);
@@ -1139,8 +1151,8 @@ static int axyne_completion_word_compare(const void *a, const void *b)
     return _stricmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* Shows the server's candidates that start with the word before the caret,
- * merged with the word list already open (if any). */
+/* Shows the server's candidates that start with the word before the caret
+ * (replacing the keyword list, which the server's items cover). */
 static void axyne_show_lsp_completion(AxyneWindowState *state, AxyneLspCompletionMessage *message)
 {
     LRESULT caret, word_start;
@@ -2889,7 +2901,10 @@ static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int referen
     status = references ? axyne_lsp_references(client, doc, position,
                                                 &request_id, &error) :
         axyne_lsp_definition(client, doc, position, &request_id, &error);
-    if (status == AXYNE_STATUS_OK && !references) state->lsp_definition_request = request_id;
+    if (status == AXYNE_STATUS_OK) {
+        if (references) state->lsp_references_request = request_id;
+        else state->lsp_definition_request = request_id;
+    }
     if (status != AXYNE_STATUS_OK)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
     else
@@ -10469,7 +10484,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                                    "LSP: 정의를 찾지 못했습니다");
                 free(path);
                 InvalidateRect(window, NULL, FALSE);
-            } else if (state != NULL) {
+            } else if (state != NULL && navigate->request_id == state->lsp_references_request) {
+                state->lsp_references_request = 0;
                 (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                                "LSP: 참조 %zu개", navigate->count);
                 InvalidateRect(window, NULL, FALSE);
@@ -10511,7 +10527,12 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_CHARADDED &&
             !state->loading_editor) {
             axyne_show_completion(state);
-            axyne_request_lsp_completion(state);
+            /* Ask the server only while typing a word or after a member
+             * access; a space or ';' would list everything. */
+            if (notification != NULL &&
+                (isalnum(notification->ch) || notification->ch == '_' || notification->ch == '.' ||
+                 notification->ch == '>' || notification->ch == ':'))
+                axyne_request_lsp_completion(state);
         }
         if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_UPDATEUI &&
             !state->loading_editor) {

@@ -1481,6 +1481,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     uint64_t _lspCompletionRequest;
     NSInteger _lspCompletionCaret;
     uint64_t _lspDefinitionRequest;
+    uint64_t _lspReferencesRequest;
     NSString *_lspStatus;
     BOOL _explorerHidden; /* View > Explorer; zero-initialised means visible */
     BOOL _panelHidden;    /* View > Bottom Panel */
@@ -1936,6 +1937,8 @@ typedef struct AxyneMacTerminalMessage {
     AxyneProcessStream stream;
 } AxyneMacTerminalMessage;
 
+static int axyne_macos_lsp_slot(const AxyneDocument *doc);
+
 static void axyne_macos_lsp_status(AxyneWorkspaceView *view, const char *text)
 {
     char *copy;
@@ -2023,6 +2026,11 @@ static void axyne_macos_lsp_completion(AxyneLspClient *client, uint64_t request_
             ? items[i].insert_text : items[i].label;
         size_t length = 0;
         if (word == NULL) continue;
+        /* clangd prefixes labels with a space or "\xE2\x80\xA2" (include hint). */
+        while (*word == ' ' || *word == '\t') ++word;
+        if ((unsigned char)word[0] == 0xE2 && (unsigned char)word[1] == 0x80 &&
+            (unsigned char)word[2] == 0xA2) word += 3;
+        while (*word == ' ') ++word;
         while (word[length] != '\0' && word[length] != '\n' && word[length] != '(' &&
                word[length] != ' ' && word[length] != '$') ++length;
         if (length == 0) continue;
@@ -3090,7 +3098,11 @@ static int axyne_macos_word_compare(const void *a, const void *b)
                    count:(size_t)count request:(uint64_t)requestID
 {
     if (requestID != _lspDefinitionRequest) {
-        [self setLspStatus:[NSString stringWithFormat:@"LSP: 참조 %zu개", count]];
+        /* A references reply reports its count; a superseded reply is dropped. */
+        if (requestID == _lspReferencesRequest) {
+            _lspReferencesRequest = 0;
+            [self setLspStatus:[NSString stringWithFormat:@"LSP: 참조 %zu개", count]];
+        }
         return;
     }
     _lspDefinitionRequest = 0;
@@ -3465,7 +3477,10 @@ static int axyne_macos_lsp_slot(const AxyneDocument *doc)
         (size_t)(current - lineStart));
     status = references ? axyne_lsp_references(client, doc, position, &requestID, &error) :
         axyne_lsp_definition(client, doc, position, &requestID, &error);
-    if (status == AXYNE_STATUS_OK && !references) _lspDefinitionRequest = requestID;
+    if (status == AXYNE_STATUS_OK) {
+        if (references) _lspReferencesRequest = requestID;
+        else _lspDefinitionRequest = requestID;
+    }
     if (status != AXYNE_STATUS_OK)
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
     else
@@ -3556,7 +3571,10 @@ static int axyne_macos_lsp_slot(const AxyneDocument *doc)
     if (notification->nmhdr.code == SCN_CHARADDED) {
         [self autoIndentFromNotification:notification];
         [self showCompletion];
-        [self requestLspCompletion];
+        /* Ask the server only while typing a word or after a member access. */
+        if (isalnum(notification->ch) || notification->ch == '_' || notification->ch == '.' ||
+            notification->ch == '>' || notification->ch == ':')
+            [self requestLspCompletion];
     }
     /* Return never accepts a completion (only Tab does): cancelling inside
      * SCN_AUTOCSELECTION drops the insertion, then the newline the key was
