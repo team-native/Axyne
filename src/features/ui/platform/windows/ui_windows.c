@@ -4544,6 +4544,7 @@ static void axyne_run_plugin_command(HWND window, AxyneWindowState *state, UINT 
     AxyneDocument *doc = axyne_active_visible(state);
     AxyneError error;
     char header[320];
+    axyne_plugins_ensure(state);
     if (!axyne_plugin_command_at(state, command, &plugin, &plugin_command)) return;
     if (state->action_process != NULL) {
         MessageBoxW(window, L"다른 작업이 실행 중입니다. 먼저 중지하세요.", L"플러그인",

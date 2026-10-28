@@ -1081,14 +1081,14 @@ AxyneStatus axyne_plugin_command_prepare(const AxynePlugin *plugin, const AxyneP
             return status;
         }
         if (program != NULL) {
-            size_t n = strlen(program);
-            script = n > 4 && (
 #ifdef _WIN32
-                _stricmp(program + n - 4, ".cmd") == 0 || _stricmp(program + n - 4, ".bat") == 0
+            size_t n = strlen(program);
+            script = n > 4 && (_stricmp(program + n - 4, ".cmd") == 0 ||
+                               _stricmp(program + n - 4, ".bat") == 0);
 #else
-                0
+            /* zip tools on Windows drop the executable bit of bundled scripts */
+            if (access(program, X_OK) != 0) (void)chmod(program, 0755);
 #endif
-            );
         }
     } else {
         program = find_program(command->program, &script);
