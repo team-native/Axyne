@@ -15,7 +15,9 @@ static const char *const manifest =
     "\"args\":[\"--file\",\"${file}\",\"${fileBasenameNoExtension}\"],\"extensions\":[\"SLINT\"]},"
     "{\"id\":\"local\",\"title\":\"Local\",\"program\":\"./bin/tool\",\"args\":[\"${pluginDir}\"],"
     "\"cwd\":\"${fileDirname}\"},"
-    "{\"title\":\"\",\"program\":\"x\"}]}";
+    "{\"title\":\"\",\"program\":\"x\"},"
+    "{\"id\":\"os\",\"title\":\"Per OS\",\"program\":{\"windows\":\"w.cmd\",\"macos\":\"m.sh\"}},"
+    "{\"id\":\"none\",\"title\":\"Other OS\",\"program\":{\"linux\":\"l\"}}]}";
 
 static int parse_checks(void)
 {
@@ -24,7 +26,13 @@ static int parse_checks(void)
     AXYNE_TEST_CHECK(plugin != NULL);
     AXYNE_TEST_STREQ(plugin->id, "demo-preview");
     AXYNE_TEST_EQ_INT(plugin->compatible, 1);
-    AXYNE_TEST_EQ_INT(plugin->command_count, 2); /* the untitled command is dropped */
+    /* the untitled command and the one without a program for this OS are dropped */
+    AXYNE_TEST_EQ_INT(plugin->command_count, 3);
+#ifdef _WIN32
+    AXYNE_TEST_STREQ(plugin->commands[2].program, "w.cmd");
+#else
+    AXYNE_TEST_STREQ(plugin->commands[2].program, "m.sh");
+#endif
     AXYNE_TEST_EQ_INT(plugin->requirement_count, 1);
     AXYNE_TEST_CHECK(axyne_plugin_command_applies(&plugin->commands[0], "C:\\a\\ui.slint"));
     AXYNE_TEST_CHECK(axyne_plugin_command_applies(&plugin->commands[0], "/a/UI.SLINT"));

@@ -28,7 +28,9 @@ extern "C" {
  * Plugins never load code into the IDE: a command runs `program` as an
  * external process (the sandbox boundary), with its output in the output
  * panel. Nothing runs at startup - commands start only when the user picks
- * them. `program` is looked up on PATH unless it is a path; a path that is
+ * them. `program` may also be {"windows": ..., "macos": ...} to pick a
+ * per-platform program (a command without one for this platform is dropped).
+ * `program` is looked up on PATH unless it is a path; a path that is
  * relative ("./bin/x", "bin\\x.cmd") is resolved inside the plugin folder.
  * Variables in args/cwd: ${file} ${fileDirname} ${fileBasename}
  * ${fileBasenameNoExtension} ${fileExtname} ${workspaceFolder} ${pluginDir}.

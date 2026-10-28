@@ -494,6 +494,13 @@ AxynePlugin *axyne_plugin_parse(const char *json_text, size_t length, const char
                 command->id = json_string(json, id);
                 command->title = json_string(json, title);
                 command->program = json_string(json, program);
+                if (command->program != NULL && command->program[0] == '\0') {
+                    /* {"windows": "...", "macos": "..."}: per-platform program */
+                    char *platform = axyne_settings_pointer_join(program, axyne_plugin_platform());
+                    free(command->program);
+                    command->program = platform != NULL ? json_string(json, platform) : NULL;
+                    axyne_settings_free_json(platform);
+                }
                 command->cwd = json_string(json, cwd);
                 command->args = json_strings(json, args, &command->arg_count, 0);
                 command->extensions = json_strings(json, extensions, &command->extension_count, 1);
