@@ -3555,6 +3555,17 @@ static int axyne_workspace_open_root(HWND window, AxyneWindowState *state,
     return 1;
 }
 
+/* Shows the window built behind the loading screen. Focus set while it was
+ * hidden did not stick, so the editor takes it now, and the window is
+ * brought forward because the loading screen never activated anything. */
+static void axyne_show_main_window(HWND window, AxyneWindowState *state, int show_command)
+{
+    ShowWindow(window, show_command);
+    UpdateWindow(window);
+    SetForegroundWindow(window);
+    if (state->editor != NULL) SetFocus(state->editor);
+}
+
 static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
 {
     char *root = NULL;
@@ -9473,8 +9484,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_TIMER:
         if (state != NULL && w_param == AXYNE_SPLASH_TIMER) {
             KillTimer(window, AXYNE_SPLASH_TIMER);
-            ShowWindow(window, state->splash_show_command);
-            UpdateWindow(window);
+            axyne_show_main_window(window, state, state->splash_show_command);
             axyne_splash_close(state->splash);
             state->splash = NULL;
             return 0;
@@ -10405,23 +10415,26 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
      * the loading screen (Figma 134:2451) covers the same rectangle while the
      * steps below run. */
     RECT bounds = {0, 0, 1440, 900};
+    RECT splash_bounds;
     {
         RECT work;
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
             int width = min(1440, (int)(work.right - work.left));
             int height = min(900, (int)(work.bottom - work.top));
-            if (show_command == SW_SHOWMAXIMIZED || show_command == SW_MAXIMIZE) {
-                bounds = work;
-            } else {
-                bounds.left = work.left + ((work.right - work.left) - width) / 2;
-                bounds.top = work.top + ((work.bottom - work.top) - height) / 2;
-                bounds.right = bounds.left + width;
-                bounds.bottom = bounds.top + height;
-            }
+            bounds.left = work.left + ((work.right - work.left) - width) / 2;
+            bounds.top = work.top + ((work.bottom - work.top) - height) / 2;
+            bounds.right = bounds.left + width;
+            bounds.bottom = bounds.top + height;
         }
+        /* A maximized launch keeps the centred size as its restore size;
+         * only the loading screen covers the whole work area. */
+        splash_bounds = bounds;
+        if ((show_command == SW_SHOWMAXIMIZED || show_command == SW_MAXIMIZE) &&
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0))
+            splash_bounds = work;
     }
     ULONGLONG started = GetTickCount64();
-    AxyneSplash *splash = axyne_splash_show(instance, &bounds, AXYNE_CONFIG_VERSION);
+    AxyneSplash *splash = axyne_splash_show(instance, &splash_bounds, AXYNE_CONFIG_VERSION);
 
     AxyneWindowState *state = (AxyneWindowState *)HeapAlloc(
         GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*state));
@@ -10451,7 +10464,8 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     /* WM_CREATE builds the editor and reads state.json (recent workspace). */
     axyne_splash_step(splash, AXYNE_STARTUP_WORKSPACE);
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne",
-        WS_OVERLAPPEDWINDOW, bounds.left, bounds.top, 1440, 900,
+        WS_OVERLAPPEDWINDOW, bounds.left, bounds.top, bounds.right - bounds.left,
+        bounds.bottom - bounds.top,
         NULL, NULL, instance, state);
     if (window == NULL) {
         axyne_splash_close(splash);
@@ -10461,9 +10475,6 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
-    if (bounds.right - bounds.left < 1440 || bounds.bottom - bounds.top < 900)
-        SetWindowPos(window, NULL, bounds.left, bounds.top, bounds.right - bounds.left,
-                     bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
     axyne_workspace_restore(window, state);
     axyne_splash_step(splash, AXYNE_STARTUP_EDITOR);
     axyne_layout(window, state);
@@ -10475,8 +10486,7 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
             state->splash = splash;
             state->splash_show_command = show_command;
         } else {
-            ShowWindow(window, show_command);
-            UpdateWindow(window);
+            axyne_show_main_window(window, state, show_command);
             axyne_splash_close(splash);
         }
     }

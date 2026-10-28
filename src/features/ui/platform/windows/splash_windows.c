@@ -179,7 +179,7 @@ AxyneSplash *axyne_splash_show(HINSTANCE instance, const RECT *bounds, const cha
     free(note);
     free(wide_version);
     splash->step = AXYNE_STARTUP_CORE;
-    splash->window = CreateWindowExW(WS_EX_TOOLWINDOW, AXYNE_SPLASH_CLASS, L"Axyne",
+    splash->window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, AXYNE_SPLASH_CLASS, L"Axyne",
         WS_POPUP, bounds->left, bounds->top, bounds->right - bounds->left,
         bounds->bottom - bounds->top, NULL, NULL, instance, splash);
     if (splash->window == NULL) {

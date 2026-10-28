@@ -7764,7 +7764,10 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     [_window setContentView:workspace];
     [_window setDelegate:self];
     axyne_install_menu([NSApplication sharedApplication], workspace);
-    [_window center];
+    if (NSIsEmptyRect(visible))
+        [_window center];
+    else /* exactly where the loading screen is */
+        [_window setFrame:[_window frameRectForContentRect:NSIntersectionRect(splashFrame, visible)] display:NO];
     [splash setStep:AXYNE_STARTUP_WORKSPACE];
     [workspace restoreWorkspace];
     [splash setStep:AXYNE_STARTUP_EDITOR];
