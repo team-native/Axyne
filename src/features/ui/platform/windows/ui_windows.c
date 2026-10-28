@@ -1179,13 +1179,21 @@ static void axyne_terminal_update_label(AxyneWindowState *state)
 
 static void axyne_terminal_select_session(HWND window, AxyneWindowState *state, int index)
 {
+    HWND focus = GetFocus();
+    int had_focus = focus == NULL || axyne_is_shell_view(state, focus);
     if (index < 0 || index >= state->shell_count) return;
+    /* Selecting the other split pane swaps roles, not places. */
+    if (state->shell_split && index == state->shell_peer) state->shell_peer = state->shell_active;
     state->shell_active = index;
+    if (state->shell_peer == index || state->shell_peer >= state->shell_count)
+        state->shell_peer = (index + 1) % max(1, state->shell_count);
     state->shell_view = state->shell_views[index];
     axyne_terminal_update_label(state);
     axyne_layout(window, state);
     InvalidateRect(window, NULL, FALSE);
     axyne_refresh_action_controls(state);
+    if (had_focus && state->panel_tab == AXYNE_WIN_PANEL_TERMINAL && !state->panel_hidden)
+        SetFocus(state->shell_view);
 }
 
 /* Adds a session (an idle shell view) and makes it active; 0 at the limit. */
@@ -8632,13 +8640,14 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
             /* The active session fills the panel; split shows the next
              * session beside it. Other sessions stay hidden. */
             int split = state->shell_split && state->shell_count > 1;
-            int partner = split ? (state->shell_active + 1) % state->shell_count : -1;
+            int partner = split ? state->shell_peer : -1;
+            int left = split ? min(state->shell_active, partner) : state->shell_active;
             int pane = split ? (terminal_width - 8) / 2 : terminal_width;
             int i;
             for (i = 0; i < state->shell_count; ++i) {
                 int shown = terminal_selected && !state->panel_hidden &&
                             (i == state->shell_active || i == partner);
-                int x = axyne_sidebar_width(state) + 16 + (i == partner ? pane + 8 : 0);
+                int x = axyne_sidebar_width(state) + 16 + (split && i != left ? pane + 8 : 0);
                 if (shown)
                     SetWindowPos(state->shell_views[i], NULL, x, terminal_top, max(0, pane),
                                  max(0, terminal_bottom - terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
@@ -9099,7 +9108,10 @@ static void axyne_legacy_command(HWND window, AxyneWindowState *state, UINT comm
         axyne_terminal_select_session(window, state, (state->shell_active + 1) % max(1, state->shell_count));
     else if (command == AXYNE_TERMINAL_SPLIT) {
         state->shell_split = !state->shell_split;
+        if (state->shell_split && state->shell_count > 1)
+            state->shell_peer = (state->shell_active + 1) % state->shell_count;
         axyne_layout(window, state);
+        SetFocus(state->shell_view); /* never left in a hidden pane */
     }
     else if (command == AXYNE_CMD_CANCEL_BUILD) {
         if (state->action_process != NULL)

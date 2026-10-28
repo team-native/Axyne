@@ -274,6 +274,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _shellCount;
     NSInteger _shellActive;
     BOOL _shellSplit;
+    NSInteger _shellPeer; /* the other split pane; left = the lower index */
     NSButton *_terminalNewSession;
     NSButton *_terminalNextSession;
     NSButton *_terminalSplit;

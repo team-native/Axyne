@@ -5729,7 +5729,10 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 - (void)selectTerminalSession:(NSInteger)index
 {
     if (index < 0 || index >= _shellCount) return;
+    /* Selecting the other split pane swaps roles, not places. */
+    if (_shellSplit && index == _shellPeer) _shellPeer = _shellActive;
     _shellActive = index;
+    if (_shellPeer == index || _shellPeer >= _shellCount) _shellPeer = (index + 1) % MAX(1, _shellCount);
     _shellView = _shellViews[index];
     [self updateTerminalTabTitle];
 }
@@ -5779,7 +5782,19 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
         ++i;
     }
     if (_shellCount < 2) _shellSplit = NO;
-    if (changed) [self selectTerminalSession:_shellActive];
+    if (changed) {
+        NSResponder *responder = [[self window] firstResponder];
+        BOOL onShell = NO;
+        [self selectTerminalSession:_shellActive];
+        for (NSInteger k = 0; k < _shellCount; ++k) if (responder == _shellViews[k]) onShell = YES;
+        if (!onShell && _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL) [[self window] makeFirstResponder:_shellView];
+    }
+    /* Clicking the other split pane gives it the keyboard: make it active. */
+    {
+        NSResponder *responder = [[self window] firstResponder];
+        for (NSInteger k = 0; k < _shellCount; ++k)
+            if (responder == _shellViews[k] && k != _shellActive) { [self selectTerminalSession:k]; break; }
+    }
 }
 
 /* 새 터미널: a second (third...) session when the current shell runs. */
@@ -5805,6 +5820,8 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 {
     (void)sender;
     _shellSplit = !_shellSplit;
+    if (_shellSplit && _shellCount > 1) _shellPeer = (_shellActive + 1) % _shellCount;
+    [[self window] makeFirstResponder:_shellView];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
 }
@@ -6441,13 +6458,14 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
          * beside it. Other sessions stay hidden. */
         NSRect area = [_terminalScroll frame];
         BOOL split = _shellSplit && _shellCount > 1;
-        NSInteger partner = split ? (_shellActive + 1) % _shellCount : -1;
+        NSInteger partner = split ? _shellPeer : -1;
+        NSInteger left = split ? MIN(_shellActive, partner) : _shellActive;
         CGFloat pane = split ? floor((area.size.width - 8) / 2) : area.size.width;
         for (NSInteger i = 0; i < _shellCount; ++i) {
             BOOL shown = terminal && (i == _shellActive || i == partner);
             NSRect frame = area;
             frame.size.width = MAX(0, pane);
-            if (i == partner) frame.origin.x += pane + 8;
+            if (split && i != left) frame.origin.x += pane + 8;
             [_shellViews[i] setFrame:frame];
             [_shellViews[i] setHidden:!shown];
         }

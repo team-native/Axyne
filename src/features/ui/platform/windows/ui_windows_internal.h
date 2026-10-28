@@ -221,6 +221,7 @@ typedef struct AxyneWindowState {
     int shell_count;
     int shell_active;
     int shell_split;
+    int shell_peer;    /* the other split pane; left = the lower index */
     HWND terminal_new_session;
     HWND terminal_next_session;
     HWND terminal_split;
