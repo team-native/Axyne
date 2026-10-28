@@ -1813,8 +1813,9 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)startGitOperationWithEmptyMessage:(const char *)emptyMessage
                                 arguments:(const char *const *)arguments
                                    count:(size_t)argumentCount;
-- (AxyneLspClient *)ensureLspForLanguage:(AxyneLanguageId)language;
+- (AxyneLspClient *)ensureLspForDocument:(const AxyneDocument *)doc;
 - (void)closeLspDocument:(const AxyneDocument *)doc;
+- (void)destroyLspClients;
 - (void)shutdownLspClients;
 - (AxyneLspClient *)openLspForActive;
 - (void)syncLspActive;
@@ -3151,50 +3152,67 @@ static AxyneLanguageId axyne_macos_lsp_language(const AxyneDocument *doc)
     return AXYNE_LANGUAGE_NONE;
 }
 
-- (AxyneLspClient *)ensureLspForLanguage:(AxyneLanguageId)language
+/* Client slot of a saved document, -1 when it has none: one shared slot
+ * while AXYNE_LSP_COMMAND is set, otherwise the language's own (C shares
+ * C++'s clangd). */
+static int axyne_macos_lsp_slot(const AxyneDocument *doc)
 {
+    AxyneLanguageId language;
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) return -1;
+    if (axyne_lsp_server_overridden()) return 0;
+    language = axyne_macos_lsp_language(doc);
+    return language == AXYNE_LANGUAGE_NONE ? -1 : (int)axyne_lsp_server_slot(language);
+}
+
+- (AxyneLspClient *)ensureLspForDocument:(const AxyneDocument *)doc
+{
+    AxyneLanguageId language = axyne_macos_lsp_language(doc);
+    int slot = axyne_macos_lsp_slot(doc);
+    const char *languageID;
     AxyneLspServerCommand server;
     AxyneLspConfig config = {0};
     AxyneError error;
     AxyneStatus status;
-    if ((int)language < 0 || language >= AXYNE_LANGUAGE_COUNT) {
+    if (slot < 0) {
         [self setLspStatus:@"LSP: no language server for this file type"];
         return NULL;
     }
-    if (_lsp[language] != NULL) return _lsp[language];
+    if (_lsp[slot] != NULL) return _lsp[slot];
     if (axyne_lsp_server_resolve(language, &server, &error) != AXYNE_STATUS_OK) {
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
         return NULL;
     }
+    languageID = axyne_lsp_language_id(language);
     config.command = server.executable;
     config.arguments = (const char *const *)server.arguments;
     config.argument_count = server.argument_count;
     config.root_path = _explorer.root;
     config.working_directory = _explorer.root;
-    config.language_id = axyne_lsp_language_id(language);
+    config.language_id = languageID != NULL ? languageID : "plaintext";
     config.on_diagnostics = axyne_macos_lsp_diagnostics;
     config.on_navigation = axyne_macos_lsp_navigation;
     config.on_error = axyne_macos_lsp_error;
     config.user_data = self;
-    status = axyne_lsp_create(&config, &_lsp[language], &error);
+    status = axyne_lsp_create(&config, &_lsp[slot], &error);
     if (status != AXYNE_STATUS_OK)
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
     else
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", server.name]];
     axyne_lsp_server_command_clear(&server);
-    return status == AXYNE_STATUS_OK ? _lsp[language] : NULL;
+    return status == AXYNE_STATUS_OK ? _lsp[slot] : NULL;
 }
 
 - (void)closeLspDocument:(const AxyneDocument *)doc
 {
-    AxyneLanguageId language = axyne_macos_lsp_language(doc);
-    if (language != AXYNE_LANGUAGE_NONE && _lsp[language] != NULL)
-        (void)axyne_lsp_did_close(_lsp[language], doc, NULL); /* NOT_FOUND is fine */
+    int slot = axyne_macos_lsp_slot(doc);
+    if (slot >= 0 && _lsp[slot] != NULL)
+        (void)axyne_lsp_did_close(_lsp[slot], doc, NULL); /* NOT_FOUND is fine */
 }
 
 /* Servers are rooted at the workspace they started in: stop them all when it
- * changes (or on teardown) and let the next request start fresh ones. */
-- (void)shutdownLspClients
+ * changes (or on teardown) and let the next request start fresh ones. Their
+ * diagnostics go with them so the Problems list does not keep stale rows. */
+- (void)destroyLspClients
 {
     size_t i;
     for (i = 0; i < AXYNE_LANGUAGE_COUNT; ++i) {
@@ -3205,6 +3223,14 @@ static AxyneLanguageId axyne_macos_lsp_language(const AxyneDocument *doc)
     }
 }
 
+- (void)shutdownLspClients
+{
+    size_t before = _problems.count;
+    [self destroyLspClients];
+    axyne_problems_clear_source(&_problems, AXYNE_PROBLEM_ORIGIN_LSP, NULL);
+    if (_problems.count != before) [self scheduleProblemsRefresh];
+}
+
 - (AxyneLspClient *)openLspForActive
 {
     AxyneDocument *doc = [self activeDocument];
@@ -3212,7 +3238,7 @@ static AxyneLanguageId axyne_macos_lsp_language(const AxyneDocument *doc)
     AxyneError error;
     AxyneStatus status;
     if (doc == NULL || doc->is_untitled || doc->path == NULL) return NULL;
-    client = [self ensureLspForLanguage:axyne_macos_lsp_language(doc)];
+    client = [self ensureLspForDocument:doc];
     if (client == NULL) return NULL;
     status = axyne_lsp_did_open(client, doc, &error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY) {
@@ -3225,12 +3251,12 @@ static AxyneLanguageId axyne_macos_lsp_language(const AxyneDocument *doc)
 - (void)syncLspActive
 {
     AxyneDocument *doc = [self activeDocument];
-    AxyneLanguageId language = axyne_macos_lsp_language(doc);
+    int slot = axyne_macos_lsp_slot(doc);
     AxyneError error;
     AxyneStatus status;
-    if (language == AXYNE_LANGUAGE_NONE || _lsp[language] == NULL) return;
-    status = axyne_lsp_did_change(_lsp[language], doc, &error);
-    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(_lsp[language], doc, &error);
+    if (slot < 0 || _lsp[slot] == NULL) return;
+    status = axyne_lsp_did_change(_lsp[slot], doc, &error);
+    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(_lsp[slot], doc, &error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY)
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
 }
@@ -7235,7 +7261,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         _gitRun = NULL;
         _gitProcess = NULL;
     }
-    [self shutdownLspClients];
+    [self destroyLspClients];
     if (_actionProcess != NULL) {
         axyne_process_release(_actionProcess);
         _actionProcess = NULL;

@@ -44,12 +44,21 @@ typedef struct AxyneLspServerCommand {
 const char *axyne_lsp_language_id(AxyneLanguageId language);
 
 /* Resolves the server for `language`. A non-empty AXYNE_LSP_COMMAND
- * environment variable overrides detection for every language (it names one
- * executable, no arguments, as before). NOT_FOUND when no candidate is on
- * PATH; `command` is cleared first and filled only on OK. */
+ * environment variable overrides detection for every language, including
+ * AXYNE_LANGUAGE_NONE (it names one executable, no arguments, as before).
+ * Without it, NONE gives UNSUPPORTED and NOT_FOUND means no candidate is on
+ * PATH. `command` is cleared first and filled only on OK. */
 AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
                                      AxyneLspServerCommand *command,
                                      AxyneError *error);
+
+/* Non-zero while AXYNE_LSP_COMMAND is set: adapters then route every saved
+ * document to one shared client. */
+int axyne_lsp_server_overridden(void);
+
+/* Client slot a language uses: C and C++ share one clangd, so
+ * AXYNE_LANGUAGE_C maps to AXYNE_LANGUAGE_CPP; others map to themselves. */
+AxyneLanguageId axyne_lsp_server_slot(AxyneLanguageId language);
 
 /* Comma separated candidate names for messages, e.g. "pyright-langserver,
  * basedpyright-langserver, pylsp"; "" for languages without candidates. */

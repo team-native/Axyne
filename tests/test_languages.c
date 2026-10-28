@@ -667,8 +667,25 @@ static int lsp_server_checks(const char *root)
     AXYNE_TEST_CONTAINS(command.executable, "clangd");
     AXYNE_TEST_EQ_INT(command.argument_count, 0);
     axyne_lsp_server_command_clear(&command);
+    /* ...including files without a known language. */
+    AXYNE_TEST_CHECK(axyne_lsp_server_overridden());
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_NONE, &command, &error),
+                      AXYNE_STATUS_OK);
+    axyne_lsp_server_command_clear(&command);
+#ifdef _WIN32
+    /* A script named with its extension is still wrapped. */
+    AXYNE_TEST_CHECK(set_env("AXYNE_LSP_COMMAND", "typescript-language-server.cmd"));
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_TYPESCRIPT, &command, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(command.executable, "cmd.exe");
+    axyne_lsp_server_command_clear(&command);
+#endif
 
     (void)set_env("AXYNE_LSP_COMMAND", NULL);
+    AXYNE_TEST_CHECK(!axyne_lsp_server_overridden());
+    /* One clangd serves C and C++. */
+    AXYNE_TEST_EQ_INT(axyne_lsp_server_slot(AXYNE_LANGUAGE_C), AXYNE_LANGUAGE_CPP);
+    AXYNE_TEST_EQ_INT(axyne_lsp_server_slot(AXYNE_LANGUAGE_GO), AXYNE_LANGUAGE_GO);
     (void)set_env("PATH", saved_path);
     free(saved_path);
     return ok;

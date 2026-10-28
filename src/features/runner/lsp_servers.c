@@ -123,7 +123,11 @@ static char *find_on_path(const char *name, int *command_script)
     for (i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i) {
         DWORD length = SearchPathW(NULL, wide_name, extensions[i], MAX_PATH, path, NULL);
         if (length != 0 && length < MAX_PATH) {
-            *command_script = i != 0;
+            size_t n = wcslen(path);
+            /* By the hit's extension: SearchPath appends nothing to a name
+             * that already has one, so "x.cmd" matches on the .exe pass. */
+            *command_script = n > 4 && (_wcsicmp(path + n - 4, L".cmd") == 0 ||
+                                        _wcsicmp(path + n - 4, L".bat") == 0);
             return utf8_from_wide(path);
         }
     }
@@ -226,6 +230,17 @@ static AxyneStatus fill_command(AxyneLspServerCommand *command, char *executable
     return AXYNE_STATUS_OK;
 }
 
+int axyne_lsp_server_overridden(void)
+{
+    const char *override = getenv("AXYNE_LSP_COMMAND");
+    return override != NULL && override[0] != '\0';
+}
+
+AxyneLanguageId axyne_lsp_server_slot(AxyneLanguageId language)
+{
+    return language == AXYNE_LANGUAGE_C ? AXYNE_LANGUAGE_CPP : language;
+}
+
 AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
                                      AxyneLspServerCommand *command,
                                      AxyneError *error)
@@ -239,11 +254,7 @@ AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
         return AXYNE_STATUS_INVALID_ARGUMENT;
     }
     memset(command, 0, sizeof(*command));
-    if (entry == NULL) {
-        set_error(error, AXYNE_STATUS_UNSUPPORTED, "no language server for this file type");
-        return AXYNE_STATUS_UNSUPPORTED;
-    }
-    if (override != NULL && override[0] != '\0') {
+    if (axyne_lsp_server_overridden()) {
         int script = 0;
         char *path = find_on_path(override, &script);
         if (path == NULL) {
@@ -255,6 +266,9 @@ AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
             }
         }
         status = fill_command(command, path, override, NULL, 0, script);
+    } else if (entry == NULL) {
+        set_error(error, AXYNE_STATUS_UNSUPPORTED, "no language server for this file type");
+        return AXYNE_STATUS_UNSUPPORTED;
     } else {
         status = AXYNE_STATUS_NOT_FOUND;
         for (i = 0; i < entry->count; ++i) {
