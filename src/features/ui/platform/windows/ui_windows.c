@@ -759,10 +759,11 @@ static void axyne_auto_indent(AxyneWindowState *state,
     }
 }
 
-/* Word completion while typing: document words plus the language's keywords.
- * Scintilla owns the list: Tab and Return accept the selected entry, Escape
- * (or typing a character that matches nothing) closes it, and with no list
- * open Tab keeps indenting. */
+/* Word completion while typing: document words plus the language's keywords,
+ * for code languages only. Scintilla owns the list: Tab accepts the selected
+ * entry; Return closes it and inserts the newline (see the message loop);
+ * Escape (or typing a character that matches nothing) closes it, and with no
+ * list open Tab keeps indenting. */
 static void axyne_show_completion(AxyneWindowState *state)
 {
     const AxyneDocument *document;
@@ -776,6 +777,11 @@ static void axyne_show_completion(AxyneWindowState *state)
         return;
     document = axyne_active(state);
     language = axyne_syntax_for_path(document == NULL ? NULL : document->path);
+    if (!axyne_syntax_completes(language)) {
+        if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+            SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
+        return;
+    }
     length = SendMessageA(state->editor, SCI_GETLENGTH, 0, 0);
     caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     list = NULL;
@@ -10516,6 +10522,12 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                 DispatchMessageW(&message);
                 continue;
             }
+            /* Return never accepts a completion: close the list and let the
+             * key insert the newline. Only Tab accepts. */
+            if (current != NULL && message.hwnd == current->editor &&
+                message.message == WM_KEYDOWN && message.wParam == VK_RETURN &&
+                SendMessageA(current->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+                SendMessageA(current->editor, SCI_AUTOCCANCEL, 0, 0);
             if (current != NULL && message.hwnd == current->shell_view) {
                 TranslateMessage(&message); DispatchMessageW(&message); continue;
             }
