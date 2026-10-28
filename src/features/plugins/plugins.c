@@ -1109,12 +1109,22 @@ AxyneStatus axyne_plugin_command_prepare(const AxynePlugin *plugin, const AxyneP
                                          AxynePluginInvocation *invocation, AxyneError *error)
 {
     const char *missing = NULL;
+    const AxynePluginRequirement *requirement;
     char *program = NULL;
     int script = 0;
     size_t i;
     if (invocation == NULL || plugin == NULL || command == NULL)
         return plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "plugin command is required");
     memset(invocation, 0, sizeof(*invocation));
+
+    requirement = axyne_plugin_missing_requirement(plugin);
+    if (requirement != NULL) {
+        if (requirement->hint[0] != '\0')
+            return plugin_error(error, AXYNE_STATUS_NOT_FOUND, "%s was not found on PATH. %s",
+                                requirement->program, requirement->hint);
+        return plugin_error(error, AXYNE_STATUS_NOT_FOUND, "%s was not found on PATH",
+                            requirement->program);
+    }
 
     if (is_path_like(command->program)) {
         char *expanded = expand(command->program, plugin, context, &missing);

@@ -76,6 +76,9 @@ static int prepare_checks(const char *root)
                       AXYNE_STATUS_NOT_FOUND);
     AXYNE_TEST_CONTAINS(error.message, "install it");
 
+    /* The remaining checks exercise commands without declared prerequisites. */
+    plugin->requirement_count = 0;
+
     /* Plugin-relative program, ${pluginDir}, ${fileDirname} as cwd. */
     AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[1], &context, &invocation, &error),
                       AXYNE_STATUS_OK);
@@ -90,6 +93,61 @@ static int prepare_checks(const char *root)
     AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[1], &context, &invocation, &error),
                       AXYNE_STATUS_INVALID_ARGUMENT);
     AXYNE_TEST_CONTAINS(error.message, "${file}");
+    plugin->requirement_count = 1;
+    axyne_plugin_free(plugin);
+    return 1;
+}
+
+static int prepare_requirement_checks(const char *root)
+{
+    static const char *const json =
+        "{\"id\":\"bundled\",\"name\":\"Bundled\",\"version\":\"1.0.0\","
+        "\"requires\":[{\"program\":\""
+#ifdef _WIN32
+        "cmd.exe"
+#else
+        "sh"
+#endif
+        "\"},{\"program\":\"surely-not-installed-runtime\",\"hint\":\"install the runtime and add it to PATH\"}],"
+        "\"commands\":[{\"id\":\"run\",\"title\":\"Run\",\"program\":\"./bundled.cmd\"}]}";
+    AxyneError error;
+    AxynePluginInvocation invocation;
+    AxynePlugin *plugin;
+    char tool[1024];
+    char *hint;
+    AXYNE_TEST_CHECK(axyne_test_path(tool, sizeof(tool), root, "bundled.cmd"));
+#ifdef _WIN32
+    AXYNE_TEST_CHECK(axyne_test_write(tool, "@exit /b 0\r\n"));
+#else
+    AXYNE_TEST_CHECK(axyne_test_write(tool, "#!/bin/sh\nexit 0\n"));
+#endif
+    plugin = axyne_plugin_parse(json, strlen(json), root, "0.1.0", &error);
+    AXYNE_TEST_CHECK(plugin != NULL);
+
+    /* Prove the bundled command prepares when its only prerequisite exists. */
+    plugin->requirement_count = 1;
+    AXYNE_TEST_CHECK(axyne_plugin_missing_requirement(plugin) == NULL);
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[0], NULL, &invocation, &error),
+                      AXYNE_STATUS_OK);
+    axyne_plugin_invocation_clear(&invocation);
+
+    /* A later, missing declared runtime must block even this bundled command. */
+    plugin->requirement_count = 2;
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[0], NULL, &invocation, &error),
+                      AXYNE_STATUS_NOT_FOUND);
+    AXYNE_TEST_EQ_INT(error.code, AXYNE_STATUS_NOT_FOUND);
+    AXYNE_TEST_CONTAINS(error.message, "surely-not-installed-runtime");
+    AXYNE_TEST_CONTAINS(error.message, "install the runtime and add it to PATH");
+    AXYNE_TEST_CHECK(invocation.executable == NULL && invocation.arguments == NULL &&
+                     invocation.working_directory == NULL && invocation.argument_count == 0);
+
+    /* A manifest without an installation hint still explains PATH lookup. */
+    hint = plugin->requirements[1].hint;
+    plugin->requirements[1].hint = "";
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[0], NULL, &invocation, &error),
+                      AXYNE_STATUS_NOT_FOUND);
+    AXYNE_TEST_CONTAINS(error.message, "surely-not-installed-runtime was not found on PATH");
+    plugin->requirements[1].hint = hint;
     axyne_plugin_free(plugin);
     return 1;
 }
@@ -162,5 +220,5 @@ int axyne_test_plugins(const char *root)
 {
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
     AXYNE_TEST_CHECK(axyne_test_register_cleanup(root));
-    return parse_checks() && prepare_checks(root) && set_checks(root);
+    return parse_checks() && prepare_requirement_checks(root) && prepare_checks(root) && set_checks(root);
 }
