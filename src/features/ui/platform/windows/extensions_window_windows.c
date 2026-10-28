@@ -471,7 +471,13 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
         ShowWindow(st->window, SW_SHOW);
         UpdateWindow(st->window);
         SetFocus(st->window);
-        while (!st->done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        while (!st->done) {
+            BOOL got = GetMessageW(&msg, NULL, 0, 0);
+            if (got <= 0) {
+                /* Hand WM_QUIT back to the main loop. */
+                if (got == 0) PostQuitMessage((int)msg.wParam);
+                break;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

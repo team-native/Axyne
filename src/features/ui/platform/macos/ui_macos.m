@@ -5803,7 +5803,10 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
         const AxynePlugin *plugin = &_plugins.items[i];
         if (!plugin->enabled || !plugin->compatible) continue;
         for (j = 0; j < plugin->command_count; ++j, ++n) {
-            NSString *title = [NSString stringWithFormat:@"%s: %s", plugin->name, plugin->commands[j].title];
+            NSString *name = [NSString stringWithUTF8String:plugin->name];
+            NSString *label = [NSString stringWithUTF8String:plugin->commands[j].title];
+            NSString *title = [NSString stringWithFormat:@"%@: %@", name != nil ? name : @"",
+                label != nil ? label : @""];
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title != nil ? title : @""
                 action:axyne_plugin_command_applies(&plugin->commands[j], path) ? @selector(runPluginCommand:) : NULL
                 keyEquivalent:@""];

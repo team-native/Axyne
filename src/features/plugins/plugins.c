@@ -736,6 +736,33 @@ static void extract_exit(AxyneProcess *process, int exit_code, void *user_data)
 #endif
 }
 
+#ifndef _WIN32
+/* Rejects symbolic links anywhere in an extracted package so nothing in it
+ * can point outside the plugin folder. */
+static int tree_has_symlink(const char *path)
+{
+    DIR *dir = opendir(path);
+    struct dirent *entry;
+    int found = 0;
+    if (dir == NULL) return 0;
+    while (!found && (entry = readdir(dir)) != NULL) {
+        struct stat info;
+        size_t length;
+        char *child;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        length = strlen(path) + strlen(entry->d_name) + 2;
+        child = (char *)malloc(length);
+        if (child == NULL) { found = 1; break; }
+        (void)snprintf(child, length, "%s/%s", path, entry->d_name);
+        if (lstat(child, &info) != 0 || S_ISLNK(info.st_mode)) found = 1;
+        else if (S_ISDIR(info.st_mode)) found = tree_has_symlink(child);
+        free(child);
+    }
+    closedir(dir);
+    return found;
+}
+#endif
+
 static AxyneStatus extract_zip(const char *zip_path, const char *destination, AxyneError *error)
 {
     AxyneProcessSpec spec;
@@ -754,8 +781,9 @@ static AxyneStatus extract_zip(const char *zip_path, const char *destination, Ax
     arguments[0] = "-xf"; arguments[1] = zip_path; arguments[2] = "-C"; arguments[3] = destination;
 #else
     const char *arguments[4];
-    program = copy_text("/usr/bin/ditto");
-    arguments[0] = "-x"; arguments[1] = "-k"; arguments[2] = zip_path; arguments[3] = destination;
+    /* unzip drops absolute and ".." entry paths; links are rejected after. */
+    program = copy_text("/usr/bin/unzip");
+    arguments[0] = "-qq"; arguments[1] = zip_path; arguments[2] = "-d"; arguments[3] = destination;
 #endif
     if (program == NULL) return plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
     memset(&wait, 0, sizeof(wait));
@@ -789,6 +817,11 @@ static AxyneStatus extract_zip(const char *zip_path, const char *destination, Ax
         if (wait.exit_code != 0)
             status = plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
                                   "the package could not be extracted: %s", wait.output);
+#ifndef _WIN32
+        else if (tree_has_symlink(destination))
+            status = plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                                  "the package must not contain symbolic links");
+#endif
     }
 #ifdef _WIN32
     CloseHandle(wait.done);
@@ -924,17 +957,30 @@ static char *find_program(const char *name, int *script)
         wchar_t *wide = wide_path(name);
         wchar_t path[MAX_PATH];
         size_t i;
+        wchar_t *path_env = NULL;
+        DWORD env_length = GetEnvironmentVariableW(L"PATH", NULL, 0);
         if (wide == NULL) return NULL;
+        if (env_length != 0) {
+            path_env = (wchar_t *)malloc(env_length * sizeof(wchar_t));
+            if (path_env != NULL && GetEnvironmentVariableW(L"PATH", path_env, env_length) == 0) {
+                free(path_env);
+                path_env = NULL;
+            }
+        }
+        if (path_env == NULL) { free(wide); return NULL; }
         for (i = 0; i < 3; ++i) {
-            DWORD length = SearchPathW(NULL, wide, extensions[i], MAX_PATH, path, NULL);
+            /* PATH only: the app and current folders are not searched. */
+            DWORD length = SearchPathW(path_env, wide, extensions[i], MAX_PATH, path, NULL);
             if (length != 0 && length < MAX_PATH) {
                 size_t n = wcslen(path);
                 free(wide);
+                free(path_env);
                 *script = n > 4 && (_wcsicmp(path + n - 4, L".cmd") == 0 || _wcsicmp(path + n - 4, L".bat") == 0);
                 return utf8_path(path);
             }
         }
         free(wide);
+        free(path_env);
         return NULL;
     }
 #else
@@ -1160,6 +1206,12 @@ AxyneStatus axyne_plugin_command_prepare(const AxynePlugin *plugin, const AxyneP
         invocation->arguments[2] = copy_text("/c");
         invocation->arguments[3] = line.data;
         invocation->argument_count = 4;
+        if (invocation->arguments[0] == NULL || invocation->arguments[1] == NULL ||
+            invocation->arguments[2] == NULL) {
+            free(program);
+            axyne_plugin_invocation_clear(invocation);
+            return plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "cannot prepare the script command");
+        }
     }
 #endif
     invocation->executable = program;
