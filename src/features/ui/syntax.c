@@ -328,6 +328,16 @@ const AxyneSyntaxLanguage *axyne_syntax_by_id(const char *id)
     return NULL;
 }
 
+int axyne_syntax_completes(const AxyneSyntaxLanguage *language)
+{
+    size_t i;
+    if (language == NULL || strcmp(language->id, "json") == 0 ||
+        strcmp(language->id, "yaml") == 0) return 0; /* data, not code */
+    for (i = 0; i < AXYNE_SYNTAX_KEYWORD_SETS; ++i)
+        if (language->keywords[i] != NULL) return 1;
+    return 0;
+}
+
 int axyne_syntax_style_bold(const AxyneSyntaxLanguage *language,
                             unsigned int style)
 {

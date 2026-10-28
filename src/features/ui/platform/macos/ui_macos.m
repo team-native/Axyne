@@ -2911,6 +2911,11 @@ static BOOL axyne_macos_is_image_path(const char *path)
     size_t prefix = 0;
     if (_editorView == nil || document == NULL || [self isEmptyState]) return;
     language = axyne_syntax_for_path(document->path);
+    if (!axyne_syntax_completes(language)) {
+        if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
+            (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
+        return;
+    }
     length = [self sendEditorMessage:SCI_GETLENGTH wParam:0 lParam:0];
     caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
     if (length > 0 && caret > 0 && caret <= length) {
@@ -3390,6 +3395,22 @@ static int axyne_macos_lsp_slot(const AxyneDocument *doc)
     if (notification->nmhdr.code == SCN_CHARADDED) {
         [self autoIndentFromNotification:notification];
         [self showCompletion];
+    }
+    /* Return never accepts a completion (only Tab does): cancelling inside
+     * SCN_AUTOCSELECTION drops the insertion, then the newline the key was
+     * meant for is typed on the next turn of the run loop. */
+    if (notification->nmhdr.code == SCN_AUTOCSELECTION &&
+        notification->listCompletionMethod == SC_AC_NEWLINE) {
+        (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SCNotification typed;
+            (void)[self sendEditorMessage:SCI_NEWLINE wParam:0 lParam:0];
+            /* SCI_NEWLINE raises no SCN_CHARADDED: indent like a typed Return. */
+            memset(&typed, 0, sizeof(typed));
+            typed.nmhdr.code = SCN_CHARADDED;
+            typed.ch = '\n';
+            [self autoIndentFromNotification:&typed];
+        });
     }
     if (notification->nmhdr.code == SCN_UPDATEUI) {
         [self updateLineNumberMargin];
