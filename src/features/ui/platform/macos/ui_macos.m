@@ -1476,6 +1476,11 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     char *_workspacePreferencesPath;
     unsigned char _workspaceBindingPresent[AXYNE_ACTION_COUNT];
     AxyneLspClient *_lsp[AXYNE_LANGUAGE_COUNT]; /* one per language, started lazily */
+    /* Latest LSP completion / definition request and the caret position the
+     * completion was asked for; older or moved-away replies are dropped. */
+    uint64_t _lspCompletionRequest;
+    NSInteger _lspCompletionCaret;
+    uint64_t _lspDefinitionRequest;
     NSString *_lspStatus;
     BOOL _explorerHidden; /* View > Explorer; zero-initialised means visible */
     BOOL _panelHidden;    /* View > Bottom Panel */
@@ -1807,6 +1812,10 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)updateBraceHighlight;
 - (void)autoIndentFromNotification:(SCNotification *)notification;
 - (void)showCompletion;
+- (void)requestLspCompletion;
+- (void)applyLspCompletion:(char **)words count:(size_t)count request:(uint64_t)requestID;
+- (void)applyLspLocation:(NSString *)uri line:(size_t)line character:(size_t)character
+                   count:(size_t)count request:(uint64_t)requestID;
 - (BOOL)showPreferences:(BOOL)workspace;
 - (BOOL)savePreferences:(AxynePreferences *)edited workspace:(BOOL)workspace;
 - (void)showGitStatus:(id)sender;
@@ -1973,15 +1982,63 @@ static void axyne_macos_lsp_diagnostics(AxyneLspClient *client, const char *path
     });
 }
 
+/* Runs on the LSP reader thread: copy the first location to the main queue. */
 static void axyne_macos_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
                                        const AxyneLspLocation *locations,
                                        size_t count, void *user_data)
 {
-    char text[160];
-    (void)client; (void)locations;
-    (void)snprintf(text, sizeof(text), "LSP: request %llu returned %zu location%s",
-                   (unsigned long long)request_id, count, count == 1 ? "" : "s");
-    axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
+    NSString *uri = nil;
+    size_t line = 0, character = 0;
+    (void)client;
+    if (view == nil) return;
+    if (count > 0 && locations[0].uri != NULL) {
+        uri = [[NSString alloc] initWithUTF8String:locations[0].uri];
+        line = locations[0].range.start.line;
+        character = locations[0].range.start.character;
+    }
+    [view retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view applyLspLocation:uri line:line character:character count:count request:request_id];
+        [uri release];
+        [view release];
+    });
+}
+
+/* Runs on the LSP reader thread: copy the words to insert to the main queue. */
+static void axyne_macos_lsp_completion(AxyneLspClient *client, uint64_t request_id,
+                                       const AxyneLspCompletionItem *items,
+                                       size_t count, void *user_data)
+{
+    AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
+    char **words;
+    size_t used = 0;
+    (void)client;
+    if (view == nil) return;
+    if (count > 200) count = 200;
+    words = count > 0 ? (char **)calloc(count, sizeof(char *)) : NULL;
+    for (size_t i = 0; i < count && words != NULL; ++i) {
+        /* The text to insert; a label may carry a signature after it. */
+        const char *word = items[i].insert_text != NULL && items[i].insert_text[0] != '\0'
+            ? items[i].insert_text : items[i].label;
+        size_t length = 0;
+        if (word == NULL) continue;
+        while (word[length] != '\0' && word[length] != '\n' && word[length] != '(' &&
+               word[length] != ' ' && word[length] != '$') ++length;
+        if (length == 0) continue;
+        words[used] = (char *)malloc(length + 1);
+        if (words[used] == NULL) break;
+        memcpy(words[used], word, length);
+        words[used][length] = '\0';
+        ++used;
+    }
+    [view retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view applyLspCompletion:words count:used request:request_id];
+        for (size_t i = 0; i < used; ++i) free(words[i]);
+        free(words);
+        [view release];
+    });
 }
 
 static void axyne_macos_lsp_error(AxyneLspClient *client, AxyneStatus status,
@@ -2938,9 +2995,111 @@ static BOOL axyne_macos_is_image_path(const char *path)
     (void)[self sendEditorMessage:SCI_AUTOCSETCHOOSESINGLE wParam:0 lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSETCANCELATSTART wParam:0 lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSETMAXHEIGHT wParam:8 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETSEPARATOR wParam:' ' lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSHOW wParam:(uintptr_t)prefix
                            lParam:(intptr_t)list];
     free(list);
+}
+
+/* Asks the language server for completions at the caret; the reply arrives
+ * in applyLspCompletion. Only a server that is already running is asked. */
+- (void)requestLspCompletion
+{
+    AxyneDocument *doc = [self activeDocument];
+    int slot = axyne_macos_lsp_slot(doc);
+    AxyneLspPosition position;
+    AxyneError error;
+    uint64_t requestID = 0;
+    NSInteger caret, line, lineStart;
+    if (doc == NULL || slot < 0 || _lsp[slot] == NULL || _editorView == nil) return;
+    if (!axyne_syntax_completes(axyne_syntax_for_path(doc->path))) return;
+    if (![self captureEditor]) return;
+    [self syncLspActive];
+    caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:(uintptr_t)caret lParam:0];
+    lineStart = [self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)line lParam:0];
+    position.line = (size_t)line;
+    position.character = axyne_lsp_utf16_character(
+        doc->contents + (size_t)lineStart, (size_t)(caret - lineStart), (size_t)(caret - lineStart));
+    if (axyne_lsp_completion(_lsp[slot], doc, position, &requestID, &error) == AXYNE_STATUS_OK) {
+        _lspCompletionRequest = requestID;
+        _lspCompletionCaret = caret;
+    }
+}
+
+static int axyne_macos_word_compare(const void *a, const void *b)
+{
+    return strcasecmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Shows the server's candidates that start with the word before the caret. */
+- (void)applyLspCompletion:(char **)words count:(size_t)count request:(uint64_t)requestID
+{
+    NSInteger caret, wordStart;
+    char prefix[256];
+    size_t prefixLength, shown = 0, length = 0;
+    char **matches;
+    char *list;
+    if (_editorView == nil || requestID != _lspCompletionRequest || count == 0) return;
+    caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    if (caret != _lspCompletionCaret) return;
+    wordStart = [self sendEditorMessage:SCI_WORDSTARTPOSITION wParam:(uintptr_t)caret lParam:1];
+    prefixLength = (size_t)(caret - wordStart);
+    if (prefixLength >= sizeof(prefix)) return;
+    if (prefixLength > 0) {
+        const char *text = (const char *)(intptr_t)[self sendEditorMessage:SCI_GETRANGEPOINTER
+            wParam:(uintptr_t)wordStart lParam:(intptr_t)prefixLength];
+        if (text == NULL) return;
+        memcpy(prefix, text, prefixLength);
+    }
+    prefix[prefixLength] = '\0';
+    matches = (char **)calloc(count, sizeof(char *));
+    if (matches == NULL) return;
+    for (size_t i = 0; i < count; ++i) {
+        if (words[i] == NULL || strncasecmp(words[i], prefix, prefixLength) != 0) continue;
+        if (prefixLength > 0 && strlen(words[i]) == prefixLength) continue;
+        matches[shown++] = words[i];
+    }
+    if (shown == 0) { free(matches); return; }
+    qsort(matches, shown, sizeof(char *), axyne_macos_word_compare);
+    for (size_t i = 0; i < shown; ++i) length += strlen(matches[i]) + 1;
+    list = (char *)malloc(length + 1);
+    if (list == NULL) { free(matches); return; }
+    length = 0;
+    for (size_t i = 0; i < shown; ++i) {
+        size_t n = strlen(matches[i]);
+        if (i > 0 && strcasecmp(matches[i], matches[i - 1]) == 0) continue;
+        if (length > 0) list[length++] = '\n';
+        memcpy(list + length, matches[i], n);
+        length += n;
+    }
+    list[length] = '\0';
+    (void)[self sendEditorMessage:SCI_AUTOCSETIGNORECASE wParam:1 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETAUTOHIDE wParam:1 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETCHOOSESINGLE wParam:0 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETCANCELATSTART wParam:0 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETMAXHEIGHT wParam:8 lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSETSEPARATOR wParam:'\n' lParam:0];
+    (void)[self sendEditorMessage:SCI_AUTOCSHOW wParam:(uintptr_t)prefixLength lParam:(intptr_t)list];
+    free(list);
+    free(matches);
+}
+
+/* Go to Definition: open the file the server named and move the caret. */
+- (void)applyLspLocation:(NSString *)uri line:(size_t)line character:(size_t)character
+                   count:(size_t)count request:(uint64_t)requestID
+{
+    if (requestID != _lspDefinitionRequest) {
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: 참조 %zu개", count]];
+        return;
+    }
+    _lspDefinitionRequest = 0;
+    NSURL *url = uri != nil ? [NSURL URLWithString:uri] : nil;
+    if (url == nil || ![url isFileURL] || [url path] == nil) {
+        [self setLspStatus:@"LSP: 정의를 찾지 못했습니다"];
+        return;
+    }
+    [self showProblemAtPath:[url path] line:line + 1 column:character + 1 utf16:YES];
 }
 
 - (void)applyPreferences
@@ -3212,6 +3371,7 @@ static int axyne_macos_lsp_slot(const AxyneDocument *doc)
     config.language_id = languageID != NULL ? languageID : "plaintext";
     config.on_diagnostics = axyne_macos_lsp_diagnostics;
     config.on_navigation = axyne_macos_lsp_navigation;
+    config.on_completion = axyne_macos_lsp_completion;
     config.on_error = axyne_macos_lsp_error;
     config.user_data = self;
     status = axyne_lsp_create(&config, &_lsp[slot], &error);
@@ -3305,6 +3465,7 @@ static int axyne_macos_lsp_slot(const AxyneDocument *doc)
         (size_t)(current - lineStart));
     status = references ? axyne_lsp_references(client, doc, position, &requestID, &error) :
         axyne_lsp_definition(client, doc, position, &requestID, &error);
+    if (status == AXYNE_STATUS_OK && !references) _lspDefinitionRequest = requestID;
     if (status != AXYNE_STATUS_OK)
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
     else
@@ -3395,6 +3556,7 @@ static int axyne_macos_lsp_slot(const AxyneDocument *doc)
     if (notification->nmhdr.code == SCN_CHARADDED) {
         [self autoIndentFromNotification:notification];
         [self showCompletion];
+        [self requestLspCompletion];
     }
     /* Return never accepts a completion (only Tab does): cancelling inside
      * SCN_AUTOCSELECTION drops the insertion, then the newline the key was
