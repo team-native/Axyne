@@ -4,6 +4,10 @@
 #include <string.h>
 
 #include "axyne/language.h"
+#include "axyne/lsp_servers.h"
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 #ifdef _WIN32
 #define EXE ".exe"
@@ -586,10 +590,94 @@ static int command_script_checks(void)
     return 1;
 }
 
+/* Language server detection: ids, PATH lookup (including .cmd shims on
+ * Windows) and the AXYNE_LSP_COMMAND override. */
+static int set_env(const char *name, const char *value)
+{
+#ifdef _WIN32
+    return _putenv_s(name, value != NULL ? value : "") == 0;
+#else
+    return value != NULL ? setenv(name, value, 1) == 0 : unsetenv(name) == 0;
+#endif
+}
+
+static int lsp_server_checks(const char *root)
+{
+    AxyneLspServerCommand command;
+    AxyneError error;
+    char bin[1024], file[1024];
+    char *saved_path = getenv("PATH") != NULL ? strdup(getenv("PATH")) : NULL;
+    int ok = 1;
+
+    AXYNE_TEST_STREQ(axyne_lsp_language_id(AXYNE_LANGUAGE_C), "c");
+    AXYNE_TEST_STREQ(axyne_lsp_language_id(AXYNE_LANGUAGE_CPP), "cpp");
+    AXYNE_TEST_STREQ(axyne_lsp_language_id(AXYNE_LANGUAGE_TYPESCRIPT), "typescript");
+    AXYNE_TEST_CHECK(axyne_lsp_language_id(AXYNE_LANGUAGE_NONE) == NULL);
+    AXYNE_TEST_CONTAINS(axyne_lsp_server_candidates(AXYNE_LANGUAGE_PYTHON), "pylsp");
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_NONE, &command, &error),
+                      AXYNE_STATUS_UNSUPPORTED);
+
+    AXYNE_TEST_CHECK(axyne_test_path(bin, sizeof(bin), root, "lsp-bin"));
+    AXYNE_TEST_CHECK(axyne_test_make_directory(bin));
+    AXYNE_TEST_CHECK(set_env("AXYNE_LSP_COMMAND", NULL));
+    AXYNE_TEST_CHECK(set_env("PATH", bin));
+
+    /* Nothing installed: NOT_FOUND names what to install. */
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_GO, &command, &error),
+                      AXYNE_STATUS_NOT_FOUND);
+    AXYNE_TEST_CONTAINS(error.message, "gopls");
+
+#ifdef _WIN32
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "clangd.exe"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, ""));
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "typescript-language-server.cmd"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "@echo off\r\n"));
+#else
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "clangd"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh\n"));
+    AXYNE_TEST_CHECK(chmod(file, 0755) == 0);
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "typescript-language-server"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh\n"));
+    AXYNE_TEST_CHECK(chmod(file, 0755) == 0);
+#endif
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_CPP, &command, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(command.executable, "clangd");
+    AXYNE_TEST_STREQ(command.name, "clangd");
+    AXYNE_TEST_EQ_INT(command.argument_count, 0);
+    axyne_lsp_server_command_clear(&command);
+
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_JAVASCRIPT, &command, &error),
+                      AXYNE_STATUS_OK);
+#ifdef _WIN32
+    /* The npm shim runs through cmd.exe with one quoted command line. */
+    AXYNE_TEST_CONTAINS(command.executable, "cmd.exe");
+    AXYNE_TEST_EQ_INT(command.argument_count, 4);
+    AXYNE_TEST_CONTAINS(command.arguments[3], "typescript-language-server.cmd\" \"--stdio\"");
+#else
+    AXYNE_TEST_EQ_INT(command.argument_count, 1);
+    AXYNE_TEST_STREQ(command.arguments[0], "--stdio");
+#endif
+    axyne_lsp_server_command_clear(&command);
+
+    /* The environment override wins for every language. */
+    AXYNE_TEST_CHECK(set_env("AXYNE_LSP_COMMAND", "clangd"));
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_PYTHON, &command, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_CONTAINS(command.executable, "clangd");
+    AXYNE_TEST_EQ_INT(command.argument_count, 0);
+    axyne_lsp_server_command_clear(&command);
+
+    (void)set_env("AXYNE_LSP_COMMAND", NULL);
+    (void)set_env("PATH", saved_path);
+    free(saved_path);
+    return ok;
+}
+
 int axyne_test_languages(const char *root)
 {
     (void)axyne_test_make_directory;
     return registry_checks() && scripting_checks() && compiled_checks(root) &&
            jvm_swift_checks() && missing_and_override_checks() && projection_checks() &&
-           command_script_checks();
+           command_script_checks() && lsp_server_checks(root);
 }
