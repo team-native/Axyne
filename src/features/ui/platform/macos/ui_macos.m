@@ -1694,6 +1694,8 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)ensurePlugins;
 - (void)runPluginCommand:(id)sender;
 - (void)showExtensions:(id)sender;
+- (void)showMarketplace:(id)sender;
+- (void)showAccount:(id)sender;
 - (void)refreshRecentMenu;
 - (BOOL)captureEditor;
 - (void)refreshActionControls;
@@ -5893,6 +5895,20 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     axyne_extensions_window_show([self window], &_plugins, AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_INSTALLED);
 }
 
+- (void)showMarketplace:(id)sender
+{
+    (void)sender;
+    [self ensurePlugins];
+    axyne_extensions_window_show([self window], &_plugins, AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_MARKETPLACE);
+}
+
+- (void)showAccount:(id)sender
+{
+    (void)sender;
+    [self ensurePlugins];
+    axyne_extensions_window_show([self window], &_plugins, AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_ACCOUNT);
+}
+
 - (void)selectOutputPanel
 {
     _panelMode = 0;
@@ -8232,6 +8248,8 @@ static void axyne_install_menu(NSApplication *application,
                 [pluginsItem release];
             }
             axyne_macos_add_item(submenu, @"확장…", @selector(showExtensions:), workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"마켓플레이스…", @selector(showMarketplace:), workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"Axyne 계정…", @selector(showAccount:), workspace, @"", 0);
             [submenu addItem:[NSMenuItem separatorItem]];
             axyne_macos_add_item(submenu, @"설정…", @selector(showGlobalPreferences:),
                 workspace, @"", 0);
