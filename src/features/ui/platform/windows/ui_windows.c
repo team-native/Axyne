@@ -37,6 +37,9 @@
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
+#include "axyne/app_state.h"
+#include "axyne/app_paths.h"
+#include "axyne/log.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
@@ -266,6 +269,9 @@ typedef struct AxyneWindowState {
     char *workspace_preferences_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
+    /* state.json: persistent recent files/folders (loaded at WM_CREATE). */
+    AxyneAppState app_state;
+    char *app_state_path;
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */
@@ -370,6 +376,8 @@ enum { AXYNE_SCN_CHARADDED = 2001, AXYNE_SCN_UPDATEUI = 2007 };
 
 enum { AXYNE_CMD_NEW = 1, AXYNE_CMD_OPEN, AXYNE_CMD_SAVE,
        AXYNE_CMD_SAVE_AS, AXYNE_CMD_CLOSE, AXYNE_CMD_RECENT_BASE = 1000,
+       /* RECENT_BASE + i: state.json recentFiles[i]; FOLDER_BASE + i: recentFolders[i]. */
+       AXYNE_CMD_RECENT_FOLDER_BASE = 1040, AXYNE_CMD_RECENT_CLEAR = 1080,
        AXYNE_CMD_FIND = 1100, AXYNE_CMD_REPLACE, AXYNE_CMD_SEARCH_FOLDER,
        AXYNE_CMD_QUICK_FILE, AXYNE_CMD_WORKSPACE,
        AXYNE_CMD_EXPLORER_NEW_FILE, AXYNE_CMD_EXPLORER_NEW_FOLDER,
@@ -408,7 +416,8 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
        AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31,
-       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32 };
+       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32,
+       AXYNE_WM_RESTORE_WORKSPACE = WM_APP + 33 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -542,6 +551,7 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
                                 const char *path);
 static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
                                    const char *known_path, int preview);
+static void axyne_remember_recent_file(AxyneWindowState *state, const char *path);
 static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index);
 static void axyne_find(HWND window, AxyneWindowState *state, int replace,
                        int replace_all);
@@ -2893,6 +2903,8 @@ static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
                     "Axyne - Open failed", MB_OK | MB_ICONERROR);
         return;
     }
+    /* Explorer previews are browsing, not opening: only real tabs are recent. */
+    if (!preview) axyne_remember_recent_file(state, state->documents.documents[index].path);
     if (replaced) {
         if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
         axyne_problems_clear_lsp(state, evicted.path);
@@ -3470,24 +3482,52 @@ static void axyne_workspace_show_error(HWND window, const char *prefix,
     MessageBoxA(window, message, "Axyne - Workspace", MB_OK | MB_ICONERROR);
 }
 
-static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
+/* ---- persistent recent items (state.json) -------------------------------- */
+
+static void axyne_app_state_persist(AxyneWindowState *state)
 {
-    char *root = NULL;
+    AxyneError error;
+    if (state->app_state_path == NULL) return;
+    if (axyne_app_state_save(&state->app_state, state->app_state_path, &error) != AXYNE_STATUS_OK)
+        axyne_log_warn("state", "cannot save %s: %s", state->app_state_path, error.message);
+}
+
+static void axyne_remember_recent_file(AxyneWindowState *state, const char *path)
+{
+    if (path == NULL || path[0] == '\0') return;
+    if (axyne_app_state_add_recent_file(&state->app_state, path) == AXYNE_STATUS_OK)
+        axyne_app_state_persist(state);
+}
+
+static int axyne_directory_exists(const char *utf8_path)
+{
+    wchar_t *wide = axyne_wide(utf8_path);
+    DWORD attributes;
+    if (wide == NULL) return 0;
+    attributes = GetFileAttributesW(wide);
+    free(wide);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+/* Opens `root` as the workspace and records it as the most recent folder.
+ * `quiet` suppresses error dialogs (startup restore). */
+static int axyne_workspace_open_root(HWND window, AxyneWindowState *state,
+                                     const char *root, int quiet)
+{
     AxyneWatcher *watcher = NULL;
     AxyneError error;
     AxyneStatus status;
-    if (!axyne_choose_folder(window, &root)) return 0;
     status = axyne_watcher_start(root, axyne_workspace_watch_callback, window,
                                  &watcher, &error);
     if (status != AXYNE_STATUS_OK) {
-        axyne_workspace_show_error(window, "Unable to watch workspace", &error);
-        free(root); return 0;
+        if (!quiet) axyne_workspace_show_error(window, "Unable to watch workspace", &error);
+        return 0;
     }
     status = axyne_explorer_set_root(&state->explorer, root, &error);
     if (status != AXYNE_STATUS_OK) {
         axyne_watcher_stop(watcher); axyne_watcher_release(watcher);
-        axyne_workspace_show_error(window, "Unable to open workspace", &error);
-        free(root); return 0;
+        if (!quiet) axyne_workspace_show_error(window, "Unable to open workspace", &error);
+        return 0;
     }
     if (state->watcher != NULL) {
         axyne_watcher_stop(state->watcher);
@@ -3497,10 +3537,36 @@ static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
     state->explorer_has_selection = 0;
     state->explorer_scroll = 0;
     axyne_load_workspace_preferences(state, root);
-    free(root);
+    if (axyne_app_state_add_recent_folder(&state->app_state, root) == AXYNE_STATUS_OK)
+        axyne_app_state_persist(state);
     axyne_git_panel_reset(window, state);
     InvalidateRect(window, NULL, FALSE);
     return 1;
+}
+
+static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
+{
+    char *root = NULL;
+    int opened;
+    if (!axyne_choose_folder(window, &root)) return 0;
+    opened = axyne_workspace_open_root(window, state, root, 0);
+    free(root);
+    return opened;
+}
+
+/* Startup: reopen the workspace the previous session used last. A folder
+ * that no longer exists is dropped from the list instead. */
+static void axyne_workspace_restore(HWND window, AxyneWindowState *state)
+{
+    char *root;
+    if (state->explorer.root != NULL || state->app_state.recent_folder_count == 0) return;
+    root = _strdup(state->app_state.recent_folders[0]);
+    if (root == NULL) return;
+    if (!axyne_directory_exists(root) || !axyne_workspace_open_root(window, state, root, 1)) {
+        (void)axyne_app_state_remove_recent_folder(&state->app_state, root);
+        axyne_app_state_persist(state);
+    }
+    free(root);
 }
 
 /* The outline section is part of the explorer tab only. */
@@ -4233,6 +4299,27 @@ static void axyne_style_popup_menu_windows(void)
     EnumWindows(axyne_style_popup_menu_window, 0);
 }
 
+/* Entries per kind in the File > 최근 항목 submenu. */
+enum { AXYNE_RECENT_MENU_MAX = 8 };
+
+/* "main.c — D:\dev\axyne\src": file name, then its folder (Figma 24:14190). */
+static wchar_t *axyne_recent_file_label(const char *utf8_path)
+{
+    wchar_t *path = axyne_wide(utf8_path), *label, *name;
+    size_t capacity;
+    if (path == NULL) return NULL;
+    name = wcsrchr(path, L'\\');
+    if (name == NULL || (wcsrchr(path, L'/') != NULL && wcsrchr(path, L'/') > name))
+        name = wcsrchr(path, L'/');
+    if (name == NULL) return path;
+    *name++ = L'\0';
+    capacity = wcslen(name) + wcslen(path) + 4;
+    label = (wchar_t *)malloc(capacity * sizeof(*label));
+    if (label != NULL) (void)swprintf_s(label, capacity, L"%ls \u2014 %ls", name, path[0] ? path : L"\\");
+    free(path);
+    return label;
+}
+
 static void axyne_file_popup(HWND window, AxyneWindowState *state)
 {
     AxyneMenuItem *pool = NULL;
@@ -4252,16 +4339,28 @@ static void axyne_file_popup(HWND window, AxyneWindowState *state)
     axyne_menu_add(menu, &pool, AXYNE_CMD_OPEN, L"열기...", L"Ctrl+O", MF_ENABLED);
     axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE, L"폴더 열기...", L"Ctrl+Shift+O", MF_ENABLED);
     axyne_menu_separator(menu, &pool);
-    for (i = 0; i < state->documents.recent_count; ++i) {
-        wchar_t *path = axyne_wide(state->documents.recent_paths[i]);
+    for (i = 0; i < state->app_state.recent_folder_count && i < AXYNE_RECENT_MENU_MAX; ++i) {
+        wchar_t *path = axyne_wide(state->app_state.recent_folders[i]);
         if (path != NULL) {
-            axyne_menu_add(recent, &pool, AXYNE_CMD_RECENT_BASE + (UINT)i, path,
+            axyne_menu_add(recent, &pool, AXYNE_CMD_RECENT_FOLDER_BASE + (UINT)i, path,
                            NULL, MF_ENABLED);
             free(path);
         }
     }
-    if (state->documents.recent_count == 0)
+    for (i = 0; i < state->app_state.recent_file_count && i < AXYNE_RECENT_MENU_MAX; ++i) {
+        wchar_t *label = axyne_recent_file_label(state->app_state.recent_files[i]);
+        if (label != NULL) {
+            axyne_menu_add(recent, &pool, AXYNE_CMD_RECENT_BASE + (UINT)i, label,
+                           NULL, MF_ENABLED);
+            free(label);
+        }
+    }
+    if (state->app_state.recent_folder_count == 0 && state->app_state.recent_file_count == 0) {
         axyne_menu_add(recent, &pool, 0, L"최근 항목 없음", NULL, MF_GRAYED);
+    } else {
+        axyne_menu_separator(recent, &pool);
+        axyne_menu_add(recent, &pool, AXYNE_CMD_RECENT_CLEAR, L"최근 항목 지우기", NULL, MF_ENABLED);
+    }
     axyne_menu_seal(recent);
     axyne_menu_submenu(menu, &pool, recent, L"최근 항목", MF_ENABLED);
     axyne_menu_separator(menu, &pool);
@@ -9296,8 +9395,19 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         axyne_update_title(window, state);
         axyne_layout(window, state);
         if (state->editor != NULL) SetFocus(state->editor);
+        axyne_app_state_init(&state->app_state);
+        state->app_state_path = axyne_app_path(AXYNE_APP_PATH_STATE);
+        if (state->app_state_path != NULL) {
+            AxyneError state_error;
+            if (axyne_app_state_load(state->app_state_path, &state->app_state, &state_error) != AXYNE_STATUS_OK)
+                axyne_log_warn("state", "ignoring %s: %s", state->app_state_path, state_error.message);
+        }
+        PostMessageW(window, AXYNE_WM_RESTORE_WORKSPACE, 0, 0);
         return 0;
     }
+    case AXYNE_WM_RESTORE_WORKSPACE:
+        if (state != NULL) axyne_workspace_restore(window, state);
+        return 0;
     case WM_SIZE:
         axyne_layout(window, state);
         return 0;
@@ -9826,10 +9936,27 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             (void)axyne_edit_command(state, command);
         else if (command >= AXYNE_CMD_WORKSPACE && command <= AXYNE_CMD_EXPLORER_REMOVE)
             axyne_workspace_operation(window, state, command);
-        else if (command >= AXYNE_CMD_RECENT_BASE &&
-                 command - AXYNE_CMD_RECENT_BASE < state->documents.recent_count)
-            axyne_open_document(window, state,
-                state->documents.recent_paths[command - AXYNE_CMD_RECENT_BASE]);
+        else if (command == AXYNE_CMD_RECENT_CLEAR) {
+            axyne_app_state_clear_recent(&state->app_state);
+            axyne_app_state_persist(state);
+        } else if (command >= AXYNE_CMD_RECENT_FOLDER_BASE && command < AXYNE_CMD_RECENT_CLEAR &&
+                   command - AXYNE_CMD_RECENT_FOLDER_BASE < state->app_state.recent_folder_count) {
+            char *root = _strdup(state->app_state.recent_folders[command - AXYNE_CMD_RECENT_FOLDER_BASE]);
+            if (root != NULL && !axyne_directory_exists(root)) {
+                MessageBoxW(window, L"폴더를 찾을 수 없어 최근 항목에서 제거합니다.", L"Axyne",
+                            MB_OK | MB_ICONINFORMATION);
+                (void)axyne_app_state_remove_recent_folder(&state->app_state, root);
+                axyne_app_state_persist(state);
+            } else if (root != NULL) {
+                (void)axyne_workspace_open_root(window, state, root, 0);
+            }
+            free(root);
+        } else if (command >= AXYNE_CMD_RECENT_BASE && command < AXYNE_CMD_RECENT_FOLDER_BASE &&
+                   command - AXYNE_CMD_RECENT_BASE < state->app_state.recent_file_count) {
+            char *path = _strdup(state->app_state.recent_files[command - AXYNE_CMD_RECENT_BASE]);
+            if (path != NULL) axyne_open_document(window, state, path);
+            free(path);
+        }
         return 0;
     }
     case WM_CTLCOLOREDIT:
@@ -10227,6 +10354,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->font_mono_small != NULL) DeleteObject(state->font_mono_small);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
+            axyne_app_state_clear(&state->app_state);
+            axyne_app_path_free(state->app_state_path);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
             HeapFree(GetProcessHeap(), 0, state);
         }
