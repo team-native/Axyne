@@ -9751,7 +9751,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 _snwprintf(title, sizeof(title) / sizeof(title[0]),
                            L"Axyne %s%s", version,
                            command == AXYNE_CMD_CHECK_FOR_UPDATES
-                               ? L" - Update Check" : L" - Release Notes");
+                               ? L" - Offline Update Check" : L" - Release Notes");
                 MessageBoxW(window, notes, title, MB_OK | MB_ICONINFORMATION);
             }
             free(notes);

@@ -4910,9 +4910,10 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     NSString *version = [NSString stringWithUTF8String:axyne_release_notes_version()];
     NSString *notes = [NSString stringWithUTF8String:axyne_release_notes_text()];
-    [alert setMessageText:@"You are up to date"];
+    [alert setMessageText:@"Update check unavailable offline"];
     [alert setInformativeText:[NSString stringWithFormat:
-        @"Axyne %@ is the latest packaged version.\n\n%@", version, notes]];
+        @"Axyne does not contact an online update service. The installed "
+         "package is version %@.\n\n%@", version, notes]];
     [alert addButtonWithTitle:@"Close"];
     [alert beginSheetModalForWindow:[self window] completionHandler:nil];
 }
