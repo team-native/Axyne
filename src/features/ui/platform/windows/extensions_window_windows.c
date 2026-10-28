@@ -283,6 +283,8 @@ static void ew_layout_fields(EwState *st)
             SetWindowPos(st->fields[i], NULL, box.left + 9, box.top + 7, box.right - box.left - 18,
                          box.bottom - box.top - 12, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         } else {
+            /* Keys must not keep going to a hidden field. */
+            if (GetFocus() == st->fields[i]) SetFocus(st->window);
             ShowWindow(st->fields[i], SW_HIDE);
         }
     }
@@ -521,16 +523,13 @@ static void ew_search(EwState *st)
 static void ew_market_install(EwState *st, int index)
 {
     const AxyneMarketItem *item;
-    wchar_t temp_dir[MAX_PATH], zip[MAX_PATH + 96];
-    wchar_t *slug;
+    wchar_t temp_dir[MAX_PATH], zip[MAX_PATH];
     char *zip_path, *installed = NULL;
     AxyneError error;
     if (index < 0 || (size_t)index >= st->market.count) return;
     item = &st->market.items[index];
-    if (GetTempPathW(MAX_PATH, temp_dir) == 0) return;
-    slug = ew_wide(item->slug);
-    (void)swprintf_s(zip, sizeof(zip) / sizeof(zip[0]), L"%lsaxyne-%ls.zip", temp_dir, slug != NULL ? slug : L"plugin");
-    free(slug);
+    /* A fresh temp file; the slug never becomes part of a path here. */
+    if (GetTempPathW(MAX_PATH, temp_dir) == 0 || GetTempFileNameW(temp_dir, L"axp", 0, zip) == 0) return;
     zip_path = ew_utf8(zip);
     if (zip_path == NULL) return;
     ew_busy(st);
@@ -538,6 +537,8 @@ static void ew_market_install(EwState *st, int index)
         ew_message(st, L"플러그인을 내려받지 못했습니다.", error.message, MB_ICONERROR);
     } else if (axyne_plugins_install_zip(st->plugins, zip_path, st->ide_version, &installed, &error) != AXYNE_STATUS_OK) {
         ew_message(st, L"플러그인을 설치하지 못했습니다.", error.message, MB_ICONERROR);
+    } else if (installed != NULL && strcmp(installed, item->slug) != 0) {
+        ew_message(st, L"내려받은 패키지의 id가 목록과 다릅니다.", installed, MB_ICONWARNING);
     } else {
         ew_set_notice(st, 0, L"설치했습니다:", item->name);
     }
@@ -561,9 +562,12 @@ static void ew_submit_account(EwState *st)
     }
     ew_busy(st);
     status = st->register_mode ? axyne_account_register(st->server, email, name, password, &error) : AXYNE_STATUS_OK;
-    if (status == AXYNE_STATUS_OK) status = axyne_account_login(st->server, email, password, &st->account, &error);
     if (status != AXYNE_STATUS_OK) {
-        ew_set_notice(st, 1, st->register_mode ? L"가입하지 못했습니다." : L"로그인하지 못했습니다.", error.message);
+        ew_set_notice(st, 1, L"가입하지 못했습니다.", error.message);
+    } else if ((status = axyne_account_login(st->server, email, password, &st->account, &error)) != AXYNE_STATUS_OK) {
+        ew_set_notice(st, 1, st->register_mode ? L"가입했지만 로그인하지 못했습니다." : L"로그인하지 못했습니다.",
+                      error.message);
+        st->register_mode = 0;
     } else {
         if (axyne_account_save(st->config_dir, &st->account, &error) != AXYNE_STATUS_OK)
             ew_set_notice(st, 1, L"로그인했지만 계정 정보를 저장하지 못했습니다.", error.message);
@@ -597,6 +601,21 @@ static void ew_open_page(EwState *st, int page)
     InvalidateRect(st->window, NULL, FALSE);
     if (page == AXYNE_EXTENSIONS_MARKETPLACE && !st->market_loaded) {
         ew_search(st);
+        InvalidateRect(st->window, NULL, FALSE);
+    }
+    if (page == AXYNE_EXTENSIONS_ACCOUNT && axyne_account_signed_in(&st->account)) {
+        /* Confirm the stored session (renewing it if needed). */
+        AxyneError error;
+        AxyneStatus status;
+        ew_busy(st);
+        status = axyne_account_refresh_profile(st->server, &st->account, &error);
+        if (status == AXYNE_STATUS_OK || status == AXYNE_STATUS_PERMISSION_DENIED)
+            (void)axyne_account_save(st->config_dir, &st->account, NULL);
+        if (status == AXYNE_STATUS_PERMISSION_DENIED)
+            ew_set_notice(st, 1, L"로그인이 만료되었습니다. 다시 로그인하세요.", NULL);
+        else if (status != AXYNE_STATUS_OK)
+            ew_set_notice(st, 1, L"계정 정보를 확인하지 못했습니다.", error.message);
+        ew_layout_fields(st);
         InvalidateRect(st->window, NULL, FALSE);
     }
 }

@@ -12,6 +12,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <sys/stat.h>
 #endif
 
 static AxyneStatus fail(AxyneError *error, AxyneStatus code, const char *format, ...)
@@ -268,6 +270,10 @@ AxyneStatus axyne_account_save(const char *config_dir, const AxyneAccount *accou
         status = doc == NULL ? fail(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory")
                  : axyne_app_paths_ensure_directory(config_dir, error);
         if (status == AXYNE_STATUS_OK) status = axyne_settings_save(doc, path, error);
+#ifndef _WIN32
+        /* Tokens: owner-only. */
+        if (status == AXYNE_STATUS_OK) (void)chmod(path, S_IRUSR | S_IWUSR);
+#endif
         axyne_settings_destroy(doc);
     }
     axyne_app_path_free(path);
@@ -362,6 +368,7 @@ AxyneStatus axyne_account_refresh_profile(const char *base_url, AxyneAccount *ac
         axyne_settings_destroy(reply);
         if (status == AXYNE_STATUS_OK) status = fetch_profile(base_url, account, NULL, error);
     }
+    if (status == AXYNE_STATUS_PERMISSION_DENIED) axyne_account_clear(account);
     return status;
 }
 
@@ -374,6 +381,20 @@ void axyne_account_logout(const char *base_url, AxyneAccount *account)
 }
 
 /* ---- marketplace ------------------------------------------------------------------ */
+
+/* Same rule as plugin ids: lower-case letters, digits, '-' and '.', not
+ * starting with '.', at most 64 characters. Slugs come from the network and
+ * end up in file names and URLs. */
+static int valid_slug(const char *slug)
+{
+    size_t i, length = slug != NULL ? strlen(slug) : 0;
+    if (length == 0 || length > 64 || slug[0] == '.') return 0;
+    for (i = 0; i < length; ++i) {
+        char c = slug[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return 0;
+    }
+    return 1;
+}
 
 void axyne_market_list_clear(AxyneMarketList *list)
 {
@@ -414,7 +435,8 @@ static AxyneStatus parse_list_doc(const AxyneSettings *doc, AxyneMarketList *lis
 #undef AXYNE_FIELD
         (void)snprintf(pointer, sizeof(pointer), "%s/download_count", base);
         item->downloads = json_number(doc, pointer);
-        if (item->slug == NULL) {
+        if (!valid_slug(item->slug)) {
+            free(item->slug);
             free(item->name); free(item->description); free(item->developer);
             free(item->category); free(item->version);
             memset(item, 0, sizeof(*item));
@@ -574,7 +596,14 @@ AxyneStatus axyne_market_decode_package(const char *json, unsigned char **data, 
         status = fail(error, AXYNE_STATUS_IO_ERROR, "패키지 내용을 해석할 수 없습니다.");
     } else {
         axyne_sha256_hex(*data, *length, actual);
-        if (expected != NULL && strcmp(actual, expected) != 0) {
+        size_t k;
+        int match = expected != NULL && strlen(expected) == 64;
+        for (k = 0; match && k < 64; ++k) {
+            char c = expected[k];
+            if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+            if (c != actual[k]) match = 0;
+        }
+        if (!match) {
             free(*data);
             *data = NULL;
             *length = 0;
@@ -619,7 +648,7 @@ AxyneStatus axyne_market_download(const char *base_url, const char *slug, const 
     AxyneStatus status;
     unsigned char *data = NULL;
     size_t length = 0;
-    if (slug == NULL || zip_path == NULL) { free(s); free(o); free(v); return fail(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid plugin"); }
+    if (!valid_slug(slug) || zip_path == NULL) { free(s); free(o); free(v); return fail(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid plugin"); }
     if (s != NULL && o != NULL && v != NULL) {
         size_t size = strlen(s) + strlen(o) + strlen(v) + 48;
         path = (char *)malloc(size);

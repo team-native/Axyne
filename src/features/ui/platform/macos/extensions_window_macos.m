@@ -261,6 +261,7 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
         [field setFont:[NSFont systemFontOfSize:12]];
         [[field cell] setUsesSingleLineMode:YES];
         [[field cell] setScrollable:YES];
+        [[field cell] setSendsActionOnEndEditing:NO];
         [field setTarget:self];
         [field setAction:i == EW_FIELD_SEARCH ? @selector(searchAction:) : @selector(submitAction:)];
         [field setHidden:YES];
@@ -282,6 +283,7 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
             [_fields[i] setFrame:NSMakeRect(box.origin.x + 9, box.origin.y + 7, box.size.width - 18, box.size.height - 13)];
             [_fields[i] setHidden:NO];
         } else {
+            if ([_fields[i] currentEditor] != nil) [[self window] makeFirstResponder:self];
             [_fields[i] setHidden:YES];
         }
     }
@@ -447,8 +449,9 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     AxyneError error;
     if (index < 0 || (size_t)index >= _market.count) return;
     item = &_market.items[index];
+    /* The slug never becomes part of a path here. */
     zip = [NSTemporaryDirectory() stringByAppendingPathComponent:
-           [NSString stringWithFormat:@"axyne-%@.zip", ew_string(item->slug)]];
+           [NSString stringWithFormat:@"axyne-%@.zip", [[NSUUID UUID] UUIDString]]];
     [self busy];
     if (axyne_market_download(_server, item->slug, "macos", _ideVersion, [zip fileSystemRepresentation], &error)
         != AXYNE_STATUS_OK)
@@ -456,6 +459,8 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     else if (axyne_plugins_install_zip(_plugins, [zip fileSystemRepresentation], _ideVersion, &installed, &error)
              != AXYNE_STATUS_OK)
         [self message:@"플러그인을 설치하지 못했습니다." detail:error.message];
+    else if (installed != NULL && strcmp(installed, item->slug) != 0)
+        [self message:@"내려받은 패키지의 id가 목록과 다릅니다." detail:installed];
     else
         [self setNotice:@"설치했습니다:" detail:item->name error:NO];
     [[NSFileManager defaultManager] removeItemAtPath:zip error:NULL];
@@ -479,9 +484,12 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     }
     [self busy];
     status = _registerMode ? axyne_account_register(_server, email, name, password, &error) : AXYNE_STATUS_OK;
-    if (status == AXYNE_STATUS_OK) status = axyne_account_login(_server, email, password, &_account, &error);
     if (status != AXYNE_STATUS_OK) {
-        [self setNotice:_registerMode ? @"가입하지 못했습니다." : @"로그인하지 못했습니다." detail:error.message error:YES];
+        [self setNotice:@"가입하지 못했습니다." detail:error.message error:YES];
+    } else if ((status = axyne_account_login(_server, email, password, &_account, &error)) != AXYNE_STATUS_OK) {
+        [self setNotice:_registerMode ? @"가입했지만 로그인하지 못했습니다." : @"로그인하지 못했습니다."
+                 detail:error.message error:YES];
+        _registerMode = NO;
     } else {
         if (axyne_account_save(_configDir, &_account, &error) != AXYNE_STATUS_OK)
             [self setNotice:@"로그인했지만 계정 정보를 저장하지 못했습니다." detail:error.message error:YES];
@@ -519,6 +527,21 @@ done:
     [[self window] makeFirstResponder:self];
     [self setNeedsDisplay:YES];
     if (page == AXYNE_EXTENSIONS_MARKETPLACE && !_marketLoaded) [self search];
+    if (page == AXYNE_EXTENSIONS_ACCOUNT && axyne_account_signed_in(&_account)) {
+        /* Confirm the stored session (renewing it if needed). */
+        AxyneError error;
+        AxyneStatus status;
+        [self busy];
+        status = axyne_account_refresh_profile(_server, &_account, &error);
+        if (status == AXYNE_STATUS_OK || status == AXYNE_STATUS_PERMISSION_DENIED)
+            (void)axyne_account_save(_configDir, &_account, NULL);
+        if (status == AXYNE_STATUS_PERMISSION_DENIED)
+            [self setNotice:@"로그인이 만료되었습니다. 다시 로그인하세요." detail:NULL error:YES];
+        else if (status != AXYNE_STATUS_OK)
+            [self setNotice:@"계정 정보를 확인하지 못했습니다." detail:error.message error:YES];
+        [self layoutFields];
+        [self setNeedsDisplay:YES];
+    }
 }
 
 - (void)drawRect:(NSRect)dirty

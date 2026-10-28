@@ -51,6 +51,12 @@ AxyneStatus axyne_http_request(const char *method, const char *url, const char *
     if (method == NULL || url == NULL || response == NULL)
         return http_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid HTTP request");
     memset(response, 0, sizeof(*response));
+    if (bearer != NULL) {
+        const char *c;
+        for (c = bearer; *c; ++c)
+            if ((unsigned char)*c < 0x20 || *c == 0x7f)
+                return http_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid token");
+    }
     wide_url = to_wide(url);
     wide_method = to_wide(method);
     if (wide_url == NULL || wide_method == NULL) {
@@ -81,6 +87,9 @@ AxyneStatus axyne_http_request(const char *method, const char *url, const char *
 
     session = WinHttpOpen(L"Axyne", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (session == NULL) /* AUTOMATIC_PROXY needs Windows 8.1+ */
+        session = WinHttpOpen(L"Axyne", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (session == NULL) {
         status = http_error(error, AXYNE_STATUS_IO_ERROR, "cannot start the HTTP client");
         goto done;

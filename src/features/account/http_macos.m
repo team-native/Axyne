@@ -40,8 +40,13 @@ AxyneStatus axyne_http_request(const char *method, const char *url, const char *
         return http_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid HTTP request");
     memset(response, 0, sizeof(*response));
     pool = [[NSAutoreleasePool alloc] init];
-    address = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
-    if (address == nil) {
+    {
+        NSString *text = [NSString stringWithUTF8String:url];
+        address = text != nil ? [NSURL URLWithString:text] : nil;
+    }
+    if (address == nil || [NSString stringWithUTF8String:method] == nil ||
+        (bearer != NULL && [NSString stringWithUTF8String:bearer] == nil) ||
+        (bearer != NULL && strpbrk(bearer, "\r\n") != NULL)) {
         [pool release];
         return http_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "invalid server address");
     }
@@ -50,7 +55,7 @@ AxyneStatus axyne_http_request(const char *method, const char *url, const char *
     [request setTimeoutInterval:AXYNE_HTTP_TIMEOUT_MS / 1000.0];
     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
     if (bearer != NULL)
-        [request setValue:[NSString stringWithFormat:@"Bearer %s", bearer] forHTTPHeaderField:@"Authorization"];
+        [request setValue:[@"Bearer " stringByAppendingString:[NSString stringWithUTF8String:bearer]] forHTTPHeaderField:@"Authorization"];
     if (json_body != NULL) {
         [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [request setHTTPBody:[NSData dataWithBytes:json_body length:strlen(json_body)]];
