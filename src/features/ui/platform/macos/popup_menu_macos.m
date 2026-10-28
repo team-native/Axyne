@@ -1,9 +1,26 @@
 #import "popup_menu_macos.h"
+#import <objc/runtime.h>
 
 #include <math.h>
 #include <stdlib.h>
 
 #include "axyne/popup_menu_layout.h"
+
+/* Key text attached to a menu item (associated object, copied). */
+static char axyne_popup_key_text_key;
+
+void axyne_popup_set_key_text(NSMenuItem *item, NSString *text)
+{
+    if (item == nil) return;
+    objc_setAssociatedObject(item, &axyne_popup_key_text_key, text,
+                             OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+NSString *axyne_popup_key_text(NSMenuItem *item)
+{
+    if (item == nil) return nil;
+    return (NSString *)objc_getAssociatedObject(item, &axyne_popup_key_text_key);
+}
 
 static NSColor *axyne_popup_color(uint32_t rgb)
 {
@@ -140,6 +157,15 @@ static BOOL axyne_popup_item_enabled(NSMenuItem *item)
             if ([item submenu] != nil) {
                 CGFloat width = ceil([@"›" sizeWithAttributes:arrowAttributes].width);
                 if (width > trailing) trailing = width;
+            } else if (axyne_popup_key_text(item) != nil) {
+                /* Registry items carry the key map's text, which can show
+                 * a two-stroke chord AppKit's key equivalent cannot. */
+                NSString *shown = axyne_popup_key_text(item);
+                if ([shown length] > 0) {
+                    CGFloat width = ceil([shown sizeWithAttributes:accelAttributes].width);
+                    if (width > trailing) trailing = width;
+                    accel = shown;
+                }
             } else {
                 NSString *equivalent = [item keyEquivalent];
                 if ([equivalent length] > 0) {

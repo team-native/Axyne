@@ -82,7 +82,7 @@ typedef enum AxyneKeyFormat {
 } AxyneKeyFormat;
 
 /* The menu style for a platform. */
-AxyneKeyFormat axyne_key_format_for(AxynePlatform platform);
+AxyneKeyFormat axyne_key_format_for(AxyneCommandPlatform platform);
 
 /* Parses one stroke such as "Ctrl+Shift+S", "F5", "Alt+Up", "Cmd+,".
  * Modifier names are case-insensitive: Ctrl/Control, Shift, Alt/Option/Opt,
@@ -145,7 +145,7 @@ typedef struct AxyneKeymap {
     AxyneKeymapEntry *entries;
     size_t count;
     size_t capacity;
-    AxynePlatform platform;
+    AxyneCommandPlatform platform;
     int altgr_exclusion;
     int has_pending;
     AxyneKeyStroke pending;
@@ -155,7 +155,7 @@ typedef struct AxyneKeymap {
 /* Builds the default map of `platform` from the registry (commands that do
  * not exist on the platform are skipped). AltGr exclusion starts enabled on
  * Windows and disabled on macOS. Release with axyne_keymap_destroy. */
-AxyneStatus axyne_keymap_init(AxyneKeymap *map, AxynePlatform platform);
+AxyneStatus axyne_keymap_init(AxyneKeymap *map, AxyneCommandPlatform platform);
 /* Frees the entries; the map can be initialised again. Safe on a zeroed map. */
 void axyne_keymap_destroy(AxyneKeymap *map);
 
@@ -228,7 +228,7 @@ AxyneStatus axyne_keymap_apply_preferences(AxyneKeymap *map,
 /* axyne_keymap_init followed by axyne_keymap_apply_preferences (NULL
  * preferences = defaults only). The map is initialised (and must be
  * destroyed) whenever init succeeded, even if applying reports an error. */
-AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxynePlatform platform,
+AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxyneCommandPlatform platform,
                                const struct AxynePreferences *preferences);
 
 /* Conversions between a stroke and the legacy preference binding form
@@ -237,9 +237,9 @@ AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxynePlatform platform,
  * Return 1 on success, 0 when the value cannot be represented (e.g. Cmd on
  * Windows, unknown key text, key text longer than key_capacity - 1). */
 int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
-                                    AxynePlatform platform,
+                                    AxyneCommandPlatform platform,
                                     AxyneKeyStroke *stroke);
-int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
+int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxyneCommandPlatform platform,
                                   unsigned int *modifiers, char *key,
                                   size_t key_capacity);
 

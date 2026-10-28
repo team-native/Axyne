@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "axyne/filesystem.h"
 #include "axyne/keymap.h"
 #include "axyne/log.h"
 #include "axyne/preferences.h"
@@ -174,7 +175,7 @@ static int axyne_test_settings_v2(const char *root)
     V2_CHECK(axyne_test_json_string_is(path, "/debugger/backend", "custom"));
 
     /* The key map honours both binding views. */
-    V2_CHECK(axyne_keymap_build(&map, AXYNE_PLATFORM_WINDOWS, loaded) == AXYNE_STATUS_OK);
+    V2_CHECK(axyne_keymap_build(&map, AXYNE_COMMAND_PLATFORM_WINDOWS, loaded) == AXYNE_STATUS_OK);
     V2_CHECK(axyne_keymap_feed(&map, axyne_test_stroke("Ctrl+Q"), 0, 0, &command) ==
                  AXYNE_KEYMAP_COMMAND && command == AXYNE_COMMAND_FILE_SAVE);
     V2_CHECK(axyne_keymap_feed(&map, axyne_test_stroke("Ctrl+S"), 0, 0, &command) == AXYNE_KEYMAP_NONE);
@@ -344,7 +345,7 @@ static int axyne_test_settings_v2(const char *root)
     {
         AxyneKeyStroke run;
         V2_CHECK(binding != NULL && axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key,
-                                                                    axyne_platform_current(), &run));
+                                                                    axyne_command_platform_current(), &run));
         V2_CHECK(axyne_key_stroke_equal(run, axyne_test_stroke("Ctrl+F5")));
     }
     V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 0);
@@ -421,6 +422,27 @@ static int axyne_test_settings_v2(const char *root)
         resolved = axyne_preferences_read_path(directory);
         V2_CHECK(resolved != NULL && strcmp(resolved, legacy_path) == 0);
         axyne_preferences_free_path(resolved);
+        /* Adopting the old file copies it byte for byte and keeps it. */
+        V2_CHECK(axyne_preferences_adopt_legacy_file(empty, &error) == AXYNE_STATUS_NOT_FOUND);
+        {
+            char *legacy_bytes = NULL, *adopted_bytes = NULL;
+            size_t legacy_length = 0, adopted_length = 0;
+            V2_CHECK(axyne_fs_read_file(legacy_path, &legacy_bytes, &legacy_length, NULL) ==
+                     AXYNE_STATUS_OK);
+            V2_CHECK(axyne_preferences_adopt_legacy_file(directory, &error) == AXYNE_STATUS_OK);
+            V2_CHECK(axyne_fs_read_file(path, &adopted_bytes, &adopted_length, NULL) ==
+                     AXYNE_STATUS_OK);
+            V2_CHECK(legacy_length == adopted_length &&
+                     memcmp(legacy_bytes, adopted_bytes, legacy_length) == 0);
+            axyne_fs_free(legacy_bytes);
+            axyne_fs_free(adopted_bytes);
+            resolved = axyne_preferences_read_path(directory);
+            V2_CHECK(resolved != NULL && strcmp(resolved, path) == 0);
+            axyne_preferences_free_path(resolved);
+            /* An existing settings.json is left alone. */
+            V2_CHECK(axyne_preferences_adopt_legacy_file(directory, &error) == AXYNE_STATUS_OK);
+            axyne_test_remove_file(path);
+        }
         resolved = axyne_preferences_write_path(directory);
         V2_CHECK(resolved != NULL && strcmp(resolved, path) == 0);
         axyne_preferences_free_path(resolved);
