@@ -44,6 +44,8 @@
 #include "../../debugger_actions.h"
 #include "../../preferences_window.h"
 #include "../../app_dialogs.h"
+#include "../../extensions_window.h"
+#include "axyne/plugins.h"
 #include <unistd.h>
 
 @interface NSObject (AxyneScintillaMessages)
@@ -1424,6 +1426,11 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _explorerSelection;
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
+    /* Installed plugins, scanned the first time Tools > 플러그인 or the
+     * 확장 window needs them (nothing plugin-related runs at startup). */
+    AxynePluginSet _plugins;
+    BOOL _pluginsLoaded;
+    NSMenu *_pluginsMenu;
     /* state.json: persistent recent files/folders. */
     AxyneAppState _appState;
     char *_appStatePath;
@@ -1683,6 +1690,10 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (BOOL)confirmCloseAll;
 - (void)notification:(SCNotification *)notification;
 - (void)setRecentMenu:(NSMenu *)menu;
+- (void)setPluginsMenu:(NSMenu *)menu;
+- (void)ensurePlugins;
+- (void)runPluginCommand:(id)sender;
+- (void)showExtensions:(id)sender;
 - (void)refreshRecentMenu;
 - (BOOL)captureEditor;
 - (void)refreshActionControls;
@@ -5752,6 +5763,133 @@ static void axyne_macos_git_exit(AxyneProcess *process, int exit_code,
     }
 }
 
+/* ---- plugins ---------------------------------------------------------------- */
+
+- (void)ensurePlugins
+{
+    char *config, *pluginsDir, *statePath;
+    if (_pluginsLoaded) return;
+    _pluginsLoaded = YES;
+    config = axyne_app_path(AXYNE_APP_PATH_CONFIG_DIR);
+    if (config == NULL) return;
+    pluginsDir = axyne_app_path_join(config, "plugins");
+    statePath = axyne_app_path_join(config, "plugins.json");
+    if (pluginsDir != NULL)
+        (void)axyne_plugins_load(&_plugins, pluginsDir, statePath, AXYNE_CONFIG_VERSION, NULL);
+    axyne_app_path_free(pluginsDir);
+    axyne_app_path_free(statePath);
+    axyne_app_path_free(config);
+}
+
+- (void)setPluginsMenu:(NSMenu *)menu
+{
+    [_pluginsMenu release];
+    _pluginsMenu = [menu retain];
+    [_pluginsMenu setDelegate:(id<NSMenuDelegate>)self];
+}
+
+/* Tools > 플러그인 is rebuilt each time it opens: item tag n is the n-th
+ * command of the enabled, compatible plugins in set order. */
+- (void)menuNeedsUpdate:(NSMenu *)menu
+{
+    AxyneDocument *doc = [self activeDocument];
+    const char *path = doc != NULL && !doc->is_untitled ? doc->path : NULL;
+    NSInteger n = 0;
+    size_t i, j;
+    if (menu != _pluginsMenu) return;
+    [self ensurePlugins];
+    [menu removeAllItems];
+    for (i = 0; i < _plugins.count; ++i) {
+        const AxynePlugin *plugin = &_plugins.items[i];
+        if (!plugin->enabled || !plugin->compatible) continue;
+        for (j = 0; j < plugin->command_count; ++j, ++n) {
+            NSString *title = [NSString stringWithFormat:@"%s: %s", plugin->name, plugin->commands[j].title];
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title != nil ? title : @""
+                action:axyne_plugin_command_applies(&plugin->commands[j], path) ? @selector(runPluginCommand:) : NULL
+                keyEquivalent:@""];
+            [item setTarget:self];
+            [item setTag:n];
+            [menu addItem:item];
+            [item release];
+        }
+    }
+    if (n == 0) {
+        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"설치된 플러그인 명령 없음" action:NULL keyEquivalent:@""];
+        [empty setEnabled:NO];
+        [menu addItem:empty];
+        [empty release];
+    }
+    axyne_macos_style_menu(menu);
+}
+
+/* Runs a plugin command as an external process in the output panel, the
+ * same way Build/Run do (Stop terminates it). */
+- (void)runPluginCommand:(id)sender
+{
+    NSInteger target = [sender tag], n = 0;
+    AxynePlugin *plugin = NULL;
+    AxynePluginCommand *command = NULL;
+    AxynePluginInvocation invocation;
+    AxynePluginContext context;
+    AxyneProcessSpec spec;
+    AxyneDocument *doc = [self activeDocument];
+    AxyneError error;
+    char header[320];
+    size_t i, j;
+    [self ensurePlugins];
+    for (i = 0; i < _plugins.count && command == NULL; ++i) {
+        AxynePlugin *item = &_plugins.items[i];
+        if (!item->enabled || !item->compatible) continue;
+        for (j = 0; j < item->command_count; ++j, ++n)
+            if (n == target) { plugin = item; command = &item->commands[j]; break; }
+    }
+    if (command == NULL) return;
+    [self selectOutputPanel];
+    if (_actionProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *busy = "[plugin] Another action is running. Stop it first.\n";
+        [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    if (doc != NULL && doc->is_dirty && !doc->is_untitled) (void)[self saveActive];
+    context.file = doc != NULL && !doc->is_untitled ? doc->path : NULL;
+    context.workspace_folder = _explorer.root;
+    [_terminalOutput setString:@""];
+    if (axyne_plugin_command_prepare(plugin, command, &context, &invocation, &error) != AXYNE_STATUS_OK) {
+        (void)snprintf(header, sizeof(header), "[plugin] %s: %s\n", plugin->name, error.message);
+        [self terminalAppend:header length:strlen(header) stream:AXYNE_PROCESS_STDERR];
+        return;
+    }
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = invocation.executable;
+    spec.arguments = (const char *const *)invocation.arguments;
+    spec.argument_count = invocation.argument_count;
+    spec.working_directory = invocation.working_directory;
+    spec.on_output = axyne_macos_terminal_output;
+    spec.on_exit = axyne_macos_terminal_exit;
+    spec.user_data = self;
+    if (axyne_process_start(&spec, &_actionProcess, &error) != AXYNE_STATUS_OK) {
+        (void)snprintf(header, sizeof(header), "[plugin] %s: %s\n", plugin->name, error.message);
+        [self terminalAppend:header length:strlen(header) stream:AXYNE_PROCESS_STDERR];
+    } else {
+        (void)snprintf(header, sizeof(header), "[plugin] %s: %s\n", plugin->name, command->title);
+        [self terminalAppend:header length:strlen(header) stream:AXYNE_PROCESS_STDOUT];
+        _activeAction = 3;
+        _lastExitFailed = NO;
+        [_terminalStart setEnabled:NO];
+        [_terminalStop setEnabled:YES];
+        [self refreshActionControls];
+    }
+    axyne_plugin_invocation_clear(&invocation);
+    [self setNeedsDisplay:YES];
+}
+
+- (void)showExtensions:(id)sender
+{
+    (void)sender;
+    [self ensurePlugins];
+    axyne_extensions_window_show([self window], &_plugins, AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_INSTALLED);
+}
+
 - (void)selectOutputPanel
 {
     _panelMode = 0;
@@ -7299,6 +7437,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (_panelSplitterTracking != nil) [self removeTrackingArea:_panelSplitterTracking];
     [_panelSplitterTracking release];
     [_recentMenu release];
+    [_pluginsMenu release];
+    axyne_plugins_clear(&_plugins);
     axyne_app_state_clear(&_appState);
     axyne_app_path_free(_appStatePath);
     if (_editorView != nil) {
@@ -8077,6 +8217,18 @@ static void axyne_install_menu(NSApplication *application,
              * menu's Preferences is not reachable from the in-window bar. */
             axyne_macos_add_item(submenu, @"새 터미널", @selector(startTerminal:),
                 workspace, @"", 0);
+            [submenu addItem:[NSMenuItem separatorItem]];
+            {
+                NSMenuItem *pluginsItem = [[NSMenuItem alloc] initWithTitle:@"플러그인"
+                    action:NULL keyEquivalent:@""];
+                NSMenu *pluginsMenu = [[NSMenu alloc] initWithTitle:@"플러그인"];
+                [pluginsItem setSubmenu:pluginsMenu];
+                [submenu addItem:pluginsItem];
+                [workspace setPluginsMenu:pluginsMenu];
+                [pluginsMenu release];
+                [pluginsItem release];
+            }
+            axyne_macos_add_item(submenu, @"확장…", @selector(showExtensions:), workspace, @"", 0);
             [submenu addItem:[NSMenuItem separatorItem]];
             axyne_macos_add_item(submenu, @"설정…", @selector(showGlobalPreferences:),
                 workspace, @"", 0);
