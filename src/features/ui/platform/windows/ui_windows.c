@@ -37,6 +37,7 @@
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
+#include "axyne/release_notes.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
 #include "../../debugger_actions.h"
@@ -398,7 +399,8 @@ enum { AXYNE_CMD_GOTO_LINE = 1200, AXYNE_CMD_SELECT_LINE,
        AXYNE_CMD_GIT_PUSH, AXYNE_CMD_GIT_PULL, AXYNE_CMD_GIT_LOG,
        AXYNE_CMD_VIEW_GIT };
 
-enum { AXYNE_CMD_EXIT = 1090 };
+enum { AXYNE_CMD_EXIT = 1090, AXYNE_CMD_CHECK_FOR_UPDATES,
+       AXYNE_CMD_RELEASE_NOTES };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -4439,6 +4441,12 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
                        MF_ENABLED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_ABOUT, L"Axyne 정보", NULL, MF_ENABLED);
+    }
+    if (menu_index == 6) {
+        axyne_menu_add(menu, &pool, AXYNE_CMD_CHECK_FOR_UPDATES,
+                       L"Check for Updates...", NULL, MF_ENABLED);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_RELEASE_NOTES,
+                       L"Release Notes", NULL, MF_ENABLED);
     }
     axyne_menu_track(window, state, menu_index, menu, pool);
 }
@@ -9734,6 +9742,21 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         else if (axyne_action_command(window, state, command)) { /* handled */ }
         else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
+        else if (command == AXYNE_CMD_CHECK_FOR_UPDATES ||
+                 command == AXYNE_CMD_RELEASE_NOTES) {
+            wchar_t *notes = axyne_wide(axyne_release_notes_text());
+            wchar_t *version = axyne_wide(axyne_release_notes_version());
+            if (notes != NULL && version != NULL) {
+                wchar_t title[128];
+                _snwprintf(title, sizeof(title) / sizeof(title[0]),
+                           L"Axyne %s%s", version,
+                           command == AXYNE_CMD_CHECK_FOR_UPDATES
+                               ? L" - Update Check" : L" - Release Notes");
+                MessageBoxW(window, notes, title, MB_OK | MB_ICONINFORMATION);
+            }
+            free(notes);
+            free(version);
+        }
         else if (command == AXYNE_CMD_ABOUT)
             MessageBoxW(window,
                 L"Axyne\nLightweight native IDE\n\nhttps://github.com/team-native/Axyne",

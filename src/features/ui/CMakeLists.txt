@@ -16,6 +16,9 @@ elseif(APPLE)
     target_link_libraries(axyne_ui PRIVATE "-framework AppKit")
 endif()
 
+target_sources(axyne_ui PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/release_notes.c")
+
 target_include_directories(axyne_ui
     PUBLIC "${PROJECT_SOURCE_DIR}/include"
     PRIVATE "${axyne_scintilla_SOURCE_DIR}/include"

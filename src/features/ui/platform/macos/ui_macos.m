@@ -27,6 +27,7 @@
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
+#include "axyne/release_notes.h"
 #include "axyne/ui_design.h"
 #include "axyne/popup_menu_layout.h"
 #include "popup_menu_macos.h"
@@ -1786,6 +1787,8 @@ static BOOL axyne_macos_palette_shift_matches(const AxynePreferences *preference
 - (void)toggleBreakpoint:(id)sender;
 - (void)showGlobalPreferences:(id)sender;
 - (void)showWorkspacePreferences:(id)sender;
+- (void)showReleaseNotes:(id)sender;
+- (void)checkForUpdates:(id)sender;
 - (void)applyPreferences;
 - (void)applyEditorScrollers;
 - (void)applySystemAppearance;
@@ -4889,6 +4892,31 @@ static void axyne_macos_show_shortcut_sections(NSWindow *owner, NSArray *section
         [self showWorkspaceMessage:@"Could not open the Axyne issue tracker."];
 }
 
+- (void)showReleaseNotes:(id)sender
+{
+    (void)sender;
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    NSString *version = [NSString stringWithUTF8String:axyne_release_notes_version()];
+    NSString *notes = [NSString stringWithUTF8String:axyne_release_notes_text()];
+    [alert setMessageText:[NSString stringWithFormat:@"Axyne %@ — Release Notes", version]];
+    [alert setInformativeText:notes];
+    [alert addButtonWithTitle:@"Close"];
+    [alert beginSheetModalForWindow:[self window] completionHandler:nil];
+}
+
+- (void)checkForUpdates:(id)sender
+{
+    (void)sender;
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    NSString *version = [NSString stringWithUTF8String:axyne_release_notes_version()];
+    NSString *notes = [NSString stringWithUTF8String:axyne_release_notes_text()];
+    [alert setMessageText:@"You are up to date"];
+    [alert setInformativeText:[NSString stringWithFormat:
+        @"Axyne %@ is the latest packaged version.\n\n%@", version, notes]];
+    [alert addButtonWithTitle:@"Close"];
+    [alert beginSheetModalForWindow:[self window] completionHandler:nil];
+}
+
 - (void)openHelp:(id)sender
 {
     (void)sender;
@@ -7975,6 +8003,10 @@ static void axyne_install_menu(NSApplication *application,
             NSMenuItem *folder = [submenu addItemWithTitle:@"설정 폴더 표시"
                 action:@selector(showSettingsFolder:) keyEquivalent:@""];
             [help setTarget:workspace]; [folder setTarget:workspace];
+            axyne_macos_add_item(submenu, @"Check for Updates...",
+                @selector(checkForUpdates:), workspace, @"", 0);
+            axyne_macos_add_item(submenu, @"Release Notes",
+                @selector(showReleaseNotes:), workspace, @"", 0);
             axyne_macos_add_item(submenu, @"키보드 단축키 참조",
                 @selector(showKeyboardShortcuts:), workspace, @"", 0);
             axyne_macos_add_item(submenu, @"문제 보고…", @selector(reportIssue:),
