@@ -244,7 +244,7 @@ static SEL axyne_macos_base_action(AxyneCommandId command, NSInteger *tag, BOOL 
     case AXYNE_COMMAND_DEBUG_STEP_OVER: *tag = AXYNE_DEBUGGER_STEP_OVER; return @selector(debugCommand:);
     case AXYNE_COMMAND_DEBUG_STEP_INTO: *tag = AXYNE_DEBUGGER_STEP_INTO; return @selector(debugCommand:);
     case AXYNE_COMMAND_DEBUG_STEP_OUT: *tag = AXYNE_DEBUGGER_STEP_OUT; return @selector(debugCommand:);
-    case AXYNE_COMMAND_TERMINAL_NEW: return @selector(startTerminal:);
+    case AXYNE_COMMAND_TERMINAL_NEW: return @selector(newTerminalSession:);
     case AXYNE_COMMAND_TOOLS_SETTINGS: return @selector(showGlobalPreferences:);
     case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS: return @selector(showWorkspacePreferences:);
     case AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON: return @selector(openPreferencesFile:);

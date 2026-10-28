@@ -1695,6 +1695,18 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self addSubview:_terminalScroll];
         _shellView = [[AxyneTerminalView alloc] initWithFrame:NSZeroRect];
         [_shellView setHidden:YES]; [self addSubview:_shellView];
+        _shellViews[0] = _shellView;
+        _shellCount = 1;
+        _shellActive = 0;
+        _terminalNewSession = axyne_macos_toolbar_button(@"+", self, @selector(newTerminalSession:));
+        [_terminalNewSession setToolTip:@"새 터미널 세션"];
+        [self addSubview:_terminalNewSession];
+        _terminalNextSession = axyne_macos_toolbar_button(@"⇄", self, @selector(nextTerminalSession:));
+        [_terminalNextSession setToolTip:@"다음 터미널 세션"];
+        [self addSubview:_terminalNextSession];
+        _terminalSplit = axyne_macos_toolbar_button(@"◫", self, @selector(toggleTerminalSplit:));
+        [_terminalSplit setToolTip:@"터미널 분할"];
+        [self addSubview:_terminalSplit];
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
@@ -1925,6 +1937,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     BOOL debuggerActive = axyne_debugger_is_active(&_debugger);
     BOOL savedDocument = document != NULL && !document->is_untitled &&
         document->path != NULL && !document->is_dirty;
+    [self pruneTerminalSessions];
     [_terminalStart setEnabled:![_shellView running]];
     [_terminalStop setEnabled:_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL ? [_shellView running] : terminalActive];
     /* A breakpoint is keyed by path and line, so any source file with a path
@@ -2174,6 +2187,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         return axyne_debugger_can_toggle_breakpoint(textDocument &&
             !document->is_untitled && document->path != NULL);
     if (action == @selector(startTerminal:)) return ![_shellView running];
+    if (action == @selector(newTerminalSession:)) return ![_shellView running] || _shellCount < 4;
     if (action == @selector(stopTerminal:)) return [_shellView running];
     if (action == @selector(showWorkspacePreferences:))
         return _workspacePreferencesPath != NULL;
@@ -2494,8 +2508,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         axyne_macos_output_background(&_preferences.theme))];
     [_terminalScroll setBackgroundColor:[_terminalOutput backgroundColor]];
     [self applyProblemsTheme];
-    [_shellView setFont:terminalFont foreground:_preferences.theme.text
-        background:axyne_macos_output_background(&_preferences.theme)];
+    for (NSInteger i = 0; i < _shellCount; ++i)
+        [_shellViews[i] setFont:terminalFont foreground:_preferences.theme.text
+            background:axyne_macos_output_background(&_preferences.theme)];
     for (NSButton *button in @[_terminalStart, _terminalStop,
                                _debugStart, _debugPause, _debugContinue,
                                _debugNext, _debugBreakpoint]) {
@@ -5695,6 +5710,105 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
                        stream:AXYNE_PROCESS_STDERR];
 }
 
+/* ---- terminal sessions ---- */
+
+/* The terminal tab reads "터미널 · zsh" (and "2/3" with several sessions). */
+- (void)updateTerminalTabTitle
+{
+    NSString *name = _shellCount > 0 ? [NSString stringWithUTF8String:_shellNames[_shellActive]] : nil;
+    NSString *title = @"터미널";
+    if ([name length] > 0)
+        title = _shellCount > 1
+            ? [NSString stringWithFormat:@"터미널 · %@ %ld/%ld", name, (long)_shellActive + 1, (long)_shellCount]
+            : [NSString stringWithFormat:@"터미널 · %@", name];
+    [_terminalTab setTitle:title];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)selectTerminalSession:(NSInteger)index
+{
+    if (index < 0 || index >= _shellCount) return;
+    _shellActive = index;
+    _shellView = _shellViews[index];
+    [self updateTerminalTabTitle];
+}
+
+- (BOOL)addTerminalSession
+{
+    AxyneTerminalView *view;
+    NSFont *font;
+    if (_shellCount >= 4) return NO;
+    view = [[AxyneTerminalView alloc] initWithFrame:NSZeroRect];
+    if (view == nil) return NO;
+    [view setHidden:YES];
+    [self addSubview:view];
+    _shellViews[_shellCount] = view;
+    _shellNames[_shellCount][0] = '\0';
+    _shellStarted[_shellCount] = NO;
+    ++_shellCount;
+    [self selectTerminalSession:_shellCount - 1];
+    font = [_terminalOutput font];
+    if (font != nil)
+        [view setFont:font foreground:_preferences.theme.text
+            background:axyne_macos_output_background(&_preferences.theme)];
+    return YES;
+}
+
+/* A session whose shell exited closes while others remain. */
+- (void)pruneTerminalSessions
+{
+    BOOL changed = NO;
+    NSInteger i = 0;
+    while (i < _shellCount && _shellCount > 1) {
+        if (_shellStarted[i] && ![_shellViews[i] running]) {
+            [_shellViews[i] shutdown];
+            [_shellViews[i] removeFromSuperview];
+            [_shellViews[i] release];
+            for (NSInteger j = i; j + 1 < _shellCount; ++j) {
+                _shellViews[j] = _shellViews[j + 1];
+                memcpy(_shellNames[j], _shellNames[j + 1], sizeof(_shellNames[j]));
+                _shellStarted[j] = _shellStarted[j + 1];
+            }
+            --_shellCount;
+            if (_shellActive > i || _shellActive >= _shellCount) --_shellActive;
+            if (_shellActive < 0) _shellActive = 0;
+            changed = YES;
+            continue;
+        }
+        ++i;
+    }
+    if (_shellCount < 2) _shellSplit = NO;
+    if (changed) [self selectTerminalSession:_shellActive];
+}
+
+/* 새 터미널: a second (third...) session when the current shell runs. */
+- (void)newTerminalSession:(id)sender
+{
+    if ([_shellView running] && ![self addTerminalSession]) {
+        NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+        [alert setMessageText:@"터미널은 최대 4개까지 열 수 있습니다."];
+        [alert runModal];
+        return;
+    }
+    [self startTerminal:sender];
+}
+
+- (void)nextTerminalSession:(id)sender
+{
+    (void)sender;
+    if (_shellCount > 1) [self selectTerminalSession:(_shellActive + 1) % _shellCount];
+    [[self window] makeFirstResponder:_shellView];
+}
+
+- (void)toggleTerminalSplit:(id)sender
+{
+    (void)sender;
+    _shellSplit = !_shellSplit;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
 - (void)startTerminal:(id)sender
 {
     (void)sender;
@@ -5713,6 +5827,13 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
         spec.argument_count = processSpec.argument_count;
         spec.working_directory = _explorer.root != NULL ? _explorer.root : [NSHomeDirectory() UTF8String];
         status = [_shellView start:&spec error:&error];
+        if (status == AXYNE_STATUS_OK) {
+            const char *base = strrchr(processSpec.executable, '/');
+            (void)snprintf(_shellNames[_shellActive], sizeof(_shellNames[0]), "%s",
+                           base != NULL ? base + 1 : processSpec.executable);
+            _shellStarted[_shellActive] = YES;
+            [self updateTerminalTabTitle];
+        }
     }
     if (status != AXYNE_STATUS_OK) [self showWorkspaceError:@"Unable to start terminal" error:&error];
     [[self window] makeFirstResponder:_shellView]; [self refreshActionControls];
@@ -6315,7 +6436,28 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_terminalScroll setFrame:NSMakeRect([self sidebarWidth] + 16, bottomTop + 32,
         MAX(0, width - [self sidebarWidth] - 24), MAX(0, [self panelHeight] - 32))];
     [_terminalScroll setHidden:_panelMode != AXYNE_BOTTOM_PANEL_OUTPUT];
-    [_shellView setFrame:[_terminalScroll frame]]; [_shellView setHidden:!terminal];
+    {
+        /* The active session fills the panel; split shows the next session
+         * beside it. Other sessions stay hidden. */
+        NSRect area = [_terminalScroll frame];
+        BOOL split = _shellSplit && _shellCount > 1;
+        NSInteger partner = split ? (_shellActive + 1) % _shellCount : -1;
+        CGFloat pane = split ? floor((area.size.width - 8) / 2) : area.size.width;
+        for (NSInteger i = 0; i < _shellCount; ++i) {
+            BOOL shown = terminal && (i == _shellActive || i == partner);
+            NSRect frame = area;
+            frame.size.width = MAX(0, pane);
+            if (i == partner) frame.origin.x += pane + 8;
+            [_shellViews[i] setFrame:frame];
+            [_shellViews[i] setHidden:!shown];
+        }
+        [_terminalNewSession setFrame:NSMakeRect(width - 228, bottomTop + 2, 28, 28)];
+        [_terminalNextSession setFrame:NSMakeRect(width - 196, bottomTop + 2, 28, 28)];
+        [_terminalSplit setFrame:NSMakeRect(width - 164, bottomTop + 2, 28, 28)];
+        [_terminalNewSession setHidden:!terminal || _panelHidden];
+        [_terminalNextSession setHidden:!terminal || _panelHidden || _shellCount < 2];
+        [_terminalSplit setHidden:!terminal || _panelHidden || _shellCount < 2];
+    }
     [_problemsView setFrame:NSMakeRect([self sidebarWidth], bottomTop + 32,
         MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32))];
     [_problemsView setHidden:_panelMode != AXYNE_BOTTOM_PANEL_PROBLEMS];
@@ -6391,7 +6533,10 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
 #undef AXYNE_MAC_HOOK
         if (_panelHidden || ownedTab || selectedTab == AXYNE_BOTTOM_PANEL_DEBUG_CONSOLE) {
-            [_terminalScroll setHidden:YES]; [_shellView setHidden:YES];
+            [_terminalScroll setHidden:YES];
+            for (NSInteger i = 0; i < _shellCount; ++i) [_shellViews[i] setHidden:YES];
+            [_terminalNewSession setHidden:YES]; [_terminalNextSession setHidden:YES];
+            [_terminalSplit setHidden:YES];
             [_problemsView setHidden:YES];
         }
     }
@@ -6879,7 +7024,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     axyne_build_feed_destroy(&_buildFeed);
     [_terminalScroll release];
     [_terminalOutput release];
-    [_shellView shutdown]; [_shellView release];
+    for (NSInteger i = 0; i < _shellCount; ++i) { [_shellViews[i] shutdown]; [_shellViews[i] release]; }
+    [_terminalNewSession release]; [_terminalNextSession release]; [_terminalSplit release];
     [_terminalStart release];
     [_terminalStop release];
     [_debugStart release];
