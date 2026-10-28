@@ -2012,9 +2012,6 @@ static int axyne_start_step(HWND window, AxyneWindowState *state,
     return 1;
 }
 
-/* Build and Run resolve the active file's language, the build target and the
- * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
- * it. Run executes the build step first when the plan has one. */
 /* 정리: deletes the active file's build output (the {out} of its build step).
  * Returns 1 when the build may go on (nothing to delete counts), 0 when the
  * output could not be removed or no build applies. Messages go to the output
@@ -2083,9 +2080,12 @@ static wchar_t *axyne_terminal_shell_path(AxyneCommandId id)
     wchar_t system_directory[MAX_PATH], found[MAX_PATH];
     UINT length = GetSystemDirectoryW(system_directory, MAX_PATH);
     const wchar_t *tail;
-    if (id == AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL &&
-        SearchPathW(NULL, L"pwsh", L".exe", MAX_PATH, found, NULL) != 0)
-        return _wcsdup(found);
+    if (id == AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL) {
+        /* PATH only: never the app or current (workspace) folder. */
+        const wchar_t *path = _wgetenv(L"PATH");
+        if (path != NULL && SearchPathW(path, L"pwsh", L".exe", MAX_PATH, found, NULL) != 0)
+            return _wcsdup(found);
+    }
     if (length == 0 || length + 48 >= MAX_PATH) return NULL;
     tail = id == AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL ? L"\\WindowsPowerShell\\v1.0\\powershell.exe"
          : id == AXYNE_COMMAND_TERMINAL_NEW_WSL ? L"\\wsl.exe" : L"\\cmd.exe";
@@ -2119,13 +2119,20 @@ static void axyne_start_terminal_shell(HWND window, AxyneWindowState *state, Axy
     }
     spec.working_directory = state->explorer.root != NULL ? state->explorer.root : home;
     status = axyne_terminal_view_start(state->shell_view, &spec, &error);
-    if (status != AXYNE_STATUS_OK) MessageBoxA(window, error.message, "Unable to start terminal", MB_OK | MB_ICONERROR);
+    if (status != AXYNE_STATUS_OK) {
+        wchar_t *text = axyne_wide(error.message);
+        MessageBoxW(window, text != NULL ? text : L"", L"터미널을 시작할 수 없습니다", MB_OK | MB_ICONERROR);
+        free(text);
+    }
     free(home);
     free(executable);
     SetFocus(state->shell_view);
     axyne_refresh_action_controls(state);
 }
 
+/* Build and Run resolve the active file's language, the build target and the
+ * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
+ * it. Run executes the build step first when the plan has one. */
 static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
 {
     AxyneDocument *doc = axyne_active_visible(state);
@@ -9254,9 +9261,14 @@ int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
         out->enabled = !axyne_terminal_view_running(state->shell_view);
         return 1;
     case AXYNE_COMMAND_TERMINAL_NEW_WSL: {
-        wchar_t *wsl = axyne_terminal_shell_path(AXYNE_COMMAND_TERMINAL_NEW_WSL);
-        out->enabled = wsl != NULL && !axyne_terminal_view_running(state->shell_view);
-        free(wsl);
+        /* wsl.exe is looked up once per run, not on every menu query. */
+        static int wsl_available = -1;
+        if (wsl_available < 0) {
+            wchar_t *wsl = axyne_terminal_shell_path(AXYNE_COMMAND_TERMINAL_NEW_WSL);
+            wsl_available = wsl != NULL;
+            free(wsl);
+        }
+        out->enabled = wsl_available && !axyne_terminal_view_running(state->shell_view);
         return 1;
     }
     case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS:
