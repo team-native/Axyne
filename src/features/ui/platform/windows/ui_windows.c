@@ -1315,11 +1315,66 @@ static int axyne_terminal_configure_default(AxyneWindowState *state)
     return 1;
 }
 
+/* terminal.defaultProfile -> shell executable: "" / cmd, "PowerShell 7" /
+ * pwsh, "PowerShell" (Windows PowerShell), or any program name on PATH or
+ * full path. NULL when it cannot be found (the caller keeps cmd.exe). */
+static char *axyne_terminal_profile_executable(const char *profile)
+{
+    wchar_t found[MAX_PATH], system_directory[MAX_PATH];
+    wchar_t *wide;
+    const wchar_t *name;
+    UINT length;
+    if (profile == NULL || profile[0] == '\0' || _stricmp(profile, "cmd") == 0 ||
+        _stricmp(profile, "cmd.exe") == 0 || _stricmp(profile, "Command Prompt") == 0)
+        return NULL;
+    if (_stricmp(profile, "PowerShell") == 0 || _stricmp(profile, "Windows PowerShell") == 0) {
+        length = GetSystemDirectoryW(system_directory, MAX_PATH);
+        if (length == 0 || length + 40 >= MAX_PATH) return NULL;
+        wcscat_s(system_directory, MAX_PATH, L"\\WindowsPowerShell\\v1.0\\powershell.exe");
+        return GetFileAttributesW(system_directory) != INVALID_FILE_ATTRIBUTES
+            ? axyne_utf8(system_directory) : NULL;
+    }
+    name = NULL;
+    if (_stricmp(profile, "PowerShell 7") == 0 || _stricmp(profile, "pwsh") == 0) name = L"pwsh";
+    wide = name == NULL ? axyne_wide(profile) : NULL;
+    if (name == NULL && wide == NULL) return NULL;
+    if (wide != NULL && (wcschr(wide, L'\\') != NULL || wcschr(wide, L'/') != NULL)) {
+        char *path = GetFileAttributesW(wide) != INVALID_FILE_ATTRIBUTES ? axyne_utf8(wide) : NULL;
+        free(wide);
+        return path;
+    }
+    length = SearchPathW(NULL, name != NULL ? name : wide, L".exe", MAX_PATH, found, NULL);
+    free(wide);
+    return length != 0 && length < MAX_PATH ? axyne_utf8(found) : NULL;
+}
+
+/* Points the terminal runner at the configured profile's shell before each
+ * start, so a changed setting applies to the next terminal. */
+static void axyne_terminal_apply_profile(AxyneWindowState *state)
+{
+    char *executable = axyne_terminal_profile_executable(state->preferences.terminal.default_profile);
+    AxyneRunnerSpec spec;
+    if (executable == NULL) {
+        /* Not found, or cmd itself: the system cmd.exe. */
+        wchar_t command_path[MAX_PATH];
+        UINT length = GetSystemDirectoryW(command_path, MAX_PATH);
+        if (length == 0 || length + 10 >= MAX_PATH) return;
+        wcscat_s(command_path, MAX_PATH, L"\\cmd.exe");
+        executable = axyne_utf8(command_path);
+        if (executable == NULL) return;
+    }
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = executable;
+    (void)axyne_runner_configure(&state->terminal_runner, &spec, NULL);
+    free(executable);
+}
+
 static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state)
 {
     state->terminal_panel_selected = 1; state->problems_panel_selected = 0; state->panel_hidden = 0;
     axyne_layout(window, state);
     if (axyne_terminal_view_running(state->shell_view)) { SetFocus(state->shell_view); return; }
+    axyne_terminal_apply_profile(state);
     AxyneProcessSpec process_spec = {0}; AxyneError error = {0};
     AxyneStatus status = axyne_runner_process_spec(&state->terminal_runner, NULL, NULL, NULL, &process_spec, &error);
     if (status == AXYNE_STATUS_OK) {
