@@ -64,6 +64,8 @@ enum {
     AXYNE_DEBUG_CONTINUE,
     AXYNE_DEBUG_STEP_OVER,
     AXYNE_DEBUG_BREAKPOINT,
+    AXYNE_PANEL_CLEAR,
+    AXYNE_PANEL_CLOSE,
     AXYNE_PROBLEMS_FILTER = 5040, /* problems panel filter EDIT control id */
     AXYNE_PROBLEMS_TIMER = 5121,  /* coalesced problems list rebuild */
     AXYNE_OUTLINE_TIMER = 5122    /* debounced outline rescan after edits */
@@ -1712,12 +1714,20 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
         instance, NULL);
     axyne_theme_editor_scrollbars(state->terminal_output, AXYNE_OUTPUT_BG);
     state->shell_view = axyne_terminal_view_create(window, instance);
-    state->terminal_start = CreateWindowA("BUTTON", "Start",
+    /* Panel header icon buttons (Figma 6:399): ▶ start / ■ stop the
+     * terminal, ⊘ clear output, ✕ hide the panel. */
+    state->terminal_start = CreateWindowW(L"BUTTON", L"\u25B6",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_START, instance, NULL);
-    state->terminal_stop = CreateWindowA("BUTTON", "Stop",
+    state->terminal_stop = CreateWindowW(L"BUTTON", L"\u25A0",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_STOP, instance, NULL);
+    state->panel_clear = CreateWindowW(L"BUTTON", L"\u2298",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_PANEL_CLEAR, instance, NULL);
+    state->panel_close = CreateWindowW(L"BUTTON", L"\u2715",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_PANEL_CLOSE, instance, NULL);
     state->debug_start = CreateWindowA("BUTTON", "Debug",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window,
         (HMENU)AXYNE_DEBUG_START, instance, NULL);
@@ -8498,10 +8508,16 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                      SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->shell_view, NULL, axyne_sidebar_width(state) + 16, terminal_top,
             terminal_width, max(0, terminal_bottom-terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_start, NULL, width - 172, bottom_top + 5,
-                     52, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_stop, NULL, width - 116, bottom_top + 5,
-                     48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_start, NULL, width - 120, bottom_top + 5,
+                     24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_stop, NULL, width - 94, bottom_top + 5,
+                     24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->panel_clear, NULL, width - 62, bottom_top + 5,
+                     24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->panel_close, NULL, width - 36, bottom_top + 5,
+                     24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(state->panel_clear, state->panel_hidden ? SW_HIDE : SW_SHOW);
+        ShowWindow(state->panel_close, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->terminal_output,
                    output_shown ? SW_SHOW : SW_HIDE);
         ShowWindow(state->shell_view,
@@ -8937,6 +8953,14 @@ static void axyne_legacy_command(HWND window, AxyneWindowState *state, UINT comm
     }
     else if (command == AXYNE_TERMINAL_START) axyne_start_terminal_panel(window, state);
     else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
+    else if (command == AXYNE_PANEL_CLEAR) {
+        if (state->terminal_output != NULL) SetWindowTextA(state->terminal_output, "");
+    }
+    else if (command == AXYNE_PANEL_CLOSE) {
+        state->panel_hidden = 1;
+        axyne_layout(window, state);
+        if (state->editor != NULL) SetFocus(state->editor);
+    }
     else if (command == AXYNE_CMD_CANCEL_BUILD) {
         if (state->action_process != NULL)
             (void)axyne_process_terminate(state->action_process, NULL);
@@ -10048,9 +10072,22 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_menu_draw(state, item);
             return TRUE;
         }
-        if (item != NULL && item->CtlType == ODT_BUTTON &&
+        if (state != NULL && item != NULL && item->CtlType == ODT_BUTTON &&
             (item->CtlID == AXYNE_TERMINAL_START || item->CtlID == AXYNE_TERMINAL_STOP ||
-             item->CtlID == AXYNE_CMD_CANCEL_BUILD)) {
+             item->CtlID == AXYNE_PANEL_CLEAR || item->CtlID == AXYNE_PANEL_CLOSE)) {
+            /* Flat icon on the panel header, highlighted while pressed. */
+            wchar_t glyph[8];
+            int disabled = (item->itemState & ODS_DISABLED) != 0;
+            GetWindowTextW(item->hwndItem, glyph, 8);
+            axyne_fill(item->hDC, item->rcItem.left, item->rcItem.top, item->rcItem.right,
+                       item->rcItem.bottom, (item->itemState & ODS_SELECTED) != 0
+                           ? AXYNE_SELECTION_BG : AXYNE_PANEL_HEADER_BG);
+            axyne_text_rect(item->hDC, state->ui_font, disabled ? AXYNE_ICON_OFF : AXYNE_ICON,
+                            item->rcItem, glyph, DT_CENTER);
+            return TRUE;
+        }
+        if (item != NULL && item->CtlType == ODT_BUTTON &&
+            item->CtlID == AXYNE_CMD_CANCEL_BUILD) {
             wchar_t label[32];
             RECT rect = item->rcItem;
             int disabled = (item->itemState & ODS_DISABLED) != 0;
