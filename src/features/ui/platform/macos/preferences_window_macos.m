@@ -355,7 +355,7 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     AxynePWButton *_sidebar[AXYNE_PW_PAGE_COUNT];
     NSInteger _page;
     AxynePWBox *_fontBox, *_sizeBox, *_tabBox;
-    NSTextField *_fontField, *_sizeField, *_tabField;
+    NSTextField *_fontField, *_sizeField, *_tabField, *_undoField;
     AxynePWButton *_check[6];
     AxynePWButton *_theme[3];
     NSTextField *_keyField[AXYNE_ACTION_COUNT];
@@ -512,6 +512,8 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
         [page addSubview:button];
     }
     /* The 렌더링 group is Windows only; nothing is built here. */
+    (void)[self fieldWithLabel:@"Undo history (MB)" x:AXYNE_PW_CONTENT_LEFT
+                            y:y + 94 + 22 width:160 page:page field:&_undoField trailing:0];
 }
 
 - (void)buildThemePage:(NSView *)page
@@ -711,6 +713,7 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     [_fontField setStringValue:[NSString stringWithUTF8String:_draft.editor.font_family]];
     [_sizeField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.font_size]];
     [_tabField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.tab_width]];
+    [_undoField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.undo_limit_mb]];
     for (int i = 0; i < 6; ++i)
         [_check[i] setOn:*[self optionInPreferences:&_draft tag:i] != 0];
     for (int i = 0; i < 3; ++i)
@@ -759,6 +762,14 @@ static BOOL axyne_pw_parse_unsigned(NSString *text, unsigned long *value)
         return NO;
     }
     out->editor.tab_width = (unsigned int)value;
+    if (!axyne_pw_parse_unsigned([_undoField stringValue], &value) ||
+        axyne_preferences_check_undo_limit(value) != AXYNE_PREFERENCE_CHECK_OK) {
+        if (message) *message = @"Undo history must be between 1 and 1024 MB.";
+        if (page) *page = AXYNE_PW_PAGE_EDITOR;
+        if (focus) *focus = _undoField;
+        return NO;
+    }
+    out->editor.undo_limit_mb = (unsigned int)value;
     utf8 = [[_fontField stringValue] UTF8String];
     if (axyne_preferences_check_font_family(utf8) != AXYNE_PREFERENCE_CHECK_OK) {
         if (message) *message = @"글꼴 이름이 올바르지 않습니다.";

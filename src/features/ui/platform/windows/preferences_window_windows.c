@@ -37,6 +37,7 @@ enum {
     PW_ID_EDIT_FONT = 160,
     PW_ID_EDIT_SIZE,
     PW_ID_EDIT_TAB,
+    PW_ID_EDIT_UNDO,
     PW_ID_KEY = 200           /* + action * 4 + {0 edit, 1 toggle, 2 restore} */
 };
 
@@ -57,7 +58,7 @@ typedef struct PwState {
     HWND page_windows[PW_PAGE_COUNT][PW_MAX_PAGE_WINDOWS];
     int page_window_count[PW_PAGE_COUNT];
     HWND nav[PW_PAGE_COUNT];
-    HWND edit_font, edit_size, edit_tab;
+    HWND edit_font, edit_size, edit_tab, edit_undo;
     HWND apply_button;
     HWND key_edit[AXYNE_ACTION_COUNT];
     HFONT font10, font11, font12, font12_bold, font16_bold, font_mono;
@@ -213,11 +214,14 @@ enum {
     PW_SIZE_BOX_W = 120,
     PW_TAB_BOX_X = PW_LEFT + 392,
     PW_TAB_BOX_W = 116,
+    PW_UNDO_BOX_W = 160,
     PW_FIELD_Y = PW_LABEL_Y + 19,
     PW_DISPLAY_GROUP_Y = PW_LABEL_Y + 49 + 16,
     PW_DISPLAY_GROUP_H = 94,
     PW_RENDER_GROUP_Y = PW_DISPLAY_GROUP_Y + PW_DISPLAY_GROUP_H + 16,
     PW_RENDER_GROUP_H = 68,
+    PW_UNDO_LABEL_Y = PW_RENDER_GROUP_Y + PW_RENDER_GROUP_H + 18,
+    PW_UNDO_FIELD_Y = PW_UNDO_LABEL_Y + 19,
     PW_THEME_GROUP_Y = PW_LABEL_Y + 9,
     PW_KEY_ROW_Y = PW_LABEL_Y + 19,
     PW_KEY_ROW_PITCH = 32,
@@ -304,6 +308,9 @@ static void pw_paint(PwState *st, HDC dc)
         pw_field_frame(st, dc, PW_LEFT, PW_FIELD_Y, PW_FONT_BOX_W, st->edit_font);
         pw_field_frame(st, dc, PW_SIZE_BOX_X, PW_FIELD_Y, PW_SIZE_BOX_W, st->edit_size);
         pw_field_frame(st, dc, PW_TAB_BOX_X, PW_FIELD_Y, PW_TAB_BOX_W, st->edit_tab);
+        pw_text(dc, st->font11, muted, L"Undo history (MB)", PW_LEFT, PW_UNDO_LABEL_Y,
+                180, 14, DT_LEFT);
+        pw_field_frame(st, dc, PW_LEFT, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W, st->edit_undo);
         pw_group_frame(st, dc, PW_DISPLAY_GROUP_Y, PW_DISPLAY_GROUP_H, L"표시");
         pw_group_frame(st, dc, PW_RENDER_GROUP_Y, PW_RENDER_GROUP_H, L"렌더링");
     } else if (st->page == PW_PAGE_THEME) {
@@ -538,6 +545,14 @@ static int pw_collect(PwState *st, AxynePreferences *out, const wchar_t **messag
         return 0;
     }
     out->editor.tab_width = (unsigned int)value;
+    if (!pw_window_utf8(st->edit_undo, text, sizeof(text)) || !pw_parse_unsigned(text, &value) ||
+        axyne_preferences_check_undo_limit(value) != AXYNE_PREFERENCE_CHECK_OK) {
+        if (message) *message = L"Undo history must be between 1 and 1024 MB.";
+        if (page) *page = PW_PAGE_EDITOR;
+        if (focus) *focus = st->edit_undo;
+        return 0;
+    }
+    out->editor.undo_limit_mb = (unsigned int)value;
     if (!pw_window_utf8(st->edit_font, text, sizeof(text)) ||
         axyne_preferences_check_font_family(text) != AXYNE_PREFERENCE_CHECK_OK) {
         if (message) *message = L"글꼴 이름이 올바르지 않습니다.";
@@ -581,6 +596,8 @@ static void pw_load_controls(PwState *st)
     pw_set_text_utf8(st->edit_size, text);
     (void)snprintf(text, sizeof(text), "%u", st->draft.editor.tab_width);
     pw_set_text_utf8(st->edit_tab, text);
+    (void)snprintf(text, sizeof(text), "%u", st->draft.editor.undo_limit_mb);
+    pw_set_text_utf8(st->edit_undo, text);
     for (i = 0; i < (int)st->draft.binding_count; ++i) {
         HWND edit = st->key_edit[st->draft.bindings[i].action];
         if (edit != NULL) pw_set_text_utf8(edit, st->draft.bindings[i].key);
@@ -779,6 +796,7 @@ static void pw_build(PwState *st)
     st->edit_font = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_FONT, PW_LEFT, PW_FIELD_Y, PW_FONT_BOX_W - 20);
     st->edit_size = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_SIZE, PW_SIZE_BOX_X, PW_FIELD_Y, PW_SIZE_BOX_W);
     st->edit_tab = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_TAB, PW_TAB_BOX_X, PW_FIELD_Y, PW_TAB_BOX_W);
+    st->edit_undo = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_UNDO, PW_LEFT, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W);
     {
         HWND chevron = pw_button(st, PW_PAGE_EDITOR, PW_ID_FONT_MENU, PW_LEFT + PW_FONT_BOX_W - 29,
                                  PW_FIELD_Y + 1, 28, AXYNE_PW_FIELD_HEIGHT - 2, L"글꼴 목록");
