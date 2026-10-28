@@ -39,6 +39,10 @@
 #include "axyne/palette_controller.h"
 #include "axyne/language.h"
 #include "axyne/build_selector.h"
+#include "axyne/plugins.h"
+#include "axyne/app_paths.h"
+#include "axyne/build_config.h"
+#include "../../extensions_window.h"
 #include "axyne/app_state.h"
 #include "axyne/app_paths.h"
 #include "axyne/log.h"
@@ -277,6 +281,10 @@ typedef struct AxyneWindowState {
     char *workspace_preferences_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
+    /* Installed plugins, scanned the first time the Tools menu or the
+     * 확장 window needs them (nothing plugin-related runs at startup). */
+    AxynePluginSet plugins;
+    int plugins_loaded;
     /* Startup loading screen still covering the hidden main window, and the
      * ShowWindow command to use once its minimum display time is over. */
     AxyneSplash *splash;
@@ -419,6 +427,11 @@ enum { AXYNE_CMD_GOTO_LINE = 1200, AXYNE_CMD_SELECT_LINE,
        AXYNE_CMD_VIEW_GIT };
 
 enum { AXYNE_CMD_EXIT = 1090 };
+
+/* Tools > 플러그인: PLUGIN_BASE + n is the n-th command of the enabled,
+ * compatible plugins in AxynePluginSet order. */
+enum { AXYNE_CMD_EXTENSIONS = 2990, AXYNE_CMD_PLUGIN_BASE = 3000,
+       AXYNE_CMD_PLUGIN_LIMIT = 3400 };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_TERMINAL_OUTPUT = WM_APP + 22,
@@ -4450,6 +4463,131 @@ static void axyne_edit_popup(HWND window, AxyneWindowState *state)
     axyne_menu_track(window, state, 1, menu, pool);
 }
 
+/* ---- plugins ---------------------------------------------------------------- */
+
+static void axyne_plugins_ensure(AxyneWindowState *state)
+{
+    char *config, *plugins_dir, *state_path;
+    if (state->plugins_loaded) return;
+    state->plugins_loaded = 1;
+    config = axyne_app_path(AXYNE_APP_PATH_CONFIG_DIR);
+    if (config == NULL) return;
+    plugins_dir = axyne_app_path_join(config, "plugins");
+    state_path = axyne_app_path_join(config, "plugins.json");
+    if (plugins_dir != NULL)
+        (void)axyne_plugins_load(&state->plugins, plugins_dir, state_path, AXYNE_CONFIG_VERSION, NULL);
+    axyne_app_path_free(plugins_dir);
+    axyne_app_path_free(state_path);
+    axyne_app_path_free(config);
+}
+
+/* Maps a Tools-menu command to its plugin command (see AXYNE_CMD_PLUGIN_BASE). */
+static int axyne_plugin_command_at(AxyneWindowState *state, UINT command,
+                                   AxynePlugin **plugin, AxynePluginCommand **plugin_command)
+{
+    size_t i, j, n = 0, target;
+    if (command < AXYNE_CMD_PLUGIN_BASE || command >= AXYNE_CMD_PLUGIN_LIMIT) return 0;
+    target = command - AXYNE_CMD_PLUGIN_BASE;
+    for (i = 0; i < state->plugins.count; ++i) {
+        AxynePlugin *item = &state->plugins.items[i];
+        if (!item->enabled || !item->compatible) continue;
+        for (j = 0; j < item->command_count; ++j, ++n) {
+            if (n == target) {
+                *plugin = item;
+                *plugin_command = &item->commands[j];
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void axyne_plugins_menu(HMENU menu, AxyneMenuItem **pool, AxyneWindowState *state)
+{
+    HMENU sub = axyne_menu_create();
+    AxyneDocument *doc = axyne_active_visible(state);
+    const char *path = doc != NULL && !doc->is_untitled ? doc->path : NULL;
+    size_t i, j, n = 0;
+    if (sub == NULL) return;
+    axyne_plugins_ensure(state);
+    for (i = 0; i < state->plugins.count; ++i) {
+        const AxynePlugin *plugin = &state->plugins.items[i];
+        if (!plugin->enabled || !plugin->compatible) continue;
+        for (j = 0; j < plugin->command_count; ++j, ++n) {
+            char label[256];
+            wchar_t *wide;
+            if (AXYNE_CMD_PLUGIN_BASE + n >= AXYNE_CMD_PLUGIN_LIMIT) break;
+            (void)snprintf(label, sizeof(label), "%s: %s", plugin->name, plugin->commands[j].title);
+            wide = axyne_wide(label);
+            if (wide != NULL) {
+                axyne_menu_add(sub, pool, AXYNE_CMD_PLUGIN_BASE + (UINT)n, wide, NULL,
+                               axyne_plugin_command_applies(&plugin->commands[j], path) &&
+                               state->action_process == NULL ? MF_ENABLED : MF_GRAYED);
+                free(wide);
+            }
+        }
+    }
+    if (n == 0) axyne_menu_add(sub, pool, 0, L"설치된 플러그인 명령 없음", NULL, MF_GRAYED);
+    axyne_menu_seal(sub);
+    axyne_menu_submenu(menu, pool, sub, L"플러그인", MF_ENABLED);
+}
+
+/* Runs a plugin command as an external process in the output panel, the
+ * same way Build/Run do (Stop terminates it). */
+static void axyne_run_plugin_command(HWND window, AxyneWindowState *state, UINT command)
+{
+    AxynePlugin *plugin = NULL;
+    AxynePluginCommand *plugin_command = NULL;
+    AxynePluginInvocation invocation;
+    AxynePluginContext context;
+    AxyneProcessSpec spec;
+    AxyneDocument *doc = axyne_active_visible(state);
+    AxyneError error;
+    char header[320];
+    if (!axyne_plugin_command_at(state, command, &plugin, &plugin_command)) return;
+    if (state->action_process != NULL) {
+        MessageBoxW(window, L"다른 작업이 실행 중입니다. 먼저 중지하세요.", L"플러그인",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (doc != NULL && doc->is_dirty && !doc->is_untitled) (void)axyne_save_active(window, state);
+    context.file = doc != NULL && !doc->is_untitled ? doc->path : NULL;
+    context.workspace_folder = state->explorer.root;
+    state->terminal_panel_selected = 0;
+    state->problems_panel_selected = 0;
+    state->panel_hidden = 0;
+    axyne_layout(window, state);
+    if (axyne_plugin_command_prepare(plugin, plugin_command, &context, &invocation, &error) != AXYNE_STATUS_OK) {
+        (void)snprintf(header, sizeof(header), "[plugin] %s: %s\r\n", plugin->name, error.message);
+        SetWindowTextA(state->terminal_output, "");
+        axyne_terminal_append_utf8(state->terminal_output, header, AXYNE_PROCESS_STDERR);
+        return;
+    }
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = invocation.executable;
+    spec.arguments = (const char *const *)invocation.arguments;
+    spec.argument_count = invocation.argument_count;
+    spec.working_directory = invocation.working_directory;
+    spec.on_output = axyne_terminal_output;
+    spec.on_exit = axyne_terminal_exit;
+    spec.user_data = state;
+    SetWindowTextA(state->terminal_output, "");
+    if (axyne_process_start(&spec, &state->action_process, &error) != AXYNE_STATUS_OK) {
+        (void)snprintf(header, sizeof(header), "[plugin] %s: %s\r\n", plugin->name, error.message);
+        axyne_terminal_append_utf8(state->terminal_output, header, AXYNE_PROCESS_STDERR);
+    } else {
+        (void)snprintf(header, sizeof(header), "[plugin] %s: %s\r\n", plugin->name, plugin_command->title);
+        axyne_terminal_append_utf8(state->terminal_output, header, AXYNE_PROCESS_STDOUT);
+        state->active_action = 3;
+        state->last_exit_failed = 0;
+        EnableWindow(state->terminal_start, FALSE);
+        EnableWindow(state->terminal_stop, TRUE);
+        axyne_refresh_action_controls(state);
+    }
+    axyne_plugin_invocation_clear(&invocation);
+    InvalidateRect(window, NULL, FALSE);
+}
+
 static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
                                int menu_index)
 {
@@ -4536,6 +4674,9 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_add(menu, &pool, AXYNE_TERMINAL_START, L"새 터미널", NULL,
                        !axyne_terminal_view_running(state->shell_view)
                            ? MF_ENABLED : MF_GRAYED);
+        axyne_menu_separator(menu, &pool);
+        axyne_plugins_menu(menu, &pool, state);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_EXTENSIONS, L"확장...", NULL, MF_ENABLED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
         axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE_PREFERENCES, L"작업 영역 설정...",
@@ -9868,6 +10009,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             else if (state->editor != NULL) SetFocus(state->editor);
         }
         else if (axyne_action_command(window, state, command)) { /* handled */ }
+        else if (command == AXYNE_CMD_EXTENSIONS) {
+            axyne_plugins_ensure(state);
+            axyne_extensions_window_show(window, &state->plugins, AXYNE_CONFIG_VERSION,
+                                         AXYNE_EXTENSIONS_INSTALLED);
+        }
+        else if (command >= AXYNE_CMD_PLUGIN_BASE && command < AXYNE_CMD_PLUGIN_LIMIT)
+            axyne_run_plugin_command(window, state, command);
         else if (command == AXYNE_CMD_EXIT) PostMessageW(window, WM_CLOSE, 0, 0);
         else if (command == AXYNE_CMD_ABOUT)
             MessageBoxW(window,
@@ -10379,6 +10527,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->font_mono_small != NULL) DeleteObject(state->font_mono_small);
             free(state->global_preferences_path);
             free(state->workspace_preferences_path);
+            axyne_plugins_clear(&state->plugins);
             axyne_splash_close(state->splash);
             state->splash = NULL;
             axyne_app_state_clear(&state->app_state);
