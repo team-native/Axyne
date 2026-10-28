@@ -2164,7 +2164,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (action == @selector(closeDocument:))
         return hasDocument;
     if (action == @selector(buildDocument:) ||
-        action == @selector(runDocument:))
+        action == @selector(runDocument:) ||
+        action == @selector(rebuildDocument:) ||
+        action == @selector(cleanBuild:))
         return textDocument && !terminalActive && !debuggerActive;
     if (action == @selector(startDebugger:))
         return axyne_debugger_can_start(debuggerActive, terminalActive, savedDocument);
@@ -2173,7 +2175,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (action == @selector(toggleBreakpoint:))
         return axyne_debugger_can_toggle_breakpoint(textDocument &&
             !document->is_untitled && document->path != NULL);
-    if (action == @selector(startTerminal:)) return ![_shellView running];
+    if (action == @selector(startTerminal:) || action == @selector(startShellTerminal:))
+        return ![_shellView running];
     if (action == @selector(stopTerminal:)) return [_shellView running];
     if (action == @selector(showWorkspacePreferences:))
         return _workspacePreferencesPath != NULL;
@@ -5925,6 +5928,100 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         return;
     }
     axyne_language_plan_free(&plan);
+}
+
+/* 정리: deletes the active file's build output (the {out} of its build step).
+ * YES when the build may go on (nothing to delete counts). */
+- (BOOL)cleanBuildOutput
+{
+    AxyneDocument *doc = [self activeDocument];
+    AxyneLanguagePlan plan;
+    char message[256];
+    AxyneStatus status;
+    BOOL ok = YES;
+    NSString *line;
+    [self selectOutputPanel];
+    if (_actionProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *busy = "[build] 다른 작업이 실행 중입니다. 먼저 중지하세요.\n";
+        [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
+        return NO;
+    }
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) {
+        const char *unsaved = "[build] 저장된 파일에서만 정리할 수 있습니다.\n";
+        [self terminalAppend:unsaved length:strlen(unsaved) stream:AXYNE_PROCESS_STDERR];
+        return NO;
+    }
+    [self discoverRuntimes];
+    memset(&plan, 0, sizeof(plan));
+    status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &_runtimes, &_buildTarget,
+        doc->path, _actionRunner.executable != NULL ? &_actionRunner : NULL,
+        &plan, message, sizeof(message));
+    [_terminalOutput setString:@""];
+    if (status != AXYNE_STATUS_OK) {
+        line = [NSString stringWithFormat:@"%s\n", message[0] != '\0' ? message : "Build could not be resolved."];
+        ok = NO;
+    } else if (!plan.has_build || plan.output_path == NULL) {
+        line = @"[build] 이 언어에는 정리할 빌드 산출물이 없습니다.\n";
+    } else {
+        NSString *output = [NSString stringWithUTF8String:plan.output_path];
+        NSFileManager *files = [NSFileManager defaultManager];
+        BOOL directory = NO;
+        if (output == nil || ![files fileExistsAtPath:output isDirectory:&directory]) {
+            line = [NSString stringWithFormat:@"[build] 정리할 산출물이 없습니다: %s\n", plan.output_path];
+        } else if (!directory && [files removeItemAtPath:output error:NULL]) {
+            line = [NSString stringWithFormat:@"[build] 정리: %s 삭제\n", plan.output_path];
+        } else {
+            line = [NSString stringWithFormat:@"[build] 산출물을 삭제하지 못했습니다: %s\n", plan.output_path];
+            ok = NO;
+        }
+    }
+    {
+        const char *bytes = [line UTF8String];
+        if (bytes != NULL)
+            [self terminalAppend:bytes length:strlen(bytes)
+                          stream:ok ? AXYNE_PROCESS_STDOUT : AXYNE_PROCESS_STDERR];
+    }
+    axyne_language_plan_free(&plan);
+    return ok;
+}
+
+- (void)cleanBuild:(id)sender
+{
+    (void)sender;
+    if ([self isEmptyState] || [self activeIsImage]) return;
+    (void)[self cleanBuildOutput];
+}
+
+/* 다시 빌드: remove the previous output, then build from scratch. */
+- (void)rebuildDocument:(id)sender
+{
+    (void)sender;
+    if ([self isEmptyState] || [self activeIsImage]) return;
+    if ([self cleanBuildOutput]) [self startAction:NO];
+}
+
+/* Tools > 새 터미널 > zsh / bash: starts that login shell once (the default
+ * 새 터미널 keeps its own shell). */
+- (void)startShellTerminal:(id)sender
+{
+    const char *shell = [sender tag] == 1 ? "/bin/bash" : "/bin/zsh";
+    const char *arguments[] = { "-l", "-i" };
+    AxyneTerminalSpec spec = {0};
+    AxyneError error = {0};
+    AxyneStatus status;
+    _panelMode = AXYNE_BOTTOM_PANEL_TERMINAL;
+    _panelHidden = NO;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+    if ([_shellView running]) { [[self window] makeFirstResponder:_shellView]; return; }
+    spec.executable = shell;
+    spec.arguments = arguments;
+    spec.argument_count = 2;
+    spec.working_directory = _explorer.root != NULL ? _explorer.root : [NSHomeDirectory() UTF8String];
+    status = [_shellView start:&spec error:&error];
+    if (status != AXYNE_STATUS_OK) [self showWorkspaceError:@"Unable to start terminal" error:&error];
+    [[self window] makeFirstResponder:_shellView];
+    [self refreshActionControls];
 }
 
 - (void)buildDocument:(id)sender

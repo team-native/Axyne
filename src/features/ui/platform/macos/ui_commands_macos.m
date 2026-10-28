@@ -232,6 +232,8 @@ static SEL axyne_macos_base_action(AxyneCommandId command, NSInteger *tag, BOOL 
     case AXYNE_COMMAND_VIEW_ZOOM_RESET: return @selector(zoomResetEditor:);
     case AXYNE_COMMAND_VIEW_WORD_WRAP: return @selector(toggleWordWrap:);
     case AXYNE_COMMAND_BUILD_BUILD: return @selector(buildDocument:);
+    case AXYNE_COMMAND_BUILD_REBUILD: return @selector(rebuildDocument:);
+    case AXYNE_COMMAND_BUILD_CLEAN: return @selector(cleanBuild:);
     case AXYNE_COMMAND_BUILD_CANCEL: return @selector(cancelBuild:);
     case AXYNE_COMMAND_BUILD_CONFIGURE_RUNNER: return @selector(configureRunnerAction:);
     case AXYNE_COMMAND_DEBUG_START: return @selector(startDebugger:);
@@ -245,6 +247,8 @@ static SEL axyne_macos_base_action(AxyneCommandId command, NSInteger *tag, BOOL 
     case AXYNE_COMMAND_DEBUG_STEP_INTO: *tag = AXYNE_DEBUGGER_STEP_INTO; return @selector(debugCommand:);
     case AXYNE_COMMAND_DEBUG_STEP_OUT: *tag = AXYNE_DEBUGGER_STEP_OUT; return @selector(debugCommand:);
     case AXYNE_COMMAND_TERMINAL_NEW: return @selector(startTerminal:);
+    case AXYNE_COMMAND_TERMINAL_NEW_ZSH: *tag = 0; return @selector(startShellTerminal:);
+    case AXYNE_COMMAND_TERMINAL_NEW_BASH: *tag = 1; return @selector(startShellTerminal:);
     case AXYNE_COMMAND_TOOLS_SETTINGS: return @selector(showGlobalPreferences:);
     case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS: return @selector(showWorkspacePreferences:);
     case AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON: return @selector(openPreferencesFile:);
