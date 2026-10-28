@@ -1751,7 +1751,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_terminalStop setToolTip:@"프로세스 중지"]; [_terminalStop setTarget:self];
         [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
         [self addSubview:_terminalStop];
-        _closePanel = [axyne_macos_toolbar_button(@"✕", self, @selector(closePanel:)) retain];
+        _closePanel = axyne_macos_toolbar_button(@"✕", self, @selector(closePanel:));
         [_closePanel setToolTip:@"패널 닫기"];
         [self addSubview:_closePanel];
         _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
