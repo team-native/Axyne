@@ -122,6 +122,13 @@ int main(void)
     }
     CHECK(axyne_syntax_by_id("nope") == NULL);
     CHECK(axyne_syntax_by_id(NULL) == NULL);
+    /* Completion pops up for code, never for prose or plain text. */
+    CHECK(axyne_syntax_completes(axyne_syntax_for_path("a.c")));
+    CHECK(axyne_syntax_completes(axyne_syntax_for_path("a.py")));
+    CHECK(!axyne_syntax_completes(axyne_syntax_for_path("README.md")));
+    CHECK(!axyne_syntax_completes(axyne_syntax_for_path("notes.txt")));
+    CHECK(!axyne_syntax_completes(axyne_syntax_for_path("noextension")));
+    CHECK(!axyne_syntax_completes(NULL));
     if (failures == 0) puts("syntax: ok");
     return failures == 0 ? 0 : 1;
 }
