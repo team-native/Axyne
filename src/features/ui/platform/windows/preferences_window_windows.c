@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +25,7 @@
 static const wchar_t AXYNE_PW_CLASS[] = L"AxynePreferencesWindow";
 
 enum {
-    PW_ID_NAV = 100,          /* 100..102 */
+    PW_ID_NAV = 100,          /* 100..105 */
     PW_ID_CLOSE = 110,
     PW_ID_LINK,
     PW_ID_OK,
@@ -38,10 +39,23 @@ enum {
     PW_ID_EDIT_SIZE,
     PW_ID_EDIT_TAB,
     PW_ID_EDIT_UNDO,
+    PW_ID_CMAKE_PATH = 170,   /* 빌드 (CMake) */
+    PW_ID_GENERATOR,
+    PW_ID_BUILD_DIR,
+    PW_ID_CONFIGURE_ARGS,
+    PW_ID_TERM_PROFILE,       /* 터미널 */
+    PW_ID_DIFF_WS,            /* 비교기 */
+    PW_ID_DIFF_TOOL,
+    PW_ID_DIFF_ARGS,
     PW_ID_KEY = 200           /* + action * 4 + {0 edit, 1 toggle, 2 restore} */
 };
 
-enum { PW_PAGE_EDITOR = 0, PW_PAGE_THEME, PW_PAGE_KEYS, PW_PAGE_COUNT };
+/* Sidebar order follows Figma 24:13953. */
+enum { PW_PAGE_EDITOR = 0, PW_PAGE_THEME, PW_PAGE_BUILD, PW_PAGE_TERMINAL, PW_PAGE_KEYS,
+       PW_PAGE_DIFF, PW_PAGE_COUNT };
+static const wchar_t *const pw_page_titles[PW_PAGE_COUNT] = {
+    L"편집기", L"글꼴 및 색", L"빌드 (CMake)", L"터미널", L"키 바인딩", L"비교기"
+};
 enum { PW_MAX_PAGE_WINDOWS = 80, PW_OPTION_COUNT = 6, PW_FONT_MENU_BASE = 4000 };
 
 typedef struct PwState {
@@ -59,6 +73,8 @@ typedef struct PwState {
     int page_window_count[PW_PAGE_COUNT];
     HWND nav[PW_PAGE_COUNT];
     HWND edit_font, edit_size, edit_tab, edit_undo;
+    HWND edit_cmake, edit_generator, edit_build_dir, edit_configure_args;
+    HWND edit_term_profile, edit_diff_tool, edit_diff_args;
     HWND apply_button;
     HWND key_edit[AXYNE_ACTION_COUNT];
     HFONT font10, font11, font12, font12_bold, font16_bold, font_mono;
@@ -230,8 +246,14 @@ enum {
     PW_KEY_BOX_X = PW_PAGE_X + 276,
     PW_KEY_BOX_W = 110,
     PW_KEY_TOGGLE_X = PW_PAGE_X + 396,
-    PW_KEY_RESTORE_X = PW_PAGE_X + 472
+    PW_KEY_RESTORE_X = PW_PAGE_X + 472,
+    /* form pages (빌드, 터미널, 비교기): label, field, hint per row */
+    PW_FORM_Y = PW_LABEL_Y,
+    PW_FORM_PITCH = 74,
+    PW_FORM_W = PW_GROUP_W
 };
+
+static int pw_form_row(int row) { return PW_FORM_Y + row * PW_FORM_PITCH; }
 
 static void pw_add(PwState *st, int page, HWND window)
 {
@@ -287,9 +309,60 @@ static void pw_group_frame(PwState *st, HDC dc, int y, int height, const wchar_t
             PW_LEFT + 11, y - 8, size.cx + 4, size.cy, DT_LEFT);
 }
 
+static void pw_form_field(PwState *st, HDC dc, int row, const wchar_t *label, const wchar_t *hint,
+                          HWND edit)
+{
+    int y = pw_form_row(row);
+    COLORREF muted = pw_rgb(AXYNE_PW_COLOR_MUTED);
+    pw_text(dc, st->font11, muted, label, PW_LEFT, y, PW_FORM_W, 14, DT_LEFT);
+    pw_field_frame(st, dc, PW_LEFT, y + 19, PW_FORM_W, edit);
+    if (hint != NULL)
+        pw_text(dc, st->font10, pw_blend(muted, pw_rgb(AXYNE_PW_COLOR_CONTENT), 75), hint,
+                PW_LEFT, y + 19 + AXYNE_PW_FIELD_HEIGHT + 4, PW_FORM_W, 14, DT_LEFT | DT_END_ELLIPSIS);
+}
+
+/* Argument lists are edited as one line: whitespace separates arguments and
+ * double quotes group one that contains spaces. */
+static void pw_args_text(const AxynePreferenceArgs *args, char *out, size_t capacity)
+{
+    size_t used = 0, i;
+    const char *value;
+    if (capacity == 0) return;
+    out[0] = '\0';
+    for (i = 0; (value = axyne_preference_args_get(args, i)) != NULL; ++i) {
+        int quote = value[0] == '\0' || strpbrk(value, " \t") != NULL;
+        int written = snprintf(out + used, capacity - used, "%s%s%s%s", i > 0 ? " " : "",
+                               quote ? "\"" : "", value, quote ? "\"" : "");
+        if (written < 0 || (size_t)written >= capacity - used) break;
+        used += (size_t)written;
+    }
+}
+
+static int pw_args_parse(const char *text, AxynePreferenceArgs *args)
+{
+    AxynePreferenceArgs parsed;
+    char item[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+    memset(&parsed, 0, sizeof(parsed));
+    while (*text != '\0') {
+        size_t length = 0;
+        int quoted = 0;
+        while (*text == ' ' || *text == '\t') ++text;
+        if (*text == '\0') break;
+        while (*text != '\0' && (quoted || (*text != ' ' && *text != '\t'))) {
+            if (*text == '"') { quoted = !quoted; ++text; continue; }
+            if (length + 1 >= sizeof(item)) return 0;
+            item[length++] = *text++;
+        }
+        if (quoted) return 0;
+        item[length] = '\0';
+        if (axyne_preference_args_append(&parsed, item) != AXYNE_STATUS_OK) return 0;
+    }
+    *args = parsed;
+    return 1;
+}
+
 static void pw_paint(PwState *st, HDC dc)
 {
-    static const wchar_t *const page_titles[PW_PAGE_COUNT] = {L"편집기", L"글꼴 및 색", L"키 바인딩"};
     COLORREF muted = pw_rgb(AXYNE_PW_COLOR_MUTED);
     int i;
     pw_fill(dc, 0, 0, AXYNE_PW_WIDTH, AXYNE_PW_HEIGHT, pw_rgb(AXYNE_PW_COLOR_CONTENT));
@@ -299,7 +372,7 @@ static void pw_paint(PwState *st, HDC dc)
     pw_fill(dc, 0, PW_PAGE_Y, AXYNE_PW_SIDEBAR_WIDTH, PW_FOOTER_Y, pw_rgb(AXYNE_PW_COLOR_SIDEBAR));
     pw_fill(dc, 0, PW_FOOTER_Y, AXYNE_PW_WIDTH, AXYNE_PW_HEIGHT, pw_rgb(AXYNE_PW_COLOR_CHROME));
     pw_fill(dc, 0, PW_FOOTER_Y, AXYNE_PW_WIDTH, PW_FOOTER_Y + 1, pw_rgb(AXYNE_PW_COLOR_CHROME_LINE));
-    pw_text(dc, st->font16_bold, pw_rgb(AXYNE_PW_COLOR_TEXT), page_titles[st->page],
+    pw_text(dc, st->font16_bold, pw_rgb(AXYNE_PW_COLOR_TEXT), pw_page_titles[st->page],
             PW_LEFT, PW_PAGE_Y + AXYNE_PW_CONTENT_TOP, 300, 22, DT_LEFT);
     if (st->page == PW_PAGE_EDITOR) {
         pw_text(dc, st->font11, muted, L"글꼴", PW_LEFT, PW_LABEL_Y, 200, 14, DT_LEFT);
@@ -315,6 +388,21 @@ static void pw_paint(PwState *st, HDC dc)
         pw_group_frame(st, dc, PW_RENDER_GROUP_Y, PW_RENDER_GROUP_H, L"렌더링");
     } else if (st->page == PW_PAGE_THEME) {
         pw_group_frame(st, dc, PW_THEME_GROUP_Y, PW_DISPLAY_GROUP_H, L"테마");
+    } else if (st->page == PW_PAGE_BUILD) {
+        pw_form_field(st, dc, 0, L"CMake 실행 파일", L"비워 두면 PATH에서 찾습니다.", st->edit_cmake);
+        pw_form_field(st, dc, 1, L"생성기 (-G)", L"예: Ninja, \"Visual Studio 17 2022\". 비워 두면 CMake 기본값.",
+                      st->edit_generator);
+        pw_form_field(st, dc, 2, L"빌드 디렉터리", L"작업 영역 기준 경로. ${config}는 빌드 구성 이름으로 바뀝니다.",
+                      st->edit_build_dir);
+        pw_form_field(st, dc, 3, L"구성 인수", L"cmake 구성 단계에 추가할 인수 (공백 구분, 큰따옴표로 묶기).",
+                      st->edit_configure_args);
+    } else if (st->page == PW_PAGE_TERMINAL) {
+        pw_form_field(st, dc, 0, L"기본 프로필", L"새 터미널에 쓸 셸 이름 (예: PowerShell 7, cmd). 비워 두면 처음 감지된 셸.",
+                      st->edit_term_profile);
+    } else if (st->page == PW_PAGE_DIFF) {
+        pw_form_field(st, dc, 1, L"외부 비교 도구", L"비워 두면 내장 비교기를 씁니다.", st->edit_diff_tool);
+        pw_form_field(st, dc, 2, L"외부 도구 인수", L"외부 비교 도구에 넘길 인수 (공백 구분, 큰따옴표로 묶기).",
+                      st->edit_diff_args);
     } else {
         pw_text(dc, st->font11, muted, L"동작", PW_LEFT, PW_LABEL_Y, 100, 14, DT_LEFT);
         pw_text(dc, st->font11, muted, L"단축키", PW_KEY_MOD_X, PW_LABEL_Y, 100, 14, DT_LEFT);
@@ -423,12 +511,11 @@ static void pw_draw_item(PwState *st, const DRAWITEMSTRUCT *di)
     int width = di->rcItem.right - di->rcItem.left;
     int height = di->rcItem.bottom - di->rcItem.top;
     if (id >= PW_ID_NAV && id < PW_ID_NAV + PW_PAGE_COUNT) {
-        static const wchar_t *const titles[PW_PAGE_COUNT] = {L"편집기", L"글꼴 및 색", L"키 바인딩"};
         int selected = st->page == id - PW_ID_NAV;
         pw_fill(dc, di->rcItem.left, di->rcItem.top, di->rcItem.right, di->rcItem.bottom,
                 pw_rgb(selected ? AXYNE_PW_COLOR_SELECTED : AXYNE_PW_COLOR_SIDEBAR));
         pw_text(dc, st->font12, pw_rgb(selected ? AXYNE_PW_COLOR_TEXT : AXYNE_PW_COLOR_MUTED),
-                titles[id - PW_ID_NAV], 12, di->rcItem.top, width - 12, height, DT_LEFT | DT_VCENTER);
+                pw_page_titles[id - PW_ID_NAV], 12, di->rcItem.top, width - 12, height, DT_LEFT | DT_VCENTER);
         if (di->itemState & ODS_FOCUS) {
             RECT focus = di->rcItem;
             InflateRect(&focus, -3, -3);
@@ -481,6 +568,8 @@ static void pw_draw_item(PwState *st, const DRAWITEMSTRUCT *di)
         pw_draw_checkbox(st, di, 1, (int)st->draft.editor.rendering == index,
             index == 0 ? L"Direct2D / DirectWrite — 선명한 글꼴, GPU 가속"
                        : L"GDI — 최소 메모리, 원격 데스크톱 권장");
+    } else if (id == PW_ID_DIFF_WS) {
+        pw_draw_checkbox(st, di, 0, st->draft.diff.ignore_whitespace != 0, L"공백 차이 무시");
     } else if (id >= PW_ID_THEME && id < PW_ID_THEME + 3) {
         static const wchar_t *const names[3] = {L"어둡게", L"밝게", L"시스템 설정 따르기"};
         pw_draw_checkbox(st, di, 1, (int)st->draft.theme.preset == id - PW_ID_THEME,
@@ -561,6 +650,45 @@ static int pw_collect(PwState *st, AxynePreferences *out, const wchar_t **messag
         return 0;
     }
     (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", text);
+    {
+        static const struct { int page; size_t offset; size_t size; } texts[] = {
+            { PW_PAGE_BUILD, offsetof(AxynePreferences, build.cmake_path), sizeof(((AxynePreferences *)0)->build.cmake_path) },
+            { PW_PAGE_BUILD, offsetof(AxynePreferences, build.generator), sizeof(((AxynePreferences *)0)->build.generator) },
+            { PW_PAGE_BUILD, offsetof(AxynePreferences, build.build_directory), sizeof(((AxynePreferences *)0)->build.build_directory) },
+            { PW_PAGE_TERMINAL, offsetof(AxynePreferences, terminal.default_profile), sizeof(((AxynePreferences *)0)->terminal.default_profile) },
+            { PW_PAGE_DIFF, offsetof(AxynePreferences, diff.external_tool), sizeof(((AxynePreferences *)0)->diff.external_tool) }
+        };
+        HWND edits[5];
+        char long_text[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+        edits[0] = st->edit_cmake; edits[1] = st->edit_generator; edits[2] = st->edit_build_dir;
+        edits[3] = st->edit_term_profile; edits[4] = st->edit_diff_tool;
+        for (i = 0; i < 5; ++i) {
+            if (edits[i] == NULL) continue;
+            if (!pw_window_utf8(edits[i], long_text, sizeof(long_text)) || strlen(long_text) >= texts[i].size) {
+                if (message) *message = L"입력한 값이 너무 깁니다.";
+                if (page) *page = texts[i].page;
+                if (focus) *focus = edits[i];
+                return 0;
+            }
+            memcpy((char *)out + texts[i].offset, long_text, strlen(long_text) + 1);
+        }
+        if (st->edit_configure_args != NULL &&
+            (!pw_window_utf8(st->edit_configure_args, long_text, sizeof(long_text)) ||
+             !pw_args_parse(long_text, &out->build.configure_args))) {
+            if (message) *message = L"구성 인수가 너무 길거나 따옴표가 닫히지 않았습니다.";
+            if (page) *page = PW_PAGE_BUILD;
+            if (focus) *focus = st->edit_configure_args;
+            return 0;
+        }
+        if (st->edit_diff_args != NULL &&
+            (!pw_window_utf8(st->edit_diff_args, long_text, sizeof(long_text)) ||
+             !pw_args_parse(long_text, &out->diff.external_tool_args))) {
+            if (message) *message = L"외부 도구 인수가 너무 길거나 따옴표가 닫히지 않았습니다.";
+            if (page) *page = PW_PAGE_DIFF;
+            if (focus) *focus = st->edit_diff_args;
+            return 0;
+        }
+    }
     for (i = 0; i < (int)out->binding_count; ++i) {
         AxynePreferenceAction action = out->bindings[i].action;
         HWND edit = st->key_edit[action];
@@ -598,6 +726,18 @@ static void pw_load_controls(PwState *st)
     pw_set_text_utf8(st->edit_tab, text);
     (void)snprintf(text, sizeof(text), "%u", st->draft.editor.undo_limit_mb);
     pw_set_text_utf8(st->edit_undo, text);
+    {
+        char args[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+        pw_set_text_utf8(st->edit_cmake, st->draft.build.cmake_path);
+        pw_set_text_utf8(st->edit_generator, st->draft.build.generator);
+        pw_set_text_utf8(st->edit_build_dir, st->draft.build.build_directory);
+        pw_args_text(&st->draft.build.configure_args, args, sizeof(args));
+        pw_set_text_utf8(st->edit_configure_args, args);
+        pw_set_text_utf8(st->edit_term_profile, st->draft.terminal.default_profile);
+        pw_set_text_utf8(st->edit_diff_tool, st->draft.diff.external_tool);
+        pw_args_text(&st->draft.diff.external_tool_args, args, sizeof(args));
+        pw_set_text_utf8(st->edit_diff_args, args);
+    }
     for (i = 0; i < (int)st->draft.binding_count; ++i) {
         HWND edit = st->key_edit[st->draft.bindings[i].action];
         if (edit != NULL) pw_set_text_utf8(edit, st->draft.bindings[i].key);
@@ -755,6 +895,10 @@ static void pw_command(PwState *st, int id, int notification, HWND source)
             axyne_preferences_select_theme(&st->draft.theme, preset);
         for (i = 0; i < 3; ++i) pw_invalidate_id(st, PW_ID_THEME + i);
         pw_update_buttons(st);
+    } else if (id == PW_ID_DIFF_WS) {
+        st->draft.diff.ignore_whitespace = !st->draft.diff.ignore_whitespace;
+        pw_invalidate_id(st, id);
+        pw_update_buttons(st);
     } else if (id == PW_ID_FONT_MENU) {
         pw_show_font_menu(st);
     } else if (id >= PW_ID_KEY) {
@@ -786,9 +930,8 @@ static void pw_build(PwState *st)
     int i, x, y;
     HWND window = st->window;
     for (i = 0; i < PW_PAGE_COUNT; ++i) {
-        static const wchar_t *const titles[PW_PAGE_COUNT] = {L"편집기", L"글꼴 및 색", L"키 바인딩"};
         st->nav[i] = pw_button(st, -1, PW_ID_NAV + i, 0, PW_PAGE_Y + i * AXYNE_PW_ITEM_HEIGHT,
-                               AXYNE_PW_SIDEBAR_WIDTH, AXYNE_PW_ITEM_HEIGHT, titles[i]);
+                               AXYNE_PW_SIDEBAR_WIDTH, AXYNE_PW_ITEM_HEIGHT, pw_page_titles[i]);
     }
     (void)pw_button(st, -1, PW_ID_CLOSE, AXYNE_PW_WIDTH - 12 - 14 - 7, 4, 28, 28, L"닫기");
 
@@ -810,6 +953,21 @@ static void pw_build(PwState *st)
         (void)pw_button(st, PW_PAGE_EDITOR, PW_ID_RENDER + i, PW_LEFT + 15,
                         PW_RENDER_GROUP_Y + 15 + i * 26, 440, 14, i == 0 ? L"Direct2D / DirectWrite \u2014 선명한 글꼴, GPU 가속"
                                    : L"GDI \u2014 최소 메모리, 원격 데스크톱 권장");
+
+    /* 빌드 (CMake), 터미널, 비교기 pages */
+    st->edit_cmake = pw_edit(st, PW_PAGE_BUILD, PW_ID_CMAKE_PATH, PW_LEFT, pw_form_row(0) + 19, PW_FORM_W);
+    st->edit_generator = pw_edit(st, PW_PAGE_BUILD, PW_ID_GENERATOR, PW_LEFT, pw_form_row(1) + 19, PW_FORM_W);
+    st->edit_build_dir = pw_edit(st, PW_PAGE_BUILD, PW_ID_BUILD_DIR, PW_LEFT, pw_form_row(2) + 19, PW_FORM_W);
+    st->edit_configure_args = pw_edit(st, PW_PAGE_BUILD, PW_ID_CONFIGURE_ARGS, PW_LEFT,
+                                      pw_form_row(3) + 19, PW_FORM_W);
+    st->edit_term_profile = pw_edit(st, PW_PAGE_TERMINAL, PW_ID_TERM_PROFILE, PW_LEFT,
+                                    pw_form_row(0) + 19, PW_FORM_W);
+    (void)pw_button(st, PW_PAGE_DIFF, PW_ID_DIFF_WS, PW_LEFT, pw_form_row(0) + 4, 300, 14,
+                    L"공백 차이 무시");
+    st->edit_diff_tool = pw_edit(st, PW_PAGE_DIFF, PW_ID_DIFF_TOOL, PW_LEFT, pw_form_row(1) + 19, PW_FORM_W);
+    st->edit_diff_args = pw_edit(st, PW_PAGE_DIFF, PW_ID_DIFF_ARGS, PW_LEFT, pw_form_row(2) + 19, PW_FORM_W);
+    SendMessageW(st->edit_configure_args, EM_LIMITTEXT, AXYNE_PREFERENCE_ARGS_TEXT_MAX - 1, 0);
+    SendMessageW(st->edit_diff_args, EM_LIMITTEXT, AXYNE_PREFERENCE_ARGS_TEXT_MAX - 1, 0);
 
     /* theme page */
     for (i = 0; i < 3; ++i)
