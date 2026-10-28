@@ -3,12 +3,15 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
+#include "axyne/account.h"
+#include "axyne/app_paths.h"
 #include "../../extensions_window.h"
 #include "../../preferences_window.h"
 
@@ -34,8 +37,29 @@ typedef enum EwAction {
     EW_HIT_INSTALL,
     EW_HIT_TOGGLE,
     EW_HIT_REMOVE,
-    EW_HIT_OPEN_FOLDER
+    EW_HIT_OPEN_FOLDER,
+    EW_HIT_MARKET_INSTALL,
+    EW_HIT_SEARCH,
+    EW_HIT_SUBMIT,
+    EW_HIT_SWITCH_MODE,
+    EW_HIT_LOGOUT
 } EwAction;
+
+/* Text fields are real EDIT children (typing, IME, caret, clipboard); the
+ * box around each is painted. */
+typedef enum EwField {
+    EW_FIELD_SEARCH = 0,
+    EW_FIELD_EMAIL,
+    EW_FIELD_NAME,
+    EW_FIELD_PASSWORD,
+    EW_FIELD_COUNT
+} EwField;
+
+enum {
+    EW_ACCOUNT_Y = EW_PAGE_Y + 76,
+    EW_ACCOUNT_ROW = 62,
+    EW_ACCOUNT_WIDTH = 340
+};
 
 typedef struct EwHit {
     RECT rect;
@@ -55,6 +79,16 @@ typedef struct EwState {
     EwHit hits[EW_MAX_HITS];
     int hit_count;
     HFONT font11, font12, font12_bold, font16_bold;
+    HWND fields[EW_FIELD_COUNT];
+    HBRUSH field_brush;
+    char *config_dir;
+    char *server;            /* API root from server.json */
+    AxyneAccount account;
+    AxyneMarketList market;
+    int market_loaded;
+    int register_mode;       /* account page: sign-up form instead of sign-in */
+    wchar_t notice[400];     /* last marketplace / account message */
+    int notice_error;
 } EwState;
 
 static COLORREF ew_rgb(uint32_t value)
@@ -136,7 +170,9 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
 
 static int ew_max_scroll(const EwState *st)
 {
-    int content = (int)st->plugins->count * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP);
+    size_t rows = st->page == AXYNE_EXTENSIONS_MARKETPLACE ? st->market.count
+                 : st->page == AXYNE_EXTENSIONS_INSTALLED ? st->plugins->count : 0;
+    int content = (int)rows * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP);
     return content > ew_list_height() ? content - ew_list_height() : 0;
 }
 
@@ -211,9 +247,178 @@ static void ew_paint_installed(EwState *st, HDC dc)
     DeleteObject(clip);
 }
 
+static void ew_set_notice(EwState *st, int is_error, const wchar_t *prefix, const char *detail)
+{
+    wchar_t *wide = ew_wide(detail);
+    (void)swprintf_s(st->notice, sizeof(st->notice) / sizeof(st->notice[0]), L"%ls%ls%ls", prefix,
+                     wide != NULL && wide[0] ? L" " : L"", wide != NULL ? wide : L"");
+    st->notice_error = is_error;
+    free(wide);
+}
+
+/* Box of a text field in window coordinates for the current page/mode. */
+static int ew_field_box(const EwState *st, EwField field, RECT *box)
+{
+    int row;
+    if (field == EW_FIELD_SEARCH) {
+        if (st->page != AXYNE_EXTENSIONS_MARKETPLACE) return 0;
+        *box = (RECT){EW_LEFT + 140, EW_PAGE_Y + 16, EW_RIGHT - 76, EW_PAGE_Y + 16 + AXYNE_PW_FIELD_HEIGHT};
+        return 1;
+    }
+    if (st->page != AXYNE_EXTENSIONS_ACCOUNT || axyne_account_signed_in(&st->account)) return 0;
+    if (field == EW_FIELD_NAME && !st->register_mode) return 0;
+    row = field == EW_FIELD_EMAIL ? 0 : field == EW_FIELD_NAME ? 1 : st->register_mode ? 2 : 1;
+    *box = (RECT){EW_LEFT, EW_ACCOUNT_Y + row * EW_ACCOUNT_ROW + 20, EW_LEFT + EW_ACCOUNT_WIDTH,
+                  EW_ACCOUNT_Y + row * EW_ACCOUNT_ROW + 20 + AXYNE_PW_FIELD_HEIGHT};
+    return 1;
+}
+
+static void ew_layout_fields(EwState *st)
+{
+    int i;
+    for (i = 0; i < EW_FIELD_COUNT; ++i) {
+        RECT box;
+        if (st->fields[i] == NULL) continue;
+        if (ew_field_box(st, (EwField)i, &box)) {
+            SetWindowPos(st->fields[i], NULL, box.left + 9, box.top + 7, box.right - box.left - 18,
+                         box.bottom - box.top - 12, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        } else {
+            ShowWindow(st->fields[i], SW_HIDE);
+        }
+    }
+}
+
+static char *ew_field_text(EwState *st, EwField field)
+{
+    int length = GetWindowTextLengthW(st->fields[field]);
+    wchar_t *wide = (wchar_t *)calloc((size_t)length + 1, sizeof(wchar_t));
+    char *text;
+    if (wide == NULL) return NULL;
+    GetWindowTextW(st->fields[field], wide, length + 1);
+    text = ew_utf8(wide);
+    free(wide);
+    return text;
+}
+
+static void ew_paint_field(EwState *st, HDC dc, EwField field, const wchar_t *label)
+{
+    RECT box, rc;
+    if (!ew_field_box(st, field, &box)) return;
+    if (label != NULL) {
+        rc = (RECT){box.left, box.top - 20, box.right, box.top - 4};
+        ew_text(dc, st->font11, AXYNE_PW_COLOR_MUTED, label, rc, DT_LEFT | DT_SINGLELINE);
+    }
+    ew_round(dc, box, 6, AXYNE_PW_COLOR_FIELD,
+             GetFocus() == st->fields[field] ? AXYNE_PW_COLOR_ACCENT : AXYNE_PW_COLOR_BORDER);
+}
+
+static void ew_paint_notice(EwState *st, HDC dc, RECT rc)
+{
+    if (st->notice[0] == L'\0') return;
+    ew_text(dc, st->font11, st->notice_error ? 0xe57373u : AXYNE_PW_COLOR_MUTED, st->notice, rc,
+            DT_LEFT | DT_WORDBREAK);
+}
+
+static void ew_paint_marketplace(EwState *st, HDC dc)
+{
+    RECT rc;
+    size_t i;
+    HRGN clip;
+    rc = (RECT){EW_LEFT, EW_PAGE_Y + AXYNE_PW_CONTENT_TOP, EW_LEFT + 136, EW_PAGE_Y + AXYNE_PW_CONTENT_TOP + 22};
+    ew_text(dc, st->font16_bold, AXYNE_PW_COLOR_TEXT, L"마켓플레이스", rc, DT_LEFT | DT_SINGLELINE);
+    ew_paint_field(st, dc, EW_FIELD_SEARCH, NULL);
+    ew_button(st, dc, (RECT){EW_RIGHT - 68, EW_PAGE_Y + 16, EW_RIGHT, EW_PAGE_Y + 16 + AXYNE_PW_FIELD_HEIGHT},
+              L"검색", 0, EW_HIT_SEARCH, 0);
+
+    if (st->market.count == 0) {
+        rc = (RECT){EW_LEFT, EW_LIST_Y + 40, EW_RIGHT, EW_LIST_Y + 120};
+        if (st->notice[0] != L'\0') ew_paint_notice(st, dc, rc);
+        else ew_text(dc, st->font12, AXYNE_PW_COLOR_MUTED,
+                     st->market_loaded ? L"조건에 맞는 플러그인이 없습니다." : L"불러오는 중...", rc,
+                     DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    clip = CreateRectRgn(EW_LEFT, EW_LIST_Y, EW_RIGHT, EW_LIST_Y + ew_list_height());
+    SelectClipRgn(dc, clip);
+    for (i = 0; i < st->market.count; ++i) {
+        const AxyneMarketItem *item = &st->market.items[i];
+        const AxynePlugin *installed = axyne_plugins_find(st->plugins, item->slug);
+        int same = installed != NULL && item->version != NULL && strcmp(installed->version, item->version) == 0;
+        int top = EW_LIST_Y + (int)i * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP) - st->scroll;
+        RECT row = {EW_LEFT, top, EW_RIGHT, top + AXYNE_EW_ROW_HEIGHT};
+        wchar_t line[512];
+        wchar_t *name, *version, *developer;
+        if (row.bottom < EW_LIST_Y || row.top > EW_LIST_Y + ew_list_height()) continue;
+        ew_round(dc, row, 8, AXYNE_PW_COLOR_FIELD, AXYNE_PW_COLOR_BORDER);
+        name = ew_wide(item->name); version = ew_wide(item->version); developer = ew_wide(item->developer);
+        (void)swprintf_s(line, 512, L"%ls  v%ls", name != NULL ? name : L"", version != NULL ? version : L"?");
+        rc = (RECT){row.left + 14, top + 10, row.right - 120, top + 28};
+        ew_text(dc, st->font12_bold, AXYNE_PW_COLOR_TEXT, line, rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        rc = (RECT){row.left + 14, top + 30, row.right - 120, top + 46};
+        ew_text_utf8(dc, st->font11, AXYNE_PW_COLOR_MUTED, item->description, rc,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        (void)swprintf_s(line, 512, L"%ls%ls다운로드 %ld회%ls", developer != NULL ? developer : L"",
+                         developer != NULL && developer[0] ? L" · " : L"", item->downloads,
+                         installed == NULL ? L"" : same ? L" · 설치됨" : L" · 새 버전 있음");
+        rc = (RECT){row.left + 14, top + 50, row.right - 120, top + 66};
+        ew_text(dc, st->font11, AXYNE_PW_COLOR_MUTED, line, rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        free(name); free(version); free(developer);
+        if (same) {
+            rc = (RECT){row.right - 104, top + 23, row.right - 12, top + 53};
+            ew_text(dc, st->font12, AXYNE_PW_COLOR_MUTED, L"설치됨", rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            ew_button(st, dc, (RECT){row.right - 104, top + 23, row.right - 12, top + 53},
+                      installed != NULL ? L"업데이트" : L"설치", 1, EW_HIT_MARKET_INSTALL, (int)i);
+        }
+    }
+    SelectClipRgn(dc, NULL);
+    DeleteObject(clip);
+}
+
+static void ew_paint_account(EwState *st, HDC dc)
+{
+    RECT rc;
+    wchar_t line[512];
+    wchar_t *server = ew_wide(st->server);
+    rc = (RECT){EW_LEFT, EW_PAGE_Y + AXYNE_PW_CONTENT_TOP, EW_RIGHT, EW_PAGE_Y + AXYNE_PW_CONTENT_TOP + 22};
+    ew_text(dc, st->font16_bold, AXYNE_PW_COLOR_TEXT,
+            axyne_account_signed_in(&st->account) ? L"Axyne 계정"
+            : st->register_mode ? L"Axyne 계정 만들기" : L"Axyne 계정 로그인", rc, DT_LEFT | DT_SINGLELINE);
+    if (axyne_account_signed_in(&st->account)) {
+        rc = (RECT){EW_LEFT, EW_ACCOUNT_Y, EW_RIGHT, EW_ACCOUNT_Y + 22};
+        ew_text_utf8(dc, st->font16_bold, AXYNE_PW_COLOR_TEXT,
+                     st->account.display_name != NULL ? st->account.display_name : "", rc, DT_LEFT | DT_SINGLELINE);
+        rc = (RECT){EW_LEFT, EW_ACCOUNT_Y + 28, EW_RIGHT, EW_ACCOUNT_Y + 46};
+        ew_text_utf8(dc, st->font12, AXYNE_PW_COLOR_MUTED, st->account.email != NULL ? st->account.email : "",
+                     rc, DT_LEFT | DT_SINGLELINE);
+        ew_button(st, dc, (RECT){EW_LEFT, EW_ACCOUNT_Y + 66, EW_LEFT + 110, EW_ACCOUNT_Y + 66 + AXYNE_PW_BUTTON_HEIGHT},
+                  L"로그아웃", 0, EW_HIT_LOGOUT, 0);
+        rc = (RECT){EW_LEFT, EW_ACCOUNT_Y + 116, EW_RIGHT, EW_ACCOUNT_Y + 176};
+    } else {
+        int rows = st->register_mode ? 3 : 2;
+        int y = EW_ACCOUNT_Y + rows * EW_ACCOUNT_ROW + 4;
+        ew_paint_field(st, dc, EW_FIELD_EMAIL, L"이메일");
+        ew_paint_field(st, dc, EW_FIELD_NAME, L"이름");
+        ew_paint_field(st, dc, EW_FIELD_PASSWORD, L"비밀번호");
+        ew_button(st, dc, (RECT){EW_LEFT, y, EW_LEFT + 120, y + AXYNE_PW_BUTTON_HEIGHT},
+                  st->register_mode ? L"가입하기" : L"로그인", 1, EW_HIT_SUBMIT, 0);
+        rc = (RECT){EW_LEFT + 136, y, EW_LEFT + EW_ACCOUNT_WIDTH + 60, y + AXYNE_PW_BUTTON_HEIGHT};
+        ew_text(dc, st->font12, AXYNE_PW_COLOR_ACCENT,
+                st->register_mode ? L"이미 계정이 있나요? 로그인" : L"계정이 없나요? 회원가입", rc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        ew_hit(st, rc, EW_HIT_SWITCH_MODE, 0);
+        rc = (RECT){EW_LEFT, y + 48, EW_RIGHT, y + 108};
+    }
+    ew_paint_notice(st, dc, rc);
+    (void)swprintf_s(line, 512, L"서버: %ls  (설정 폴더의 server.json에서 변경)", server != NULL ? server : L"");
+    rc = (RECT){EW_LEFT, EW_FOOTER_Y - 30, EW_RIGHT, EW_FOOTER_Y - 12};
+    ew_text(dc, st->font11, AXYNE_PW_COLOR_MUTED, line, rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    free(server);
+}
+
 static void ew_paint(EwState *st, HDC dc)
 {
-    static const wchar_t *const pages[AXYNE_EXTENSIONS_PAGE_COUNT] = { L"설치됨" };
+    static const wchar_t *const pages[AXYNE_EXTENSIONS_PAGE_COUNT] = { L"설치됨", L"마켓플레이스", L"계정" };
     RECT rc;
     int i;
     st->hit_count = 0;
@@ -237,6 +442,8 @@ static void ew_paint(EwState *st, HDC dc)
         ew_hit(st, item, EW_HIT_NAV, i);
     }
     if (st->page == AXYNE_EXTENSIONS_INSTALLED) ew_paint_installed(st, dc);
+    else if (st->page == AXYNE_EXTENSIONS_MARKETPLACE) ew_paint_marketplace(st, dc);
+    else ew_paint_account(st, dc);
 
     ew_fill(dc, (RECT){0, EW_FOOTER_Y, AXYNE_PW_WIDTH, AXYNE_PW_HEIGHT}, AXYNE_PW_COLOR_CHROME);
     ew_fill(dc, (RECT){0, EW_FOOTER_Y, AXYNE_PW_WIDTH, EW_FOOTER_Y + 1}, AXYNE_PW_COLOR_CHROME_LINE);
@@ -290,6 +497,110 @@ static void ew_install(EwState *st)
     InvalidateRect(st->window, NULL, FALSE);
 }
 
+static void ew_busy(EwState *st)
+{
+    /* Requests are short and block this modal window; show it on screen. */
+    UpdateWindow(st->window);
+    SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32514)));
+}
+
+static void ew_search(EwState *st)
+{
+    AxyneError error;
+    char *query = ew_field_text(st, EW_FIELD_SEARCH);
+    st->notice[0] = L'\0';
+    ew_busy(st);
+    axyne_market_list_clear(&st->market);
+    if (axyne_market_list(st->server, query, "windows", st->ide_version, &st->market, &error) != AXYNE_STATUS_OK)
+        ew_set_notice(st, 1, L"마켓플레이스를 불러오지 못했습니다.", error.message);
+    st->market_loaded = 1;
+    st->scroll = 0;
+    free(query);
+}
+
+static void ew_market_install(EwState *st, int index)
+{
+    const AxyneMarketItem *item;
+    wchar_t temp_dir[MAX_PATH], zip[MAX_PATH + 96];
+    wchar_t *slug;
+    char *zip_path, *installed = NULL;
+    AxyneError error;
+    if (index < 0 || (size_t)index >= st->market.count) return;
+    item = &st->market.items[index];
+    if (GetTempPathW(MAX_PATH, temp_dir) == 0) return;
+    slug = ew_wide(item->slug);
+    (void)swprintf_s(zip, sizeof(zip) / sizeof(zip[0]), L"%lsaxyne-%ls.zip", temp_dir, slug != NULL ? slug : L"plugin");
+    free(slug);
+    zip_path = ew_utf8(zip);
+    if (zip_path == NULL) return;
+    ew_busy(st);
+    if (axyne_market_download(st->server, item->slug, "windows", st->ide_version, zip_path, &error) != AXYNE_STATUS_OK) {
+        ew_message(st, L"플러그인을 내려받지 못했습니다.", error.message, MB_ICONERROR);
+    } else if (axyne_plugins_install_zip(st->plugins, zip_path, st->ide_version, &installed, &error) != AXYNE_STATUS_OK) {
+        ew_message(st, L"플러그인을 설치하지 못했습니다.", error.message, MB_ICONERROR);
+    } else {
+        ew_set_notice(st, 0, L"설치했습니다:", item->name);
+    }
+    DeleteFileW(zip);
+    free(installed);
+    free(zip_path);
+}
+
+static void ew_submit_account(EwState *st)
+{
+    AxyneError error;
+    AxyneStatus status;
+    char *email = ew_field_text(st, EW_FIELD_EMAIL);
+    char *name = ew_field_text(st, EW_FIELD_NAME);
+    char *password = ew_field_text(st, EW_FIELD_PASSWORD);
+    st->notice[0] = L'\0';
+    if (email == NULL || password == NULL || name == NULL) goto done;
+    if (email[0] == '\0' || password[0] == '\0' || (st->register_mode && name[0] == '\0')) {
+        ew_set_notice(st, 1, st->register_mode ? L"이메일, 이름, 비밀번호를 입력하세요." : L"이메일과 비밀번호를 입력하세요.", NULL);
+        goto done;
+    }
+    ew_busy(st);
+    status = st->register_mode ? axyne_account_register(st->server, email, name, password, &error) : AXYNE_STATUS_OK;
+    if (status == AXYNE_STATUS_OK) status = axyne_account_login(st->server, email, password, &st->account, &error);
+    if (status != AXYNE_STATUS_OK) {
+        ew_set_notice(st, 1, st->register_mode ? L"가입하지 못했습니다." : L"로그인하지 못했습니다.", error.message);
+    } else {
+        if (axyne_account_save(st->config_dir, &st->account, &error) != AXYNE_STATUS_OK)
+            ew_set_notice(st, 1, L"로그인했지만 계정 정보를 저장하지 못했습니다.", error.message);
+        else
+            ew_set_notice(st, 0, st->register_mode ? L"가입하고 로그인했습니다." : L"로그인했습니다.", NULL);
+        st->register_mode = 0;
+    }
+    SetWindowTextW(st->fields[EW_FIELD_PASSWORD], L"");
+done:
+    if (password != NULL) SecureZeroMemory(password, strlen(password));
+    free(email); free(name); free(password);
+    ew_layout_fields(st);
+}
+
+static void ew_logout(EwState *st)
+{
+    ew_busy(st);
+    axyne_account_logout(st->server, &st->account);
+    (void)axyne_account_save(st->config_dir, &st->account, NULL);
+    ew_set_notice(st, 0, L"로그아웃했습니다.", NULL);
+    ew_layout_fields(st);
+}
+
+/* Page entry: the marketplace loads on first view. */
+static void ew_open_page(EwState *st, int page)
+{
+    st->page = page;
+    st->scroll = 0;
+    st->notice[0] = L'\0';
+    ew_layout_fields(st);
+    InvalidateRect(st->window, NULL, FALSE);
+    if (page == AXYNE_EXTENSIONS_MARKETPLACE && !st->market_loaded) {
+        ew_search(st);
+        InvalidateRect(st->window, NULL, FALSE);
+    }
+}
+
 static void ew_activate(EwState *st, const EwHit *hit)
 {
     AxyneError error;
@@ -297,7 +608,16 @@ static void ew_activate(EwState *st, const EwHit *hit)
         ? &st->plugins->items[hit->index] : NULL;
     switch (hit->action) {
     case EW_HIT_CLOSE: st->done = 1; break;
-    case EW_HIT_NAV: st->page = hit->index; st->scroll = 0; break;
+    case EW_HIT_NAV: ew_open_page(st, hit->index); break;
+    case EW_HIT_SEARCH: ew_search(st); break;
+    case EW_HIT_MARKET_INSTALL: ew_market_install(st, hit->index); break;
+    case EW_HIT_SUBMIT: ew_submit_account(st); break;
+    case EW_HIT_LOGOUT: ew_logout(st); break;
+    case EW_HIT_SWITCH_MODE:
+        st->register_mode = !st->register_mode;
+        st->notice[0] = L'\0';
+        ew_layout_fields(st);
+        break;
     case EW_HIT_INSTALL: ew_install(st); break;
     case EW_HIT_TOGGLE:
         if (plugin != NULL &&
@@ -339,7 +659,8 @@ static int ew_hit_at(const EwState *st, int x, int y)
     POINT point = {x, y};
     for (i = st->hit_count - 1; i >= 0; --i) {
         const EwHit *hit = &st->hits[i];
-        int in_list = hit->action == EW_HIT_TOGGLE || hit->action == EW_HIT_REMOVE;
+        int in_list = hit->action == EW_HIT_TOGGLE || hit->action == EW_HIT_REMOVE ||
+                      hit->action == EW_HIT_MARKET_INSTALL;
         if (in_list && (y < EW_LIST_Y || y >= EW_LIST_Y + ew_list_height())) continue;
         if (PtInRect(&hit->rect, point)) return i;
     }
@@ -358,6 +679,19 @@ static LRESULT CALLBACK ew_proc(HWND window, UINT message, WPARAM wparam, LPARAM
     }
     case WM_ERASEBKGND:
         return 1;
+    case WM_CTLCOLOREDIT:
+        if (st != NULL) {
+            HDC dc = (HDC)wparam;
+            SetTextColor(dc, ew_rgb(AXYNE_PW_COLOR_TEXT));
+            SetBkColor(dc, ew_rgb(AXYNE_PW_COLOR_FIELD));
+            return (LRESULT)st->field_brush;
+        }
+        break;
+    case WM_COMMAND:
+        /* Repaint field borders when focus moves between fields. */
+        if (st != NULL && (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS))
+            InvalidateRect(window, NULL, FALSE);
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(window, &ps);
@@ -445,6 +779,10 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
     st->font12 = ew_font(12, FW_NORMAL);
     st->font12_bold = ew_font(12, FW_SEMIBOLD);
     st->font16_bold = ew_font(16, FW_SEMIBOLD);
+    st->field_brush = CreateSolidBrush(ew_rgb(AXYNE_PW_COLOR_FIELD));
+    st->config_dir = axyne_app_path(AXYNE_APP_PATH_CONFIG_DIR);
+    st->server = axyne_server_base_url(st->config_dir);
+    axyne_account_load(st->config_dir, &st->account);
     memset(&window_class, 0, sizeof(window_class));
     window_class.cbSize = sizeof(window_class);
     if (!GetClassInfoExW(instance, AXYNE_EW_CLASS, &window_class)) {
@@ -467,10 +805,19 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
     st->window = CreateWindowExW(0, AXYNE_EW_CLASS, L"확장", WS_POPUP | WS_CLIPCHILDREN, x, y,
                                  AXYNE_PW_WIDTH, AXYNE_PW_HEIGHT, owner, NULL, instance, st);
     if (st->window != NULL) {
+        int i;
+        for (i = 0; i < EW_FIELD_COUNT; ++i) {
+            st->fields[i] = CreateWindowExW(0, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | (i == EW_FIELD_PASSWORD ? ES_PASSWORD : 0),
+                0, 0, 10, 10, st->window, (HMENU)(INT_PTR)(100 + i), instance, NULL);
+            if (st->fields[i] != NULL) SendMessageW(st->fields[i], WM_SETFONT, (WPARAM)st->font12, FALSE);
+        }
+        SendMessageW(st->fields[EW_FIELD_SEARCH], EM_SETCUEBANNER, TRUE, (LPARAM)L"플러그인 검색");
         if (owner != NULL) EnableWindow(owner, FALSE);
         ShowWindow(st->window, SW_SHOW);
         UpdateWindow(st->window);
         SetFocus(st->window);
+        ew_open_page(st, st->page);
         while (!st->done) {
             BOOL got = GetMessageW(&msg, NULL, 0, 0);
             if (got <= 0) {
@@ -478,6 +825,23 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
                 if (got == 0) PostQuitMessage((int)msg.wParam);
                 break;
             }
+            if (msg.message == WM_KEYDOWN && (msg.wParam == VK_RETURN || msg.wParam == VK_ESCAPE ||
+                                              msg.wParam == VK_TAB) && GetParent(msg.hwnd) == st->window) {
+                /* Keys typed in a field: Enter submits, Esc closes, Tab moves on. */
+                if (msg.wParam == VK_ESCAPE) st->done = 1;
+                else if (msg.wParam == VK_RETURN) {
+                    if (msg.hwnd == st->fields[EW_FIELD_SEARCH]) ew_search(st);
+                    else ew_submit_account(st);
+                    InvalidateRect(st->window, NULL, FALSE);
+                } else {
+                    HWND next = GetNextDlgTabItem(st->window, msg.hwnd, GetKeyState(VK_SHIFT) < 0);
+                    if (next != NULL) SetFocus(next);
+                }
+                continue;
+            }
+            if (msg.message == WM_CHAR && (msg.wParam == L'\r' || msg.wParam == 27 || msg.wParam == L'\t') &&
+                GetParent(msg.hwnd) == st->window)
+                continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -487,5 +851,10 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
     }
     DeleteObject(st->font11); DeleteObject(st->font12);
     DeleteObject(st->font12_bold); DeleteObject(st->font16_bold);
+    DeleteObject(st->field_brush);
+    axyne_market_list_clear(&st->market);
+    axyne_account_clear(&st->account);
+    free(st->server);
+    axyne_app_path_free(st->config_dir);
     free(st);
 }

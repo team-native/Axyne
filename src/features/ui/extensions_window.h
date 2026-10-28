@@ -8,13 +8,16 @@ extern "C" {
 #endif
 
 /* 확장 window: installed plugins (enable/disable, remove, install a local
- * package). It reuses the preferences window frame (Figma 24:13953 metrics:
+ * package), the server marketplace (search, install, update) and the Axyne
+ * account (sign up, sign in, sign out; see axyne/account.h). It reuses the preferences window frame (Figma 24:13953 metrics:
  * 760x560, 37px title bar, 198px sidebar, 80px footer, same colours) so the
  * two read as one family. The window edits `plugins` in place; callers
  * rebuild anything derived from it (the Tools > 플러그인 menu) afterwards. */
 
 typedef enum AxyneExtensionsPage {
     AXYNE_EXTENSIONS_INSTALLED = 0,
+    AXYNE_EXTENSIONS_MARKETPLACE,
+    AXYNE_EXTENSIONS_ACCOUNT,
     AXYNE_EXTENSIONS_PAGE_COUNT
 } AxyneExtensionsPage;
 

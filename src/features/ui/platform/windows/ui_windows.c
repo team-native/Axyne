@@ -430,7 +430,8 @@ enum { AXYNE_CMD_EXIT = 1090 };
 
 /* Tools > 플러그인: PLUGIN_BASE + n is the n-th command of the enabled,
  * compatible plugins in AxynePluginSet order. */
-enum { AXYNE_CMD_EXTENSIONS = 2990, AXYNE_CMD_PLUGIN_BASE = 3000,
+enum { AXYNE_CMD_EXTENSIONS = 2990, AXYNE_CMD_MARKETPLACE = 2991, AXYNE_CMD_ACCOUNT = 2992,
+       AXYNE_CMD_PLUGIN_BASE = 3000,
        AXYNE_CMD_PLUGIN_LIMIT = 3400 };
 
 enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
@@ -4678,6 +4679,8 @@ static void axyne_chrome_popup(HWND window, AxyneWindowState *state,
         axyne_menu_separator(menu, &pool);
         axyne_plugins_menu(menu, &pool, state);
         axyne_menu_add(menu, &pool, AXYNE_CMD_EXTENSIONS, L"확장...", NULL, MF_ENABLED);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_MARKETPLACE, L"마켓플레이스...", NULL, MF_ENABLED);
+        axyne_menu_add(menu, &pool, AXYNE_CMD_ACCOUNT, L"Axyne 계정...", NULL, MF_ENABLED);
         axyne_menu_separator(menu, &pool);
         axyne_menu_add(menu, &pool, AXYNE_CMD_PREFERENCES, L"설정...", NULL, MF_ENABLED);
         axyne_menu_add(menu, &pool, AXYNE_CMD_WORKSPACE_PREFERENCES, L"작업 영역 설정...",
@@ -10010,10 +10013,13 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             else if (state->editor != NULL) SetFocus(state->editor);
         }
         else if (axyne_action_command(window, state, command)) { /* handled */ }
-        else if (command == AXYNE_CMD_EXTENSIONS) {
+        else if (command == AXYNE_CMD_EXTENSIONS || command == AXYNE_CMD_MARKETPLACE ||
+                 command == AXYNE_CMD_ACCOUNT) {
             axyne_plugins_ensure(state);
             axyne_extensions_window_show(window, &state->plugins, AXYNE_CONFIG_VERSION,
-                                         AXYNE_EXTENSIONS_INSTALLED);
+                                         command == AXYNE_CMD_MARKETPLACE ? AXYNE_EXTENSIONS_MARKETPLACE
+                                         : command == AXYNE_CMD_ACCOUNT ? AXYNE_EXTENSIONS_ACCOUNT
+                                         : AXYNE_EXTENSIONS_INSTALLED);
         }
         else if (command >= AXYNE_CMD_PLUGIN_BASE && command < AXYNE_CMD_PLUGIN_LIMIT)
             axyne_run_plugin_command(window, state, command);
