@@ -2015,6 +2015,117 @@ static int axyne_start_step(HWND window, AxyneWindowState *state,
 /* Build and Run resolve the active file's language, the build target and the
  * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
  * it. Run executes the build step first when the plan has one. */
+/* 정리: deletes the active file's build output (the {out} of its build step).
+ * Returns 1 when the build may go on (nothing to delete counts), 0 when the
+ * output could not be removed or no build applies. Messages go to the output
+ * panel. */
+static int axyne_build_clean(HWND window, AxyneWindowState *state)
+{
+    AxyneDocument *doc = axyne_active_visible(state);
+    AxyneLanguagePlan plan;
+    char message[256], line[600];
+    AxyneStatus status;
+    int ok = 1;
+    if (doc == NULL) return 0;
+    state->panel_tab = AXYNE_WIN_PANEL_OUTPUT;
+    state->panel_hidden = 0;
+    axyne_layout(window, state);
+    if (state->action_process != NULL || axyne_debugger_is_active(&state->debugger)) {
+        const char *busy = "[build] 다른 작업이 실행 중입니다. 먼저 중지하세요.\r\n";
+        axyne_terminal_append_utf8(state->terminal_output, busy, AXYNE_PROCESS_STDERR);
+        return 0;
+    }
+    if (doc->is_untitled || doc->path == NULL) {
+        const char *unsaved = "[build] 저장된 파일에서만 정리할 수 있습니다.\r\n";
+        axyne_terminal_append_utf8(state->terminal_output, unsaved, AXYNE_PROCESS_STDERR);
+        return 0;
+    }
+    axyne_discover_runtimes(window, state);
+    memset(&plan, 0, sizeof(plan));
+    status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &state->runtimes,
+        &state->build_target, doc->path,
+        state->action_runner.executable != NULL ? &state->action_runner : NULL,
+        &plan, message, sizeof(message));
+    SetWindowTextA(state->terminal_output, "");
+    if (status != AXYNE_STATUS_OK) {
+        (void)snprintf(line, sizeof(line), "%s\r\n",
+                       message[0] != '\0' ? message : "Build could not be resolved.");
+        axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDERR);
+        ok = 0;
+    } else if (!plan.has_build || plan.output_path == NULL) {
+        axyne_terminal_append_utf8(state->terminal_output,
+            "[build] 이 언어에는 정리할 빌드 산출물이 없습니다.\r\n", AXYNE_PROCESS_STDOUT);
+    } else {
+        wchar_t *wide = axyne_wide(plan.output_path);
+        DWORD attributes = wide != NULL ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            (void)snprintf(line, sizeof(line), "[build] 정리할 산출물이 없습니다: %s\r\n", plan.output_path);
+            axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDOUT);
+        } else if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && DeleteFileW(wide)) {
+            (void)snprintf(line, sizeof(line), "[build] 정리: %s 삭제\r\n", plan.output_path);
+            axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDOUT);
+        } else {
+            (void)snprintf(line, sizeof(line),
+                           "[build] 산출물을 삭제하지 못했습니다(실행 중일 수 있음): %s\r\n", plan.output_path);
+            axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDERR);
+            ok = 0;
+        }
+        free(wide);
+    }
+    axyne_language_plan_free(&plan);
+    return ok;
+}
+
+/* Tools > 새 터미널 > PowerShell / 명령 프롬프트 / WSL: starts that shell once
+ * in the terminal panel (the default 새 터미널 keeps its own shell). */
+static wchar_t *axyne_terminal_shell_path(AxyneCommandId id)
+{
+    wchar_t system_directory[MAX_PATH], found[MAX_PATH];
+    UINT length = GetSystemDirectoryW(system_directory, MAX_PATH);
+    const wchar_t *tail;
+    if (id == AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL &&
+        SearchPathW(NULL, L"pwsh", L".exe", MAX_PATH, found, NULL) != 0)
+        return _wcsdup(found);
+    if (length == 0 || length + 48 >= MAX_PATH) return NULL;
+    tail = id == AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL ? L"\\WindowsPowerShell\\v1.0\\powershell.exe"
+         : id == AXYNE_COMMAND_TERMINAL_NEW_WSL ? L"\\wsl.exe" : L"\\cmd.exe";
+    wcscat_s(system_directory, MAX_PATH, tail);
+    return GetFileAttributesW(system_directory) != INVALID_FILE_ATTRIBUTES
+        ? _wcsdup(system_directory) : NULL;
+}
+
+static void axyne_start_terminal_shell(HWND window, AxyneWindowState *state, AxyneCommandId id)
+{
+    wchar_t *shell = axyne_terminal_shell_path(id);
+    char *executable = shell != NULL ? axyne_utf8(shell) : NULL;
+    AxyneTerminalSpec spec = {0};
+    AxyneError error = {0};
+    AxyneStatus status;
+    char *home = NULL;
+    free(shell);
+    state->panel_tab = AXYNE_WIN_PANEL_TERMINAL;
+    state->panel_hidden = 0;
+    axyne_layout(window, state);
+    if (axyne_terminal_view_running(state->shell_view)) { free(executable); SetFocus(state->shell_view); return; }
+    if (executable == NULL) {
+        MessageBoxW(window, id == AXYNE_COMMAND_TERMINAL_NEW_WSL ? L"WSL이 설치되어 있지 않습니다."
+                    : L"셸을 찾을 수 없습니다.", L"새 터미널", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    spec.executable = executable;
+    if (state->explorer.root == NULL) {
+        wchar_t path[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, path))) home = axyne_utf8(path);
+    }
+    spec.working_directory = state->explorer.root != NULL ? state->explorer.root : home;
+    status = axyne_terminal_view_start(state->shell_view, &spec, &error);
+    if (status != AXYNE_STATUS_OK) MessageBoxA(window, error.message, "Unable to start terminal", MB_OK | MB_ICONERROR);
+    free(home);
+    free(executable);
+    SetFocus(state->shell_view);
+    axyne_refresh_action_controls(state);
+}
+
 static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
 {
     AxyneDocument *doc = axyne_active_visible(state);
@@ -9113,6 +9224,7 @@ int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
         out->checked = state->fullscreen != 0;
         return 1;
     case AXYNE_COMMAND_BUILD_BUILD: case AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING:
+    case AXYNE_COMMAND_BUILD_REBUILD: case AXYNE_COMMAND_BUILD_CLEAN:
         out->enabled = document != NULL && state->action_process == NULL && !debugger_active;
         return 1;
     case AXYNE_COMMAND_BUILD_CANCEL:
@@ -9138,8 +9250,15 @@ int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
         out->enabled = axyne_action_enabled(state, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS);
         return 1;
     case AXYNE_COMMAND_TERMINAL_NEW:
+    case AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL: case AXYNE_COMMAND_TERMINAL_NEW_COMMAND_PROMPT:
         out->enabled = !axyne_terminal_view_running(state->shell_view);
         return 1;
+    case AXYNE_COMMAND_TERMINAL_NEW_WSL: {
+        wchar_t *wsl = axyne_terminal_shell_path(AXYNE_COMMAND_TERMINAL_NEW_WSL);
+        out->enabled = wsl != NULL && !axyne_terminal_view_running(state->shell_view);
+        free(wsl);
+        return 1;
+    }
     case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS:
         out->enabled = state->explorer.root != NULL;
         return 1;
@@ -9216,6 +9335,17 @@ int axyne_win_base_command(AxyneWindowState *state, AxyneCommandId id)
     case AXYNE_COMMAND_VIEW_WORD_WRAP: legacy = AXYNE_CMD_WORD_WRAP; break;
     case AXYNE_COMMAND_VIEW_FULL_SCREEN: legacy = AXYNE_CMD_FULLSCREEN; break;
     case AXYNE_COMMAND_BUILD_BUILD: legacy = AXYNE_CMD_BUILD; break;
+    case AXYNE_COMMAND_BUILD_CLEAN:
+        (void)axyne_build_clean(window, state);
+        return 1;
+    case AXYNE_COMMAND_BUILD_REBUILD:
+        /* 다시 빌드: remove the previous output, then build from scratch. */
+        if (axyne_build_clean(window, state)) axyne_start_action(window, state, 0);
+        return 1;
+    case AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL: case AXYNE_COMMAND_TERMINAL_NEW_COMMAND_PROMPT:
+    case AXYNE_COMMAND_TERMINAL_NEW_WSL:
+        axyne_start_terminal_shell(window, state, id);
+        return 1;
     case AXYNE_COMMAND_BUILD_SELECT_TARGET: legacy = AXYNE_CMD_BUILD_TARGET; break;
     case AXYNE_COMMAND_BUILD_CANCEL: legacy = AXYNE_CMD_CANCEL_BUILD; break;
     case AXYNE_COMMAND_BUILD_CONFIGURE_RUNNER: legacy = AXYNE_CMD_CONFIGURE_RUNNER; break;
