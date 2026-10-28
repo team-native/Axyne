@@ -285,6 +285,11 @@ typedef struct AxyneWindowState {
     AxyneAppState app_state;
     char *app_state_path;
     AxyneLspClient *lsp[AXYNE_LANGUAGE_COUNT]; /* one per language, started lazily */
+    /* Latest LSP completion / definition request and where the caret was when
+     * the completion was asked for; older or moved-away replies are dropped. */
+    uint64_t lsp_completion_request;
+    LRESULT lsp_completion_caret;
+    uint64_t lsp_definition_request;
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */
@@ -429,7 +434,9 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
        AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31,
-       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32 };
+       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32,
+       AXYNE_WM_LSP_COMPLETION = WM_APP + 33,
+       AXYNE_WM_LSP_NAVIGATE = WM_APP + 34 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -527,16 +534,106 @@ static void axyne_lsp_diagnostics(AxyneLspClient *client, const char *path,
         axyne_free_lsp_diagnostics_message(message);
 }
 
+/* Completion candidates copied off the LSP reader thread. */
+typedef struct AxyneLspCompletionMessage {
+    uint64_t request_id;
+    char **words;
+    size_t count;
+} AxyneLspCompletionMessage;
+
+static void axyne_free_lsp_completion_message(AxyneLspCompletionMessage *message)
+{
+    size_t i;
+    if (message == NULL) return;
+    for (i = 0; i < message->count; ++i) free(message->words[i]);
+    free(message->words);
+    free(message);
+}
+
+static void axyne_lsp_completion_items(AxyneLspClient *client, uint64_t request_id,
+                                       const AxyneLspCompletionItem *items,
+                                       size_t count, void *user_data)
+{
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    AxyneLspCompletionMessage *message;
+    size_t i;
+    (void)client;
+    if (state == NULL || state->main_window == NULL) return;
+    if (count > 200) count = 200;
+    message = (AxyneLspCompletionMessage *)calloc(1, sizeof(*message));
+    if (message == NULL) return;
+    message->request_id = request_id;
+    message->words = count > 0 ? (char **)calloc(count, sizeof(char *)) : NULL;
+    for (i = 0; i < count && message->words != NULL; ++i) {
+        /* The text to insert; a label may carry a signature after it. */
+        const char *word = items[i].insert_text != NULL && items[i].insert_text[0] != '\0'
+            ? items[i].insert_text : items[i].label;
+        size_t length = 0;
+        if (word == NULL) continue;
+        while (word[length] != '\0' && word[length] != '\n' && word[length] != '(' &&
+               word[length] != ' ' && word[length] != '$') ++length;
+        if (length == 0) continue;
+        message->words[message->count] = (char *)malloc(length + 1);
+        if (message->words[message->count] == NULL) break;
+        memcpy(message->words[message->count], word, length);
+        message->words[message->count][length] = '\0';
+        ++message->count;
+    }
+    if (!PostMessageW(state->main_window, AXYNE_WM_LSP_COMPLETION, 0, (LPARAM)message))
+        axyne_free_lsp_completion_message(message);
+}
+
+/* First definition/reference location copied off the LSP reader thread. */
+typedef struct AxyneLspNavigateMessage {
+    uint64_t request_id;
+    size_t count;
+    char *uri;
+    AxyneLspPosition start;
+} AxyneLspNavigateMessage;
+
 static void axyne_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
                                  const AxyneLspLocation *locations,
                                  size_t count, void *user_data)
 {
-    char text[160];
     AxyneWindowState *state = (AxyneWindowState *)user_data;
-    (void)client; (void)locations;
-    (void)snprintf(text, sizeof(text), "LSP: request %llu returned %zu location%s",
-                   (unsigned long long)request_id, count, count == 1 ? "" : "s");
-    axyne_lsp_status(state, text);
+    AxyneLspNavigateMessage *message;
+    (void)client;
+    if (state == NULL || state->main_window == NULL) return;
+    message = (AxyneLspNavigateMessage *)calloc(1, sizeof(*message));
+    if (message == NULL) return;
+    message->request_id = request_id;
+    message->count = count;
+    if (count > 0 && locations[0].uri != NULL) {
+        message->uri = _strdup(locations[0].uri);
+        message->start = locations[0].range.start;
+    }
+    if (!PostMessageW(state->main_window, AXYNE_WM_LSP_NAVIGATE, 0, (LPARAM)message)) {
+        free(message->uri);
+        free(message);
+    }
+}
+
+/* file:///C:/a%20b/c.c -> C:\a b\c.c (NULL for other schemes). */
+static char *axyne_lsp_uri_path(const char *uri)
+{
+    const char *p;
+    char *path, *out;
+    if (uri == NULL || _strnicmp(uri, "file://", 7) != 0) return NULL;
+    p = uri + 7;
+    if (p[0] == '/' && isalpha((unsigned char)p[1]) && p[2] == ':') ++p; /* drive path */
+    path = (char *)malloc(strlen(p) + 1);
+    if (path == NULL) return NULL;
+    for (out = path; *p != '\0'; ++p) {
+        if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+            char hex[3] = { p[1], p[2], '\0' };
+            *out++ = (char)strtol(hex, NULL, 16);
+            p += 2;
+        } else {
+            *out++ = *p == '/' ? '\\' : *p;
+        }
+    }
+    *out = '\0';
+    return path;
 }
 
 static void axyne_lsp_error(AxyneLspClient *client, AxyneStatus status,
@@ -1002,8 +1099,100 @@ static void axyne_show_completion(AxyneWindowState *state)
     SendMessageA(state->editor, SCI_AUTOCSETCHOOSESINGLE, 0, 0);
     SendMessageA(state->editor, SCI_AUTOCSETCANCELATSTART, 0, 0);
     SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETSEPARATOR, ' ', 0);
     SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix, (LPARAM)list);
     free(list);
+}
+
+static int axyne_lsp_slot(const AxyneDocument *doc);
+static void axyne_lsp_sync_active(AxyneWindowState *state);
+
+/* Asks the language server for completions at the caret; the reply merges
+ * into the word list (AXYNE_WM_LSP_COMPLETION). Only a server that is already
+ * running is asked, so typing never starts one. */
+static void axyne_request_lsp_completion(AxyneWindowState *state)
+{
+    AxyneDocument *doc = axyne_active(state);
+    int slot = axyne_lsp_slot(doc);
+    AxyneLspPosition position;
+    AxyneError error;
+    uint64_t request_id = 0;
+    LRESULT caret, line_start;
+    if (doc == NULL || slot < 0 || state->lsp[slot] == NULL || state->editor == NULL) return;
+    if (!axyne_syntax_completes(axyne_syntax_for_path(doc->path))) return;
+    if (!axyne_capture_editor(state)) return;
+    axyne_lsp_sync_active(state);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION, caret, 0);
+    line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, position.line, 0);
+    position.character = axyne_lsp_utf16_character(
+        doc->contents + (size_t)line_start, (size_t)(caret - line_start),
+        (size_t)(caret - line_start));
+    if (axyne_lsp_completion(state->lsp[slot], doc, position, &request_id, &error) == AXYNE_STATUS_OK) {
+        state->lsp_completion_request = request_id;
+        state->lsp_completion_caret = caret;
+    }
+}
+
+static int axyne_completion_word_compare(const void *a, const void *b)
+{
+    return _stricmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Shows the server's candidates that start with the word before the caret,
+ * merged with the word list already open (if any). */
+static void axyne_show_lsp_completion(AxyneWindowState *state, AxyneLspCompletionMessage *message)
+{
+    LRESULT caret, word_start;
+    char prefix[256];
+    char **words = NULL;
+    size_t count = 0, capacity, i, length = 0, prefix_length;
+    char *list;
+    if (state->editor == NULL || message->request_id != state->lsp_completion_request) return;
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    if (caret != state->lsp_completion_caret) return;
+    word_start = SendMessageA(state->editor, SCI_WORDSTARTPOSITION, (WPARAM)caret, 1);
+    prefix_length = (size_t)(caret - word_start);
+    if (prefix_length >= sizeof(prefix)) return;
+    if (prefix_length > 0) {
+        struct Sci_TextRange range;
+        range.chrg.cpMin = (Sci_PositionCR)word_start; range.chrg.cpMax = (Sci_PositionCR)caret;
+        range.lpstrText = prefix;
+        SendMessageA(state->editor, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    }
+    prefix[prefix_length] = '\0';
+    capacity = message->count + 1;
+    words = (char **)calloc(capacity, sizeof(char *));
+    if (words == NULL) return;
+    for (i = 0; i < message->count; ++i) {
+        const char *word = message->words[i];
+        if (word == NULL || _strnicmp(word, prefix, prefix_length) != 0) continue;
+        if (prefix_length > 0 && strlen(word) == prefix_length) continue;
+        words[count++] = message->words[i];
+    }
+    if (count == 0) { free(words); return; }
+    qsort(words, count, sizeof(char *), axyne_completion_word_compare);
+    for (i = 0; i < count; ++i) length += strlen(words[i]) + 1;
+    list = (char *)malloc(length + 1);
+    if (list == NULL) { free(words); return; }
+    length = 0;
+    for (i = 0; i < count; ++i) {
+        size_t n = strlen(words[i]);
+        if (i > 0 && _stricmp(words[i], words[i - 1]) == 0) continue;
+        if (length > 0) list[length++] = '\n';
+        memcpy(list + length, words[i], n);
+        length += n;
+    }
+    list[length] = '\0';
+    SendMessageA(state->editor, SCI_AUTOCSETIGNORECASE, 1, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETAUTOHIDE, 1, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETCHOOSESINGLE, 0, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETCANCELATSTART, 0, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETSEPARATOR, '\n', 0);
+    SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix_length, (LPARAM)list);
+    free(list);
+    free(words);
 }
 
 /* Native scrollbars of the Scintilla window follow the editor theme: the
@@ -2604,6 +2793,7 @@ static AxyneLspClient *axyne_lsp_ensure(AxyneWindowState *state, const AxyneDocu
     config.language_id = language_id != NULL ? language_id : "plaintext";
     config.on_diagnostics = axyne_lsp_diagnostics;
     config.on_navigation = axyne_lsp_navigation;
+    config.on_completion = axyne_lsp_completion_items;
     config.on_error = axyne_lsp_error;
     config.user_data = state;
     status = axyne_lsp_create(&config, &state->lsp[slot], &error);
@@ -2699,6 +2889,7 @@ static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int referen
     status = references ? axyne_lsp_references(client, doc, position,
                                                 &request_id, &error) :
         axyne_lsp_definition(client, doc, position, &request_id, &error);
+    if (status == AXYNE_STATUS_OK && !references) state->lsp_definition_request = request_id;
     if (status != AXYNE_STATUS_OK)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
     else
@@ -10255,6 +10446,39 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             else axyne_git_panel_job_free((AxyneGitPanelJob *)l_param);
         }
         return 0;
+    case AXYNE_WM_LSP_COMPLETION: {
+        AxyneLspCompletionMessage *completion = (AxyneLspCompletionMessage *)l_param;
+        if (completion != NULL) {
+            if (state != NULL) axyne_show_lsp_completion(state, completion);
+            axyne_free_lsp_completion_message(completion);
+        }
+        return 0;
+    }
+    case AXYNE_WM_LSP_NAVIGATE: {
+        /* Go to Definition: open the target file and move the caret there. */
+        AxyneLspNavigateMessage *navigate = (AxyneLspNavigateMessage *)l_param;
+        if (navigate != NULL) {
+            if (state != NULL && navigate->request_id == state->lsp_definition_request) {
+                char *path = axyne_lsp_uri_path(navigate->uri);
+                state->lsp_definition_request = 0;
+                if (path != NULL)
+                    axyne_problems_show(window, state, path, navigate->start.line + 1,
+                                        navigate->start.character + 1, 1);
+                else
+                    (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                                   "LSP: 정의를 찾지 못했습니다");
+                free(path);
+                InvalidateRect(window, NULL, FALSE);
+            } else if (state != NULL) {
+                (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                               "LSP: 참조 %zu개", navigate->count);
+                InvalidateRect(window, NULL, FALSE);
+            }
+            free(navigate->uri);
+            free(navigate);
+        }
+        return 0;
+    }
     case AXYNE_WM_LSP_DIAGNOSTICS: {
         AxyneLspDiagnosticsMessage *diagnostics_message =
             (AxyneLspDiagnosticsMessage *)l_param;
@@ -10285,8 +10509,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             !state->loading_editor)
             axyne_auto_indent(state, notification);
         if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_CHARADDED &&
-            !state->loading_editor)
+            !state->loading_editor) {
             axyne_show_completion(state);
+            axyne_request_lsp_completion(state);
+        }
         if (notification != NULL && notification->nmhdr.code == AXYNE_SCN_UPDATEUI &&
             !state->loading_editor) {
             axyne_update_line_number_margin(state);
