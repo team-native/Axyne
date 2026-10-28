@@ -6168,12 +6168,38 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
                        stream:AXYNE_PROCESS_STDERR];
 }
 
+/* terminal.defaultProfile -> login shell: "" = zsh, a full path, or a shell
+ * name looked up in the usual bin folders. Unknown names keep zsh. */
+- (void)applyTerminalProfile
+{
+    const char *profile = _preferences.terminal.default_profile;
+    NSString *shell = @"/bin/zsh";
+    AxyneRunnerSpec spec = {0};
+    const char *shellArgs[] = {"-l", "-i"};
+    if (profile[0] != '\0') {
+        NSString *name = [NSString stringWithUTF8String:profile];
+        NSFileManager *files = [NSFileManager defaultManager];
+        if ([name hasPrefix:@"/"]) {
+            if ([files isExecutableFileAtPath:name]) shell = name;
+        } else if (name != nil) {
+            for (NSString *dir in @[@"/bin", @"/usr/bin", @"/usr/local/bin", @"/opt/homebrew/bin"]) {
+                NSString *candidate = [dir stringByAppendingPathComponent:[name lowercaseString]];
+                if ([files isExecutableFileAtPath:candidate]) { shell = candidate; break; }
+            }
+        }
+    }
+    spec.executable = [shell fileSystemRepresentation];
+    spec.arguments = shellArgs; spec.argument_count = 2;
+    (void)axyne_runner_configure(&_terminalRunner, &spec, NULL);
+}
+
 - (void)startTerminal:(id)sender
 {
     (void)sender;
     _panelMode = 2; _panelHidden = NO;
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
     if ([_shellView running]) { [[self window] makeFirstResponder:_shellView]; return; }
+    [self applyTerminalProfile];
     AxyneProcessSpec processSpec = {0}; AxyneError error = {0};
     AxyneStatus status = axyne_runner_process_spec(&_terminalRunner, NULL, NULL, NULL, &processSpec, &error);
     if (status == AXYNE_STATUS_OK) {
