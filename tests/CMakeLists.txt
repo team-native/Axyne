@@ -62,10 +62,12 @@ add_executable(axyne_tests
     test_app_paths.c
     test_memory_usage.c
     test_log.c
+    test_plugins.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(axyne_tests PRIVATE
+    axyne_plugins
     axyne_runner
     axyne_git
     axyne_lsp
@@ -213,6 +215,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/keymap"
 )
 add_test(
+    NAME axyne-plugins
+    COMMAND $<TARGET_FILE:axyne_tests> plugins
+            "${AXYNE_TEST_FIXTURE_DIR}/plugins"
+)
+add_test(
     NAME axyne-app-state
     COMMAND $<TARGET_FILE:axyne_tests> app-state
             "${AXYNE_TEST_FIXTURE_DIR}/app-state"
@@ -238,6 +245,7 @@ set_tests_properties(
     axyne-memory-usage
     axyne-app-paths
     axyne-app-state
+    axyne-plugins
     axyne-keymap
     axyne-commands
     axyne-build-target
