@@ -620,7 +620,12 @@ int axyne_win_handle_key(AxyneWindowState *state, WPARAM virtual_key)
     if (state == NULL || !state->keymap_ready) return 0;
     /* The native terminal grid takes every key itself (direct shell input,
      * Ctrl+C etc. go to the shell), as before the key map. */
-    if (state->shell_view != NULL && GetFocus() == state->shell_view) return 0;
+    {
+        HWND focus = GetFocus();
+        int i;
+        for (i = 0; focus != NULL && i < state->shell_count; ++i)
+            if (state->shell_views[i] == focus) return 0;
+    }
     now = GetTickCount64();
     was_pending = axyne_keymap_pending(&state->keymap, now, NULL);
     result = axyne_keymap_feed(&state->keymap, axyne_win_stroke(virtual_key), now,
