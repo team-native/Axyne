@@ -1419,6 +1419,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneDocumentSet _documents;
     AxyneExplorer _explorer;
     AxyneWatcher *_watcher;
+    AxyneDiscoveryBox *_restoreBox; /* assign-only target of startup restore */
     NSInteger _explorerSelection;
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
@@ -2196,8 +2197,22 @@ static BOOL axyne_macos_is_image_path(const char *path)
         _appStatePath = axyne_app_path(AXYNE_APP_PATH_STATE);
         if (_appStatePath != NULL)
             (void)axyne_app_state_load(_appStatePath, &_appState, NULL);
-        /* Reopen the last workspace once the window is up. */
-        dispatch_async(dispatch_get_main_queue(), ^{ [self restoreWorkspace]; });
+        /* Reopen the last workspace once the window is up. The queue block
+         * must not retain this view: editor-runtime tests intentionally do
+         * not drain the main queue before releasing it. */
+        AxyneDiscoveryBox *restoreBox = (AxyneDiscoveryBox *)calloc(1, sizeof(*restoreBox));
+        if (restoreBox != NULL) {
+            restoreBox->target = self;
+            _restoreBox = restoreBox;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (restoreBox->target != nil) {
+                    AxyneWorkspaceView *view = restoreBox->target;
+                    view->_restoreBox = NULL;
+                    [view restoreWorkspace];
+                }
+                free(restoreBox);
+            });
+        }
         _terminalOutput = [[NSTextView alloc] initWithFrame:NSZeroRect];
         [_terminalOutput setEditable:NO];
         [_terminalOutput setSelectable:YES];
@@ -7257,6 +7272,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
     if (_refreshBox != NULL) _refreshBox->target = nil;
+    if (_restoreBox != NULL) _restoreBox->target = nil;
     [self cancelProblemsRefresh];
     [self cancelOutlineRefresh];
     axyne_palette_ctl_destroy(&_palette);
