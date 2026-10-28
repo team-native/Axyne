@@ -173,35 +173,6 @@ static char *url_encode(const char *text)
     return out;
 }
 
-/* ---- server.json ---------------------------------------------------------------- */
-
-char *axyne_server_base_url(const char *config_dir)
-{
-    char *path = config_dir != NULL ? axyne_app_path_join(config_dir, "server.json") : NULL;
-    AxyneSettings *doc = NULL;
-    char *url = NULL;
-    if (path != NULL && axyne_settings_load(path, &doc, NULL) == AXYNE_STATUS_OK) {
-        url = json_string(doc, "/baseUrl");
-        axyne_settings_destroy(doc);
-    } else if (path != NULL && axyne_app_paths_ensure_directory(config_dir, NULL) == AXYNE_STATUS_OK &&
-               axyne_settings_create(&doc, NULL) == AXYNE_STATUS_OK) {
-        /* First use: write the default so the address is easy to find and edit. */
-        if (axyne_settings_set_string(doc, "/baseUrl", AXYNE_DEFAULT_SERVER_URL, NULL) == AXYNE_STATUS_OK)
-            (void)axyne_settings_save(doc, path, NULL);
-        axyne_settings_destroy(doc);
-    }
-    axyne_app_path_free(path);
-    if (url == NULL || url[0] == '\0') {
-        free(url);
-        url = copy_text(AXYNE_DEFAULT_SERVER_URL);
-    }
-    if (url != NULL) {
-        size_t length = strlen(url);
-        while (length > 0 && url[length - 1] == '/') url[--length] = '\0';
-    }
-    return url;
-}
-
 /* ---- account ---------------------------------------------------------------------- */
 
 int axyne_account_signed_in(const AxyneAccount *account)

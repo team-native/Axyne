@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 
+#include "axyne/server_client.h" /* axyne_server_base_url, AXYNE_DEFAULT_SERVER_URL */
 #include "axyne/status.h"
 
 #ifdef __cplusplus
@@ -17,11 +18,6 @@ extern "C" {
  * means editing that one file. The signed-in session is kept in
  * <config>/account.json. All network calls block; strings are UTF-8. */
 
-#define AXYNE_DEFAULT_SERVER_URL "http://127.0.0.1:8080/api/v1"
-
-/* The API root without a trailing '/'; NULL when out of memory. Release with
- * free(). */
-char *axyne_server_base_url(const char *config_dir);
 
 typedef struct AxyneAccount {
     char *email;
