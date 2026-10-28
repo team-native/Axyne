@@ -3304,7 +3304,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
         notification->listCompletionMethod == SC_AC_NEWLINE) {
         (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
         dispatch_async(dispatch_get_main_queue(), ^{
+            SCNotification typed;
             (void)[self sendEditorMessage:SCI_NEWLINE wParam:0 lParam:0];
+            /* SCI_NEWLINE raises no SCN_CHARADDED: indent like a typed Return. */
+            memset(&typed, 0, sizeof(typed));
+            typed.nmhdr.code = SCN_CHARADDED;
+            typed.ch = '\n';
+            [self autoIndentFromNotification:&typed];
         });
     }
     if (notification->nmhdr.code == SCN_UPDATEUI) {

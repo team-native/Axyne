@@ -129,6 +129,10 @@ int main(void)
     CHECK(!axyne_syntax_completes(axyne_syntax_for_path("notes.txt")));
     CHECK(!axyne_syntax_completes(axyne_syntax_for_path("noextension")));
     CHECK(!axyne_syntax_completes(NULL));
+    CHECK(!axyne_syntax_completes(axyne_syntax_by_id("json")));
+    CHECK(!axyne_syntax_completes(axyne_syntax_by_id("yaml")));
+    CHECK(!axyne_syntax_completes(axyne_syntax_by_id("xml")));
+    CHECK(axyne_syntax_completes(axyne_syntax_by_id("bash")));
     if (failures == 0) puts("syntax: ok");
     return failures == 0 ? 0 : 1;
 }

@@ -331,7 +331,8 @@ const AxyneSyntaxLanguage *axyne_syntax_by_id(const char *id)
 int axyne_syntax_completes(const AxyneSyntaxLanguage *language)
 {
     size_t i;
-    if (language == NULL) return 0;
+    if (language == NULL || strcmp(language->id, "json") == 0 ||
+        strcmp(language->id, "yaml") == 0) return 0; /* data, not code */
     for (i = 0; i < AXYNE_SYNTAX_KEYWORD_SETS; ++i)
         if (language->keywords[i] != NULL) return 1;
     return 0;

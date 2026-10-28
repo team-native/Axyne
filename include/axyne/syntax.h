@@ -37,14 +37,14 @@ const AxyneSyntaxLanguage *axyne_syntax_for_path(const char *path);
 /* Looks a language up by its id; NULL when unknown. */
 const AxyneSyntaxLanguage *axyne_syntax_by_id(const char *id);
 
+/* Nonzero when word completion applies to `language`: code languages that
+ * define keywords. Prose and data formats (plain text, Markdown, XML, JSON,
+ * YAML) get no completion popup. */
+int axyne_syntax_completes(const AxyneSyntaxLanguage *language);
+
 /* Nonzero when `style` of `language` draws bold (SCI_STYLESETBOLD); adapters
  * send 0 for every other lexer-owned style so a language switch cannot leak
  * weight. Only Markdown headings are bold. */
-/* Nonzero when word completion applies to `language`: code languages that
- * define keywords. Prose and data formats (plain text, Markdown, XML, ...)
- * get no completion popup. */
-int axyne_syntax_completes(const AxyneSyntaxLanguage *language);
-
 int axyne_syntax_style_bold(const AxyneSyntaxLanguage *language,
                             unsigned int style);
 
