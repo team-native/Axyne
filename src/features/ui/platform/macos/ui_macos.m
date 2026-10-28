@@ -6177,9 +6177,11 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     AxyneRunnerSpec spec = {0};
     const char *shellArgs[] = {"-l", "-i"};
     if (profile[0] != '\0') {
-        NSString *name = [NSString stringWithUTF8String:profile];
+        NSString *name = [[NSString stringWithUTF8String:profile] stringByExpandingTildeInPath];
         NSFileManager *files = [NSFileManager defaultManager];
-        if ([name hasPrefix:@"/"]) {
+        if ([name rangeOfString:@"/"].location != NSNotFound) {
+            /* A path: absolute, ~-relative, or relative to the home folder. */
+            if (![name hasPrefix:@"/"]) name = [NSHomeDirectory() stringByAppendingPathComponent:name];
             if ([files isExecutableFileAtPath:name]) shell = name;
         } else if (name != nil) {
             for (NSString *dir in @[@"/bin", @"/usr/bin", @"/usr/local/bin", @"/opt/homebrew/bin"]) {

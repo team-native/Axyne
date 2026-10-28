@@ -158,11 +158,13 @@ static wchar_t *pw_wide(const char *utf8)
 /* Reads a window's text as UTF-8 into `out`; returns 0 when it does not fit. */
 static int pw_window_utf8(HWND window, char *out, size_t capacity)
 {
-    wchar_t wide[256];
+    int count = GetWindowTextLengthW(window);
+    wchar_t *wide = (wchar_t *)calloc((size_t)count + 1, sizeof(wchar_t));
     int length;
-    wide[0] = L'\0';
-    GetWindowTextW(window, wide, 256);
+    if (wide == NULL) { out[0] = '\0'; return 0; }
+    GetWindowTextW(window, wide, count + 1);
     length = WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)capacity, NULL, NULL);
+    free(wide);
     if (length <= 0) { out[0] = '\0'; return 0; }
     return 1;
 }
@@ -253,6 +255,10 @@ enum {
     PW_FORM_W = PW_GROUP_W
 };
 
+/* One-line argument text: every stored byte may need an escape, plus quotes
+ * and separators. */
+enum { PW_ARGS_LINE_MAX = AXYNE_PREFERENCE_ARGS_TEXT_MAX * 3 + 32 };
+
 static int pw_form_row(int row) { return PW_FORM_Y + row * PW_FORM_PITCH; }
 
 static void pw_add(PwState *st, int page, HWND window)
@@ -321,8 +327,9 @@ static void pw_form_field(PwState *st, HDC dc, int row, const wchar_t *label, co
                 PW_LEFT, y + 19 + AXYNE_PW_FIELD_HEIGHT + 4, PW_FORM_W, 14, DT_LEFT | DT_END_ELLIPSIS);
 }
 
-/* Argument lists are edited as one line: whitespace separates arguments and
- * double quotes group one that contains spaces. */
+/* Argument lists are edited as one line: whitespace separates arguments,
+ * double quotes group one that contains spaces, and \" or \\ inside give a
+ * literal quote or backslash. */
 static void pw_args_text(const AxynePreferenceArgs *args, char *out, size_t capacity)
 {
     size_t used = 0, i;
@@ -331,10 +338,16 @@ static void pw_args_text(const AxynePreferenceArgs *args, char *out, size_t capa
     out[0] = '\0';
     for (i = 0; (value = axyne_preference_args_get(args, i)) != NULL; ++i) {
         int quote = value[0] == '\0' || strpbrk(value, " \t") != NULL;
-        int written = snprintf(out + used, capacity - used, "%s%s%s%s", i > 0 ? " " : "",
-                               quote ? "\"" : "", value, quote ? "\"" : "");
-        if (written < 0 || (size_t)written >= capacity - used) break;
-        used += (size_t)written;
+        const char *c;
+        if (used + 4 >= capacity) break;
+        if (i > 0) out[used++] = ' ';
+        if (quote) out[used++] = '"';
+        for (c = value; *c != '\0' && used + 3 < capacity; ++c) {
+            if (*c == '"' || *c == '\\') out[used++] = '\\';
+            out[used++] = *c;
+        }
+        if (quote) out[used++] = '"';
+        out[used] = '\0';
     }
 }
 
@@ -350,6 +363,7 @@ static int pw_args_parse(const char *text, AxynePreferenceArgs *args)
         if (*text == '\0') break;
         while (*text != '\0' && (quoted || (*text != ' ' && *text != '\t'))) {
             if (*text == '"') { quoted = !quoted; ++text; continue; }
+            if (*text == '\\' && (text[1] == '"' || text[1] == '\\')) ++text;
             if (length + 1 >= sizeof(item)) return 0;
             item[length++] = *text++;
         }
@@ -659,7 +673,7 @@ static int pw_collect(PwState *st, AxynePreferences *out, const wchar_t **messag
             { PW_PAGE_DIFF, offsetof(AxynePreferences, diff.external_tool), sizeof(((AxynePreferences *)0)->diff.external_tool) }
         };
         HWND edits[5];
-        char long_text[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+        char long_text[PW_ARGS_LINE_MAX];
         edits[0] = st->edit_cmake; edits[1] = st->edit_generator; edits[2] = st->edit_build_dir;
         edits[3] = st->edit_term_profile; edits[4] = st->edit_diff_tool;
         for (i = 0; i < 5; ++i) {
@@ -727,7 +741,7 @@ static void pw_load_controls(PwState *st)
     (void)snprintf(text, sizeof(text), "%u", st->draft.editor.undo_limit_mb);
     pw_set_text_utf8(st->edit_undo, text);
     {
-        char args[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+        char args[PW_ARGS_LINE_MAX];
         pw_set_text_utf8(st->edit_cmake, st->draft.build.cmake_path);
         pw_set_text_utf8(st->edit_generator, st->draft.build.generator);
         pw_set_text_utf8(st->edit_build_dir, st->draft.build.build_directory);
@@ -966,8 +980,8 @@ static void pw_build(PwState *st)
                     L"공백 차이 무시");
     st->edit_diff_tool = pw_edit(st, PW_PAGE_DIFF, PW_ID_DIFF_TOOL, PW_LEFT, pw_form_row(1) + 19, PW_FORM_W);
     st->edit_diff_args = pw_edit(st, PW_PAGE_DIFF, PW_ID_DIFF_ARGS, PW_LEFT, pw_form_row(2) + 19, PW_FORM_W);
-    SendMessageW(st->edit_configure_args, EM_LIMITTEXT, AXYNE_PREFERENCE_ARGS_TEXT_MAX - 1, 0);
-    SendMessageW(st->edit_diff_args, EM_LIMITTEXT, AXYNE_PREFERENCE_ARGS_TEXT_MAX - 1, 0);
+    SendMessageW(st->edit_configure_args, EM_LIMITTEXT, PW_ARGS_LINE_MAX - 1, 0);
+    SendMessageW(st->edit_diff_args, EM_LIMITTEXT, PW_ARGS_LINE_MAX - 1, 0);
 
     /* theme page */
     for (i = 0; i < 3; ++i)

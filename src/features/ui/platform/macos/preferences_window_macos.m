@@ -346,8 +346,9 @@ typedef NS_ENUM(NSInteger, AxynePWKind) {
 enum { AXYNE_PW_PAGE_EDITOR = 0, AXYNE_PW_PAGE_THEME, AXYNE_PW_PAGE_BUILD, AXYNE_PW_PAGE_TERMINAL,
        AXYNE_PW_PAGE_KEYS, AXYNE_PW_PAGE_DIFF, AXYNE_PW_PAGE_COUNT };
 
-/* Argument lists are edited as one line: whitespace separates arguments and
- * double quotes group one that contains spaces. */
+/* Argument lists are edited as one line: whitespace separates arguments,
+ * double quotes group one that contains spaces, and \" or \\ inside give a
+ * literal quote or backslash. */
 static NSString *axyne_pw_args_text(const AxynePreferenceArgs *args)
 {
     NSMutableArray *parts = [NSMutableArray array];
@@ -355,6 +356,8 @@ static NSString *axyne_pw_args_text(const AxynePreferenceArgs *args)
     for (size_t i = 0; (value = axyne_preference_args_get(args, i)) != NULL; ++i) {
         NSString *item = [NSString stringWithUTF8String:value];
         if (item == nil) continue;
+        item = [[item stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
         if ([item length] == 0 || [item rangeOfCharacterFromSet:
                 [NSCharacterSet whitespaceCharacterSet]].location != NSNotFound)
             item = [NSString stringWithFormat:@"\"%@\"", item];
@@ -377,6 +380,7 @@ static BOOL axyne_pw_args_parse(NSString *text, AxynePreferenceArgs *args)
         if (*cursor == '\0') break;
         while (*cursor != '\0' && (quoted || (*cursor != ' ' && *cursor != '\t'))) {
             if (*cursor == '"') { quoted = !quoted; ++cursor; continue; }
+            if (*cursor == '\\' && (cursor[1] == '"' || cursor[1] == '\\')) ++cursor;
             if (length + 1 >= sizeof(item)) return NO;
             item[length++] = *cursor++;
         }
