@@ -1578,6 +1578,31 @@ static NSString *axyne_macos_runner_lines(char **values, size_t count)
     return result;
 }
 
+@interface AxyneSessionCountButton : AxyneChromeButton
+{
+    id _commandTarget;
+}
+- (void)setCommandTarget:(id)target;
+@end
+
+@implementation AxyneSessionCountButton
+- (void)setCommandTarget:(id)target { _commandTarget = target; }
+- (NSMenu *)menuForEvent:(NSEvent *)event
+{
+    if ([event type] != NSEventTypeRightMouseDown) return [super menuForEvent:event];
+    NSMenu *menu = [NSMenu menuWithTitle:@"터미널"];
+    NSArray *titles = @[@"터미널 시작", @"터미널 중지", @"터미널 지우기", @"다음 세션"];
+    SEL actions[] = {@selector(startTerminal:), @selector(stopTerminal:),
+                     @selector(clearOutput:), @selector(nextTerminalSession:)};
+    for (NSUInteger index = 0; index < [titles count]; ++index) {
+        NSMenuItem *item = [menu addItemWithTitle:[titles objectAtIndex:index]
+            action:actions[index] keyEquivalent:@""];
+        [item setTarget:_commandTarget];
+    }
+    return menu;
+}
+@end
+
 static NSButton *axyne_macos_toolbar_button(NSString *title, id target,
                                             SEL action)
 {
@@ -1697,12 +1722,27 @@ static BOOL axyne_macos_is_image_path(const char *path)
         _terminalNewSession = axyne_macos_toolbar_button(@"+", self, @selector(newTerminalSession:));
         [_terminalNewSession setToolTip:@"새 터미널 세션"];
         [self addSubview:_terminalNewSession];
-        _terminalNextSession = axyne_macos_toolbar_button(@"⇄", self, @selector(nextTerminalSession:));
+        AxyneSessionCountButton *sessionCount =
+            [[AxyneSessionCountButton alloc] initWithFrame:NSZeroRect];
+        [sessionCount setTitle:@"⇄"];
+        [sessionCount setTarget:self];
+        [sessionCount setAction:@selector(nextTerminalSession:)];
+        [sessionCount setCommandTarget:self];
+        [sessionCount setBordered:NO];
+        [sessionCount setBezelStyle:NSBezelStyleTexturedRounded];
+        [sessionCount setFont:[NSFont systemFontOfSize:12.0]];
+        [sessionCount setContentTintColor:axyne_color(115, 119, 128)];
+        _terminalNextSession = sessionCount;
         [_terminalNextSession setToolTip:@"다음 터미널 세션"];
+        [_terminalNextSession setBordered:NO];
+        [_terminalNextSession setAlignment:NSTextAlignmentRight];
         [self addSubview:_terminalNextSession];
         _terminalSplit = axyne_macos_toolbar_button(@"◫", self, @selector(toggleTerminalSplit:));
         [_terminalSplit setToolTip:@"터미널 분할"];
         [self addSubview:_terminalSplit];
+        _terminalCollapse = axyne_macos_toolbar_button(@"⌃", self, @selector(togglePanelCollapse:));
+        [_terminalCollapse setToolTip:@"터미널 패널 접기"];
+        [self addSubview:_terminalCollapse];
         _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
         _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
         _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
@@ -2131,6 +2171,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (![self bottomPanelTabVisible:tab]) return;
     _panelMode = tab;
     _panelHidden = NO;
+    _panelCollapsed = NO;
     [_problemsView setHidden:_panelMode != AXYNE_BOTTOM_PANEL_PROBLEMS];
     [self setNeedsLayout:YES]; [self setNeedsDisplay:YES];
     /* The list takes the keyboard (Up/Down/Enter) when its tab is chosen. */
@@ -3807,6 +3848,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (CGFloat)panelHeight
 {
     if (_panelHidden) return 0;
+    if (_panelCollapsed && _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL)
+        return AXYNE_UI_TERMINAL_HEADER;
     return axyne_layout_clamp_panel(
         (int)(_panelSize > 0 ? _panelSize :
             (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL
@@ -5839,18 +5882,24 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 
 /* ---- terminal sessions ---- */
 
-/* The terminal tab reads "터미널 · zsh" (and "2/3" with several sessions). */
+/* Keep the tab label stable; show session count at the bottom of the panel. */
 - (void)updateTerminalTabTitle
 {
-    NSString *name = _shellCount > 0 ? [NSString stringWithUTF8String:_shellNames[_shellActive]] : nil;
-    NSString *title = @"터미널";
-    if ([name length] > 0)
-        title = _shellCount > 1
-            ? [NSString stringWithFormat:@"터미널 · %@ %ld/%ld", name, (long)_shellActive + 1, (long)_shellCount]
-            : [NSString stringWithFormat:@"터미널 · %@", name];
-    [_terminalTab setTitle:title];
+    [_terminalTab setTitle:@"터미널"];
+    [_terminalNextSession setTitle:[NSString stringWithFormat:@"터미널 %ld개", (long)_shellCount]];
+    [_terminalNextSession setToolTip:[NSString stringWithFormat:@"터미널 %ld개 — 클릭하여 다음 세션", (long)_shellCount]];
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
+}
+
+- (void)togglePanelCollapse:(id)sender
+{
+    (void)sender;
+    if (_panelMode != AXYNE_BOTTOM_PANEL_TERMINAL) return;
+    _panelCollapsed = !_panelCollapsed;
+    [_terminalCollapse setTitle:_panelCollapsed ? @"⌄" : @"⌃"];
+    [_terminalCollapse setToolTip:_panelCollapsed ? @"터미널 패널 펼치기" : @"터미널 패널 접기"];
+    [self setNeedsLayout:YES];
 }
 
 - (void)selectTerminalSession:(NSInteger)index
@@ -6703,12 +6752,17 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             [_shellViews[i] setFrame:frame];
             [_shellViews[i] setHidden:!shown];
         }
-        [_terminalNewSession setFrame:NSMakeRect(width - 228, panelActionTop, 28, 28)];
-        [_terminalNextSession setFrame:NSMakeRect(width - 196, panelActionTop, 28, 28)];
-        [_terminalSplit setFrame:NSMakeRect(width - 164, panelActionTop, 28, 28)];
+        [_terminalNewSession setFrame:NSMakeRect(width - 122, panelActionTop, 24, 24)];
+        [_terminalSplit setFrame:NSMakeRect(width - 92, panelActionTop, 24, 24)];
+        [_terminalCollapse setFrame:NSMakeRect(width - 62, panelActionTop, 24, 24)];
+        [_terminalNextSession setFrame:NSMakeRect(width - 168,
+            bottomTop + [self panelHeight] - 34, 110, 18)];
+        [_terminalNextSession setFont:[NSFont systemFontOfSize:10]];
+        [_terminalNextSession setAlignment:NSTextAlignmentRight];
         [_terminalNewSession setHidden:!terminal || _panelHidden];
-        [_terminalNextSession setHidden:!terminal || _panelHidden || _shellCount < 2];
-        [_terminalSplit setHidden:!terminal || _panelHidden || _shellCount < 2];
+        [_terminalNextSession setHidden:!terminal || _panelHidden || _panelCollapsed];
+        [_terminalSplit setHidden:!terminal || _panelHidden];
+        [_terminalCollapse setHidden:!terminal || _panelHidden];
     }
     [_problemsView setFrame:NSMakeRect([self sidebarWidth],
         bottomTop + panelHeaderHeight,
@@ -6777,8 +6831,10 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     /* A hidden bottom panel takes every panel control with it; the per-mode
      * visibility set above still applies when it is shown. */
-    for (NSView *panelView in @[_terminalStart, _terminalStop, _clearOutput, _closePanel])
-        [panelView setHidden:_panelHidden];
+    [_terminalStart setHidden:_panelHidden || terminal];
+    [_terminalStop setHidden:_panelHidden || terminal];
+    [_clearOutput setHidden:_panelHidden || terminal];
+    [_closePanel setHidden:_panelHidden];
     for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab)
         [[self bottomPanelTabButton:(AxyneBottomPanelTab)tab] setHidden:_panelHidden ||
             ![self bottomPanelTabVisible:(AxyneBottomPanelTab)tab]];
@@ -7380,6 +7436,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_terminalOutput release];
     for (NSInteger i = 0; i < _shellCount; ++i) { [_shellViews[i] shutdown]; [_shellViews[i] release]; }
     [_terminalNewSession release]; [_terminalNextSession release]; [_terminalSplit release];
+    [_terminalCollapse release];
     [_terminalStart release];
     [_terminalStop release];
     [_debugStart release];

@@ -235,6 +235,7 @@ typedef struct AxyneWindowState {
     HWND terminal_new_session;
     HWND terminal_next_session;
     HWND terminal_split;
+    HWND terminal_collapse;
     wchar_t terminal_tab_label[48];
     HWND terminal_start;
     HWND terminal_stop;
@@ -298,6 +299,7 @@ typedef struct AxyneWindowState {
     int sidebar_tab;     /* AXYNE_SIDEBAR_TAB_*: what the sidebar shows */
     AxyneGitPanelUi git_panel;
     int panel_hidden;    /* View > Bottom Panel */
+    int panel_collapsed; /* Terminal panel header remains visible */
     int sidebar_size;    /* dragged explorer width; 0 = default, session only */
     int panel_size;      /* dragged bottom panel height; 0 = default */
     int client_width;    /* client size cached by axyne_layout and paint */

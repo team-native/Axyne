@@ -289,6 +289,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSButton *_terminalNewSession;
     NSButton *_terminalNextSession;
     NSButton *_terminalSplit;
+    NSButton *_terminalCollapse;
+    BOOL _panelCollapsed;
     NSButton *_terminalStart;
     NSButton *_terminalStop;
     NSButton *_debugStart;
