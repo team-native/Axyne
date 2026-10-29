@@ -873,6 +873,7 @@ void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code, void *user_
 @end
 
 /* ui_lsp_nav_macos.m - go to definition, references, workspace symbols (D20). */
+@class AxyneMacLspNavState;
 @interface AxyneWorkspaceView (AxyneLspNavFeature)
 - (NSInteger)lspNavValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
 - (BOOL)lspNavPerformCommand:(AxyneCommandId)command sender:(id)sender;
@@ -880,6 +881,13 @@ void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code, void *user_
 - (void)lspNavDocumentWillClose:(AxyneDocument *)document;
 - (void)lspNavDocumentSaved:(AxyneDocument *)document;
 - (void)lspNavEditorNotification:(SCNotification *)notification;
+- (AxyneMacLspNavState *)lspNavState;
+- (void)lspNavRequestCompletion;
+- (void)lspNavApplyCompletion:(char **)words count:(size_t)count
+                      client:(AxyneLspClient *)client request:(uint64_t)request;
+- (void)lspNavApplyNavigation:(char *)uri line:(size_t)line character:(size_t)character
+                        count:(size_t)count client:(AxyneLspClient *)client
+                      request:(uint64_t)request;
 - (BOOL)lspNavDrawStatusBarInRect:(NSRect)rect colors:(const AxyneMacChromeColors *)colors;
 - (void)lspNavDrawBottomPanelStripInRect:(NSRect)strip colors:(const AxyneMacChromeColors *)colors;
 - (BOOL)lspNavLayoutBottomPanelInRect:(NSRect)content tab:(AxyneBottomPanelTab)tab;
@@ -887,6 +895,13 @@ void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code, void *user_
 - (void)lspNavApplyPreferences;
 - (void)lspNavTeardown;
 @end
+
+void axyne_macos_lsp_completion(AxyneLspClient *client, uint64_t request_id,
+                               const AxyneLspCompletionItem *items,
+                               size_t count, void *user_data);
+void axyne_macos_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
+                               const AxyneLspLocation *locations,
+                               size_t count, void *user_data);
 
 /* ui_diag_macos.m - inline diagnostics and explorer badges (D17, D19). */
 @interface AxyneWorkspaceView (AxyneDiagFeature)

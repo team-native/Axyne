@@ -454,3 +454,19 @@ if(WIN32 OR APPLE)
         set_tests_properties(axyne-http-client PROPERTIES TIMEOUT 50)
     endif()
 endif()
+
+# Exercise the LSP JSON-RPC framing against a tiny local language server. The
+# response deliberately puts Content-Length after another header so the parser
+# must consume the complete header block.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_executable(axyne_lsp_protocol_tests test_lsp_protocol.c)
+    target_link_libraries(axyne_lsp_protocol_tests PRIVATE axyne_lsp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-protocol")
+    add_test(NAME axyne-lsp-protocol
+        COMMAND $<TARGET_FILE:axyne_lsp_protocol_tests>
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/lsp_test_server.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-protocol")
+    set_tests_properties(axyne-lsp-protocol PROPERTIES TIMEOUT 20)
+endif()

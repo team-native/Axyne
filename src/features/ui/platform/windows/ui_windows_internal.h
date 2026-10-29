@@ -33,6 +33,7 @@
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
 #include "axyne/process.h"
+#include "axyne/syntax.h"
 #include "axyne/plugins.h"
 #include "axyne/runner.h"
 #include "axyne/watcher.h"
@@ -548,6 +549,8 @@ int axyne_win_empty_state(AxyneWindowState *state);
 /* Copies the Scintilla text into the active document model (shows an error
  * and returns 0 when that fails). Call before reading document contents. */
 int axyne_win_capture_editor(AxyneWindowState *state);
+/* Starts/opens the current file in its language server. */
+int axyne_win_lsp_open_active(AxyneWindowState *state);
 /* Opens `path` in a normal tab (or activates its tab) and, when `line` is
  * non-zero, moves the caret to the 1-based line/column (byte column, 0 = 1)
  * and centres the line. Relative paths resolve below the workspace root.
@@ -582,6 +585,16 @@ void axyne_win_output_append(AxyneWindowState *state, const char *utf8,
 void axyne_win_output_append_bytes(AxyneWindowState *state, const char *bytes,
                                    size_t length, AxyneProcessStream stream);
 void axyne_win_output_clear(AxyneWindowState *state);
+void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
+                              const AxyneLspCompletionItem *items,
+                              size_t count, void *user_data);
+void axyne_win_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
+                              const AxyneLspLocation *locations,
+                              size_t count, void *user_data);
+void axyne_win_lsp_sync_active(AxyneWindowState *state);
+int axyne_win_lsp_open_active(AxyneWindowState *state);
+int axyne_win_lsp_nav_dispatch(AxyneWindowState *state, int references);
+void axyne_win_lsp_nav_drain(HWND window);
 void axyne_terminal_output(AxyneProcess *process, AxyneProcessStream stream,
                            const char *bytes, size_t length, void *user_data);
 void axyne_terminal_exit(AxyneProcess *process, int exit_code, void *user_data);
