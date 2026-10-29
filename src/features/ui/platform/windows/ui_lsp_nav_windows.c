@@ -362,14 +362,19 @@ static int axyne_win_lsp_navigate(AxyneWindowState *state, int references)
     char **request_path;
     uint64_t *request_slot;
 
-    if (state == NULL || state->lsp_nav_ui == NULL || state->editor == NULL ||
-        !axyne_win_capture_editor(state) ||
+    if (state == NULL || state->lsp_nav_ui == NULL) return 0;
+    ui = state->lsp_nav_ui;
+    request_path = references ? &ui->references_path : &ui->definition_path;
+    request_slot = references ? &ui->references_request : &ui->definition_request;
+    free(*request_path);
+    *request_path = NULL;
+    *request_slot = 0;
+    if (state->editor == NULL || !axyne_win_capture_editor(state) ||
         !axyne_win_lsp_open_active(state))
         return 0;
     document = axyne_win_active_document(state);
     if (!axyne_win_lsp_document_supported(document)) return 0;
     if (state->lsp == NULL) return 0;
-    ui = state->lsp_nav_ui;
     caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     position.line = (size_t)SendMessageA(state->editor,
         SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
@@ -379,11 +384,7 @@ static int axyne_win_lsp_navigate(AxyneWindowState *state, int references)
         (document->contents != NULL ? document->contents : "") +
             (size_t)line_start,
         (size_t)(caret - line_start), (size_t)(caret - line_start));
-    request_path = references ? &ui->references_path : &ui->definition_path;
-    request_slot = references ? &ui->references_request : &ui->definition_request;
-    free(*request_path);
     *request_path = _strdup(document->path);
-    *request_slot = 0;
     if (*request_path == NULL) return 0;
     status = references
         ? axyne_lsp_references(state->lsp, document, position,
