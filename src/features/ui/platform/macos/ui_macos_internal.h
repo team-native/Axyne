@@ -271,7 +271,19 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _sidebarTab;
     AxyneGitPanelView *_gitPanel;
     NSTextView *_terminalOutput;
-    AxyneTerminalView *_shellView; /* native terminal grid (Terminal tab) */
+    AxyneTerminalView *_shellView; /* active terminal session (one of _shellViews) */
+    /* Terminal sessions: up to 4 native shells (owned here); the active one
+     * is shown, with the next one beside it while split. */
+    AxyneTerminalView *_shellViews[4];
+    char _shellNames[4][24];
+    BOOL _shellStarted[4];
+    NSInteger _shellCount;
+    NSInteger _shellActive;
+    BOOL _shellSplit;
+    NSInteger _shellPeer; /* the other split pane; left = the lower index */
+    NSButton *_terminalNewSession;
+    NSButton *_terminalNextSession;
+    NSButton *_terminalSplit;
     NSButton *_terminalStart;
     NSButton *_terminalStop;
     NSButton *_debugStart;

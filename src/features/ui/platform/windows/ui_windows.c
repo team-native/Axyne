@@ -70,6 +70,9 @@ enum {
     AXYNE_DEBUG_CONTINUE,
     AXYNE_DEBUG_STEP_OVER,
     AXYNE_DEBUG_BREAKPOINT,
+    AXYNE_TERMINAL_NEW_SESSION,
+    AXYNE_TERMINAL_NEXT_SESSION,
+    AXYNE_TERMINAL_SPLIT,
     AXYNE_PANEL_CLEAR,
     AXYNE_PANEL_CLOSE,
     AXYNE_PROBLEMS_FILTER = 5040, /* problems panel filter EDIT control id */
@@ -935,9 +938,13 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
 static void axyne_refresh_terminal_theme(AxyneWindowState *state)
 {
     if (state == NULL || state->terminal_output == NULL) return;
-    axyne_terminal_view_theme(state->shell_view,
-        state->font_output != NULL ? state->font_output : state->code_font,
-        state->preferences.theme.text, state->preferences.theme.background);
+    {
+        int i;
+        for (i = 0; i < state->shell_count; ++i)
+            axyne_terminal_view_theme(state->shell_views[i],
+                state->font_output != NULL ? state->font_output : state->code_font,
+                state->preferences.theme.text, state->preferences.theme.background);
+    }
     InvalidateRect(state->terminal_output, NULL, TRUE);
     UpdateWindow(state->terminal_output);
 }
@@ -1163,6 +1170,132 @@ static int axyne_terminal_configure_default(AxyneWindowState *state)
     return 1;
 }
 
+/* ---- terminal sessions ------------------------------------------------------ */
+
+enum { AXYNE_WIN_TERMINAL_MAX = 4 };
+
+static int axyne_is_shell_view(const AxyneWindowState *state, HWND window)
+{
+    int i;
+    if (window == NULL) return 0;
+    for (i = 0; i < state->shell_count; ++i)
+        if (state->shell_views[i] == window) return 1;
+    return 0;
+}
+
+/* The terminal tab reads "터미널 · cmd" (and "2/3" with several sessions). */
+static void axyne_terminal_update_label(AxyneWindowState *state)
+{
+    const char *name = state->shell_count > 0 ? state->shell_names[state->shell_active] : "";
+    wchar_t *wide = axyne_wide(name);
+    if (wide == NULL || wide[0] == L'\0')
+        (void)swprintf_s(state->terminal_tab_label, 48, L"터미널");
+    else if (state->shell_count > 1)
+        (void)swprintf_s(state->terminal_tab_label, 48, L"터미널 · %ls %d/%d", wide,
+                         state->shell_active + 1, state->shell_count);
+    else
+        (void)swprintf_s(state->terminal_tab_label, 48, L"터미널 · %ls", wide);
+    free(wide);
+}
+
+static void axyne_terminal_select_session(HWND window, AxyneWindowState *state, int index)
+{
+    HWND focus = GetFocus();
+    int had_focus = focus == NULL || axyne_is_shell_view(state, focus);
+    if (index < 0 || index >= state->shell_count) return;
+    /* Selecting the other split pane swaps roles, not places. */
+    if (state->shell_split && index == state->shell_peer) state->shell_peer = state->shell_active;
+    state->shell_active = index;
+    if (state->shell_peer == index || state->shell_peer >= state->shell_count)
+        state->shell_peer = (index + 1) % max(1, state->shell_count);
+    state->shell_view = state->shell_views[index];
+    axyne_terminal_update_label(state);
+    axyne_layout(window, state);
+    InvalidateRect(window, NULL, FALSE);
+    axyne_refresh_action_controls(state);
+    if (had_focus && state->panel_tab == AXYNE_WIN_PANEL_TERMINAL && !state->panel_hidden)
+        SetFocus(state->shell_view);
+}
+
+/* Adds a session (an idle shell view) and makes it active; 0 at the limit. */
+static int axyne_terminal_add_session(HWND window, AxyneWindowState *state)
+{
+    HWND view;
+    if (state->shell_count >= AXYNE_WIN_TERMINAL_MAX) return 0;
+    view = axyne_terminal_view_create(window, GetModuleHandleW(NULL));
+    if (view == NULL) return 0;
+    axyne_terminal_view_theme(view, state->font_output != NULL ? state->font_output : state->code_font,
+                              state->preferences.theme.text, state->preferences.theme.background);
+    state->shell_views[state->shell_count] = view;
+    state->shell_names[state->shell_count][0] = '\0';
+    state->shell_started[state->shell_count] = 0;
+    ++state->shell_count;
+    axyne_terminal_select_session(window, state, state->shell_count - 1);
+    return 1;
+}
+
+/* A session whose shell exited closes while others remain. */
+static void axyne_terminal_prune_sessions(HWND window, AxyneWindowState *state)
+{
+    int i = 0, changed = 0;
+    while (i < state->shell_count && state->shell_count > 1) {
+        if (state->shell_started[i] && !axyne_terminal_view_running(state->shell_views[i])) {
+            int j;
+            if (state->shell_peer == i) {
+                state->shell_split = 0;
+                state->shell_peer = -1;
+            } else if (state->shell_peer > i) {
+                --state->shell_peer;
+            }
+            DestroyWindow(state->shell_views[i]);
+            for (j = i; j + 1 < state->shell_count; ++j) {
+                state->shell_views[j] = state->shell_views[j + 1];
+                memcpy(state->shell_names[j], state->shell_names[j + 1], sizeof(state->shell_names[j]));
+                state->shell_started[j] = state->shell_started[j + 1];
+            }
+            --state->shell_count;
+            if (state->shell_active > i || state->shell_active >= state->shell_count) --state->shell_active;
+            if (state->shell_active < 0) state->shell_active = 0;
+            changed = 1;
+            continue;
+        }
+        ++i;
+    }
+    if (state->shell_count < 2) {
+        state->shell_split = 0;
+        state->shell_peer = -1;
+    }
+    if (changed) axyne_terminal_select_session(window, state, state->shell_active);
+}
+
+/* Remembers the shell's name ("cmd", "powershell") for the tab label. */
+static void axyne_terminal_note_started(AxyneWindowState *state, const char *executable)
+{
+    const char *base = executable != NULL ? executable : "";
+    const char *slash = strrchr(base, '\\');
+    char *dot;
+    if (slash != NULL) base = slash + 1;
+    (void)snprintf(state->shell_names[state->shell_active], sizeof(state->shell_names[0]), "%s", base);
+    dot = strrchr(state->shell_names[state->shell_active], '.');
+    if (dot != NULL && _stricmp(dot, ".exe") == 0) *dot = '\0';
+    state->shell_started[state->shell_active] = 1;
+    axyne_terminal_update_label(state);
+}
+
+static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state);
+
+/* 새 터미널: a second (third...) session when the current shell runs. */
+static void axyne_new_terminal_session(HWND window, AxyneWindowState *state)
+{
+    if (axyne_terminal_view_running(state->shell_view) &&
+        !axyne_terminal_add_session(window, state)) {
+        MessageBoxW(window, L"터미널은 최대 4개까지 열 수 있습니다.", L"새 터미널",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    axyne_start_terminal_panel(window, state);
+}
+
 static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state)
 {
     state->panel_tab = AXYNE_WIN_PANEL_TERMINAL;
@@ -1178,6 +1311,7 @@ static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state)
         if (state->explorer.root == NULL) { wchar_t path[MAX_PATH]; if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, path))) home = axyne_utf8(path); }
         spec.working_directory = state->explorer.root != NULL ? state->explorer.root : home;
         status = axyne_terminal_view_start(state->shell_view, &spec, &error); free(home);
+        if (status == AXYNE_STATUS_OK) axyne_terminal_note_started(state, process_spec.executable);
     }
     if (status != AXYNE_STATUS_OK) MessageBoxA(window, error.message, "Unable to start terminal", MB_OK | MB_ICONERROR);
     SetFocus(state->shell_view); axyne_refresh_action_controls(state);
@@ -1733,6 +1867,19 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
         instance, NULL);
     axyne_theme_editor_scrollbars(state->terminal_output, AXYNE_OUTPUT_BG);
     state->shell_view = axyne_terminal_view_create(window, instance);
+    state->shell_views[0] = state->shell_view;
+    state->shell_count = state->shell_view != NULL ? 1 : 0;
+    state->shell_active = 0;
+    axyne_terminal_update_label(state);
+    state->terminal_new_session = CreateWindowW(L"BUTTON", L"+",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_NEW_SESSION, instance, NULL);
+    state->terminal_next_session = CreateWindowW(L"BUTTON", L"\u21C4",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_NEXT_SESSION, instance, NULL);
+    state->terminal_split = CreateWindowW(L"BUTTON", L"\u25EB",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_SPLIT, instance, NULL);
     state->terminal_start = CreateWindowW(L"BUTTON", L"\u25B6",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_START, instance, NULL);
@@ -2964,7 +3111,7 @@ static int axyne_editor_actionable(AxyneWindowState *state)
 {
     HWND focus = GetFocus();
     return state->editor != NULL && axyne_active_visible(state) != NULL &&
-           focus != state->shell_view && focus != state->terminal_output;
+           !axyne_is_shell_view(state, focus) && focus != state->terminal_output;
 }
 
 static int axyne_settings_file_exists(const char *utf8_path)
@@ -3044,7 +3191,7 @@ static int axyne_action_enabled(AxyneWindowState *state, UINT command)
 static HWND axyne_edit_field_focused(const AxyneWindowState *state)
 {
     HWND focus = GetFocus();
-    if (focus == state->shell_view) return focus;
+    if (axyne_is_shell_view(state, focus)) return focus;
     wchar_t class_name[16];
     if (focus == NULL || focus == state->editor) return NULL;
     if (GetClassNameW(focus, class_name, 16) <= 0 ||
@@ -3055,7 +3202,7 @@ static HWND axyne_edit_field_focused(const AxyneWindowState *state)
 
 static int axyne_edit_command_enabled(AxyneWindowState *state, UINT command)
 {
-    if (GetFocus() == state->shell_view)
+    if (axyne_is_shell_view(state, GetFocus()))
         return command == AXYNE_CMD_COPY || command == AXYNE_CMD_PASTE || command == AXYNE_CMD_SELECT_ALL;
     HWND field = axyne_edit_field_focused(state);
     if (field != NULL) {
@@ -4732,6 +4879,8 @@ static const wchar_t *axyne_panel_tab_label(const AxyneWindowState *state, int i
 {
     if (index == AXYNE_WIN_PANEL_PROBLEMS && state->problems_tab_label[0] != L'\0')
         return state->problems_tab_label;
+    if (index == AXYNE_WIN_PANEL_TERMINAL && state->terminal_tab_label[0] != L'\0')
+        return state->terminal_tab_label;
     return AXYNE_PANEL_LABELS[index];
 }
 
@@ -8723,12 +8872,40 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
         SetWindowPos(state->terminal_output, NULL, axyne_sidebar_width(state) + 16, terminal_top,
                      terminal_width, terminal_bottom > terminal_top ? terminal_bottom - terminal_top : 0,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->shell_view, NULL, axyne_sidebar_width(state) + 16, terminal_top,
-            terminal_width, max(0, terminal_bottom-terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_start, NULL, width - 120, bottom_top + 5,
-                     24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_stop, NULL, width - 94, bottom_top + 5,
-                     24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        {
+            /* The active session fills the panel; split shows the next
+             * session beside it. Other sessions stay hidden. */
+            int split = state->shell_split && state->shell_count > 1;
+            int partner = split ? state->shell_peer : -1;
+            int left = split ? min(state->shell_active, partner) : state->shell_active;
+            int pane = split ? (terminal_width - 8) / 2 : terminal_width;
+            int i;
+            for (i = 0; i < state->shell_count; ++i) {
+                int shown = terminal_selected && !state->panel_hidden &&
+                            (i == state->shell_active || i == partner);
+                int x = axyne_sidebar_width(state) + 16 + (split && i != left ? pane + 8 : 0);
+                if (shown)
+                    SetWindowPos(state->shell_views[i], NULL, x, terminal_top, max(0, pane),
+                                 max(0, terminal_bottom - terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
+                ShowWindow(state->shell_views[i], shown ? SW_SHOW : SW_HIDE);
+            }
+            SetWindowPos(state->terminal_new_session, NULL, width - 256, bottom_top + 5, 24, 22,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(state->terminal_next_session, NULL, width - 230, bottom_top + 5, 24, 22,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(state->terminal_split, NULL, width - 204, bottom_top + 5, 24, 22,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindow(state->terminal_new_session,
+                       terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
+            ShowWindow(state->terminal_next_session,
+                       terminal_selected && !state->panel_hidden && state->shell_count > 1 ? SW_SHOW : SW_HIDE);
+            ShowWindow(state->terminal_split,
+                       terminal_selected && !state->panel_hidden && state->shell_count > 1 ? SW_SHOW : SW_HIDE);
+        }
+        SetWindowPos(state->terminal_start, NULL, width - 172, bottom_top + 5,
+                     52, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(state->terminal_stop, NULL, width - 116, bottom_top + 5,
+                     48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->panel_clear, NULL, width - 62, bottom_top + 5,
                      24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->panel_close, NULL, width - 36, bottom_top + 5,
@@ -8737,8 +8914,6 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
         ShowWindow(state->panel_close, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->terminal_output,
                    output_shown ? SW_SHOW : SW_HIDE);
-        ShowWindow(state->shell_view,
-                   terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
         ShowWindow(state->terminal_start, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->terminal_stop, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->debug_start, SW_HIDE);
@@ -9263,6 +9438,16 @@ static void axyne_legacy_command(HWND window, AxyneWindowState *state, UINT comm
     }
     else if (command == AXYNE_TERMINAL_START) axyne_start_terminal_panel(window, state);
     else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
+    else if (command == AXYNE_TERMINAL_NEW_SESSION) axyne_new_terminal_session(window, state);
+    else if (command == AXYNE_TERMINAL_NEXT_SESSION)
+        axyne_terminal_select_session(window, state, (state->shell_active + 1) % max(1, state->shell_count));
+    else if (command == AXYNE_TERMINAL_SPLIT) {
+        state->shell_split = !state->shell_split;
+        if (state->shell_split && state->shell_count > 1)
+            state->shell_peer = (state->shell_active + 1) % state->shell_count;
+        axyne_layout(window, state);
+        SetFocus(state->shell_view); /* never left in a hidden pane */
+    }
     else if (command == AXYNE_PANEL_CLEAR) {
         if (state->panel_tab == AXYNE_WIN_PANEL_TERMINAL)
             axyne_terminal_view_clear(state->shell_view);
@@ -9500,6 +9685,9 @@ int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
         out->enabled = axyne_action_enabled(state, AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS);
         return 1;
     case AXYNE_COMMAND_TERMINAL_NEW:
+        out->enabled = !axyne_terminal_view_running(state->shell_view) ||
+                       state->shell_count < AXYNE_WIN_TERMINAL_MAX;
+        return 1;
     case AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL: case AXYNE_COMMAND_TERMINAL_NEW_COMMAND_PROMPT:
         out->enabled = !axyne_terminal_view_running(state->shell_view);
         return 1;
@@ -9614,7 +9802,9 @@ int axyne_win_base_command(AxyneWindowState *state, AxyneCommandId id)
     case AXYNE_COMMAND_DEBUG_STEP_OUT: legacy = AXYNE_CMD_DEBUG_STEP_OUT; break;
     case AXYNE_COMMAND_DEBUG_TOGGLE_BREAKPOINT: legacy = AXYNE_DEBUG_BREAKPOINT; break;
     case AXYNE_COMMAND_DEBUG_CLEAR_BREAKPOINTS: legacy = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS; break;
-    case AXYNE_COMMAND_TERMINAL_NEW: legacy = AXYNE_TERMINAL_START; break;
+    case AXYNE_COMMAND_TERMINAL_NEW:
+        axyne_new_terminal_session(window, state);
+        return 1;
     case AXYNE_COMMAND_TOOLS_SETTINGS: legacy = AXYNE_CMD_PREFERENCES; break;
     case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS: legacy = AXYNE_CMD_WORKSPACE_PREFERENCES; break;
     case AXYNE_COMMAND_TOOLS_OPEN_SETTINGS_JSON: legacy = AXYNE_CMD_OPEN_PREFERENCES_FILE; break;
@@ -10456,7 +10646,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         if (state != NULL && item != NULL && item->CtlType == ODT_BUTTON &&
             (item->CtlID == AXYNE_TERMINAL_START || item->CtlID == AXYNE_TERMINAL_STOP ||
-             item->CtlID == AXYNE_PANEL_CLEAR || item->CtlID == AXYNE_PANEL_CLOSE)) {
+             item->CtlID == AXYNE_TERMINAL_NEW_SESSION || item->CtlID == AXYNE_TERMINAL_NEXT_SESSION ||
+             item->CtlID == AXYNE_TERMINAL_SPLIT ||
+             item->CtlID == AXYNE_PANEL_CLEAR || item->CtlID == AXYNE_PANEL_CLOSE ||
+             item->CtlID == AXYNE_CMD_CANCEL_BUILD)) {
+            if (item->CtlID == AXYNE_PANEL_CLEAR || item->CtlID == AXYNE_PANEL_CLOSE) {
             wchar_t glyph[8];
             GetWindowTextW(item->hwndItem, glyph, 8);
             axyne_fill(item->hDC, item->rcItem.left, item->rcItem.top,
@@ -10467,9 +10661,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 (item->itemState & ODS_DISABLED) != 0 ? AXYNE_ICON_OFF : AXYNE_ICON,
                 item->rcItem, glyph, DT_CENTER);
             return TRUE;
-        }
-        if (state != NULL && item != NULL && item->CtlType == ODT_BUTTON &&
-            item->CtlID == AXYNE_CMD_CANCEL_BUILD) {
+            }
             wchar_t label[32];
             RECT rect = item->rcItem;
             int disabled = (item->itemState & ODS_DISABLED) != 0;
@@ -10534,7 +10726,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 0;
     }
     case WM_APP + 202:
-        if (state != NULL) axyne_refresh_action_controls(state);
+        if (state != NULL) {
+            axyne_terminal_prune_sessions(window, state);
+            axyne_refresh_action_controls(state);
+        }
         return 0;
     case AXYNE_WM_TERMINAL_EXIT: {
         AxyneTerminalExitMessage *exit_message =
@@ -10971,6 +11166,23 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                 continue;
             }
         }
+        {
+            AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
+                window, GWLP_USERDATA);
+            if (current != NULL && axyne_is_shell_view(current, message.hwnd)) {
+                if (message.message == WM_LBUTTONDOWN &&
+                    message.hwnd != current->shell_view) {
+                    int i;
+                    /* Clicking the other split pane makes it active. */
+                    for (i = 0; i < current->shell_count; ++i)
+                        if (current->shell_views[i] == message.hwnd)
+                            axyne_terminal_select_session(window, current, i);
+                }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+                continue;
+            }
+        }
         if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN) {
             AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
                 window, GWLP_USERDATA);
@@ -11026,9 +11238,6 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
                 message.message == WM_KEYDOWN && message.wParam == VK_RETURN &&
                 SendMessageA(current->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
                 SendMessageA(current->editor, SCI_AUTOCCANCEL, 0, 0);
-            if (current != NULL && message.hwnd == current->shell_view) {
-                TranslateMessage(&message); DispatchMessageW(&message); continue;
-            }
             if (current != NULL && axyne_win_handle_key(current, message.wParam)) continue;
         }
         TranslateMessage(&message);

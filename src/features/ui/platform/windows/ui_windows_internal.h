@@ -217,7 +217,20 @@ typedef struct AxyneWindowState {
     AxyneGitUiRun *git_run;
     int git_batch_busy; /* a commit, push or pull runs on a worker thread */
     HWND terminal_output;
-    HWND shell_view;
+    HWND shell_view;   /* the active terminal session (one of shell_views) */
+    /* Terminal sessions: up to AXYNE_WIN_TERMINAL_MAX native shells; the
+     * active one is shown, with the next one beside it while split. */
+    HWND shell_views[4];
+    char shell_names[4][24];
+    int shell_started[4];
+    int shell_count;
+    int shell_active;
+    int shell_split;
+    int shell_peer;    /* the other split pane; left = the lower index */
+    HWND terminal_new_session;
+    HWND terminal_next_session;
+    HWND terminal_split;
+    wchar_t terminal_tab_label[48];
     HWND terminal_start;
     HWND terminal_stop;
     HWND panel_clear;
