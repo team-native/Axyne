@@ -4781,6 +4781,11 @@ static void axyne_menu_draw(AxyneWindowState *state, const DRAWITEMSTRUCT *draw)
     }
     if (item->label != NULL)
         axyne_text_rect(dc, state->ui_font, text, cell, item->label, DT_LEFT);
+    /* Windows paints its own submenu arrow over owner-drawn popup items after
+     * WM_DRAWITEM (white while selected); clip the item out so only ours shows. */
+    if (item->arrow)
+        ExcludeClipRect(dc, draw->rcItem.left, draw->rcItem.top, draw->rcItem.right,
+                        draw->rcItem.bottom);
 }
 
 /* Toolbar slots in layout order (registry commands, so feature overrides
