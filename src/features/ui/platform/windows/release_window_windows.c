@@ -90,6 +90,9 @@ static HBITMAP rw_asset(int id){
 static void rw_draw_asset(HDC dc,int id,int x,int y,int w,int h){HBITMAP b=rw_asset(id);if(b){BITMAP bm;HDC m=CreateCompatibleDC(dc);GetObject(b,sizeof(bm),&bm);SelectObject(m,b);AlphaBlend(dc,x,y,w,h,m,0,0,bm.bmWidth,bm.bmHeight, (BLENDFUNCTION){AC_SRC_OVER,0,255,AC_SRC_ALPHA});DeleteDC(m);}}
 static const wchar_t *catname(int c){static const wchar_t*n[]={L"All",L"Feature",L"Improvement",L"Fix",L"Notice"};return n[c<0||c>4?0:c];}
 static int count_category(const AxyneReleaseEntry*e,int c){return e?(int)axyne_release_category_count(e,(AxyneReleaseCategory)c):0;}
+/* Filter chips size to their text like Figma 57:3607: 13px padding, 6px label/count gap, 6px between chips. */
+static int filter_width(HDC d,const AxyneReleaseEntry*e,int c){wchar_t n[16];swprintf(n,16,L"%d",count_category(e,c));return 13+rw_text_width(d,catname(c),11,400)+6+rw_text_width(d,n,11,400)+13;}
+static int filter_x(HDC d,const AxyneReleaseEntry*e,int c){int x=253;for(int i=0;i<c;i++)x+=filter_width(d,e,i)+6;return x;}
 static int visible_index(RwState*s,int n){int k=-1;for(size_t i=0;i<s->catalog.count;i++){if(s->filter==0||count_category(&s->catalog.entries[i],s->filter)>0){if(++k==n)return(int)i;}}return -1;}
 static void rw_paint(HWND w,RwState*s,HDC d){
     RECT rc;GetClientRect(w,&rc);int width=rc.right,height=rc.bottom;fill(d,0,0,width,height,C_BG);
@@ -107,26 +110,27 @@ static void rw_paint(HWND w,RwState*s,HDC d){
     }
     if(s->kind==RW_RAW){fill(d,0,0,width,32,0x171413);rw_text(d,12,8,L"CHANGELOG — Raw release notes",12,400,rgb(C_TEXT));rw_draw_asset(d,4702,width-28,11,10,10);return;}
     fill(d,0,0,width,32,0x171413);rw_draw_asset(d,4701,12,8,16,16);rw_text(d,38,8,L"Release notes — Axyne",12,400,rgb(C_TEXT));rw_draw_asset(d,4702,width-28,11,10,10);
-    fill(d,0,32,220,height-118,C_SIDEBAR);rw_text(d,16,48,L"RELEASE HISTORY",11,600,rgb(C_MUTED));
+    fill(d,0,32,220,height-85,C_SIDEBAR);rw_text(d,16,48,L"RELEASE HISTORY",11,600,rgb(C_MUTED));
     if(s->loading)rw_text(d,246,64,L"Loading release history…",14,400,rgb(C_MUTED));
     else if(s->failed)rw_text(d,246,64,L"Release history is unavailable.",14,400,rgb(C_MUTED));
     int row=0;
     for(int i=0;(i=visible_index(s,row))>=0;row++){
-        int y=82+row*56-s->scroll;if(y<35||y>height-100)continue;
+        int y=73+row*54-s->scroll;if(y<35||y+52>height-53)continue;
         if(i==s->selected)fill(d,8,y,204,52,0x2b2623);
         wchar_t *v=rw_wide(s->catalog.entries[i].version);if(v){if(strcmp(s->catalog.entries[i].version,axyne_release_notes_version())==0){int badge_x=20+rw_text_width(d,v,13,700)+8;if(badge_x<54)badge_x=54;if(badge_x>142)badge_x=142;RECT version_rect={20,y+3,badge_x-8,y+27};rw_text_ellipsized(d,&version_rect,v,13,700,rgb(C_TEXT));rw_round_fill(d,badge_x,y+5,58,18,9,0x552d3b);rw_text(d,badge_x+6,y+7,L"Installed",9,400,rgb(0xfbcce2));}else{RECT version_rect={20,y+3,200,y+27};rw_text_ellipsized(d,&version_rect,v,13,700,rgb(C_TEXT));}free(v);}
         const char*dt=s->catalog.entries[i].published_at;wchar_t*dw=rw_wide(dt);rw_text(d,20,y+30,dw?dw:L"Date unavailable",11,400,rgb(C_MUTED));free(dw);
     }
-    fill(d,220,32,1,height-118,C_BORDER);
+    fill(d,220,32,1,height-85,C_BORDER);
     AxyneReleaseEntry*e=s->selected>=0&&(size_t)s->selected<s->catalog.count?&s->catalog.entries[s->selected]:NULL;
     if(e){wchar_t*v=rw_wide(e->version);wchar_t title[256];swprintf(title,256,L"Axyne %s",v?v:L"");rw_text(d,252,58,title,26,700,rgb(C_TEXT));free(v);
       wchar_t*date=rw_wide(e->published_at);rw_text(d,252,94,date?date:L"Date unavailable",12,400,rgb(C_MUTED));free(date);
-      for(int c=0;c<5;c++){int x=252+c*89;int n=count_category(e,c);fill(d,x,128,79,27,c==s->filter?C_ACCENT:0x211d1b);wchar_t label[64];swprintf(label,64,L"%s  %d",catname(c),n);rw_text(d,x+8,134,label,11,400,rgb(c==s->filter?C_ACCENT_TEXT:C_TEXT));}
-      int y=174,shown=0;
-      for(size_t i=0;i<e->change_count&&y<height-160;i++){AxyneReleaseChange*c=&e->changes[i];if(s->filter&&c->category!=s->filter)continue;wchar_t*t=rw_wide(c->title),*b=rw_wide(c->body);rw_text(d,252,y,catname(c->category),11,600,rgb(C_ACCENT_TEXT));rw_text(d,338,y,t?t:L"",13,600,rgb(C_TEXT));if(b)rw_text(d,338,y+22,b,12,400,rgb(C_MUTED));free(t);free(b);y+=58;shown++;}
-      if(!shown)rw_text(d,252,178,L"No changes in this category.",13,400,rgb(C_MUTED));
+      for(int c=0;c<5;c++){int x=filter_x(d,e,c),fw=filter_width(d,e,c);wchar_t n[16];swprintf(n,16,L"%d",count_category(e,c));unsigned fg=rgb(c==s->filter?C_ACCENT_TEXT:C_TEXT);fill(d,x,155,fw,28,c==s->filter?C_ACCENT:0x211d1b);rw_text(d,x+13,161,catname(c),11,400,fg);rw_text(d,x+fw-13-rw_text_width(d,n,11,400),162,n,11,400,fg);}
+      int y=200,shown=0;
+      for(size_t i=0;i<e->change_count&&y+63<=height-53;i++){AxyneReleaseChange*c=&e->changes[i];if(s->filter&&c->category!=s->filter)continue;wchar_t*t=rw_wide(c->title),*b=rw_wide(c->body);const wchar_t*cat=catname(c->category);rw_round_fill(d,253,y+11,58,20,4,0x211d1b);rw_text(d,253+(58-rw_text_width(d,cat,10,600))/2,y+14,cat,10,600,rgb(C_ACCENT_TEXT));rw_text(d,325,y+11,t?t:L"",13,600,rgb(C_TEXT));if(b)rw_text(d,325,y+33,b,12,400,rgb(C_MUTED));free(t);free(b);y+=63;shown++;}
+      if(!shown)rw_text(d,253,204,L"No changes in this category.",13,400,rgb(C_MUTED));
     }
-    fill(d,0,height-86,width,1,C_BORDER);fill(d,18,height-58,16,16,s->show_after?C_ACCENT:0x24211f);if(s->show_after)rw_draw_asset(d,4703,19,height-57,13,13);rw_text(d,42,height-61,L"Show release notes after update",12,400,rgb(C_TEXT));rw_text(d,width-285,height-61,L"View raw CHANGELOG",12,400,rgb(C_MUTED));fill(d,width-132,height-69,112,34,C_ACCENT);rw_text(d,width-106,height-60,L"Close",12,600,rgb(C_ACCENT_TEXT));
+    /* Footer follows Figma 57:3685: 53px bar, 13px checkbox, 84x30 Close button. */
+    fill(d,0,height-53,width,1,C_BORDER);fill(d,17,height-32,13,13,s->show_after?C_ACCENT:0x24211f);if(s->show_after)rw_draw_asset(d,4703,17,height-32,13,13);rw_text(d,41,height-34,L"Show release notes after update",12,400,rgb(C_TEXT));rw_text(d,width-283,height-34,L"View raw CHANGELOG",12,400,rgb(C_MUTED));rw_round_fill(d,width-100,height-41,84,30,4,C_ACCENT);rw_text(d,width-100+(84-rw_text_width(d,L"Close",12,600))/2,height-34,L"Close",12,600,rgb(C_ACCENT_TEXT));
 }
 static void rw_close(HWND w){RwState*s=(RwState*)GetWindowLongPtrW(w,GWLP_USERDATA);if(!s)return;s->alive=0;if(s->job){InterlockedExchange(&s->job->cancelled,1);rw_release(s->job);s->job=NULL;}KillTimer(w,RW_TIMER);axyne_release_catalog_clear(&s->catalog);free(s->raw_notes);free(s);SetWindowLongPtrW(w,GWLP_USERDATA,0);}
 static void rw_open_raw(HWND parent,const char*notes){RwState*s=(RwState*)calloc(1,sizeof(*s));if(!s)return;s->owner=GetWindow(parent,GW_OWNER);s->kind=RW_RAW;if(notes){size_t n=strlen(notes)+1;s->raw_notes=(char*)malloc(n);if(s->raw_notes)memcpy(s->raw_notes,notes,n);}HWND w=CreateWindowExW(WS_EX_TOOLWINDOW,RW_CLASS,L"CHANGELOG",WS_POPUP,CW_USEDEFAULT,CW_USEDEFAULT,780,600,parent,NULL,rw_instance,s);if(!w){free(s->raw_notes);free(s);return;}RECT r;GetWindowRect(parent,&r);SetWindowPos(w,NULL,r.left+70,r.top+40,780,600,SWP_NOZORDER);ShowWindow(w,SW_SHOW);SetFocus(s->raw_edit);}
@@ -138,7 +142,7 @@ static LRESULT CALLBACK rw_proc(HWND w,UINT m,WPARAM wp,LPARAM lp){RwState*s=(Rw
  case WM_TIMER:if(s&&s->job&&InterlockedCompareExchange(&s->job->done,0,0)){RwJob*j=s->job;s->job=NULL;if(j->kind==0){axyne_release_catalog_clear(&s->catalog);s->catalog=j->catalog;memset(&j->catalog,0,sizeof(j->catalog));s->failed=j->status!=AXYNE_STATUS_OK;s->loading=0;s->show_after=s->catalog.show_after_update;if(s->kind==RW_TOAST){if(s->catalog.update_available&&s->catalog.suppressed){rw_release(j);DestroyWindow(w);return 0;}s->toast_mode=s->catalog.update_available?1:0;SetTimer(w,RW_TOAST_TIMER,9000,NULL);}else s->selected=s->catalog.count?0:-1;}else if(j->kind==2)s->show_after=j->enabled;rw_release(j);InvalidateRect(w,NULL,FALSE);}else if(s&&wp==RW_TOAST_TIMER)DestroyWindow(w);return 0;
  case WM_LBUTTONUP:if(s){int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);RECT r;GetClientRect(w,&r);if(s->kind==RW_TOAST){if(y<28&&x>r.right-40){DestroyWindow(w);return 0;}if(y>=67&&y<95&&x>=r.right-140&&x<r.right-12){HWND owner=s->owner;DestroyWindow(w);axyne_release_ui_open(owner,0);return 0;}if(y>=67&&y<95&&x>=r.right-308&&x<r.right-148&&s->catalog.latest_version){RwJob*j=rw_start(1,0,s->catalog.latest_version);if(j)rw_release(j);DestroyWindow(w);return 0;}if(y>55){DestroyWindow(w);return 0;}}
  else if(s->kind==RW_RAW){if(y<32&&x>r.right-42)DestroyWindow(w);}
- else {if(y<32&&x>r.right-42){DestroyWindow(w);return 0;}if(x<220&&y>=82){int idx=(y-82+s->scroll)/56;int actual=visible_index(s,idx);if(actual>=0)s->selected=actual;}else if(y>=120&&y<160&&x>=252){s->filter=(x-252)/89;if(s->filter>4)s->filter=4;}else if(y>r.bottom-82&&x<260){s->show_after=!s->show_after;RwJob*j=rw_start(2,s->show_after,NULL);if(j){if(s->job)rw_release(s->job);s->job=j;}}else if(y>r.bottom-82&&x>r.right-145)DestroyWindow(w);else if(y>r.bottom-82&&x>r.right-310){AxyneReleaseEntry*entry=s->selected>=0&&(size_t)s->selected<s->catalog.count?&s->catalog.entries[s->selected]:NULL;rw_open_raw(w,entry?entry->notes:NULL);}}InvalidateRect(w,NULL,FALSE);}return 0;
+ else {if(y<32&&x>r.right-42){DestroyWindow(w);return 0;}if(x<220&&y>=73&&y<r.bottom-53){int idx=(y-73+s->scroll)/54;int actual=visible_index(s,idx);if(actual>=0)s->selected=actual;}else if(y>=155&&y<183&&x>=253){AxyneReleaseEntry*entry=s->selected>=0&&(size_t)s->selected<s->catalog.count?&s->catalog.entries[s->selected]:NULL;HDC d=GetDC(w);if(d){for(int c=0;c<5;c++){int fx=filter_x(d,entry,c);if(x>=fx&&x<fx+filter_width(d,entry,c)){s->filter=c;break;}}ReleaseDC(w,d);}}else if(y>r.bottom-53&&x<260){s->show_after=!s->show_after;RwJob*j=rw_start(2,s->show_after,NULL);if(j){if(s->job)rw_release(s->job);s->job=j;}}else if(y>r.bottom-53&&x>=r.right-100&&x<r.right-16)DestroyWindow(w);else if(y>r.bottom-53&&x>r.right-290){AxyneReleaseEntry*entry=s->selected>=0&&(size_t)s->selected<s->catalog.count?&s->catalog.entries[s->selected]:NULL;rw_open_raw(w,entry?entry->notes:NULL);}}InvalidateRect(w,NULL,FALSE);}return 0;
  case WM_MOUSEWHEEL:if(s&&s->kind==RW_WINDOW){s->scroll-=GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*48;if(s->scroll<0)s->scroll=0;InvalidateRect(w,NULL,FALSE);}return 0;
  case WM_KEYDOWN:if(wp==VK_ESCAPE){DestroyWindow(w);return 0;}if(s&&s->kind==RW_WINDOW&&(wp==VK_UP||wp==VK_DOWN)){int n=visible_index(s,0),max=0;while(visible_index(s,max)>=0)max++;if(max){int cur=0;for(int i=0;i<max;i++)if(visible_index(s,i)==s->selected)cur=i;cur+=wp==VK_DOWN?1:-1;if(cur<0)cur=0;if(cur>=max)cur=max-1;s->selected=visible_index(s,cur);(void)n;InvalidateRect(w,NULL,FALSE);}return 0;}return DefWindowProcW(w,m,wp,lp);
  case WM_CLOSE:DestroyWindow(w);return 0;case WM_DESTROY:rw_close(w);return 0;default:return DefWindowProcW(w,m,wp,lp);}return DefWindowProcW(w,m,wp,lp);}
