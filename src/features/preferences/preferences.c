@@ -114,14 +114,14 @@ static const char *axyne_backend_name(AxyneDebuggerBackend backend)
 
 /* ---- legacy bindings ---------------------------------------------------- */
 
-static AxynePlatform axyne_build_platform(void) { return axyne_platform_current(); }
+static AxyneCommandPlatform axyne_build_platform(void) { return axyne_command_platform_current(); }
 
 /* Run binding after the D1 migration: Ctrl+F5 on both platforms. On Windows
  * the primary modifier (COMMAND) already means Ctrl; on macOS it is Control.
  * The legacy default itself stays F5 until the UI adopts the new keys. */
 static unsigned int axyne_migrated_run_modifiers(void)
 {
-    return axyne_build_platform() == AXYNE_PLATFORM_MACOS
+    return axyne_build_platform() == AXYNE_COMMAND_PLATFORM_MACOS
         ? AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND;
 }
 
@@ -187,7 +187,7 @@ static int axyne_legacy_equal(const AxyneKeyBinding *a, const AxyneKeyBinding *b
  * this version does not know): "<modifier names>+<key text as stored>". */
 static int axyne_legacy_raw_text(const AxyneKeyBinding *binding, char *text, size_t capacity)
 {
-    int mac = axyne_build_platform() == AXYNE_PLATFORM_MACOS;
+    int mac = axyne_build_platform() == AXYNE_COMMAND_PLATFORM_MACOS;
     int written;
     if (binding->key[0] == '\0') return 0;
     written = snprintf(text, capacity, "%s%s%s%s%s",
@@ -216,7 +216,7 @@ static int axyne_ascii_token_equal(const char *token, size_t length, const char 
 static int axyne_legacy_from_raw_text(const char *text, unsigned int *modifiers,
                                       char *key, size_t capacity)
 {
-    int mac = axyne_build_platform() == AXYNE_PLATFORM_MACOS;
+    int mac = axyne_build_platform() == AXYNE_COMMAND_PLATFORM_MACOS;
     unsigned int bits = 0;
     const char *cursor = text;
     for (;;) {
@@ -427,6 +427,26 @@ AxyneStatus axyne_preferences_set_command_binding(AxynePreferences *preferences,
     return axyne_store_command_binding(preferences, command, keys, count, 1);
 }
 
+AxyneStatus axyne_preferences_capture_key(AxynePreferences *preferences,
+    AxynePreferenceAction action, unsigned int key, unsigned int modifiers, int macos)
+{
+    AxyneKeyStroke stroke = {0, 0};
+    char text[128];
+    const char *keys[1] = {text};
+    if (preferences == NULL || action < 0 || action >= AXYNE_ACTION_COUNT)
+        return AXYNE_STATUS_INVALID_ARGUMENT;
+    stroke.key = macos ? axyne_key_from_mac_character(key) : axyne_key_from_windows_vk(key);
+    if (stroke.key == AXYNE_KEY_NONE) return AXYNE_STATUS_INVALID_ARGUMENT;
+    if (modifiers & AXYNE_KEY_MODIFIER_COMMAND) stroke.mods |= AXYNE_KEYMOD_CMD;
+    if (modifiers & AXYNE_KEY_MODIFIER_CONTROL) stroke.mods |= AXYNE_KEYMOD_CTRL;
+    if (modifiers & AXYNE_KEY_MODIFIER_SHIFT) stroke.mods |= AXYNE_KEYMOD_SHIFT;
+    if (modifiers & AXYNE_KEY_MODIFIER_ALT) stroke.mods |= AXYNE_KEYMOD_ALT;
+    if (axyne_key_stroke_format(&stroke, AXYNE_KEY_FORMAT_CANONICAL, text, sizeof(text)) >= sizeof(text))
+        return AXYNE_STATUS_INVALID_ARGUMENT;
+    return axyne_preferences_set_command_binding(preferences,
+        axyne_command_name(axyne_command_from_legacy_action(action)), keys, 1);
+}
+
 void axyne_preferences_remove_command_binding(AxynePreferences *preferences,
                                               const char *command)
 {
@@ -486,7 +506,7 @@ void axyne_preferences_defaults(AxynePreferences *preferences)
     preferences->files.auto_save_delay_ms = 1000;
     axyne_copy_text(preferences->build.build_directory,
                     sizeof(preferences->build.build_directory), "build/${config}");
-    preferences->debugger.backend = axyne_build_platform() == AXYNE_PLATFORM_MACOS
+    preferences->debugger.backend = axyne_build_platform() == AXYNE_COMMAND_PLATFORM_MACOS
         ? AXYNE_DEBUGGER_BACKEND_LLDB_MI : AXYNE_DEBUGGER_BACKEND_GDB;
     preferences->version = AXYNE_PREFERENCES_VERSION;
     axyne_preferences_mark_all(preferences);
@@ -1504,6 +1524,39 @@ char *axyne_preferences_read_path(const char *directory)
 char *axyne_preferences_write_path(const char *directory)
 {
     return axyne_join_path(directory, "settings.json");
+}
+
+AxyneStatus axyne_preferences_adopt_legacy_file(const char *directory, AxyneError *error)
+{
+    char *settings = axyne_join_path(directory, "settings.json");
+    char *legacy = axyne_join_path(directory, "preferences.json");
+    char *contents = NULL;
+    size_t length = 0;
+    AxyneStatus status;
+    if (settings == NULL || legacy == NULL) {
+        free(settings);
+        free(legacy);
+        if (error != NULL) {
+            error->code = directory == NULL ? AXYNE_STATUS_INVALID_ARGUMENT
+                                              : AXYNE_STATUS_OUT_OF_MEMORY;
+            (void)snprintf(error->message, sizeof(error->message), "%s",
+                           "Unable to build the settings path");
+        }
+        return directory == NULL ? AXYNE_STATUS_INVALID_ARGUMENT : AXYNE_STATUS_OUT_OF_MEMORY;
+    }
+    if (axyne_file_exists(settings)) {
+        status = AXYNE_STATUS_OK;
+    } else {
+        status = axyne_fs_read_file(legacy, &contents, &length, error);
+        /* The old file stays; its bytes (every override and unknown member)
+         * become settings.json. */
+        if (status == AXYNE_STATUS_OK)
+            status = axyne_fs_write_file(settings, contents, length, error);
+        axyne_fs_free(contents);
+    }
+    free(settings);
+    free(legacy);
+    return status;
 }
 
 char *axyne_preferences_workspace_directory(const char *workspace_root)

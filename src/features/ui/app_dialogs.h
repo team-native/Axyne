@@ -4,6 +4,9 @@
 #include <stddef.h>
 
 #include "preferences_window.h"
+#include "axyne/runner_profiles.h"
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +36,7 @@ enum {
     AXYNE_DLG_RUNNER_WIDTH = 520,
     AXYNE_DLG_RUNNER_HEIGHT = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD +
         (AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT) + AXYNE_DLG_GAP +
+        (AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT) + AXYNE_DLG_GAP +
         (AXYNE_DLG_LABEL_BLOCK + AXYNE_DLG_AREA_HEIGHT) + AXYNE_DLG_GAP +
         (AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT) + AXYNE_DLG_GAP +
         (AXYNE_DLG_LABEL_BLOCK + AXYNE_DLG_AREA_HEIGHT) + AXYNE_DLG_NOTE_GAP +
@@ -59,7 +63,28 @@ typedef struct AxyneRunnerDialogValues {
     const char *arguments;
     const char *working_directory;
     const char *environment;
+    AxyneLanguageId language;
+    const AxyneRunnerProfiles *profiles; /* borrowed while the dialog is open */
+    const AxyneRunnerConfig *fallback;
 } AxyneRunnerDialogValues;
+
+/* Dialog text uses one argument/environment entry per line, without a shell. */
+static inline char *axyne_runner_dialog_lines(char *const *items, size_t count)
+{
+    size_t length = 1, i;
+    char *text, *cursor;
+    for (i = 0; i < count; ++i) length += strlen(items[i]) + 1;
+    text = (char *)malloc(length);
+    if (text == NULL) return NULL;
+    cursor = text;
+    for (i = 0; i < count; ++i) {
+        size_t n = strlen(items[i]);
+        if (i != 0) *cursor++ = '\n';
+        memcpy(cursor, items[i], n); cursor += n;
+    }
+    *cursor = '\0';
+    return text;
+}
 
 typedef struct AxyneRunnerDialogHooks {
     void *context;
