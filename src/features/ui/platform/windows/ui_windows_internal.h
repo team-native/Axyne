@@ -14,7 +14,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "splash_windows.h"
+
 #include "axyne/build_selector.h"
+#include "axyne/app_state.h"
+#include "axyne/app_paths.h"
 #include "axyne/debugger.h"
 #include "axyne/document.h"
 #include "axyne/explorer.h"
@@ -22,6 +26,7 @@
 #include "axyne/git_panel.h"
 #include "axyne/language.h"
 #include "axyne/lsp.h"
+#include "axyne/lsp_servers.h"
 #include "axyne/outline.h"
 #include "axyne/palette_controller.h"
 #include "axyne/preferences.h"
@@ -228,6 +233,8 @@ typedef struct AxyneWindowState {
     wchar_t terminal_tab_label[48];
     HWND terminal_start;
     HWND terminal_stop;
+    HWND panel_clear;
+    HWND panel_close;
     HWND debug_start;
     HWND debug_pause;
     HWND debug_continue;
@@ -246,7 +253,14 @@ typedef struct AxyneWindowState {
     char *global_settings_write_path;
     char *workspace_settings_write_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
+    AxyneSplash *splash;
+    int splash_show_command;
+    UINT_PTR splash_timer_id;
+    int splash_timer_thread;
+    AxyneAppState app_state;
+    char *app_state_path;
     AxyneLspClient *lsp;
+    AxyneLanguageId lsp_language;
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */

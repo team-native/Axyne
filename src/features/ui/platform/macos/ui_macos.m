@@ -1,4 +1,7 @@
 #include "ui_macos_internal.h"
+#include "axyne/memory_usage.h"
+#include "axyne/build_config.h"
+#import "splash_macos.h"
 
 /* Menu text at the Figma 12pt size. Only the font is set so AppKit keeps
  * choosing the colour (which also dims disabled entries) and draws the
@@ -1672,6 +1675,10 @@ static BOOL axyne_macos_is_image_path(const char *path)
             if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
                 [self showWorkspaceError:@"Unable to load preferences" error:&preferenceError];
         }
+        axyne_app_state_init(&_appState);
+        _appStatePath = axyne_app_path(AXYNE_APP_PATH_STATE);
+        if (_appStatePath != NULL)
+            (void)axyne_app_state_load(_appStatePath, &_appState, NULL);
         _terminalOutput = [[NSTextView alloc] initWithFrame:NSZeroRect];
         [_terminalOutput setEditable:NO];
         [_terminalOutput setSelectable:YES];
@@ -1759,10 +1766,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_terminalStart setToolTip:@"터미널 시작"];
         [_terminalStart setTarget:self]; [_terminalStart setAction:@selector(startTerminal:)];
         [self addSubview:_terminalStart];
-        _terminalStop = axyne_macos_toolbar_button(@"×", self, @selector(stopTerminal:));
+        _terminalStop = axyne_macos_toolbar_button(@"■", self, @selector(stopTerminal:));
         [_terminalStop setToolTip:@"프로세스 중지"]; [_terminalStop setTarget:self];
         [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
         [self addSubview:_terminalStop];
+        _closePanel = axyne_macos_toolbar_button(@"✕", self, @selector(closePanel:));
+        [_closePanel setToolTip:@"패널 닫기"];
+        [self addSubview:_closePanel];
         _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
         [_debugStart setTitle:@"Debug"]; [_debugStart setTarget:self];
         [_debugStart setAction:@selector(startDebugger:)];
@@ -2177,7 +2187,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (action == @selector(closeDocument:))
         return hasDocument;
     if (action == @selector(buildDocument:) ||
-        action == @selector(runDocument:))
+        action == @selector(runDocument:) ||
+        action == @selector(rebuildDocument:) ||
+        action == @selector(cleanBuild:))
         return textDocument && !terminalActive && !debuggerActive;
     if (action == @selector(startDebugger:))
         return axyne_debugger_can_start(debuggerActive, terminalActive, savedDocument);
@@ -2188,6 +2200,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
             !document->is_untitled && document->path != NULL);
     if (action == @selector(startTerminal:)) return ![_shellView running];
     if (action == @selector(newTerminalSession:)) return ![_shellView running] || _shellCount < 4;
+    if (action == @selector(startShellTerminal:))
+        return ![_shellView running];
     if (action == @selector(stopTerminal:)) return [_shellView running];
     if (action == @selector(showWorkspacePreferences:))
         return _workspacePreferencesPath != NULL;
@@ -2461,6 +2475,11 @@ static BOOL axyne_macos_is_image_path(const char *path)
     size_t prefix = 0;
     if (_editorView == nil || document == NULL || [self isEmptyState]) return;
     language = axyne_syntax_for_path(document->path);
+    if (!axyne_syntax_completes(language)) {
+        if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
+            (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
+        return;
+    }
     length = [self sendEditorMessage:SCI_GETLENGTH wParam:0 lParam:0];
     caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
     if (length > 0 && caret > 0 && caret <= length) {
@@ -2521,7 +2540,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
                                _undoButton, _redoButton, _buildButton,
                                _runButton, _targetButton, _searchButton,
                                _outputTab, _problemsTab, _terminalTab, _debugConsoleTab,
-                               _terminalStart, _terminalStop, _clearOutput]) {
+                               _terminalStart, _terminalStop, _clearOutput, _closePanel]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(_preferences.theme.muted)];
         [(AxyneChromeButton *)button setFillColor:nil];
         [button setFont:[NSFont systemFontOfSize:11]];
@@ -2708,24 +2727,39 @@ static BOOL axyne_macos_is_image_path(const char *path)
 
 - (BOOL)ensureLsp
 {
-    const char *command = getenv("AXYNE_LSP_COMMAND");
+    AxyneDocument *doc = [self activeDocument];
+    AxyneLanguageId language = doc != NULL && doc->path != NULL ?
+        axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
+    AxyneLspServerCommand server = {0};
     AxyneLspConfig config = {0};
     AxyneError error;
-    if (_lsp != NULL) return YES;
-    if (command == NULL || command[0] == '\0') {
-        [self setLspStatus:@"LSP: set AXYNE_LSP_COMMAND to a local server executable"];
+    AxyneStatus status;
+    if (_lsp != NULL && _lspLanguage == language) return YES;
+    if (_lsp != NULL) {
+        axyne_lsp_destroy(_lsp);
+        _lsp = NULL;
+    }
+    status = axyne_lsp_server_resolve(language, &server, &error);
+    if (status != AXYNE_STATUS_OK) {
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
         return NO;
     }
-    config.command = command;
-    config.language_id = "plaintext";
+    config.command = server.executable;
+    config.arguments = (const char *const *)server.arguments;
+    config.argument_count = server.argument_count;
+    config.language_id = axyne_lsp_language_id(language);
+    if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_macos_lsp_diagnostics;
     config.on_navigation = axyne_macos_lsp_navigation;
     config.on_error = axyne_macos_lsp_error;
     config.user_data = self;
-    if (axyne_lsp_create(&config, &_lsp, &error) != AXYNE_STATUS_OK) {
+    status = axyne_lsp_create(&config, &_lsp, &error);
+    axyne_lsp_server_command_clear(&server);
+    if (status != AXYNE_STATUS_OK) {
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
         return NO;
     }
+    _lspLanguage = language;
     return YES;
 }
 
@@ -2871,6 +2905,22 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (notification->nmhdr.code == SCN_CHARADDED) {
         [self autoIndentFromNotification:notification];
         [self showCompletion];
+    }
+    /* Return never accepts a completion (only Tab does): cancelling inside
+     * SCN_AUTOCSELECTION drops the insertion, then the newline the key was
+     * meant for is typed on the next turn of the run loop. */
+    if (notification->nmhdr.code == SCN_AUTOCSELECTION &&
+        notification->listCompletionMethod == SC_AC_NEWLINE) {
+        (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SCNotification typed;
+            (void)[self sendEditorMessage:SCI_NEWLINE wParam:0 lParam:0];
+            /* SCI_NEWLINE raises no SCN_CHARADDED: indent like a typed Return. */
+            memset(&typed, 0, sizeof(typed));
+            typed.nmhdr.code = SCN_CHARADDED;
+            typed.ch = '\n';
+            [self autoIndentFromNotification:&typed];
+        });
     }
     if (notification->nmhdr.code == SCN_UPDATEUI) {
         [self updateLineNumberMargin];
@@ -3111,6 +3161,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
                 lParam:(intptr_t)evicted.native_editor_document];
         axyne_document_dispose(&evicted);
     }
+    if (!preview && _documents.documents[index].path != NULL &&
+        axyne_app_state_add_recent_file(&_appState, _documents.documents[index].path) == AXYNE_STATUS_OK)
+        [self persistAppState];
     [self refreshRecentMenu];
     [self setNeedsDisplay:YES];
 }
@@ -3199,8 +3252,32 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
     [self rebuildKeymap]; /* workspace keybindings */
     [_gitPanel workspaceChanged];
+    if (axyne_app_state_add_recent_folder(&_appState, path) == AXYNE_STATUS_OK)
+        [self persistAppState];
+    [self refreshRecentMenu];
     [self setNeedsDisplay:YES];
     return YES;
+}
+
+- (void)persistAppState
+{
+    if (_appStatePath != NULL)
+        (void)axyne_app_state_save(&_appState, _appStatePath, NULL);
+}
+
+- (void)restoreWorkspace
+{
+    NSString *path;
+    BOOL isDirectory = NO;
+    if (_explorer.root != NULL || _appState.recent_folder_count == 0) return;
+    path = [NSString stringWithUTF8String:_appState.recent_folders[0]];
+    if (path != nil && [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] &&
+        isDirectory) {
+        (void)[self selectWorkspaceURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+        return;
+    }
+    (void)axyne_app_state_remove_recent_folder(&_appState, _appState.recent_folders[0]);
+    [self persistAppState];
 }
 
 - (void)openWorkspace:(id)sender
@@ -4332,6 +4409,11 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [_terminalOutput scrollRangeToVisible:NSMakeRange(0, 0)];
 }
 
+- (void)closePanel:(id)sender
+{
+    if (!_panelHidden) [self togglePanel:sender];
+}
+
 - (void)togglePanel:(id)sender
 {
     (void)sender;
@@ -4482,6 +4564,32 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [self openPath:path];
 }
 
+- (void)openRecentFolder:(id)sender
+{
+    NSString *path = [sender representedObject];
+    BOOL isDirectory = NO;
+    if (path == nil || ![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
+        if (path != nil) {
+            const char *utf8 = [path fileSystemRepresentation];
+            if (utf8 != NULL) (void)axyne_app_state_remove_recent_folder(&_appState, utf8);
+            [self persistAppState];
+            [self refreshRecentMenu];
+        }
+        return;
+    }
+    (void)[self selectWorkspaceURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+}
+
+- (void)clearRecent:(id)sender
+{
+    (void)sender;
+    axyne_app_state_clear_recent(&_appState);
+    for (size_t i = 0; i < _documents.recent_count; ++i) free(_documents.recent_paths[i]);
+    _documents.recent_count = 0;
+    [self persistAppState];
+    [self refreshRecentMenu];
+}
+
 - (void)setRecentMenu:(NSMenu *)menu
 {
     [_recentMenu release];
@@ -4496,15 +4604,15 @@ static BOOL axyne_macos_is_image_path(const char *path)
 {
     if (_recentMenu == nil) return;
     [_recentMenu removeAllItems];
-    if (_documents.recent_count == 0) {
+    if (_appState.recent_file_count == 0 && _appState.recent_folder_count == 0) {
         NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"최근 항목 없음"
             action:nil keyEquivalent:@""];
         [empty setEnabled:NO];
         [_recentMenu addItem:empty];
         [empty release];
     }
-    for (size_t i = 0; i < _documents.recent_count; ++i) {
-        NSString *path = [NSString stringWithUTF8String:_documents.recent_paths[i]];
+    for (size_t i = 0; i < _appState.recent_file_count; ++i) {
+        NSString *path = [NSString stringWithUTF8String:_appState.recent_files[i]];
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:
             path != nil ? path : @"(Invalid path)"
             action:@selector(openRecent:) keyEquivalent:@""];
@@ -4514,11 +4622,21 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [item release];
     }
     [_recentMenu addItem:[NSMenuItem separatorItem]];
+    for (size_t i = 0; i < _appState.recent_folder_count; ++i) {
+        NSString *path = [NSString stringWithUTF8String:_appState.recent_folders[i]];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:
+            path != nil ? path : @"(Invalid folder)"
+            action:@selector(openRecentFolder:) keyEquivalent:@""];
+        [item setTarget:self];
+        [item setRepresentedObject:path];
+        [_recentMenu addItem:item];
+        [item release];
+    }
     {
         NSMenuItem *folders = [[NSMenuItem alloc] initWithTitle:@"최근 폴더 없음"
             action:nil keyEquivalent:@""];
         [folders setEnabled:NO];
-        [_recentMenu addItem:folders];
+        if (_appState.recent_folder_count == 0) [_recentMenu addItem:folders];
         [folders release];
     }
     [_recentMenu addItem:[NSMenuItem separatorItem]];
@@ -4780,9 +4898,20 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (void)viewDidMoveToWindow
 {
     [super viewDidMoveToWindow];
+    [_statusTimer invalidate];
+    _statusTimer = nil;
+    if ([self window] != nil)
+        _statusTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self
+            selector:@selector(statusTimerTick:) userInfo:nil repeats:YES];
     [self loadScintillaView];
     [self applyPreferences];
     [self loadActiveDocument];
+}
+
+- (void)statusTimerTick:(NSTimer *)timer
+{
+    (void)timer;
+    [self setNeedsDisplay:YES];
 }
 
 /* A click on the menu bar while the window is inactive opens the menu
@@ -5765,6 +5894,12 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     NSInteger i = 0;
     while (i < _shellCount && _shellCount > 1) {
         if (_shellStarted[i] && ![_shellViews[i] running]) {
+            if (_shellPeer == i) {
+                _shellSplit = NO;
+                _shellPeer = -1;
+            } else if (_shellPeer > i) {
+                --_shellPeer;
+            }
             [_shellViews[i] shutdown];
             [_shellViews[i] removeFromSuperview];
             [_shellViews[i] release];
@@ -5781,7 +5916,10 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
         }
         ++i;
     }
-    if (_shellCount < 2) _shellSplit = NO;
+    if (_shellCount < 2) {
+        _shellSplit = NO;
+        _shellPeer = -1;
+    }
     if (changed) {
         NSResponder *responder = [[self window] firstResponder];
         BOOL onShell = NO;
@@ -6042,6 +6180,100 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         return;
     }
     axyne_language_plan_free(&plan);
+}
+
+/* 정리: deletes the active file's build output (the {out} of its build step).
+ * YES when the build may go on (nothing to delete counts). */
+- (BOOL)cleanBuildOutput
+{
+    AxyneDocument *doc = [self activeDocument];
+    AxyneLanguagePlan plan;
+    char message[256];
+    AxyneStatus status;
+    BOOL ok = YES;
+    NSString *line;
+    [self selectOutputPanel];
+    if (_actionProcess != NULL || axyne_debugger_is_active(&_debugger)) {
+        const char *busy = "[build] 다른 작업이 실행 중입니다. 먼저 중지하세요.\n";
+        [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
+        return NO;
+    }
+    if (doc == NULL || doc->is_untitled || doc->path == NULL) {
+        const char *unsaved = "[build] 저장된 파일에서만 정리할 수 있습니다.\n";
+        [self terminalAppend:unsaved length:strlen(unsaved) stream:AXYNE_PROCESS_STDERR];
+        return NO;
+    }
+    [self discoverRuntimes];
+    memset(&plan, 0, sizeof(plan));
+    status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &_runtimes, &_buildTarget,
+        doc->path, _actionRunner.executable != NULL ? &_actionRunner : NULL,
+        &plan, message, sizeof(message));
+    [_terminalOutput setString:@""];
+    if (status != AXYNE_STATUS_OK) {
+        line = [NSString stringWithFormat:@"%s\n", message[0] != '\0' ? message : "Build could not be resolved."];
+        ok = NO;
+    } else if (!plan.has_build || plan.output_path == NULL) {
+        line = @"[build] 이 언어에는 정리할 빌드 산출물이 없습니다.\n";
+    } else {
+        NSString *output = [NSString stringWithUTF8String:plan.output_path];
+        NSFileManager *files = [NSFileManager defaultManager];
+        BOOL directory = NO;
+        if (output == nil || ![files fileExistsAtPath:output isDirectory:&directory]) {
+            line = [NSString stringWithFormat:@"[build] 정리할 산출물이 없습니다: %s\n", plan.output_path];
+        } else if (!directory && [files removeItemAtPath:output error:NULL]) {
+            line = [NSString stringWithFormat:@"[build] 정리: %s 삭제\n", plan.output_path];
+        } else {
+            line = [NSString stringWithFormat:@"[build] 산출물을 삭제하지 못했습니다: %s\n", plan.output_path];
+            ok = NO;
+        }
+    }
+    {
+        const char *bytes = [line UTF8String];
+        if (bytes != NULL)
+            [self terminalAppend:bytes length:strlen(bytes)
+                          stream:ok ? AXYNE_PROCESS_STDOUT : AXYNE_PROCESS_STDERR];
+    }
+    axyne_language_plan_free(&plan);
+    return ok;
+}
+
+- (void)cleanBuild:(id)sender
+{
+    (void)sender;
+    if ([self isEmptyState] || [self activeIsImage]) return;
+    (void)[self cleanBuildOutput];
+}
+
+/* 다시 빌드: remove the previous output, then build from scratch. */
+- (void)rebuildDocument:(id)sender
+{
+    (void)sender;
+    if ([self isEmptyState] || [self activeIsImage]) return;
+    if ([self cleanBuildOutput]) [self startAction:NO];
+}
+
+/* Tools > 새 터미널 > zsh / bash: starts that login shell once (the default
+ * 새 터미널 keeps its own shell). */
+- (void)startShellTerminal:(id)sender
+{
+    const char *shell = [sender tag] == 1 ? "/bin/bash" : "/bin/zsh";
+    const char *arguments[] = { "-l", "-i" };
+    AxyneTerminalSpec spec = {0};
+    AxyneError error = {0};
+    AxyneStatus status;
+    _panelMode = AXYNE_BOTTOM_PANEL_TERMINAL;
+    _panelHidden = NO;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+    if ([_shellView running]) { [[self window] makeFirstResponder:_shellView]; return; }
+    spec.executable = shell;
+    spec.arguments = arguments;
+    spec.argument_count = 2;
+    spec.working_directory = _explorer.root != NULL ? _explorer.root : [NSHomeDirectory() UTF8String];
+    status = [_shellView start:&spec error:&error];
+    if (status != AXYNE_STATUS_OK) [self showWorkspaceError:@"Unable to start terminal" error:&error];
+    [[self window] makeFirstResponder:_shellView];
+    [self refreshActionControls];
 }
 
 - (void)buildDocument:(id)sender
@@ -6493,9 +6725,10 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             tabX += tabWidth + 2;
         }
     }
-    [_terminalStart setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
+    [_terminalStart setFrame:NSMakeRect(width - 132, bottomTop + 2, 28, 28)];
+    [_terminalStop setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
     [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
-    [_terminalStop setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
+    [_closePanel setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
     CGFloat x = 8;
     size_t icon = 0;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
@@ -6532,7 +6765,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     /* A hidden bottom panel takes every panel control with it; the per-mode
      * visibility set above still applies when it is shown. */
-    for (NSView *panelView in @[_terminalStart, _clearOutput, _terminalStop])
+    for (NSView *panelView in @[_terminalStart, _terminalStop, _clearOutput, _closePanel])
         [panelView setHidden:_panelHidden];
     for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab)
         [[self bottomPanelTabButton:(AxyneBottomPanelTab)tab] setHidden:_panelHidden ||
@@ -6902,6 +7135,85 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
             size:11 color:text family:@"SF Pro Text"];
     }
+    {
+        AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
+        NSInteger line = 1, column = 1, eol = SC_EOL_LF, codepage = SC_CP_UTF8;
+        AxyneLanguageId language = document != NULL && document->path != NULL
+            ? axyne_language_for_path(document->path) : AXYNE_LANGUAGE_NONE;
+        const char *languageName = language != AXYNE_LANGUAGE_NONE
+            ? axyne_language_name(language) : "Plain Text";
+        const char *toolchain = _buildTarget.platform == AXYNE_PLATFORM_WINDOWS ? "MSVC" : "Clang";
+        char target[96];
+        AxyneMemoryUsage memory;
+        char gauge[64];
+        NSString *encoding;
+        NSString *eolName;
+        NSString *metadata;
+        NSFont *statusFont = [NSFont fontWithName:@"SF Pro Text" size:11];
+        NSDictionary *statusAttributes;
+        CGFloat memoryWidth, metadataWidth, barWidth = 96;
+        CGFloat cursorX;
+        CGFloat fillWidth;
+
+        if (document != NULL && _editorView != nil) {
+            NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+            line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
+            column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
+            eol = [self sendEditorMessage:SCI_GETEOLMODE wParam:0 lParam:0];
+            codepage = [self sendEditorMessage:SCI_GETCODEPAGE wParam:0 lParam:0];
+        }
+        if (_runtimesDiscovered && language != AXYNE_LANGUAGE_NONE && document != NULL &&
+            document->path != NULL) {
+            AxyneLanguagePlan plan;
+            char message[256];
+            memset(&plan, 0, sizeof(plan));
+            if (axyne_language_resolve_runner(language, &_runtimes, &_buildTarget,
+                    document->path, NULL, &plan, message, sizeof(message)) == AXYNE_STATUS_OK &&
+                plan.toolchain_name != NULL && plan.toolchain_name[0] != '\0')
+                toolchain = plan.toolchain_name;
+            axyne_language_plan_free(&plan);
+        }
+        (void)snprintf(target, sizeof(target), "%s %s %s", toolchain,
+            axyne_architecture_name(_buildTarget.platform, _buildTarget.architecture),
+            axyne_configuration_name(_buildTarget.configuration));
+        encoding = codepage == SC_CP_UTF8 ? @"UTF-8" :
+            [NSString stringWithFormat:@"CP%ld", (long)codepage];
+        eolName = eol == SC_EOL_CRLF ? @"CRLF" : (eol == SC_EOL_CR ? @"CR" : @"LF");
+        if (axyne_memory_usage_sample(&memory, NULL) != AXYNE_STATUS_OK)
+            memset(&memory, 0, sizeof(memory));
+        (void)axyne_memory_format_gauge(memory.resident_bytes,
+            AXYNE_MEMORY_BUDGET_BYTES, gauge, sizeof(gauge));
+        metadata = document != NULL
+            ? [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    %@    %@    %s    %s",
+                (long)line, (long)column,
+                _preferences.editor.insert_spaces ? @"공백" : @"탭",
+                _preferences.editor.tab_width, encoding, eolName, languageName, target]
+            : @"";
+        statusAttributes = @{NSFontAttributeName: statusFont != nil ? statusFont : [NSFont systemFontOfSize:11]};
+        memoryWidth = [[NSString stringWithUTF8String:gauge] sizeWithAttributes:statusAttributes].width;
+        cursorX = width - 12 - barWidth;
+        metadata = [self label:metadata fittingWidth:MAX(0,
+            cursorX - 10 - memoryWidth - 18 - 180)
+            size:11 family:@"SF Pro Text"];
+        metadataWidth = [metadata sizeWithAttributes:statusAttributes].width;
+        [axyne_preference_color(_preferences.theme.toolbar) setFill];
+        NSRectFill(NSMakeRect(180, statusTop, MAX(0, width - 180), AXYNE_STATUS));
+        [[axyne_preference_color(0x343942) colorWithAlphaComponent:1.0] setFill];
+        NSRectFill(NSMakeRect(cursorX, statusTop + 8, barWidth, 8));
+        fillWidth = MIN(barWidth, barWidth * (CGFloat)memory.resident_bytes /
+            (CGFloat)AXYNE_MEMORY_BUDGET_BYTES);
+        if (fillWidth > 0) {
+            [axyne_preference_color(axyne_memory_usage_level(memory.resident_bytes) ==
+                AXYNE_MEMORY_LEVEL_NORMAL ? 0xa66bf0 : 0xe5a445) setFill];
+            NSRectFill(NSMakeRect(cursorX, statusTop + 8, fillWidth, 8));
+        }
+        cursorX -= 10 + memoryWidth;
+        [self drawLabel:[NSString stringWithUTF8String:gauge]
+            at:NSMakePoint(cursorX, statusTop + 5) size:11 color:text family:@"SF Pro Text"];
+        cursorX -= 18 + metadataWidth;
+        [self drawLabel:metadata at:NSMakePoint(MAX(180, cursorX), statusTop + 5)
+            size:11 color:text family:@"SF Pro Text"];
+    }
 }
 
 - (AxyneMacChromeColors)chromeColors
@@ -6941,6 +7253,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
 }
 - (void)dealloc
 {
+    [_statusTimer invalidate];
+    _statusTimer = nil;
 #define AXYNE_MAC_HOOK(feature) [self feature##Teardown];
     AXYNE_MAC_FEATURES(AXYNE_MAC_HOOK)
 #undef AXYNE_MAC_HOOK
@@ -6994,6 +7308,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (_panelSplitterTracking != nil) [self removeTrackingArea:_panelSplitterTracking];
     [_panelSplitterTracking release];
     [_recentMenu release];
+    axyne_app_state_clear(&_appState);
+    axyne_app_path_free(_appStatePath);
     if (_editorView != nil) {
         /* The autocomplete popup must be gone before releasing any document
          * references or tearing down the Scintilla view. */
@@ -7033,6 +7349,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_outputTab release]; [_problemsTab release]; [_terminalTab release];
     [_debugConsoleTab release];
     [_clearOutput release];
+    [_closePanel release];
     [_problemsView setDelegate:nil];
     [_problemsView removeFromSuperview];
     [_problemsView release];
@@ -7456,6 +7773,14 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 {
     (void)notification;
     NSRect frame = NSMakeRect(0, 0, 1440, 900);
+    NSRect visible = [[NSScreen mainScreen] visibleFrame];
+    NSRect splashFrame = NSMakeRect(NSMidX(visible) - 720, NSMidY(visible) - 450,
+                                    1440, 900);
+    AxyneSplashController *splash = [[AxyneSplashController alloc]
+        initWithFrame:NSIntersectionRect(splashFrame, visible)
+              version:@AXYNE_CONFIG_VERSION];
+    NSDate *splashShownAt = [NSDate date];
+    [splash setStep:AXYNE_STARTUP_SETTINGS];
     _window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
@@ -7469,8 +7794,28 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     [_window setContentView:workspace];
     [_window setDelegate:self];
     axyne_install_menu([NSApplication sharedApplication], workspace);
-    [_window center];
-    [_window makeKeyAndOrderFront:nil];
+    if (NSIsEmptyRect(visible))
+        [_window center];
+    else
+        [_window setFrame:[_window frameRectForContentRect:
+            NSIntersectionRect(splashFrame, visible)] display:NO];
+    [splash setStep:AXYNE_STARTUP_WORKSPACE];
+    [workspace restoreWorkspace];
+    [splash setStep:AXYNE_STARTUP_EDITOR];
+    [workspace layoutSubtreeIfNeeded];
+    [splash setStep:AXYNE_STARTUP_STEP_COUNT];
+    {
+        NSTimeInterval remaining = splash != nil ?
+            0.45 + [splashShownAt timeIntervalSinceNow] : 0;
+        NSWindow *window = _window;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(remaining > 0 ? remaining * NSEC_PER_SEC : 0)),
+                       dispatch_get_main_queue(), ^{
+            [window makeKeyAndOrderFront:nil];
+            [splash close];
+            [splash release];
+        });
+    }
     /* Without explicit activation a binary started from a terminal or a
      * fresh build keeps another app's menu bar and ignores menu clicks. */
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];

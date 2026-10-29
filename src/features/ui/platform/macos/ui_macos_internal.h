@@ -30,6 +30,9 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/app_state.h"
+#include "axyne/app_paths.h"
+#include "axyne/lsp_servers.h"
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
 #include "axyne/palette_controller.h"
@@ -203,6 +206,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneDiscoveryBox *_chordMonitorBox;
     AxyneDiscoveryBox *_chordTimerBox;
     NSButton *_clearOutput;
+    NSButton *_closePanel;
     NSScrollView *_terminalScroll;
     /* Problems panel: the model (LSP diagnostics + build output) and the
      * list view that paints the rows built from it. */
@@ -234,6 +238,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _explorerSelection;
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
+    AxyneAppState _appState;
+    char *_appStatePath;
     BOOL _loadingEditor;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
@@ -295,6 +301,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     char *_workspacePreferencesPath;
     unsigned char _workspaceBindingPresent[AXYNE_ACTION_COUNT];
     AxyneLspClient *_lsp;
+    AxyneLanguageId _lspLanguage;
     NSString *_lspStatus;
     BOOL _explorerHidden; /* View > Explorer; zero-initialised means visible */
     BOOL _panelHidden;    /* View > Bottom Panel */
@@ -308,6 +315,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxynePaletteController _palette;
     AxynePaletteOverlay *_paletteOverlay;
     NSTextField *_paletteField;
+    NSTimer *_statusTimer;
     NSTimer *_paletteTimer;
     /* Feature category objects (ui_<feature>_macos.m). Each starts nil, is
      * created lazily by its category and released by its Teardown hook; the
@@ -416,6 +424,10 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)closeDocument:(id)sender;
 - (void)closeDocumentAtIndex:(size_t)index;
 - (void)openRecent:(id)sender;
+- (void)openRecentFolder:(id)sender;
+- (void)clearRecent:(id)sender;
+- (void)persistAppState;
+- (void)restoreWorkspace;
 - (void)openPath:(NSString *)path asPreview:(BOOL)preview;
 - (BOOL)confirmCloseAll;
 - (void)notification:(SCNotification *)notification;

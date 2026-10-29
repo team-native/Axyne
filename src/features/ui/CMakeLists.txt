@@ -3,6 +3,7 @@ if(WIN32)
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_commands_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/terminal_view_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/splash_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/syntax.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/preferences_window_windows.c"
         # One file per feature category (hooks: ui_windows_internal.h).
@@ -23,6 +24,7 @@ elseif(APPLE)
     add_library(axyne_ui STATIC
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/terminal_view_macos.m"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/macos/splash_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/syntax.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/preferences_window_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/popup_menu_macos.m"
@@ -50,7 +52,7 @@ endif()
 
 target_include_directories(axyne_ui
     PUBLIC "${PROJECT_SOURCE_DIR}/include"
-    PRIVATE "${axyne_scintilla_SOURCE_DIR}/include"
+    PRIVATE "${axyne_scintilla_SOURCE_DIR}/include" "${AXYNE_GENERATED_INCLUDE_DIR}"
 )
 target_link_libraries(axyne PRIVATE axyne_ui)
 target_link_libraries(axyne_ui PRIVATE axyne_terminal)

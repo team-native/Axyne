@@ -372,6 +372,10 @@ const AxyneCommandBinding *axyne_preferences_find_command_binding(
 AxyneStatus axyne_preferences_set_command_binding(
     AxynePreferences *preferences, const char *command,
     const char *const *keys, size_t count);
+/* Capture a Windows virtual key or macOS character with legacy modifier bits. */
+AxyneStatus axyne_preferences_capture_key(AxynePreferences *preferences,
+    AxynePreferenceAction action, unsigned int key, unsigned int modifiers, int macos);
+
 void axyne_preferences_remove_command_binding(AxynePreferences *preferences,
                                               const char *command);
 /* Non-zero when the command-keyed bindings differ (order-insensitive). */

@@ -427,6 +427,26 @@ AxyneStatus axyne_preferences_set_command_binding(AxynePreferences *preferences,
     return axyne_store_command_binding(preferences, command, keys, count, 1);
 }
 
+AxyneStatus axyne_preferences_capture_key(AxynePreferences *preferences,
+    AxynePreferenceAction action, unsigned int key, unsigned int modifiers, int macos)
+{
+    AxyneKeyStroke stroke = {0, 0};
+    char text[128];
+    const char *keys[1] = {text};
+    if (preferences == NULL || action < 0 || action >= AXYNE_ACTION_COUNT)
+        return AXYNE_STATUS_INVALID_ARGUMENT;
+    stroke.key = macos ? axyne_key_from_mac_character(key) : axyne_key_from_windows_vk(key);
+    if (stroke.key == AXYNE_KEY_NONE) return AXYNE_STATUS_INVALID_ARGUMENT;
+    if (modifiers & AXYNE_KEY_MODIFIER_COMMAND) stroke.mods |= AXYNE_KEYMOD_CMD;
+    if (modifiers & AXYNE_KEY_MODIFIER_CONTROL) stroke.mods |= AXYNE_KEYMOD_CTRL;
+    if (modifiers & AXYNE_KEY_MODIFIER_SHIFT) stroke.mods |= AXYNE_KEYMOD_SHIFT;
+    if (modifiers & AXYNE_KEY_MODIFIER_ALT) stroke.mods |= AXYNE_KEYMOD_ALT;
+    if (axyne_key_stroke_format(&stroke, AXYNE_KEY_FORMAT_CANONICAL, text, sizeof(text)) >= sizeof(text))
+        return AXYNE_STATUS_INVALID_ARGUMENT;
+    return axyne_preferences_set_command_binding(preferences,
+        axyne_command_name(axyne_command_from_legacy_action(action)), keys, 1);
+}
+
 void axyne_preferences_remove_command_binding(AxynePreferences *preferences,
                                               const char *command)
 {

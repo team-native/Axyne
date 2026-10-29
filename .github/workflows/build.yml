@@ -69,7 +69,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install nsis -y --no-progress
+          $installed = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              $installed = $true
+              break
+            }
+            if ($attempt -lt 3) {
+              Write-Host "NSIS installation attempt $attempt failed; retrying after 15 seconds."
+              Start-Sleep -Seconds 15
+            }
+          }
+          if (-not $installed) {
+            throw 'NSIS installation failed after 3 attempts.'
+          }
           $env:Path = "C:\Program Files (x86)\NSIS;$env:Path"
           if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
             throw 'NSIS compiler was not installed.'
