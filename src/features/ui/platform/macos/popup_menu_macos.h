@@ -16,6 +16,12 @@ typedef struct AxynePopupMenuColors {
              separator, check; /* 0xRRGGBB */
 } AxynePopupMenuColors;
 
+/* Key text the popup shows for an item instead of formatting its key
+ * equivalent (e.g. the chord "⌘K ⌘O"); "" shows none, nil (the default)
+ * falls back to the key equivalent. Stored on the item (copied). */
+void axyne_popup_set_key_text(NSMenuItem *item, NSString *text);
+NSString *axyne_popup_key_text(NSMenuItem *item);
+
 @class AxynePopupMenu;
 
 @protocol AxynePopupMenuDelegate <NSObject>

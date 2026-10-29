@@ -5,12 +5,12 @@
 #include "axyne/palette.h"
 #include "axyne/preferences.h"
 
-AxynePlatform axyne_platform_current(void)
+AxyneCommandPlatform axyne_command_platform_current(void)
 {
 #ifdef __APPLE__
-    return AXYNE_PLATFORM_MACOS;
+    return AXYNE_COMMAND_PLATFORM_MACOS;
 #else
-    return AXYNE_PLATFORM_WINDOWS;
+    return AXYNE_COMMAND_PLATFORM_WINDOWS;
 #endif
 }
 
@@ -22,9 +22,9 @@ AxynePlatform axyne_platform_current(void)
 #define PAL AXYNE_COMMAND_FLAG_PALETTE
 #define NATIVE AXYNE_COMMAND_FLAG_NATIVE_KEY
 #define DBG AXYNE_COMMAND_FLAG_DEBUG_CONTEXT
-#define BOTH AXYNE_PLATFORM_BOTH
-#define WIN AXYNE_PLATFORM_WINDOWS
-#define MAC AXYNE_PLATFORM_MACOS
+#define BOTH AXYNE_COMMAND_PLATFORM_BOTH
+#define WIN AXYNE_COMMAND_PLATFORM_WINDOWS
+#define MAC AXYNE_COMMAND_PLATFORM_MACOS
 #define P(name) AXYNE_PALETTE_COMMAND_##name
 #define L(name) AXYNE_ACTION_##name
 #define NOL (-1)
@@ -403,28 +403,28 @@ const char *axyne_command_name(AxyneCommandId id)
     return info != NULL ? info->name : "";
 }
 
-const char *axyne_command_title(AxyneCommandId id, AxynePlatform platform)
+const char *axyne_command_title(AxyneCommandId id, AxyneCommandPlatform platform)
 {
     const AxyneCommandInfo *info = axyne_command_info(id);
     if (info == NULL) return "";
-    if (platform == AXYNE_PLATFORM_MACOS && info->mac_title != NULL)
+    if (platform == AXYNE_COMMAND_PLATFORM_MACOS && info->mac_title != NULL)
         return info->mac_title;
     return info->title;
 }
 
-int axyne_command_available(AxyneCommandId id, AxynePlatform platform)
+int axyne_command_available(AxyneCommandId id, AxyneCommandPlatform platform)
 {
     const AxyneCommandInfo *info = axyne_command_info(id);
     return info != NULL && (info->platforms & (unsigned)platform) != 0;
 }
 
 const char *axyne_command_default_keys(AxyneCommandId id,
-                                       AxynePlatform platform, size_t index)
+                                       AxyneCommandPlatform platform, size_t index)
 {
     const AxyneCommandInfo *info = axyne_command_info(id);
     if (info == NULL || index >= AXYNE_COMMAND_DEFAULT_KEYS ||
         (info->platforms & (unsigned)platform) == 0) return NULL;
-    return platform == AXYNE_PLATFORM_MACOS ? info->macos_keys[index]
+    return platform == AXYNE_COMMAND_PLATFORM_MACOS ? info->macos_keys[index]
                                             : info->windows_keys[index];
 }
 

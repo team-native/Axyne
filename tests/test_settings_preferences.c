@@ -2,10 +2,60 @@
 
 #include <string.h>
 
+#include "axyne/filesystem.h"
+#include "axyne/commands.h"
 #include "axyne/keymap.h"
 #include "axyne/log.h"
 #include "axyne/preferences.h"
 #include "axyne/settings.h"
+
+static int axyne_test_shortcut_capture(const char *root)
+{
+    AxynePreferences *draft = malloc(sizeof(*draft));
+    AxynePreferences *loaded = malloc(sizeof(*loaded));
+    unsigned int modifiers = AXYNE_KEY_MODIFIER_CONTROL | AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT;
+    const char *old_keys[] = {"Ctrl+K Ctrl+S"};
+    const AxyneKeyBinding *binding;
+    char path[1024];
+    AXYNE_TEST_CHECK(draft != NULL && loaded != NULL);
+    axyne_preferences_defaults(draft);
+    AXYNE_TEST_STATUS(axyne_preferences_set_command_binding(draft,
+        axyne_command_name(axyne_command_from_legacy_action(AXYNE_ACTION_SAVE)), old_keys, 1), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 'P', modifiers, 0), AXYNE_STATUS_OK);
+    binding = axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE);
+    AXYNE_TEST_CHECK(binding != NULL && binding->enabled);
+    AXYNE_TEST_STREQ(binding->key, "P");
+    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_command_platform_current() == AXYNE_COMMAND_PLATFORM_MACOS ?
+        AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND) |
+        AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT);
+    /* The old chord cannot shadow the captured single-stroke binding. */
+    for (size_t i = 0; i < draft->command_binding_count; ++i)
+        AXYNE_TEST_CHECK(strcmp(draft->command_bindings[i].command,
+            axyne_command_name(axyne_command_from_legacy_action(AXYNE_ACTION_SAVE))) != 0);
+    AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), root, "capture.json"));
+    AXYNE_TEST_STATUS(axyne_preferences_save_global(draft, path, NULL), AXYNE_STATUS_OK);
+    AXYNE_TEST_STATUS(axyne_preferences_load_global(path, loaded, NULL), AXYNE_STATUS_OK);
+    binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
+    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_command_platform_current() == AXYNE_COMMAND_PLATFORM_MACOS ?
+        AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND) |
+        AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT);
+    AXYNE_TEST_STREQ(binding->key, "P");
+    modifiers = 0;
+    AXYNE_TEST_STATUS(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 'P', modifiers, 0), AXYNE_STATUS_OK);
+    AXYNE_TEST_EQ_INT(axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE)->modifiers, 0);
+    /* Modifier-only key must leave the row unchanged. */
+    AXYNE_TEST_EQ_INT(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 0x10, modifiers, 0),
+        AXYNE_STATUS_INVALID_ARGUMENT);
+    AXYNE_TEST_STREQ(axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE)->key, "P");
+    /* Native event converters feed the same portable capture path. */
+    AXYNE_TEST_EQ_INT(axyne_key_from_windows_vk('P'), 'P');
+    AXYNE_TEST_STATUS(axyne_preferences_capture_key(draft, AXYNE_ACTION_SAVE, 'p',
+        AXYNE_KEY_MODIFIER_COMMAND | AXYNE_KEY_MODIFIER_SHIFT, 1), AXYNE_STATUS_OK);
+    AXYNE_TEST_STREQ(axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE)->key, "P");
+    free(draft);
+    free(loaded);
+    return 1;
+}
 
 static int axyne_test_json_has(const char *path, const char *pointer)
 {
@@ -174,7 +224,7 @@ static int axyne_test_settings_v2(const char *root)
     V2_CHECK(axyne_test_json_string_is(path, "/debugger/backend", "custom"));
 
     /* The key map honours both binding views. */
-    V2_CHECK(axyne_keymap_build(&map, AXYNE_PLATFORM_WINDOWS, loaded) == AXYNE_STATUS_OK);
+    V2_CHECK(axyne_keymap_build(&map, AXYNE_COMMAND_PLATFORM_WINDOWS, loaded) == AXYNE_STATUS_OK);
     V2_CHECK(axyne_keymap_feed(&map, axyne_test_stroke("Ctrl+Q"), 0, 0, &command) ==
                  AXYNE_KEYMAP_COMMAND && command == AXYNE_COMMAND_FILE_SAVE);
     V2_CHECK(axyne_keymap_feed(&map, axyne_test_stroke("Ctrl+S"), 0, 0, &command) == AXYNE_KEYMAP_NONE);
@@ -344,7 +394,7 @@ static int axyne_test_settings_v2(const char *root)
     {
         AxyneKeyStroke run;
         V2_CHECK(binding != NULL && axyne_keymap_stroke_from_legacy(binding->modifiers, binding->key,
-                                                                    axyne_platform_current(), &run));
+                                                                    axyne_command_platform_current(), &run));
         V2_CHECK(axyne_key_stroke_equal(run, axyne_test_stroke("Ctrl+F5")));
     }
     V2_CHECK(axyne_preferences_migrate_run_binding(loaded) == 0);
@@ -421,6 +471,27 @@ static int axyne_test_settings_v2(const char *root)
         resolved = axyne_preferences_read_path(directory);
         V2_CHECK(resolved != NULL && strcmp(resolved, legacy_path) == 0);
         axyne_preferences_free_path(resolved);
+        /* Adopting the old file copies it byte for byte and keeps it. */
+        V2_CHECK(axyne_preferences_adopt_legacy_file(empty, &error) == AXYNE_STATUS_NOT_FOUND);
+        {
+            char *legacy_bytes = NULL, *adopted_bytes = NULL;
+            size_t legacy_length = 0, adopted_length = 0;
+            V2_CHECK(axyne_fs_read_file(legacy_path, &legacy_bytes, &legacy_length, NULL) ==
+                     AXYNE_STATUS_OK);
+            V2_CHECK(axyne_preferences_adopt_legacy_file(directory, &error) == AXYNE_STATUS_OK);
+            V2_CHECK(axyne_fs_read_file(path, &adopted_bytes, &adopted_length, NULL) ==
+                     AXYNE_STATUS_OK);
+            V2_CHECK(legacy_length == adopted_length &&
+                     memcmp(legacy_bytes, adopted_bytes, legacy_length) == 0);
+            axyne_fs_free(legacy_bytes);
+            axyne_fs_free(adopted_bytes);
+            resolved = axyne_preferences_read_path(directory);
+            V2_CHECK(resolved != NULL && strcmp(resolved, path) == 0);
+            axyne_preferences_free_path(resolved);
+            /* An existing settings.json is left alone. */
+            V2_CHECK(axyne_preferences_adopt_legacy_file(directory, &error) == AXYNE_STATUS_OK);
+            axyne_test_remove_file(path);
+        }
         resolved = axyne_preferences_write_path(directory);
         V2_CHECK(resolved != NULL && strcmp(resolved, path) == 0);
         axyne_preferences_free_path(resolved);
@@ -670,6 +741,7 @@ int axyne_test_settings_preferences(const char *root)
                          out.binding_present[AXYNE_ACTION_NEW] == 1);
     }
 
+    AXYNE_TEST_CHECK(axyne_test_shortcut_capture(root));
     AXYNE_TEST_CHECK(axyne_test_settings_v2(root));
     axyne_test_remove_tree(root);
     return 1;

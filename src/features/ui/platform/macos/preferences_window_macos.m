@@ -342,7 +342,55 @@ typedef NS_ENUM(NSInteger, AxynePWKind) {
 /* Controller                                                          */
 /* ------------------------------------------------------------------ */
 
-enum { AXYNE_PW_PAGE_EDITOR = 0, AXYNE_PW_PAGE_THEME, AXYNE_PW_PAGE_KEYS, AXYNE_PW_PAGE_COUNT };
+/* Sidebar order follows Figma 24:13953. */
+enum { AXYNE_PW_PAGE_EDITOR = 0, AXYNE_PW_PAGE_THEME, AXYNE_PW_PAGE_BUILD, AXYNE_PW_PAGE_TERMINAL,
+       AXYNE_PW_PAGE_KEYS, AXYNE_PW_PAGE_DIFF, AXYNE_PW_PAGE_COUNT };
+
+/* Argument lists are edited as one line: whitespace separates arguments,
+ * double quotes group one that contains spaces, and \" or \\ inside give a
+ * literal quote or backslash. */
+static NSString *axyne_pw_args_text(const AxynePreferenceArgs *args)
+{
+    NSMutableArray *parts = [NSMutableArray array];
+    const char *value;
+    for (size_t i = 0; (value = axyne_preference_args_get(args, i)) != NULL; ++i) {
+        NSString *item = [NSString stringWithUTF8String:value];
+        if (item == nil) continue;
+        item = [[item stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+        if ([item length] == 0 || [item rangeOfCharacterFromSet:
+                [NSCharacterSet whitespaceCharacterSet]].location != NSNotFound)
+            item = [NSString stringWithFormat:@"\"%@\"", item];
+        [parts addObject:item];
+    }
+    return [parts componentsJoinedByString:@" "];
+}
+
+static BOOL axyne_pw_args_parse(NSString *text, AxynePreferenceArgs *args)
+{
+    AxynePreferenceArgs parsed;
+    char item[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+    const char *cursor = [text UTF8String];
+    memset(&parsed, 0, sizeof(parsed));
+    if (cursor == NULL) return NO;
+    while (*cursor != '\0') {
+        size_t length = 0;
+        BOOL quoted = NO;
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (*cursor == '\0') break;
+        while (*cursor != '\0' && (quoted || (*cursor != ' ' && *cursor != '\t'))) {
+            if (*cursor == '"') { quoted = !quoted; ++cursor; continue; }
+            if (*cursor == '\\' && (cursor[1] == '"' || cursor[1] == '\\')) ++cursor;
+            if (length + 1 >= sizeof(item)) return NO;
+            item[length++] = *cursor++;
+        }
+        if (quoted) return NO;
+        item[length] = '\0';
+        if (axyne_preference_args_append(&parsed, item) != AXYNE_STATUS_OK) return NO;
+    }
+    *args = parsed;
+    return YES;
+}
 enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
 
 @interface AxynePWController : NSObject <NSTextFieldDelegate> {
@@ -355,7 +403,10 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     AxynePWButton *_sidebar[AXYNE_PW_PAGE_COUNT];
     NSInteger _page;
     AxynePWBox *_fontBox, *_sizeBox, *_tabBox;
-    NSTextField *_fontField, *_sizeField, *_tabField;
+    NSTextField *_fontField, *_sizeField, *_tabField, *_undoField;
+    NSTextField *_cmakeField, *_generatorField, *_buildDirField, *_configureArgsField;
+    NSTextField *_terminalProfileField, *_diffToolField, *_diffArgsField;
+    AxynePWButton *_diffWhitespace;
     AxynePWButton *_check[6];
     AxynePWButton *_theme[3];
     NSTextField *_keyField[AXYNE_ACTION_COUNT];
@@ -512,6 +563,58 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
         [page addSubview:button];
     }
     /* The 렌더링 group is Windows only; nothing is built here. */
+    (void)[self fieldWithLabel:@"Undo history (MB)" x:AXYNE_PW_CONTENT_LEFT
+                            y:y + 94 + 22 width:160 page:page field:&_undoField trailing:0];
+}
+
+/* One form row: caption, full-width field and a muted hint below it. */
+- (void)formRow:(NSInteger)row label:(NSString *)label hint:(NSString *)hint page:(NSView *)page
+          field:(NSTextField **)field
+{
+    CGFloat width = [page frame].size.width - AXYNE_PW_CONTENT_LEFT - 18;
+    CGFloat y = AXYNE_PW_CONTENT_TOP + 19 + 16 + row * 74;
+    (void)[self fieldWithLabel:label x:AXYNE_PW_CONTENT_LEFT y:y width:width page:page
+                         field:field trailing:0];
+    if (hint != nil) {
+        NSTextField *note = [self labelWithText:hint font:axyne_pw_font(10, NO)
+                                          color:AXYNE_PW_COLOR_MUTED];
+        [note setFrame:NSMakeRect(AXYNE_PW_CONTENT_LEFT, y + 19 + AXYNE_PW_FIELD_HEIGHT + 4, width, 14)];
+        [[note cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+        [page addSubview:note];
+    }
+}
+
+- (void)buildBuildPage:(NSView *)page
+{
+    [self addHeading:@"빌드 (CMake)" to:page];
+    [self formRow:0 label:@"CMake 실행 파일" hint:@"비워 두면 PATH에서 찾습니다." page:page field:&_cmakeField];
+    [self formRow:1 label:@"생성기 (-G)" hint:@"예: Ninja, Xcode. 비워 두면 CMake 기본값." page:page
+            field:&_generatorField];
+    [self formRow:2 label:@"빌드 디렉터리" hint:@"작업 영역 기준 경로. ${config}는 빌드 구성 이름으로 바뀝니다."
+             page:page field:&_buildDirField];
+    [self formRow:3 label:@"구성 인수" hint:@"cmake 구성 단계에 추가할 인수 (공백 구분, 큰따옴표로 묶기)."
+             page:page field:&_configureArgsField];
+}
+
+- (void)buildTerminalPage:(NSView *)page
+{
+    [self addHeading:@"터미널" to:page];
+    [self formRow:0 label:@"기본 프로필"
+             hint:@"새 터미널에 쓸 셸 이름 또는 경로 (예: zsh, bash, fish). 비워 두면 zsh." page:page
+            field:&_terminalProfileField];
+}
+
+- (void)buildDiffPage:(NSView *)page
+{
+    [self addHeading:@"비교기" to:page];
+    _diffWhitespace = [self buttonKind:AxynePWKindCheck title:@"공백 차이 무시"
+        frame:NSMakeRect(AXYNE_PW_CONTENT_LEFT, AXYNE_PW_CONTENT_TOP + 19 + 16 + 4, 300, 14)
+        action:@selector(toggleDiffWhitespace:) tag:0];
+    [page addSubview:_diffWhitespace];
+    [self formRow:1 label:@"외부 비교 도구" hint:@"비워 두면 내장 비교기를 씁니다." page:page
+            field:&_diffToolField];
+    [self formRow:2 label:@"외부 도구 인수" hint:@"외부 비교 도구에 넘길 인수 (공백 구분, 큰따옴표로 묶기)."
+             page:page field:&_diffArgsField];
 }
 
 - (void)buildThemePage:(NSView *)page
@@ -591,7 +694,9 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     AxynePWBox *root;
     AxynePWTitleStrip *strip;
     AxynePWBox *sidebar, *footer, *line;
-    static NSString *const pageTitles[AXYNE_PW_PAGE_COUNT] = {@"편집기", @"글꼴 및 색", @"키 바인딩"};
+    static NSString *const pageTitles[AXYNE_PW_PAGE_COUNT] = {
+        @"편집기", @"글꼴 및 색", @"빌드 (CMake)", @"터미널", @"키 바인딩", @"비교기"
+    };
     CGFloat buttonY = (AXYNE_PW_FOOTER_HEIGHT - AXYNE_PW_BUTTON_HEIGHT) / 2.0;
     CGFloat right = AXYNE_PW_WIDTH - 12;
     _panel = [[AxynePWPanel alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskBorderless
@@ -613,6 +718,9 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     [self buildEditorPage:_pages[AXYNE_PW_PAGE_EDITOR]];
     [self buildThemePage:_pages[AXYNE_PW_PAGE_THEME]];
     [self buildKeysPage:_pages[AXYNE_PW_PAGE_KEYS]];
+    [self buildBuildPage:_pages[AXYNE_PW_PAGE_BUILD]];
+    [self buildTerminalPage:_pages[AXYNE_PW_PAGE_TERMINAL]];
+    [self buildDiffPage:_pages[AXYNE_PW_PAGE_DIFF]];
 
     sidebar = [[[AxynePWBox alloc] initWithFrame:NSMakeRect(0, AXYNE_PW_TITLE_HEIGHT,
         AXYNE_PW_SIDEBAR_WIDTH, AXYNE_PW_HEIGHT - AXYNE_PW_TITLE_HEIGHT - AXYNE_PW_FOOTER_HEIGHT)]
@@ -711,10 +819,20 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     [_fontField setStringValue:[NSString stringWithUTF8String:_draft.editor.font_family]];
     [_sizeField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.font_size]];
     [_tabField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.tab_width]];
+    [_undoField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.undo_limit_mb]];
     for (int i = 0; i < 6; ++i)
         [_check[i] setOn:*[self optionInPreferences:&_draft tag:i] != 0];
     for (int i = 0; i < 3; ++i)
         [_theme[i] setOn:(int)_draft.theme.preset == i];
+    [_cmakeField setStringValue:[NSString stringWithUTF8String:_draft.build.cmake_path] ?: @""];
+    [_generatorField setStringValue:[NSString stringWithUTF8String:_draft.build.generator] ?: @""];
+    [_buildDirField setStringValue:[NSString stringWithUTF8String:_draft.build.build_directory] ?: @""];
+    [_configureArgsField setStringValue:axyne_pw_args_text(&_draft.build.configure_args)];
+    [_terminalProfileField setStringValue:
+        [NSString stringWithUTF8String:_draft.terminal.default_profile] ?: @""];
+    [_diffToolField setStringValue:[NSString stringWithUTF8String:_draft.diff.external_tool] ?: @""];
+    [_diffArgsField setStringValue:axyne_pw_args_text(&_draft.diff.external_tool_args)];
+    [_diffWhitespace setOn:_draft.diff.ignore_whitespace != 0];
     for (size_t i = 0; i < _draft.binding_count; ++i) {
         AxynePreferenceAction action = _draft.bindings[i].action;
         if (_keyField[action] == nil) continue;
@@ -759,6 +877,14 @@ static BOOL axyne_pw_parse_unsigned(NSString *text, unsigned long *value)
         return NO;
     }
     out->editor.tab_width = (unsigned int)value;
+    if (!axyne_pw_parse_unsigned([_undoField stringValue], &value) ||
+        axyne_preferences_check_undo_limit(value) != AXYNE_PREFERENCE_CHECK_OK) {
+        if (message) *message = @"Undo history must be between 1 and 1024 MB.";
+        if (page) *page = AXYNE_PW_PAGE_EDITOR;
+        if (focus) *focus = _undoField;
+        return NO;
+    }
+    out->editor.undo_limit_mb = (unsigned int)value;
     utf8 = [[_fontField stringValue] UTF8String];
     if (axyne_preferences_check_font_family(utf8) != AXYNE_PREFERENCE_CHECK_OK) {
         if (message) *message = @"글꼴 이름이 올바르지 않습니다.";
@@ -767,6 +893,40 @@ static BOOL axyne_pw_parse_unsigned(NSString *text, unsigned long *value)
         return NO;
     }
     (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", utf8);
+    {
+        struct { NSTextField *field; char *target; size_t size; NSInteger page; } texts[] = {
+            { _cmakeField, out->build.cmake_path, sizeof(out->build.cmake_path), AXYNE_PW_PAGE_BUILD },
+            { _generatorField, out->build.generator, sizeof(out->build.generator), AXYNE_PW_PAGE_BUILD },
+            { _buildDirField, out->build.build_directory, sizeof(out->build.build_directory), AXYNE_PW_PAGE_BUILD },
+            { _terminalProfileField, out->terminal.default_profile, sizeof(out->terminal.default_profile),
+              AXYNE_PW_PAGE_TERMINAL },
+            { _diffToolField, out->diff.external_tool, sizeof(out->diff.external_tool), AXYNE_PW_PAGE_DIFF }
+        };
+        for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); ++i) {
+            const char *value = texts[i].field != nil ? [[texts[i].field stringValue] UTF8String] : "";
+            if (value == NULL || strlen(value) >= texts[i].size) {
+                if (message) *message = @"입력한 값이 너무 깁니다.";
+                if (page) *page = texts[i].page;
+                if (focus) *focus = texts[i].field;
+                return NO;
+            }
+            memcpy(texts[i].target, value, strlen(value) + 1);
+        }
+        if (_configureArgsField != nil &&
+            !axyne_pw_args_parse([_configureArgsField stringValue], &out->build.configure_args)) {
+            if (message) *message = @"구성 인수가 너무 길거나 따옴표가 닫히지 않았습니다.";
+            if (page) *page = AXYNE_PW_PAGE_BUILD;
+            if (focus) *focus = _configureArgsField;
+            return NO;
+        }
+        if (_diffArgsField != nil &&
+            !axyne_pw_args_parse([_diffArgsField stringValue], &out->diff.external_tool_args)) {
+            if (message) *message = @"외부 도구 인수가 너무 길거나 따옴표가 닫히지 않았습니다.";
+            if (page) *page = AXYNE_PW_PAGE_DIFF;
+            if (focus) *focus = _diffArgsField;
+            return NO;
+        }
+    }
     for (size_t i = 0; i < out->binding_count; ++i) {
         AxynePreferenceAction action = out->bindings[i].action;
         NSString *text = _keyField[action] != nil ? [_keyField[action] stringValue] : @"";
@@ -826,6 +986,13 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
     if (option == NULL) return;
     *option = !*option;
     [(AxynePWButton *)sender setOn:*option != 0];
+    [self updateButtons];
+}
+
+- (void)toggleDiffWhitespace:(id)sender
+{
+    _draft.diff.ignore_whitespace = !_draft.diff.ignore_whitespace;
+    [(AxynePWButton *)sender setOn:_draft.diff.ignore_whitespace != 0];
     [self updateButtons];
 }
 
@@ -979,9 +1146,41 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
     return NO;
 }
 
+/* Captures before AppKit handles menu equivalents or edits the field text. */
+- (BOOL)captureKeyEvent:(NSEvent *)event
+{
+    if ([event window] != _panel) return NO;
+    NSString *characters = [event charactersIgnoringModifiers];
+    if ([characters length] == 0) return NO;
+    unichar key = [characters characterAtIndex:0];
+    if (key == 9 || key == 27) return NO;
+    for (size_t i = 0; i < _draft.binding_count; ++i) {
+        AxynePreferenceAction action = _draft.bindings[i].action;
+        NSTextField *field = _keyField[action];
+        if (field == nil || ([field currentEditor] != [_panel firstResponder] &&
+            (id)field != [_panel firstResponder])) continue;
+        unsigned int modifiers = 0;
+        NSEventModifierFlags flags = [event modifierFlags];
+        if (flags & NSEventModifierFlagControl) modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+        if (flags & NSEventModifierFlagShift) modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+        if (flags & NSEventModifierFlagOption) modifiers |= AXYNE_KEY_MODIFIER_ALT;
+        if (flags & NSEventModifierFlagCommand) modifiers |= AXYNE_KEY_MODIFIER_COMMAND;
+        if (axyne_preferences_capture_key(&_draft, action, key, modifiers, 1) == AXYNE_STATUS_OK) {
+            const AxyneKeyBinding *binding = axyne_preferences_find_binding(&_draft, action);
+            [field setStringValue:[NSString stringWithUTF8String:binding->key]];
+            [self refreshKeyRow:action];
+            [self updateButtons];
+        }
+        return YES;
+    }
+    return NO;
+}
+
 - (NSInteger)runOverOwner:(NSWindow *)owner
 {
     NSInteger result;
+    id monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+        handler:^NSEvent *(NSEvent *event) { return [self captureKeyEvent:event] ? nil : event; }];
     if (owner != nil) {
         NSRect o = [owner frame];
         [_panel setFrameOrigin:NSMakePoint(NSMidX(o) - AXYNE_PW_WIDTH / 2.0,
@@ -991,6 +1190,7 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
     }
     [_panel makeKeyAndOrderFront:nil];
     result = [NSApp runModalForWindow:_panel];
+    if (monitor != nil) [NSEvent removeMonitor:monitor];
     [_panel orderOut:nil];
     if (owner != nil) [owner makeKeyAndOrderFront:nil];
     return result;
@@ -1301,6 +1501,8 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
 @interface AxyneRunnerDialog : NSObject <NSTextFieldDelegate, NSTextViewDelegate, AxyneDlgActions> {
     AxyneDlgPanel *_panel;
     AxyneRunnerDialogHooks _hooks;
+    AxyneRunnerDialogValues _initial;
+    NSPopUpButton *_language;
     NSTextField *_executable, *_workingDirectory, *_error; /* owned by the panel's views */
     NSTextView *_arguments, *_environment;
     AxynePWButton *_browse, *_cancelButton, *_saveButton;
@@ -1324,7 +1526,22 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     self = [super init];
     if (self == nil) return nil;
     _hooks = *hooks;
+    _initial = *values;
     _panel = axyne_dlg_panel(@"Runner 설정", width, height, self, &root);
+
+    caption = axyne_dlg_label(@"Language", AXYNE_PW_COLOR_MUTED, 11, NO);
+    [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
+    [root addSubview:caption];
+    _language = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(AXYNE_DLG_PAD,
+        y + AXYNE_DLG_LABEL_BLOCK, inner, AXYNE_PW_FIELD_HEIGHT) pullsDown:NO] autorelease];
+    [_language addItemWithTitle:@"Global (fallback)"];
+    for (int i = 0; i < AXYNE_LANGUAGE_COUNT; ++i)
+        [_language addItemWithTitle:axyne_dlg_string(axyne_language_name((AxyneLanguageId)i))];
+    [_language selectItemAtIndex:values->language + 1];
+    [_language setTarget:self];
+    [_language setAction:@selector(languageChanged:)];
+    [root addSubview:_language];
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
 
     caption = axyne_dlg_label(@"실행 파일", AXYNE_PW_COLOR_MUTED, 11, NO);
     [caption setFrameOrigin:NSMakePoint(AXYNE_DLG_PAD, y)];
@@ -1392,7 +1609,8 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     [_workingDirectory setNextKeyView:_environment];
     [_environment setNextKeyView:_cancelButton];
     [_cancelButton setNextKeyView:_saveButton];
-    [_saveButton setNextKeyView:_executable];
+    [_saveButton setNextKeyView:_language];
+    [_language setNextKeyView:_executable];
     [_panel setInitialFirstResponder:_executable];
     return self;
 }
@@ -1437,6 +1655,7 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     utf8 = [[_arguments string] UTF8String];              values.arguments = utf8 != NULL ? utf8 : "";
     utf8 = [[_workingDirectory stringValue] UTF8String];  values.working_directory = utf8 != NULL ? utf8 : "";
     utf8 = [[_environment string] UTF8String];            values.environment = utf8 != NULL ? utf8 : "";
+    values.language = (AxyneLanguageId)([_language indexOfSelectedItem] - 1);
     if (_hooks.save != NULL && _hooks.save(_hooks.context, &values, error, sizeof(error))) {
         [self finish:1];
         return;
@@ -1444,6 +1663,21 @@ static NSTextView *axyne_dlg_area(NSView *parent, NSRect frame, NSString *text,
     [self showError:error[0] != '\0' ? axyne_dlg_string(error)
                                      : @"Runner 설정이 올바르지 않습니다."];
     if ([[_executable stringValue] length] == 0) [_panel makeFirstResponder:_executable];
+}
+
+- (void)languageChanged:(id)sender
+{
+    (void)sender;
+    const AxyneRunnerConfig *config = axyne_runner_profiles_get(_initial.profiles,
+        (AxyneLanguageId)([_language indexOfSelectedItem] - 1), _initial.fallback);
+    char *args = config != NULL ? axyne_runner_dialog_lines(config->arguments, config->argument_count) : NULL;
+    char *env = config != NULL ? axyne_runner_dialog_lines(config->environment, config->environment_count) : NULL;
+    [_executable setStringValue:axyne_dlg_string(config != NULL ? config->executable : NULL)];
+    [_workingDirectory setStringValue:axyne_dlg_string(config != NULL ? config->working_directory : NULL)];
+    [_arguments setString:axyne_dlg_string(args)];
+    [_environment setString:axyne_dlg_string(env)];
+    free(args); free(env);
+    [self showError:@""];
 }
 
 - (void)browse:(id)sender
