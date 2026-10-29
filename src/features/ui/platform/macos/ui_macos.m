@@ -1884,6 +1884,21 @@ static BOOL axyne_macos_is_image_path(const char *path)
     return axyne_documents_empty_state(&_documents) != 0;
 }
 
+- (BOOL)completionBlocked
+{
+    AxyneDocument *document = [self isEmptyState] ? NULL : [self activeDocument];
+    NSInteger caret, line, lineStart;
+    if (_editorView == nil || document == NULL) return YES;
+    caret = (NSInteger)[self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+    if (caret <= 0) return NO;
+    /* The lexer styles lazily; make sure the typed character is styled. */
+    line = (NSInteger)[self sendEditorMessage:SCI_LINEFROMPOSITION wParam:(uintptr_t)caret lParam:0];
+    lineStart = (NSInteger)[self sendEditorMessage:SCI_POSITIONFROMLINE wParam:(uintptr_t)line lParam:0];
+    (void)[self sendEditorMessage:SCI_COLOURISE wParam:(uintptr_t)lineStart lParam:(intptr_t)caret];
+    return axyne_syntax_style_is_text(axyne_syntax_for_path(document->path),
+        (unsigned int)[self sendEditorMessage:SCI_GETSTYLEAT wParam:(uintptr_t)(caret - 1) lParam:0]) != 0;
+}
+
 /* The active document is an image preview: it has no source text. */
 - (BOOL)activeIsImage
 {
@@ -2505,7 +2520,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     size_t prefix = 0;
     if (_editorView == nil || document == NULL || [self isEmptyState]) return;
     language = axyne_syntax_for_path(document->path);
-    if (!axyne_syntax_completes(language)) {
+    if (!axyne_syntax_completes(language) || [self completionBlocked]) {
         if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
             (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
         return;

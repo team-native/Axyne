@@ -450,6 +450,9 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)loadScintillaView;
 - (BOOL)requireEditorFor:(NSString *)action;
 - (BOOL)isEmptyState;
+// Nonzero when the caret sits in a comment or string literal; completion
+// (word and LSP) stays closed there.
+- (BOOL)completionBlocked;
 - (void)updateEmptyState;
 - (void)applyEmptyGuideTheme;
 - (BOOL)editorReadyForSave;

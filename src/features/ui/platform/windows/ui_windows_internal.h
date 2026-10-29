@@ -552,6 +552,12 @@ int axyne_win_empty_state(AxyneWindowState *state);
 /* Copies the Scintilla text into the active document model (shows an error
  * and returns 0 when that fails). Call before reading document contents. */
 int axyne_win_capture_editor(AxyneWindowState *state);
+/* Completion popup helpers shared by word and LSP completion: blocked is
+ * nonzero when the caret sits in a comment or string; show_list issues
+ * SCI_AUTOCSHOW and keeps the list inside the main window. */
+int axyne_win_completion_blocked(AxyneWindowState *state);
+void axyne_win_completion_show_list(AxyneWindowState *state, size_t prefix,
+                                    const char *list, char separator);
 /* Starts/opens the current file in its language server. */
 int axyne_win_lsp_open_active(AxyneWindowState *state);
 /* Opens `path` in a normal tab (or activates its tab) and, when `line` is

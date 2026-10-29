@@ -803,7 +803,7 @@ static void axyne_show_completion(AxyneWindowState *state)
         return;
     document = axyne_active(state);
     language = axyne_syntax_for_path(document == NULL ? NULL : document->path);
-    if (!axyne_syntax_completes(language)) {
+    if (!axyne_syntax_completes(language) || axyne_win_completion_blocked(state)) {
         if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
             SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
         return;
@@ -826,13 +826,97 @@ static void axyne_show_completion(AxyneWindowState *state)
             SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
         return;
     }
+    axyne_win_completion_show_list(state, prefix, list, ' ');
+    free(list);
+}
+
+int axyne_win_completion_blocked(AxyneWindowState *state)
+{
+    const AxyneDocument *document;
+    LRESULT caret, line, line_start;
+    if (state == NULL || state->editor == NULL) return 1;
+    document = axyne_active(state);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    if (caret <= 0) return 0;
+    /* The lexer styles lazily; make sure the typed character is styled. */
+    line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    SendMessageA(state->editor, SCI_COLOURISE, (WPARAM)line_start, (LPARAM)caret);
+    return axyne_syntax_style_is_text(
+        axyne_syntax_for_path(document == NULL ? NULL : document->path),
+        (unsigned int)SendMessageA(state->editor, SCI_GETSTYLEAT,
+                                   (WPARAM)(caret - 1), 0));
+}
+
+typedef struct AxyneCompletionPopupSearch {
+    HWND found;
+} AxyneCompletionPopupSearch;
+
+static BOOL CALLBACK axyne_find_completion_popup(HWND window, LPARAM l_param)
+{
+    char name[16];
+    if (IsWindowVisible(window) && GetClassNameA(window, name, sizeof(name)) > 0 &&
+        strcmp(name, "ListBoxX") == 0) {
+        ((AxyneCompletionPopupSearch *)l_param)->found = window;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Scintilla only keeps its list on the monitor; move it so it never leaves
+ * the Axyne window: shift it left at the right edge and flip it above the
+ * caret line at the bottom edge. */
+static void axyne_fit_completion_popup(AxyneWindowState *state)
+{
+    AxyneCompletionPopupSearch search = { NULL };
+    RECT bounds, popup;
+    POINT caret_point;
+    LRESULT caret, line_height;
+    int width, height, x, y;
+    if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0) return;
+    EnumThreadWindows(GetCurrentThreadId(), axyne_find_completion_popup,
+                      (LPARAM)&search);
+    if (search.found == NULL || !GetWindowRect(search.found, &popup) ||
+        !GetClientRect(state->main_window, &bounds))
+        return;
+    MapWindowPoints(state->main_window, NULL, (POINT *)&bounds, 2);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    caret_point.x = (LONG)SendMessageA(state->editor, SCI_POINTXFROMPOSITION, 0, caret);
+    caret_point.y = (LONG)SendMessageA(state->editor, SCI_POINTYFROMPOSITION, 0, caret);
+    ClientToScreen(state->editor, &caret_point);
+    line_height = SendMessageA(state->editor, SCI_TEXTHEIGHT, 0, 0);
+    width = popup.right - popup.left;
+    height = popup.bottom - popup.top;
+    x = popup.left;
+    y = popup.top;
+    if (width > bounds.right - bounds.left) width = bounds.right - bounds.left;
+    if (x + width > bounds.right) x = bounds.right - width;
+    if (x < bounds.left) x = bounds.left;
+    if (y + height > bounds.bottom) y = caret_point.y - height;
+    if (y < bounds.top) {
+        y = caret_point.y + (int)line_height;
+        if (y + height > bounds.bottom) height = bounds.bottom - y;
+    }
+    if (height < (int)line_height) return;
+    if (x != popup.left || y != popup.top || width != popup.right - popup.left ||
+        height != popup.bottom - popup.top)
+        SetWindowPos(search.found, NULL, x, y, width, height,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void axyne_win_completion_show_list(AxyneWindowState *state, size_t prefix,
+                                    const char *list, char separator)
+{
+    if (state == NULL || state->editor == NULL || list == NULL) return;
     SendMessageA(state->editor, SCI_AUTOCSETIGNORECASE, 1, 0);
     SendMessageA(state->editor, SCI_AUTOCSETAUTOHIDE, 1, 0);
     SendMessageA(state->editor, SCI_AUTOCSETCHOOSESINGLE, 0, 0);
     SendMessageA(state->editor, SCI_AUTOCSETCANCELATSTART, 0, 0);
     SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETMAXWIDTH, 60, 0);
+    SendMessageA(state->editor, SCI_AUTOCSETSEPARATOR, (WPARAM)(unsigned char)separator, 0);
     SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix, (LPARAM)list);
-    free(list);
+    axyne_fit_completion_popup(state);
 }
 
 /* Native scrollbars of the Scintilla window follow the editor theme: the
