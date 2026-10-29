@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +25,7 @@
 static const wchar_t AXYNE_PW_CLASS[] = L"AxynePreferencesWindow";
 
 enum {
-    PW_ID_NAV = 100,          /* 100..102 */
+    PW_ID_NAV = 100,          /* 100..105 */
     PW_ID_CLOSE = 110,
     PW_ID_LINK,
     PW_ID_OK,
@@ -37,10 +38,24 @@ enum {
     PW_ID_EDIT_FONT = 160,
     PW_ID_EDIT_SIZE,
     PW_ID_EDIT_TAB,
+    PW_ID_EDIT_UNDO,
+    PW_ID_CMAKE_PATH = 170,   /* 빌드 (CMake) */
+    PW_ID_GENERATOR,
+    PW_ID_BUILD_DIR,
+    PW_ID_CONFIGURE_ARGS,
+    PW_ID_TERM_PROFILE,       /* 터미널 */
+    PW_ID_DIFF_WS,            /* 비교기 */
+    PW_ID_DIFF_TOOL,
+    PW_ID_DIFF_ARGS,
     PW_ID_KEY = 200           /* + action * 4 + {0 edit, 1 toggle, 2 restore} */
 };
 
-enum { PW_PAGE_EDITOR = 0, PW_PAGE_THEME, PW_PAGE_KEYS, PW_PAGE_COUNT };
+/* Sidebar order follows Figma 24:13953. */
+enum { PW_PAGE_EDITOR = 0, PW_PAGE_THEME, PW_PAGE_BUILD, PW_PAGE_TERMINAL, PW_PAGE_KEYS,
+       PW_PAGE_DIFF, PW_PAGE_COUNT };
+static const wchar_t *const pw_page_titles[PW_PAGE_COUNT] = {
+    L"편집기", L"글꼴 및 색", L"빌드 (CMake)", L"터미널", L"키 바인딩", L"비교기"
+};
 enum { PW_MAX_PAGE_WINDOWS = 80, PW_OPTION_COUNT = 6, PW_FONT_MENU_BASE = 4000 };
 
 typedef struct PwState {
@@ -57,7 +72,9 @@ typedef struct PwState {
     HWND page_windows[PW_PAGE_COUNT][PW_MAX_PAGE_WINDOWS];
     int page_window_count[PW_PAGE_COUNT];
     HWND nav[PW_PAGE_COUNT];
-    HWND edit_font, edit_size, edit_tab;
+    HWND edit_font, edit_size, edit_tab, edit_undo;
+    HWND edit_cmake, edit_generator, edit_build_dir, edit_configure_args;
+    HWND edit_term_profile, edit_diff_tool, edit_diff_args;
     HWND apply_button;
     HWND key_edit[AXYNE_ACTION_COUNT];
     HFONT font10, font11, font12, font12_bold, font16_bold, font_mono;
@@ -141,11 +158,13 @@ static wchar_t *pw_wide(const char *utf8)
 /* Reads a window's text as UTF-8 into `out`; returns 0 when it does not fit. */
 static int pw_window_utf8(HWND window, char *out, size_t capacity)
 {
-    wchar_t wide[256];
+    int count = GetWindowTextLengthW(window);
+    wchar_t *wide = (wchar_t *)calloc((size_t)count + 1, sizeof(wchar_t));
     int length;
-    wide[0] = L'\0';
-    GetWindowTextW(window, wide, 256);
+    if (wide == NULL) { out[0] = '\0'; return 0; }
+    GetWindowTextW(window, wide, count + 1);
     length = WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)capacity, NULL, NULL);
+    free(wide);
     if (length <= 0) { out[0] = '\0'; return 0; }
     return 1;
 }
@@ -213,11 +232,14 @@ enum {
     PW_SIZE_BOX_W = 120,
     PW_TAB_BOX_X = PW_LEFT + 392,
     PW_TAB_BOX_W = 116,
+    PW_UNDO_BOX_W = 160,
     PW_FIELD_Y = PW_LABEL_Y + 19,
     PW_DISPLAY_GROUP_Y = PW_LABEL_Y + 49 + 16,
     PW_DISPLAY_GROUP_H = 94,
     PW_RENDER_GROUP_Y = PW_DISPLAY_GROUP_Y + PW_DISPLAY_GROUP_H + 16,
     PW_RENDER_GROUP_H = 68,
+    PW_UNDO_LABEL_Y = PW_RENDER_GROUP_Y + PW_RENDER_GROUP_H + 18,
+    PW_UNDO_FIELD_Y = PW_UNDO_LABEL_Y + 19,
     PW_THEME_GROUP_Y = PW_LABEL_Y + 9,
     PW_KEY_ROW_Y = PW_LABEL_Y + 19,
     PW_KEY_ROW_PITCH = 32,
@@ -226,8 +248,18 @@ enum {
     PW_KEY_BOX_X = PW_PAGE_X + 276,
     PW_KEY_BOX_W = 110,
     PW_KEY_TOGGLE_X = PW_PAGE_X + 396,
-    PW_KEY_RESTORE_X = PW_PAGE_X + 472
+    PW_KEY_RESTORE_X = PW_PAGE_X + 472,
+    /* form pages (빌드, 터미널, 비교기): label, field, hint per row */
+    PW_FORM_Y = PW_LABEL_Y,
+    PW_FORM_PITCH = 74,
+    PW_FORM_W = PW_GROUP_W
 };
+
+/* One-line argument text: every stored byte may need an escape, plus quotes
+ * and separators. */
+enum { PW_ARGS_LINE_MAX = AXYNE_PREFERENCE_ARGS_TEXT_MAX * 3 + 32 };
+
+static int pw_form_row(int row) { return PW_FORM_Y + row * PW_FORM_PITCH; }
 
 static void pw_add(PwState *st, int page, HWND window)
 {
@@ -283,9 +315,68 @@ static void pw_group_frame(PwState *st, HDC dc, int y, int height, const wchar_t
             PW_LEFT + 11, y - 8, size.cx + 4, size.cy, DT_LEFT);
 }
 
+static void pw_form_field(PwState *st, HDC dc, int row, const wchar_t *label, const wchar_t *hint,
+                          HWND edit)
+{
+    int y = pw_form_row(row);
+    COLORREF muted = pw_rgb(AXYNE_PW_COLOR_MUTED);
+    pw_text(dc, st->font11, muted, label, PW_LEFT, y, PW_FORM_W, 14, DT_LEFT);
+    pw_field_frame(st, dc, PW_LEFT, y + 19, PW_FORM_W, edit);
+    if (hint != NULL)
+        pw_text(dc, st->font10, pw_blend(muted, pw_rgb(AXYNE_PW_COLOR_CONTENT), 75), hint,
+                PW_LEFT, y + 19 + AXYNE_PW_FIELD_HEIGHT + 4, PW_FORM_W, 14, DT_LEFT | DT_END_ELLIPSIS);
+}
+
+/* Argument lists are edited as one line: whitespace separates arguments,
+ * double quotes group one that contains spaces, and \" or \\ inside give a
+ * literal quote or backslash. */
+static void pw_args_text(const AxynePreferenceArgs *args, char *out, size_t capacity)
+{
+    size_t used = 0, i;
+    const char *value;
+    if (capacity == 0) return;
+    out[0] = '\0';
+    for (i = 0; (value = axyne_preference_args_get(args, i)) != NULL; ++i) {
+        int quote = value[0] == '\0' || strpbrk(value, " \t") != NULL;
+        const char *c;
+        if (used + 4 >= capacity) break;
+        if (i > 0) out[used++] = ' ';
+        if (quote) out[used++] = '"';
+        for (c = value; *c != '\0' && used + 3 < capacity; ++c) {
+            if (*c == '"' || *c == '\\') out[used++] = '\\';
+            out[used++] = *c;
+        }
+        if (quote) out[used++] = '"';
+        out[used] = '\0';
+    }
+}
+
+static int pw_args_parse(const char *text, AxynePreferenceArgs *args)
+{
+    AxynePreferenceArgs parsed;
+    char item[AXYNE_PREFERENCE_ARGS_TEXT_MAX];
+    memset(&parsed, 0, sizeof(parsed));
+    while (*text != '\0') {
+        size_t length = 0;
+        int quoted = 0;
+        while (*text == ' ' || *text == '\t') ++text;
+        if (*text == '\0') break;
+        while (*text != '\0' && (quoted || (*text != ' ' && *text != '\t'))) {
+            if (*text == '"') { quoted = !quoted; ++text; continue; }
+            if (*text == '\\' && (text[1] == '"' || text[1] == '\\')) ++text;
+            if (length + 1 >= sizeof(item)) return 0;
+            item[length++] = *text++;
+        }
+        if (quoted) return 0;
+        item[length] = '\0';
+        if (axyne_preference_args_append(&parsed, item) != AXYNE_STATUS_OK) return 0;
+    }
+    *args = parsed;
+    return 1;
+}
+
 static void pw_paint(PwState *st, HDC dc)
 {
-    static const wchar_t *const page_titles[PW_PAGE_COUNT] = {L"편집기", L"글꼴 및 색", L"키 바인딩"};
     COLORREF muted = pw_rgb(AXYNE_PW_COLOR_MUTED);
     int i;
     pw_fill(dc, 0, 0, AXYNE_PW_WIDTH, AXYNE_PW_HEIGHT, pw_rgb(AXYNE_PW_COLOR_CONTENT));
@@ -295,7 +386,7 @@ static void pw_paint(PwState *st, HDC dc)
     pw_fill(dc, 0, PW_PAGE_Y, AXYNE_PW_SIDEBAR_WIDTH, PW_FOOTER_Y, pw_rgb(AXYNE_PW_COLOR_SIDEBAR));
     pw_fill(dc, 0, PW_FOOTER_Y, AXYNE_PW_WIDTH, AXYNE_PW_HEIGHT, pw_rgb(AXYNE_PW_COLOR_CHROME));
     pw_fill(dc, 0, PW_FOOTER_Y, AXYNE_PW_WIDTH, PW_FOOTER_Y + 1, pw_rgb(AXYNE_PW_COLOR_CHROME_LINE));
-    pw_text(dc, st->font16_bold, pw_rgb(AXYNE_PW_COLOR_TEXT), page_titles[st->page],
+    pw_text(dc, st->font16_bold, pw_rgb(AXYNE_PW_COLOR_TEXT), pw_page_titles[st->page],
             PW_LEFT, PW_PAGE_Y + AXYNE_PW_CONTENT_TOP, 300, 22, DT_LEFT);
     if (st->page == PW_PAGE_EDITOR) {
         pw_text(dc, st->font11, muted, L"글꼴", PW_LEFT, PW_LABEL_Y, 200, 14, DT_LEFT);
@@ -304,10 +395,28 @@ static void pw_paint(PwState *st, HDC dc)
         pw_field_frame(st, dc, PW_LEFT, PW_FIELD_Y, PW_FONT_BOX_W, st->edit_font);
         pw_field_frame(st, dc, PW_SIZE_BOX_X, PW_FIELD_Y, PW_SIZE_BOX_W, st->edit_size);
         pw_field_frame(st, dc, PW_TAB_BOX_X, PW_FIELD_Y, PW_TAB_BOX_W, st->edit_tab);
+        pw_text(dc, st->font11, muted, L"Undo history (MB)", PW_LEFT, PW_UNDO_LABEL_Y,
+                180, 14, DT_LEFT);
+        pw_field_frame(st, dc, PW_LEFT, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W, st->edit_undo);
         pw_group_frame(st, dc, PW_DISPLAY_GROUP_Y, PW_DISPLAY_GROUP_H, L"표시");
         pw_group_frame(st, dc, PW_RENDER_GROUP_Y, PW_RENDER_GROUP_H, L"렌더링");
     } else if (st->page == PW_PAGE_THEME) {
         pw_group_frame(st, dc, PW_THEME_GROUP_Y, PW_DISPLAY_GROUP_H, L"테마");
+    } else if (st->page == PW_PAGE_BUILD) {
+        pw_form_field(st, dc, 0, L"CMake 실행 파일", L"비워 두면 PATH에서 찾습니다.", st->edit_cmake);
+        pw_form_field(st, dc, 1, L"생성기 (-G)", L"예: Ninja, \"Visual Studio 17 2022\". 비워 두면 CMake 기본값.",
+                      st->edit_generator);
+        pw_form_field(st, dc, 2, L"빌드 디렉터리", L"작업 영역 기준 경로. ${config}는 빌드 구성 이름으로 바뀝니다.",
+                      st->edit_build_dir);
+        pw_form_field(st, dc, 3, L"구성 인수", L"cmake 구성 단계에 추가할 인수 (공백 구분, 큰따옴표로 묶기).",
+                      st->edit_configure_args);
+    } else if (st->page == PW_PAGE_TERMINAL) {
+        pw_form_field(st, dc, 0, L"기본 프로필", L"새 터미널에 쓸 셸 이름 (예: PowerShell 7, cmd). 비워 두면 처음 감지된 셸.",
+                      st->edit_term_profile);
+    } else if (st->page == PW_PAGE_DIFF) {
+        pw_form_field(st, dc, 1, L"외부 비교 도구", L"비워 두면 내장 비교기를 씁니다.", st->edit_diff_tool);
+        pw_form_field(st, dc, 2, L"외부 도구 인수", L"외부 비교 도구에 넘길 인수 (공백 구분, 큰따옴표로 묶기).",
+                      st->edit_diff_args);
     } else {
         pw_text(dc, st->font11, muted, L"동작", PW_LEFT, PW_LABEL_Y, 100, 14, DT_LEFT);
         pw_text(dc, st->font11, muted, L"단축키", PW_KEY_MOD_X, PW_LABEL_Y, 100, 14, DT_LEFT);
@@ -416,12 +525,11 @@ static void pw_draw_item(PwState *st, const DRAWITEMSTRUCT *di)
     int width = di->rcItem.right - di->rcItem.left;
     int height = di->rcItem.bottom - di->rcItem.top;
     if (id >= PW_ID_NAV && id < PW_ID_NAV + PW_PAGE_COUNT) {
-        static const wchar_t *const titles[PW_PAGE_COUNT] = {L"편집기", L"글꼴 및 색", L"키 바인딩"};
         int selected = st->page == id - PW_ID_NAV;
         pw_fill(dc, di->rcItem.left, di->rcItem.top, di->rcItem.right, di->rcItem.bottom,
                 pw_rgb(selected ? AXYNE_PW_COLOR_SELECTED : AXYNE_PW_COLOR_SIDEBAR));
         pw_text(dc, st->font12, pw_rgb(selected ? AXYNE_PW_COLOR_TEXT : AXYNE_PW_COLOR_MUTED),
-                titles[id - PW_ID_NAV], 12, di->rcItem.top, width - 12, height, DT_LEFT | DT_VCENTER);
+                pw_page_titles[id - PW_ID_NAV], 12, di->rcItem.top, width - 12, height, DT_LEFT | DT_VCENTER);
         if (di->itemState & ODS_FOCUS) {
             RECT focus = di->rcItem;
             InflateRect(&focus, -3, -3);
@@ -474,6 +582,8 @@ static void pw_draw_item(PwState *st, const DRAWITEMSTRUCT *di)
         pw_draw_checkbox(st, di, 1, (int)st->draft.editor.rendering == index,
             index == 0 ? L"Direct2D / DirectWrite — 선명한 글꼴, GPU 가속"
                        : L"GDI — 최소 메모리, 원격 데스크톱 권장");
+    } else if (id == PW_ID_DIFF_WS) {
+        pw_draw_checkbox(st, di, 0, st->draft.diff.ignore_whitespace != 0, L"공백 차이 무시");
     } else if (id >= PW_ID_THEME && id < PW_ID_THEME + 3) {
         static const wchar_t *const names[3] = {L"어둡게", L"밝게", L"시스템 설정 따르기"};
         pw_draw_checkbox(st, di, 1, (int)st->draft.theme.preset == id - PW_ID_THEME,
@@ -538,6 +648,14 @@ static int pw_collect(PwState *st, AxynePreferences *out, const wchar_t **messag
         return 0;
     }
     out->editor.tab_width = (unsigned int)value;
+    if (!pw_window_utf8(st->edit_undo, text, sizeof(text)) || !pw_parse_unsigned(text, &value) ||
+        axyne_preferences_check_undo_limit(value) != AXYNE_PREFERENCE_CHECK_OK) {
+        if (message) *message = L"Undo history must be between 1 and 1024 MB.";
+        if (page) *page = PW_PAGE_EDITOR;
+        if (focus) *focus = st->edit_undo;
+        return 0;
+    }
+    out->editor.undo_limit_mb = (unsigned int)value;
     if (!pw_window_utf8(st->edit_font, text, sizeof(text)) ||
         axyne_preferences_check_font_family(text) != AXYNE_PREFERENCE_CHECK_OK) {
         if (message) *message = L"글꼴 이름이 올바르지 않습니다.";
@@ -546,6 +664,45 @@ static int pw_collect(PwState *st, AxynePreferences *out, const wchar_t **messag
         return 0;
     }
     (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", text);
+    {
+        static const struct { int page; size_t offset; size_t size; } texts[] = {
+            { PW_PAGE_BUILD, offsetof(AxynePreferences, build.cmake_path), sizeof(((AxynePreferences *)0)->build.cmake_path) },
+            { PW_PAGE_BUILD, offsetof(AxynePreferences, build.generator), sizeof(((AxynePreferences *)0)->build.generator) },
+            { PW_PAGE_BUILD, offsetof(AxynePreferences, build.build_directory), sizeof(((AxynePreferences *)0)->build.build_directory) },
+            { PW_PAGE_TERMINAL, offsetof(AxynePreferences, terminal.default_profile), sizeof(((AxynePreferences *)0)->terminal.default_profile) },
+            { PW_PAGE_DIFF, offsetof(AxynePreferences, diff.external_tool), sizeof(((AxynePreferences *)0)->diff.external_tool) }
+        };
+        HWND edits[5];
+        char long_text[PW_ARGS_LINE_MAX];
+        edits[0] = st->edit_cmake; edits[1] = st->edit_generator; edits[2] = st->edit_build_dir;
+        edits[3] = st->edit_term_profile; edits[4] = st->edit_diff_tool;
+        for (i = 0; i < 5; ++i) {
+            if (edits[i] == NULL) continue;
+            if (!pw_window_utf8(edits[i], long_text, sizeof(long_text)) || strlen(long_text) >= texts[i].size) {
+                if (message) *message = L"입력한 값이 너무 깁니다.";
+                if (page) *page = texts[i].page;
+                if (focus) *focus = edits[i];
+                return 0;
+            }
+            memcpy((char *)out + texts[i].offset, long_text, strlen(long_text) + 1);
+        }
+        if (st->edit_configure_args != NULL &&
+            (!pw_window_utf8(st->edit_configure_args, long_text, sizeof(long_text)) ||
+             !pw_args_parse(long_text, &out->build.configure_args))) {
+            if (message) *message = L"구성 인수가 너무 길거나 따옴표가 닫히지 않았습니다.";
+            if (page) *page = PW_PAGE_BUILD;
+            if (focus) *focus = st->edit_configure_args;
+            return 0;
+        }
+        if (st->edit_diff_args != NULL &&
+            (!pw_window_utf8(st->edit_diff_args, long_text, sizeof(long_text)) ||
+             !pw_args_parse(long_text, &out->diff.external_tool_args))) {
+            if (message) *message = L"외부 도구 인수가 너무 길거나 따옴표가 닫히지 않았습니다.";
+            if (page) *page = PW_PAGE_DIFF;
+            if (focus) *focus = st->edit_diff_args;
+            return 0;
+        }
+    }
     for (i = 0; i < (int)out->binding_count; ++i) {
         AxynePreferenceAction action = out->bindings[i].action;
         HWND edit = st->key_edit[action];
@@ -581,6 +738,20 @@ static void pw_load_controls(PwState *st)
     pw_set_text_utf8(st->edit_size, text);
     (void)snprintf(text, sizeof(text), "%u", st->draft.editor.tab_width);
     pw_set_text_utf8(st->edit_tab, text);
+    (void)snprintf(text, sizeof(text), "%u", st->draft.editor.undo_limit_mb);
+    pw_set_text_utf8(st->edit_undo, text);
+    {
+        char args[PW_ARGS_LINE_MAX];
+        pw_set_text_utf8(st->edit_cmake, st->draft.build.cmake_path);
+        pw_set_text_utf8(st->edit_generator, st->draft.build.generator);
+        pw_set_text_utf8(st->edit_build_dir, st->draft.build.build_directory);
+        pw_args_text(&st->draft.build.configure_args, args, sizeof(args));
+        pw_set_text_utf8(st->edit_configure_args, args);
+        pw_set_text_utf8(st->edit_term_profile, st->draft.terminal.default_profile);
+        pw_set_text_utf8(st->edit_diff_tool, st->draft.diff.external_tool);
+        pw_args_text(&st->draft.diff.external_tool_args, args, sizeof(args));
+        pw_set_text_utf8(st->edit_diff_args, args);
+    }
     for (i = 0; i < (int)st->draft.binding_count; ++i) {
         HWND edit = st->key_edit[st->draft.bindings[i].action];
         if (edit != NULL) pw_set_text_utf8(edit, st->draft.bindings[i].key);
@@ -738,6 +909,10 @@ static void pw_command(PwState *st, int id, int notification, HWND source)
             axyne_preferences_select_theme(&st->draft.theme, preset);
         for (i = 0; i < 3; ++i) pw_invalidate_id(st, PW_ID_THEME + i);
         pw_update_buttons(st);
+    } else if (id == PW_ID_DIFF_WS) {
+        st->draft.diff.ignore_whitespace = !st->draft.diff.ignore_whitespace;
+        pw_invalidate_id(st, id);
+        pw_update_buttons(st);
     } else if (id == PW_ID_FONT_MENU) {
         pw_show_font_menu(st);
     } else if (id >= PW_ID_KEY) {
@@ -769,9 +944,8 @@ static void pw_build(PwState *st)
     int i, x, y;
     HWND window = st->window;
     for (i = 0; i < PW_PAGE_COUNT; ++i) {
-        static const wchar_t *const titles[PW_PAGE_COUNT] = {L"편집기", L"글꼴 및 색", L"키 바인딩"};
         st->nav[i] = pw_button(st, -1, PW_ID_NAV + i, 0, PW_PAGE_Y + i * AXYNE_PW_ITEM_HEIGHT,
-                               AXYNE_PW_SIDEBAR_WIDTH, AXYNE_PW_ITEM_HEIGHT, titles[i]);
+                               AXYNE_PW_SIDEBAR_WIDTH, AXYNE_PW_ITEM_HEIGHT, pw_page_titles[i]);
     }
     (void)pw_button(st, -1, PW_ID_CLOSE, AXYNE_PW_WIDTH - 12 - 14 - 7, 4, 28, 28, L"닫기");
 
@@ -779,6 +953,7 @@ static void pw_build(PwState *st)
     st->edit_font = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_FONT, PW_LEFT, PW_FIELD_Y, PW_FONT_BOX_W - 20);
     st->edit_size = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_SIZE, PW_SIZE_BOX_X, PW_FIELD_Y, PW_SIZE_BOX_W);
     st->edit_tab = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_TAB, PW_TAB_BOX_X, PW_FIELD_Y, PW_TAB_BOX_W);
+    st->edit_undo = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_UNDO, PW_LEFT, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W);
     {
         HWND chevron = pw_button(st, PW_PAGE_EDITOR, PW_ID_FONT_MENU, PW_LEFT + PW_FONT_BOX_W - 29,
                                  PW_FIELD_Y + 1, 28, AXYNE_PW_FIELD_HEIGHT - 2, L"글꼴 목록");
@@ -792,6 +967,21 @@ static void pw_build(PwState *st)
         (void)pw_button(st, PW_PAGE_EDITOR, PW_ID_RENDER + i, PW_LEFT + 15,
                         PW_RENDER_GROUP_Y + 15 + i * 26, 440, 14, i == 0 ? L"Direct2D / DirectWrite \u2014 선명한 글꼴, GPU 가속"
                                    : L"GDI \u2014 최소 메모리, 원격 데스크톱 권장");
+
+    /* 빌드 (CMake), 터미널, 비교기 pages */
+    st->edit_cmake = pw_edit(st, PW_PAGE_BUILD, PW_ID_CMAKE_PATH, PW_LEFT, pw_form_row(0) + 19, PW_FORM_W);
+    st->edit_generator = pw_edit(st, PW_PAGE_BUILD, PW_ID_GENERATOR, PW_LEFT, pw_form_row(1) + 19, PW_FORM_W);
+    st->edit_build_dir = pw_edit(st, PW_PAGE_BUILD, PW_ID_BUILD_DIR, PW_LEFT, pw_form_row(2) + 19, PW_FORM_W);
+    st->edit_configure_args = pw_edit(st, PW_PAGE_BUILD, PW_ID_CONFIGURE_ARGS, PW_LEFT,
+                                      pw_form_row(3) + 19, PW_FORM_W);
+    st->edit_term_profile = pw_edit(st, PW_PAGE_TERMINAL, PW_ID_TERM_PROFILE, PW_LEFT,
+                                    pw_form_row(0) + 19, PW_FORM_W);
+    (void)pw_button(st, PW_PAGE_DIFF, PW_ID_DIFF_WS, PW_LEFT, pw_form_row(0) + 4, 300, 14,
+                    L"공백 차이 무시");
+    st->edit_diff_tool = pw_edit(st, PW_PAGE_DIFF, PW_ID_DIFF_TOOL, PW_LEFT, pw_form_row(1) + 19, PW_FORM_W);
+    st->edit_diff_args = pw_edit(st, PW_PAGE_DIFF, PW_ID_DIFF_ARGS, PW_LEFT, pw_form_row(2) + 19, PW_FORM_W);
+    SendMessageW(st->edit_configure_args, EM_LIMITTEXT, PW_ARGS_LINE_MAX - 1, 0);
+    SendMessageW(st->edit_diff_args, EM_LIMITTEXT, PW_ARGS_LINE_MAX - 1, 0);
 
     /* theme page */
     for (i = 0; i < 3; ++i)
@@ -895,6 +1085,24 @@ static int pw_key(PwState *st, const MSG *msg)
 {
     HWND focus = GetFocus();
     int id = focus != NULL ? GetDlgCtrlID(focus) : 0;
+    if (id >= PW_ID_KEY && id < PW_ID_KEY + AXYNE_ACTION_COUNT * 4 &&
+        (id - PW_ID_KEY) % 4 == 0 && msg->wParam != VK_TAB && msg->wParam != VK_ESCAPE) {
+        unsigned int modifiers = 0;
+        AxynePreferenceAction action = (AxynePreferenceAction)((id - PW_ID_KEY) / 4);
+        if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= AXYNE_KEY_MODIFIER_CONTROL;
+        if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= AXYNE_KEY_MODIFIER_SHIFT;
+        if (GetKeyState(VK_MENU) & 0x8000) modifiers |= AXYNE_KEY_MODIFIER_ALT;
+        if (axyne_preferences_capture_key(&st->draft, action, (unsigned int)msg->wParam, modifiers, 0) == AXYNE_STATUS_OK) {
+            const AxyneKeyBinding *binding = axyne_preferences_find_binding(&st->draft, action);
+            st->loading = 1;
+            pw_set_text_utf8(st->key_edit[action], binding->key);
+            st->loading = 0;
+            pw_invalidate_id(st, PW_ID_KEY + action * 4 + 1);
+            InvalidateRect(st->window, NULL, FALSE);
+            pw_update_buttons(st);
+        }
+        return 1; /* Modifier-only presses wait for a key. */
+    }
     if (msg->wParam == VK_ESCAPE) {
         st->result = 0; st->done = 1;
         return 1;
@@ -989,7 +1197,7 @@ int axyne_preferences_window_show(void *native_owner, int workspace,
     UpdateWindow(st->window);
     SetFocus(st->edit_font);
     while (!st->done && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (msg.message == WM_KEYDOWN && (msg.hwnd == st->window || IsChild(st->window, msg.hwnd)) &&
+        if ((msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && (msg.hwnd == st->window || IsChild(st->window, msg.hwnd)) &&
             pw_key(st, &msg))
             continue;
         if (!IsDialogMessageW(st->window, &msg)) {
@@ -1020,7 +1228,7 @@ cleanup:
 
 enum {
     DLG_ID_EXE = 301, DLG_ID_BROWSE, DLG_ID_ARGS, DLG_ID_WD, DLG_ID_ENV,
-    DLG_ID_CLOSE, DLG_ID_MSG, DLG_ID_STAGE
+    DLG_ID_CLOSE, DLG_ID_MSG, DLG_ID_STAGE, DLG_ID_LANGUAGE
 };
 enum { DLG_RUNNER = 0, DLG_SHORTCUTS = 1, DLG_COMMIT = 2 };
 
@@ -1039,7 +1247,7 @@ typedef struct DlgState {
     int kind, width, height;
     int done, result;
     /* runner */
-    HWND exe, browse, args, wd, env;
+    HWND exe, browse, args, wd, env, language;
     AxyneRunnerDialogHooks hooks;
     const AxyneRunnerDialogValues *initial;
     wchar_t error[256];
@@ -1146,6 +1354,7 @@ static void dlg_paint_chrome(DlgState *d, HDC dc, const wchar_t *title)
 static void dlg_runner_rows(int *exe, int *args, int *wd, int *env, int *note)
 {
     int y = AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD;
+    y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
     *exe = y;
     y += AXYNE_DLG_LABEL_BLOCK + AXYNE_PW_FIELD_HEIGHT + AXYNE_DLG_GAP;
     *args = y;
@@ -1169,6 +1378,8 @@ static void dlg_paint_runner(DlgState *d, HDC dc)
     pw_fill(dc, 0, 0, d->width, d->height, pw_rgb(AXYNE_PW_COLOR_CONTENT));
     dlg_paint_chrome(d, dc, L"Runner 설정");
     pw_text(dc, f->font11, muted, L"실행 파일", AXYNE_DLG_PAD, exe_y, 200, 14, DT_LEFT);
+    pw_text(dc, f->font11, muted, L"Language", AXYNE_DLG_PAD,
+        AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD, inner, 14, DT_LEFT);
     dlg_frame(dc, AXYNE_DLG_PAD, exe_y + AXYNE_DLG_LABEL_BLOCK,
               inner - AXYNE_DLG_BROWSE_WIDTH - 8, AXYNE_PW_FIELD_HEIGHT, d->exe);
     pw_text(dc, f->font11, muted, L"인자 (한 줄에 하나)", AXYNE_DLG_PAD, args_y, 300, 14, DT_LEFT);
@@ -1486,6 +1697,7 @@ static void dlg_runner_save(DlgState *d)
     values.arguments = args != NULL ? args : "";
     values.working_directory = wd != NULL ? wd : "";
     values.environment = env != NULL ? env : "";
+    values.language = (AxyneLanguageId)((int)SendMessageW(d->language, CB_GETCURSEL, 0, 0) - 1);
     if (d->hooks.save != NULL)
         saved = d->hooks.save(d->hooks.context, &values, error, sizeof(error));
     free(exe); free(args); free(wd); free(env);
@@ -1517,6 +1729,25 @@ static void dlg_commit_accept(DlgState *d)
     d->done = 1;
 }
 
+static void dlg_runner_language(DlgState *d)
+{
+    AxyneLanguageId language = (AxyneLanguageId)((int)SendMessageW(d->language, CB_GETCURSEL, 0, 0) - 1);
+    const AxyneRunnerConfig *config = axyne_runner_profiles_get(d->initial->profiles, language, d->initial->fallback);
+    char *args = config != NULL ? axyne_runner_dialog_lines(config->arguments, config->argument_count) : NULL;
+    char *env = config != NULL ? axyne_runner_dialog_lines(config->environment, config->environment_count) : NULL;
+    const char *texts[4] = {config != NULL ? config->executable : NULL, args,
+        config != NULL ? config->working_directory : NULL, env};
+    HWND fields[4] = {d->exe, d->args, d->wd, d->env};
+    for (int i = 0; i < 4; ++i) {
+        wchar_t *wide = dlg_wide_crlf(texts[i]);
+        if (wide != NULL) SetWindowTextW(fields[i], wide);
+        free(wide);
+    }
+    free(args); free(env);
+    d->error[0] = L'\0';
+    InvalidateRect(d->window, NULL, FALSE);
+}
+
 static void dlg_command(DlgState *d, int id, int code)
 {
     if (id == IDCANCEL || id == DLG_ID_CLOSE || (id == IDOK && d->kind == DLG_SHORTCUTS)) {
@@ -1526,6 +1757,8 @@ static void dlg_command(DlgState *d, int id, int code)
         dlg_commit_accept(d);
     } else if (id == IDOK) {
         dlg_runner_save(d);
+    } else if (id == DLG_ID_LANGUAGE && code == CBN_SELCHANGE) {
+        dlg_runner_language(d);
     } else if (id == DLG_ID_BROWSE) {
         dlg_browse(d);
     } else if (d->kind == DLG_COMMIT && id == DLG_ID_STAGE) {
@@ -1786,6 +2019,17 @@ static void dlg_build_runner(DlgState *d)
     int cancel_x = save_x - AXYNE_PW_BUTTON_GAP - AXYNE_PW_BUTTON_WIDTH;
     dlg_runner_rows(&exe_y, &args_y, &wd_y, &env_y, &note_y);
     /* Creation order is the Tab order. */
+    d->language = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        CBS_DROPDOWNLIST | WS_VSCROLL, AXYNE_DLG_PAD, AXYNE_PW_TITLE_HEIGHT + AXYNE_DLG_PAD +
+        AXYNE_DLG_LABEL_BLOCK, inner, 260, d->window, (HMENU)(INT_PTR)DLG_ID_LANGUAGE, NULL, NULL);
+    SendMessageW(d->language, WM_SETFONT, (WPARAM)d->fonts->font11, TRUE);
+    SendMessageW(d->language, CB_ADDSTRING, 0, (LPARAM)L"Global (fallback)");
+    for (int i = 0; i < AXYNE_LANGUAGE_COUNT; ++i) {
+        wchar_t *name = pw_wide(axyne_language_name((AxyneLanguageId)i));
+        SendMessageW(d->language, CB_ADDSTRING, 0, (LPARAM)name);
+        free(name);
+    }
+    SendMessageW(d->language, CB_SETCURSEL, (WPARAM)(d->initial->language + 1), 0);
     d->exe = dlg_edit(d, DLG_ID_EXE, AXYNE_DLG_PAD, exe_y + AXYNE_DLG_LABEL_BLOCK,
                       inner - AXYNE_DLG_BROWSE_WIDTH - 8, d->initial->executable, d->fonts->font11);
     d->browse = dlg_button(d, DLG_ID_BROWSE, AXYNE_DLG_PAD + inner - AXYNE_DLG_BROWSE_WIDTH,
