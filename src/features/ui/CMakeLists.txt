@@ -2,6 +2,7 @@ if(WIN32)
     add_library(axyne_ui STATIC
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_commands_windows.c"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/windows/release_window_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/terminal_view_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/extensions_window_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/splash_windows.c"
@@ -20,10 +21,11 @@ if(WIN32)
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_lsp_nav_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_diag_windows.c"
         "${CMAKE_CURRENT_LIST_DIR}/platform/windows/ui_release_windows.c")
-    target_link_libraries(axyne_ui PRIVATE user32 gdi32 comdlg32 shell32 ole32 imm32)
+    target_link_libraries(axyne_ui PRIVATE user32 gdi32 comdlg32 shell32 ole32 imm32 windowscodecs msimg32)
 elseif(APPLE)
     add_library(axyne_ui STATIC
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_macos.m"
+        "${CMAKE_CURRENT_LIST_DIR}/platform/macos/release_window_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/terminal_view_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/extensions_window_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/splash_macos.m"
@@ -45,6 +47,11 @@ elseif(APPLE)
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_diag_macos.m"
         "${CMAKE_CURRENT_LIST_DIR}/platform/macos/ui_release_macos.m")
     target_link_libraries(axyne_ui PRIVATE "-framework AppKit")
+    file(GLOB AXYNE_RELEASE_ASSETS "${CMAKE_CURRENT_LIST_DIR}/assets/release/*.png"
+        "${CMAKE_CURRENT_LIST_DIR}/assets/release/*.svg")
+    set_source_files_properties(${AXYNE_RELEASE_ASSETS} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources/release")
+    target_sources(axyne PRIVATE ${AXYNE_RELEASE_ASSETS})
     # The feature files only add categories to AxyneWorkspaceView; nothing
     # references their symbols, so the app must load all Objective-C members
     # (-ObjC). Not an INTERFACE option: test targets that -force_load axyne_ui
@@ -52,12 +59,20 @@ elseif(APPLE)
     target_link_options(axyne PRIVATE "-ObjC")
 endif()
 
+target_sources(axyne_ui PRIVATE "${CMAKE_CURRENT_LIST_DIR}/release_notes.c")
+if(WIN32)
+    set(AXYNE_RELEASE_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/assets/release")
+    configure_file("${AXYNE_RELEASE_ASSET_DIR}/release_assets.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/release_assets.rc" @ONLY)
+    target_sources(axyne_ui INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/release_assets.rc")
+endif()
+
 target_include_directories(axyne_ui
     PUBLIC "${PROJECT_SOURCE_DIR}/include"
     PRIVATE "${axyne_scintilla_SOURCE_DIR}/include" "${AXYNE_GENERATED_INCLUDE_DIR}"
 )
 target_link_libraries(axyne PRIVATE axyne_ui)
-target_link_libraries(axyne_ui PRIVATE axyne_terminal axyne_plugins)
+target_link_libraries(axyne_ui PRIVATE axyne_terminal axyne_server_client axyne_plugins)
 
 if(MSVC)
     target_compile_options(axyne_ui PRIVATE /W4 /utf-8)

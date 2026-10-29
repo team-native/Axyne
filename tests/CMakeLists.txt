@@ -428,6 +428,21 @@ add_executable(axyne_server_client_tests test_server_client.c)
 target_link_libraries(axyne_server_client_tests PRIVATE axyne_server_client)
 add_test(NAME axyne-server-client COMMAND axyne_server_client_tests
     "${AXYNE_TEST_FIXTURE_DIR}/server-client")
+
+# Shared release model and independent suppression-state contract.
+add_executable(axyne_release_notes_tests
+    test_release_notes.c
+    "${PROJECT_SOURCE_DIR}/src/features/ui/release_notes.c")
+target_link_libraries(axyne_release_notes_tests PRIVATE axyne_core)
+if(MSVC)
+    target_compile_options(axyne_release_notes_tests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(axyne_release_notes_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+file(MAKE_DIRECTORY "${AXYNE_TEST_FIXTURE_DIR}/release-notes")
+add_test(NAME axyne-release-notes COMMAND $<TARGET_FILE:axyne_release_notes_tests>
+    "${AXYNE_TEST_FIXTURE_DIR}/release-notes")
+set_tests_properties(axyne-release-notes PROPERTIES TIMEOUT 30)
 if(WIN32 OR APPLE)
     add_executable(axyne_http_client_tests test_http_client.c)
     target_link_libraries(axyne_http_client_tests PRIVATE axyne_server_client)

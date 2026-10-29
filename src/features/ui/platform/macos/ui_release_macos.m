@@ -2,18 +2,28 @@
  * Owns _releaseUi. Hook contract: ui_macos_internal.h ("feature categories").
  * Base stub: implements no command and draws nothing yet. */
 #include "ui_macos_internal.h"
+#include "axyne/release_ui.h"
 
 @implementation AxyneWorkspaceView (AxyneReleaseFeature)
 
 - (NSInteger)releaseValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item
 {
-    (void)command; (void)item;
+    (void)item;
+    if (command == AXYNE_COMMAND_HELP_CHECK_FOR_UPDATES ||
+        command == AXYNE_COMMAND_HELP_RELEASE_NOTES)
+        return AXYNE_MAC_COMMAND_ENABLED;
     return AXYNE_MAC_COMMAND_UNHANDLED;
 }
 
 - (BOOL)releasePerformCommand:(AxyneCommandId)command sender:(id)sender
 {
-    (void)command; (void)sender;
+    (void)sender;
+    if (command == AXYNE_COMMAND_HELP_CHECK_FOR_UPDATES ||
+        command == AXYNE_COMMAND_HELP_RELEASE_NOTES) {
+        axyne_release_ui_open([self window],
+            command == AXYNE_COMMAND_HELP_CHECK_FOR_UPDATES);
+        return YES;
+    }
     return NO;
 }
 
@@ -48,6 +58,8 @@
 
 - (void)releaseTeardown
 {
+    if ([self window] != nil)
+        axyne_release_ui_close_owner([self window]);
     [_releaseUi release];
     _releaseUi = nil;
 }
