@@ -17,7 +17,8 @@ enum {
     AXYNE_MAC_MENU_SEPARATOR,
     AXYNE_MAC_MENU_SUBMENU,   /* titled submenu; entries until SUBMENU_END */
     AXYNE_MAC_MENU_SUBMENU_END,
-    AXYNE_MAC_MENU_RECENT     /* File > 최근 항목 (filled by -refreshRecentMenu) */
+    AXYNE_MAC_MENU_RECENT,    /* File > 최근 항목 (filled by -refreshRecentMenu) */
+    AXYNE_MAC_MENU_PLUGINS    /* Tools > 플러그인 and 확장... */
 };
 
 typedef struct AxyneMacMenuEntry {
@@ -144,6 +145,7 @@ static const AxyneMacMenuEntry axyne_macos_tools_menu[] = {
     SUB("외부 도구"),
         ITEM(TOOLS_CONFIGURE_EXTERNAL_TOOLS),
     END_SUB,
+    { AXYNE_MAC_MENU_PLUGINS, AXYNE_COMMAND_NONE, NULL },
     SEP,
     ITEM(TOOLS_SETTINGS), ITEM(TOOLS_WORKSPACE_SETTINGS), ITEM(TOOLS_OPEN_SETTINGS_JSON),
     ITEM(TOOLS_OPEN_THEME_JSON), ITEM(TOOLS_KEYBINDINGS),
@@ -549,6 +551,10 @@ static void axyne_macos_refresh_keys(AxyneWorkspaceView *view, NSMenu *menu)
         NSMenuItem *item = nil;
         if (entry->kind == AXYNE_MAC_MENU_SEPARATOR) {
             pendingSeparator = [menu numberOfItems] > 0;
+            continue;
+        }
+        if (entry->kind == AXYNE_MAC_MENU_PLUGINS) {
+            [self toolsAppendPluginMenu:menu];
             continue;
         }
         if (entry->kind == AXYNE_MAC_MENU_ITEM) {

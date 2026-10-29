@@ -1468,7 +1468,7 @@ static void axyne_macos_lsp_error(AxyneLspClient *client, AxyneStatus status,
     axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
 }
 
-static void axyne_macos_terminal_output(AxyneProcess *process,
+void axyne_macos_terminal_output(AxyneProcess *process,
                                          AxyneProcessStream stream,
                                          const char *bytes, size_t length,
                                          void *user_data)
@@ -1496,7 +1496,7 @@ static void axyne_macos_terminal_output(AxyneProcess *process,
     });
 }
 
-static void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code,
+void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code,
                                       void *user_data)
 {
     AxyneWorkspaceView *view = (AxyneWorkspaceView *)user_data;
@@ -5740,7 +5740,7 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
 - (void)terminalExited:(AxyneProcess *)process exitCode:(int)exitCode
 {
     char message[96];
-    [self finishBuildProblems];
+    if (_activeAction == 1 || _activeAction == 2) [self finishBuildProblems];
     _lastExitCode = exitCode;
     _lastExitFailed = exitCode != 0;
     _hasExitStatus = YES;
