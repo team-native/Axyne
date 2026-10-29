@@ -171,6 +171,7 @@ typedef struct AxyneWindowState {
     HFONT font_tiny;    /* 10px: shortcut hints */
     HFONT font_bold;    /* 11px bold: accent run label */
     HFONT font_glyph13; /* 13px: tab close glyph, toolbar glyphs */
+    HFONT font_glyph13_bold; /* 13px bold: active terminal panel tab */
     HFONT font_glyph14; /* 14px: toolbar glyphs */
     HFONT font_dot;     /* 7px: dirty marker */
     HFONT font_output;  /* 12px mono: output and terminal panel text */

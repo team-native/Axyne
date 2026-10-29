@@ -241,6 +241,12 @@ int main(void)
         CHECK(class_getInstanceVariable([view class], "_terminalSend") == NULL);
         CHECK([shell acceptsFirstResponder] && [shell running]);
         CHECK(NSEqualRects([shell frame], [output frame]));
+        CHECK(AXYNE_UI_TERMINAL_PANEL == 375);
+        CHECK(AXYNE_UI_TERMINAL_HEADER == 67);
+        CHECK(NSMinY([shell frame]) ==
+            842 - AXYNE_UI_STATUS - AXYNE_UI_TERMINAL_PANEL + AXYNE_UI_TERMINAL_HEADER);
+        CHECK(NSHeight([shell frame]) ==
+            AXYNE_UI_TERMINAL_PANEL - AXYNE_UI_TERMINAL_HEADER);
         [field(view, "_problemsTab") performClick:nil];
         [view layoutSubtreeIfNeeded];
         NSView *problemsView = field(view, "_problemsView");
@@ -248,9 +254,10 @@ int main(void)
         CHECK([output isHidden] && ![problemsView isHidden]);
         CHECK([shell isHidden] && [shell running]);
         {
-            /* The list fills the panel below its 32px tab header. */
+            /* The list fills the panel below its Figma-sized tab header. */
             NSRect list = [problemsView frame];
             CGFloat panelTop = 842 - AXYNE_UI_STATUS - AXYNE_UI_PANEL;
+            CHECK(AXYNE_UI_PANEL_HEADER == 32);
             CHECK(NSMinX(list) == AXYNE_UI_SIDEBAR && NSMaxX(list) == 1440);
             CHECK(NSMinY(list) == panelTop + AXYNE_UI_PANEL_HEADER);
             CHECK(NSMaxY(list) == 842 - AXYNE_UI_STATUS);

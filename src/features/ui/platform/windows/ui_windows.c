@@ -173,7 +173,9 @@ static int axyne_sidebar_width(const AxyneWindowState *state)
 
 static int axyne_panel_height(const AxyneWindowState *state)
 {
-    int height = state->panel_size > 0 ? state->panel_size : AXYNE_UI_PANEL;
+    int default_height = state->panel_tab == AXYNE_WIN_PANEL_TERMINAL
+        ? AXYNE_UI_TERMINAL_PANEL : AXYNE_UI_PANEL;
+    int height = state->panel_size > 0 ? state->panel_size : default_height;
     if (state->panel_hidden) return 0;
     if (state->client_height <= 0) return height;
     return axyne_layout_clamp_panel(height, state->client_height,
@@ -5043,21 +5045,36 @@ static const wchar_t *axyne_panel_tab_label(const AxyneWindowState *state, int i
     return AXYNE_PANEL_LABELS[index];
 }
 
-/* Figma panel tabs: items start 8px past the explorer column, 6px padding
- * either side of the 11px label, 2px gaps. Paint and hit-test share this.
- * A disabled tab has an empty rectangle and takes no room. */
+static int axyne_panel_header_height(const AxyneWindowState *state)
+{
+    return state->panel_tab == AXYNE_WIN_PANEL_TERMINAL
+        ? AXYNE_UI_TERMINAL_HEADER : AXYNE_UI_PANEL_HEADER;
+}
+
+static HFONT axyne_panel_tab_font(const AxyneWindowState *state, int index)
+{
+    if (state->panel_tab != AXYNE_WIN_PANEL_TERMINAL) return state->font_small;
+    return index == AXYNE_WIN_PANEL_TERMINAL
+        ? state->font_glyph13_bold : state->font_glyph13;
+}
+
+/* Figma panel tabs: items start 8px past the explorer column. Output/problem
+ * tabs use 11px text and 2px gaps; terminal uses 13px text and 24px gaps.
+ * Paint and hit-test share these bounds. Disabled tabs take no room. */
 static RECT axyne_panel_tab_rect(AxyneWindowState *state, int index,
                                  int panel_top)
 {
-    RECT rect = {0, panel_top, 0, panel_top + AXYNE_UI_PANEL_HEADER};
+    RECT rect = {0, panel_top, 0, panel_top + axyne_panel_header_height(state)};
     int x = axyne_sidebar_width(state) + 8;
+    int gap = state->panel_tab == AXYNE_WIN_PANEL_TERMINAL ? 24 : 2;
     int i;
     for (i = 0; i <= index && i < AXYNE_WIN_PANEL_COUNT; ++i) {
         int width;
         if (!axyne_panel_tab_enabled(state, i)) continue;
-        width = 12 + axyne_measure_text(state->font_small, axyne_panel_tab_label(state, i));
+        width = 12 + axyne_measure_text(axyne_panel_tab_font(state, i),
+                                         axyne_panel_tab_label(state, i));
         if (i == index) { rect.left = x; rect.right = x + width; }
-        x += width + 2;
+        x += width + gap;
     }
     return rect;
 }
@@ -5068,7 +5085,7 @@ static int axyne_panel_body_rect(const AxyneWindowState *state, RECT *body)
     int status_top = state->client_height - AXYNE_STATUS;
     int panel = axyne_panel_height(state);
     body->left = axyne_sidebar_width(state);
-    body->top = status_top - panel + AXYNE_UI_PANEL_HEADER;
+    body->top = status_top - panel + axyne_panel_header_height(state);
     body->right = state->client_width;
     body->bottom = status_top;
     if (body->top > body->bottom) body->top = body->bottom;
@@ -8247,7 +8264,7 @@ static RECT axyne_problems_list_rect(const AxyneWindowState *state)
     int status_top = state->client_height - AXYNE_STATUS;
     list.left = axyne_sidebar_width(state);
     list.right = state->client_width;
-    list.top = status_top - axyne_panel_height(state) + AXYNE_UI_PANEL_HEADER;
+    list.top = status_top - axyne_panel_height(state) + axyne_panel_header_height(state);
     list.bottom = status_top;
     if (list.bottom < list.top) list.bottom = list.top;
     return list;
@@ -9009,6 +9026,7 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
     int editor_top = AXYNE_TOP_MENU + AXYNE_TOOLBAR + AXYNE_TABS;
     int status_top = height - AXYNE_STATUS;
     int bottom_top = status_top - axyne_panel_height(state);
+    int panel_action_top = bottom_top + (axyne_panel_header_height(state) - 22) / 2;
     int editor_bottom = bottom_top;
     int editor_left = axyne_sidebar_width(state);
     int editor_width = width - editor_left;
@@ -9019,13 +9037,13 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                      editor_width, editor_height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (state->terminal_output != NULL) {
-        int terminal_top = bottom_top + AXYNE_UI_PANEL_HEADER + 6;
+        int terminal_top = bottom_top + axyne_panel_header_height(state);
         /* Output tab: build/run/debugger output; Terminal tab: the native
          * shell grid (shell_view). Other tabs belong to their owners. */
         int terminal_selected = state->panel_tab == AXYNE_WIN_PANEL_TERMINAL;
         int output_shown = !state->panel_hidden &&
             state->panel_tab == AXYNE_WIN_PANEL_OUTPUT;
-        int terminal_bottom = status_top - 6;
+        int terminal_bottom = status_top;
         int terminal_width = width - axyne_sidebar_width(state) - 32;
         if (terminal_width < 0) terminal_width = 0;
         SetWindowPos(state->terminal_output, NULL, axyne_sidebar_width(state) + 16, terminal_top,
@@ -9048,11 +9066,11 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                                  max(0, terminal_bottom - terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
                 ShowWindow(state->shell_views[i], shown ? SW_SHOW : SW_HIDE);
             }
-            SetWindowPos(state->terminal_new_session, NULL, width - 256, bottom_top + 5, 24, 22,
+            SetWindowPos(state->terminal_new_session, NULL, width - 256, panel_action_top, 24, 22,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            SetWindowPos(state->terminal_next_session, NULL, width - 230, bottom_top + 5, 24, 22,
+            SetWindowPos(state->terminal_next_session, NULL, width - 230, panel_action_top, 24, 22,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            SetWindowPos(state->terminal_split, NULL, width - 204, bottom_top + 5, 24, 22,
+            SetWindowPos(state->terminal_split, NULL, width - 204, panel_action_top, 24, 22,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             ShowWindow(state->terminal_new_session,
                        terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
@@ -9061,13 +9079,13 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
             ShowWindow(state->terminal_split,
                        terminal_selected && !state->panel_hidden && state->shell_count > 1 ? SW_SHOW : SW_HIDE);
         }
-        SetWindowPos(state->terminal_start, NULL, width - 172, bottom_top + 5,
+        SetWindowPos(state->terminal_start, NULL, width - 172, panel_action_top,
                      52, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->terminal_stop, NULL, width - 116, bottom_top + 5,
+        SetWindowPos(state->terminal_stop, NULL, width - 116, panel_action_top,
                      48, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->panel_clear, NULL, width - 62, bottom_top + 5,
+        SetWindowPos(state->panel_clear, NULL, width - 62, panel_action_top,
                      24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(state->panel_close, NULL, width - 36, bottom_top + 5,
+        SetWindowPos(state->panel_close, NULL, width - 36, panel_action_top,
                      24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(state->panel_clear, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->panel_close, state->panel_hidden ? SW_HIDE : SW_SHOW);
@@ -9378,7 +9396,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
     if (!state->panel_hidden) {
         axyne_fill(dc, axyne_sidebar_width(state), bottom_top, width, status_top, AXYNE_OUTPUT_BG);
         axyne_fill(dc, axyne_sidebar_width(state), bottom_top, width,
-                   bottom_top + AXYNE_UI_PANEL_HEADER, AXYNE_PANEL_HEADER_BG);
+                   bottom_top + axyne_panel_header_height(state), AXYNE_PANEL_HEADER_BG);
     }
     axyne_fill(dc, 0, status_top, width, height, AXYNE_STATUS_BG);
     if (!state->explorer_hidden)
@@ -9522,11 +9540,14 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             label = (RECT){rect.left + 6, rect.top, rect.right - 6, rect.bottom};
             /* Figma keeps every label #737780; only the underline marks the
              * selected tab. Custom palettes still brighten the selection. */
-            axyne_text_rect(dc, state->font_small,
+            axyne_text_rect(dc, axyne_panel_tab_font(state, i),
                            selected && !AXYNE_REFERENCE ? AXYNE_TEXT : AXYNE_MUTED,
                            label, axyne_panel_tab_label(state, i), DT_LEFT);
-            if (selected) axyne_fill(dc, rect.left, rect.bottom - 3,
-                                     rect.right, rect.bottom, AXYNE_INDICATOR);
+            if (selected) {
+                int indicator_height = state->panel_tab == AXYNE_WIN_PANEL_TERMINAL ? 2 : 3;
+                axyne_fill(dc, rect.left, rect.bottom - indicator_height,
+                           rect.right, rect.bottom, AXYNE_INDICATOR);
+            }
         }
         (void)axyne_panel_body_rect(state, &body);
         if (!axyne_win_hooks_panel_paint(state, dc, state->panel_tab, body) &&
@@ -10285,6 +10306,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         state->font_tiny = axyne_make_ui_font(-10, FW_NORMAL);
         state->font_bold = axyne_make_ui_font(-11, FW_BOLD);
         state->font_glyph13 = axyne_make_ui_font(-13, FW_NORMAL);
+        state->font_glyph13_bold = axyne_make_ui_font(-13, FW_BOLD);
         state->font_glyph14 = axyne_make_ui_font(-14, FW_NORMAL);
         state->font_dot = axyne_make_ui_font(-7, FW_NORMAL);
         state->font_output = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
@@ -10534,7 +10556,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         {
             int panel_top = client.bottom - AXYNE_STATUS - axyne_panel_height(state);
             if (!state->panel_hidden && y >= panel_top &&
-                y < panel_top + AXYNE_UI_PANEL_HEADER) {
+                y < panel_top + axyne_panel_header_height(state)) {
                 int panel_index;
                 for (panel_index = 0; panel_index < AXYNE_WIN_PANEL_COUNT; ++panel_index) {
                     RECT rect;
@@ -11190,6 +11212,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (state->font_tiny != NULL) DeleteObject(state->font_tiny);
             if (state->font_bold != NULL) DeleteObject(state->font_bold);
             if (state->font_glyph13 != NULL) DeleteObject(state->font_glyph13);
+            if (state->font_glyph13_bold != NULL) DeleteObject(state->font_glyph13_bold);
             if (state->font_glyph14 != NULL) DeleteObject(state->font_glyph14);
             if (state->font_dot != NULL) DeleteObject(state->font_dot);
             if (state->font_output != NULL) DeleteObject(state->font_output);

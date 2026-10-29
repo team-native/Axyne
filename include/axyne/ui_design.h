@@ -14,7 +14,9 @@ enum {
     AXYNE_UI_TABS = 34,
     AXYNE_UI_STATUS = 24,
     AXYNE_UI_PANEL = 230,
-    AXYNE_UI_PANEL_HEADER = 32,
+    AXYNE_UI_TERMINAL_PANEL = 375, /* Terminal panel bounds in Figma 24:14037. */
+    AXYNE_UI_PANEL_HEADER = 32, /* Output/problems tabs in Figma 6:399. */
+    AXYNE_UI_TERMINAL_HEADER = 67, /* Terminal panel in Figma 24:14037. */
     AXYNE_UI_EXPLORER_HEADER = 30,
     AXYNE_UI_ROW = 22,
     AXYNE_UI_INDENT = 12,
