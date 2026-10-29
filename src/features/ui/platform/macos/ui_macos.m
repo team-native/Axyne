@@ -1768,10 +1768,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_terminalStart setToolTip:@"터미널 시작"];
         [_terminalStart setTarget:self]; [_terminalStart setAction:@selector(startTerminal:)];
         [self addSubview:_terminalStart];
-        _terminalStop = axyne_macos_toolbar_button(@"×", self, @selector(stopTerminal:));
+        _terminalStop = axyne_macos_toolbar_button(@"■", self, @selector(stopTerminal:));
         [_terminalStop setToolTip:@"프로세스 중지"]; [_terminalStop setTarget:self];
         [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
         [self addSubview:_terminalStop];
+        _closePanel = axyne_macos_toolbar_button(@"✕", self, @selector(closePanel:));
+        [_closePanel setToolTip:@"패널 닫기"];
+        [self addSubview:_closePanel];
         _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
         [_debugStart setTitle:@"Debug"]; [_debugStart setTarget:self];
         [_debugStart setAction:@selector(startDebugger:)];
@@ -2535,7 +2538,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
                                _undoButton, _redoButton, _buildButton,
                                _runButton, _targetButton, _searchButton,
                                _outputTab, _problemsTab, _terminalTab, _debugConsoleTab,
-                               _terminalStart, _terminalStop, _clearOutput]) {
+                               _terminalStart, _terminalStop, _clearOutput, _closePanel]) {
         [(AxyneChromeButton *)button setLabelColor:axyne_preference_color(_preferences.theme.muted)];
         [(AxyneChromeButton *)button setFillColor:nil];
         [button setFont:[NSFont systemFontOfSize:11]];
@@ -4402,6 +4405,11 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (bytes != NULL && bytes[0] != '\0')
         [self terminalAppend:bytes length:strlen(bytes) stream:AXYNE_PROCESS_STDOUT];
     [_terminalOutput scrollRangeToVisible:NSMakeRange(0, 0)];
+}
+
+- (void)closePanel:(id)sender
+{
+    if (!_panelHidden) [self togglePanel:sender];
 }
 
 - (void)togglePanel:(id)sender
@@ -6561,9 +6569,10 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             tabX += tabWidth + 2;
         }
     }
-    [_terminalStart setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
+    [_terminalStart setFrame:NSMakeRect(width - 132, bottomTop + 2, 28, 28)];
+    [_terminalStop setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
     [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
-    [_terminalStop setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
+    [_closePanel setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
     CGFloat x = 8;
     size_t icon = 0;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
@@ -6600,7 +6609,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     /* A hidden bottom panel takes every panel control with it; the per-mode
      * visibility set above still applies when it is shown. */
-    for (NSView *panelView in @[_terminalStart, _clearOutput, _terminalStop])
+    for (NSView *panelView in @[_terminalStart, _terminalStop, _clearOutput, _closePanel])
         [panelView setHidden:_panelHidden];
     for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab)
         [[self bottomPanelTabButton:(AxyneBottomPanelTab)tab] setHidden:_panelHidden ||
@@ -7182,6 +7191,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [_outputTab release]; [_problemsTab release]; [_terminalTab release];
     [_debugConsoleTab release];
     [_clearOutput release];
+    [_closePanel release];
     [_problemsView setDelegate:nil];
     [_problemsView removeFromSuperview];
     [_problemsView release];

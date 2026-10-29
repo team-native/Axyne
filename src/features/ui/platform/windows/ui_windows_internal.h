@@ -218,6 +218,8 @@ typedef struct AxyneWindowState {
     HWND shell_view;
     HWND terminal_start;
     HWND terminal_stop;
+    HWND panel_clear;
+    HWND panel_close;
     HWND debug_start;
     HWND debug_pause;
     HWND debug_continue;

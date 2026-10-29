@@ -5,6 +5,7 @@
 HWND axyne_terminal_view_create(HWND parent, HINSTANCE instance);
 AxyneStatus axyne_terminal_view_start(HWND, const AxyneTerminalSpec *, AxyneError *);
 void axyne_terminal_view_stop(HWND);
+void axyne_terminal_view_clear(HWND);
 int axyne_terminal_view_running(HWND);
 AxyneTerminal *axyne_terminal_view_model(HWND);
 void axyne_terminal_view_theme(HWND, HFONT, uint32_t, uint32_t);

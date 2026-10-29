@@ -206,6 +206,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneDiscoveryBox *_chordMonitorBox;
     AxyneDiscoveryBox *_chordTimerBox;
     NSButton *_clearOutput;
+    NSButton *_closePanel;
     NSScrollView *_terminalScroll;
     /* Problems panel: the model (LSP diagnostics + build output) and the
      * list view that paints the rows built from it. */
