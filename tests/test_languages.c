@@ -660,6 +660,35 @@ static int lsp_server_checks(const char *root)
 #endif
     axyne_lsp_server_command_clear(&command);
 
+    /* Kotlin prefers JetBrains kotlin-lsp; Swift falls back to xcrun. */
+    AXYNE_TEST_CONTAINS(axyne_lsp_server_candidates(AXYNE_LANGUAGE_KOTLIN), "kotlin-lsp");
+    AXYNE_TEST_CONTAINS(axyne_lsp_server_candidates(AXYNE_LANGUAGE_SWIFT), "xcrun");
+#ifdef _WIN32
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "kotlin-lsp.exe"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, ""));
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "xcrun.exe"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, ""));
+#else
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "kotlin-lsp"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh\n"));
+    AXYNE_TEST_CHECK(chmod(file, 0755) == 0);
+    AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "xcrun"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh\n"));
+    AXYNE_TEST_CHECK(chmod(file, 0755) == 0);
+#endif
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_KOTLIN, &command, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_STREQ(command.name, "kotlin-lsp");
+    AXYNE_TEST_EQ_INT(command.argument_count, 1);
+    AXYNE_TEST_STREQ(command.arguments[0], "--stdio");
+    axyne_lsp_server_command_clear(&command);
+    AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_SWIFT, &command, &error),
+                      AXYNE_STATUS_OK);
+    AXYNE_TEST_STREQ(command.name, "xcrun");
+    AXYNE_TEST_EQ_INT(command.argument_count, 1);
+    AXYNE_TEST_STREQ(command.arguments[0], "sourcekit-lsp");
+    axyne_lsp_server_command_clear(&command);
+
     /* The environment override wins for every language. */
     AXYNE_TEST_CHECK(set_env("AXYNE_LSP_COMMAND", "clangd"));
     AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_PYTHON, &command, &error),

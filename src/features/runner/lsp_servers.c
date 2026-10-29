@@ -41,10 +41,15 @@ static const LanguageServers servers[AXYNE_LANGUAGE_COUNT] = {
     { "go", { { "gopls", { NULL }, 0 } }, 1, "gopls" },
     { "rust", { { "rust-analyzer", { NULL }, 0 } }, 1, "rust-analyzer" },
     { "slint", { { "slint-lsp", { NULL }, 0 } }, 1, "slint-lsp" },
-    { "kotlin", { { "kotlin-language-server", { NULL }, 0 } }, 1,
-      "kotlin-language-server" },
+    { "kotlin",
+      { { "kotlin-lsp", { "--stdio" }, 1 },
+        { "kotlin-language-server", { NULL }, 0 } }, 2,
+      "kotlin-lsp, kotlin-language-server" },
     { "java", { { "jdtls", { NULL }, 0 } }, 1, "jdtls" },
-    { "swift", { { "sourcekit-lsp", { NULL }, 0 } }, 1, "sourcekit-lsp" },
+    { "swift",
+      { { "sourcekit-lsp", { NULL }, 0 },
+        { "xcrun", { "sourcekit-lsp" }, 1 } }, 2,
+      "sourcekit-lsp (xcrun sourcekit-lsp)" },
     { "c", { { "clangd", { NULL }, 0 } }, 1, "clangd" },
     { "cpp", { { "clangd", { NULL }, 0 } }, 1, "clangd" }
 };
