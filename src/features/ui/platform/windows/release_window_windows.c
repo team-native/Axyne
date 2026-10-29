@@ -62,8 +62,15 @@ static RwJob *rw_start(int kind,int enabled,const char *version){
 static void rw_text(HDC dc,int x,int y,const wchar_t*s,int size,int weight,COLORREF color){
     HFONT f; HGDIOBJ old; LOGFONTW lf={0};lf.lfHeight=-size;lf.lfWeight=weight;wcscpy(lf.lfFaceName,L"Segoe UI");f=CreateFontIndirectW(&lf);old=SelectObject(dc,f);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,color);TextOutW(dc,x,y,s,(int)wcslen(s));SelectObject(dc,old);DeleteObject(f);
 }
+static int rw_text_width(HDC dc,const wchar_t*s,int size,int weight){
+    HFONT f;HGDIOBJ old;LOGFONTW lf={0};SIZE extent={0};lf.lfHeight=-size;lf.lfWeight=weight;wcscpy(lf.lfFaceName,L"Segoe UI");f=CreateFontIndirectW(&lf);if(!f)return 0;old=SelectObject(dc,f);GetTextExtentPoint32W(dc,s,(int)wcslen(s),&extent);SelectObject(dc,old);DeleteObject(f);return extent.cx;
+}
+static void rw_text_ellipsized(HDC dc,const RECT*rect,const wchar_t*s,int size,int weight,COLORREF color){
+    HFONT f;HGDIOBJ old;LOGFONTW lf={0};RECT bounds=*rect;if(!s)return;lf.lfHeight=-size;lf.lfWeight=weight;wcscpy(lf.lfFaceName,L"Segoe UI");f=CreateFontIndirectW(&lf);if(!f)return;old=SelectObject(dc,f);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,color);DrawTextW(dc,s,-1,&bounds,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,old);DeleteObject(f);
+}
 static wchar_t *rw_wide(const char*s){int n;if(!s)return NULL;n=MultiByteToWideChar(CP_UTF8,0,s,-1,NULL,0);if(!n)return NULL;wchar_t*w=(wchar_t*)calloc((size_t)n,sizeof(wchar_t));if(w)MultiByteToWideChar(CP_UTF8,0,s,-1,w,n);return w;}
 static void fill(HDC d,int x,int y,int w,int h,unsigned c){RECT r={x,y,x+w,y+h};HBRUSH b=CreateSolidBrush(rgb(c));FillRect(d,&r,b);DeleteObject(b);}
+static void rw_round_fill(HDC d,int x,int y,int w,int h,int radius,unsigned c){HBRUSH b=CreateSolidBrush(rgb(c));HPEN p=CreatePen(PS_SOLID,1,rgb(c));HGDIOBJ old_b,old_p;if(!b||!p){if(b)DeleteObject(b);if(p)DeleteObject(p);return;}old_b=SelectObject(d,b);old_p=SelectObject(d,p);RoundRect(d,x,y,x+w,y+h,radius*2,radius*2);SelectObject(d,old_p);SelectObject(d,old_b);DeleteObject(p);DeleteObject(b);}
 static HBITMAP rw_asset(int id){
     IWICImagingFactory*f=NULL;IWICBitmapDecoder*dec=NULL;IWICBitmapFrameDecode*frame=NULL;IWICFormatConverter*conv=NULL;IStream*stream=NULL;HGLOBAL hg;void*mem;HRSRC res;DWORD bytes;HRESULT hr;UINT w=0,h=0;BITMAPINFO bi={0};void*bits=NULL;HBITMAP bmp=NULL;
     if(id<4701||id>4704)return NULL;if(rw_assets[id-4700])return rw_assets[id-4700];
@@ -87,10 +94,15 @@ static int visible_index(RwState*s,int n){int k=-1;for(size_t i=0;i<s->catalog.c
 static void rw_paint(HWND w,RwState*s,HDC d){
     RECT rc;GetClientRect(w,&rc);int width=rc.right,height=rc.bottom;fill(d,0,0,width,height,C_BG);
     if(s->kind==RW_TOAST){
-        fill(d,0,0,width,height,0x1b1e22);rw_draw_asset(d,4701,16,14,28,28);rw_text(d,54,16,L"Axyne",13,600,rgb(C_TEXT));
-        rw_text(d,18,40,s->toast_mode==1?L"Update available":s->loading?L"Checking for updates…":s->failed?L"Could not check for updates":L"You're up to date",13,400,rgb(C_TEXT));
-        rw_text(d,18,70,L"Dismiss",11,400,rgb(C_MUTED));
-        if(s->toast_mode==1){rw_text(d,width-176,71,L"Suppress version",10,400,rgb(C_MUTED));rw_text(d,width-80,71,L"View release",10,600,rgb(C_ACCENT_TEXT));}
+        wchar_t heading[256];const char*version_text=s->catalog.latest_version?s->catalog.latest_version:axyne_release_notes_version();wchar_t*version=rw_wide(version_text);if(s->loading)wcscpy(heading,L"Checking for updates…");else swprintf(heading,256,L"Axyne %s",version?version:L"");free(version);
+        const char*message=s->loading?"Checking for updates…":s->failed?"Could not check for updates":s->catalog.message&&s->catalog.message[0]?s->catalog.message:s->catalog.update_available?"A new release is available.":"You are up to date.";wchar_t*detail=rw_wide(message);RECT detail_rect={54,34,width-20,54};
+        fill(d,0,0,width,height,0x22201e);rw_draw_asset(d,4701,16,14,28,28);rw_text(d,54,16,heading,13,600,rgb(C_TEXT));rw_text_ellipsized(d,&detail_rect,detail,11,400,rgb(C_MUTED));free(detail);
+        if(s->toast_mode==1){
+            int secondary_x=width-308,primary_x=width-140;
+            /* Color literals below use Win32 COLORREF byte order (0x00BBGGRR). */
+            rw_round_fill(d,secondary_x,67,160,28,4,0x2b2623);rw_text(d,secondary_x+8,76,L"Don't show this version again",9,400,rgb(C_TEXT));
+            rw_round_fill(d,primary_x,67,128,28,4,0xfa6bb4);rw_text(d,primary_x+10,76,L"View release notes",10,600,rgb(0xffffff));
+        }
         rw_draw_asset(d,4704,width-26,12,10,10);return;
     }
     if(s->kind==RW_RAW){fill(d,0,0,width,32,0x171413);rw_text(d,12,8,L"CHANGELOG — Raw release notes",12,400,rgb(C_TEXT));rw_draw_asset(d,4702,width-28,11,10,10);return;}
@@ -102,7 +114,7 @@ static void rw_paint(HWND w,RwState*s,HDC d){
     for(int i=0;(i=visible_index(s,row))>=0;row++){
         int y=82+row*56-s->scroll;if(y<35||y>height-100)continue;
         if(i==s->selected)fill(d,8,y,204,52,0x2b2623);
-        wchar_t *v=rw_wide(s->catalog.entries[i].version);if(v){rw_text(d,20,y+8,v,13,700,rgb(C_TEXT));free(v);}
+        wchar_t *v=rw_wide(s->catalog.entries[i].version);if(v){if(strcmp(s->catalog.entries[i].version,axyne_release_notes_version())==0){int badge_x=20+rw_text_width(d,v,13,700)+8;if(badge_x<54)badge_x=54;if(badge_x>142)badge_x=142;RECT version_rect={20,y+3,badge_x-8,y+27};rw_text_ellipsized(d,&version_rect,v,13,700,rgb(C_TEXT));rw_round_fill(d,badge_x,y+5,58,18,9,0x552d3b);rw_text(d,badge_x+6,y+7,L"Installed",9,400,rgb(0xfbcce2));}else{RECT version_rect={20,y+3,200,y+27};rw_text_ellipsized(d,&version_rect,v,13,700,rgb(C_TEXT));}free(v);}
         const char*dt=s->catalog.entries[i].published_at;wchar_t*dw=rw_wide(dt);rw_text(d,20,y+30,dw?dw:L"Date unavailable",11,400,rgb(C_MUTED));free(dw);
     }
     fill(d,220,32,1,height-118,C_BORDER);
@@ -124,7 +136,7 @@ static LRESULT CALLBACK rw_proc(HWND w,UINT m,WPARAM wp,LPARAM lp){RwState*s=(Rw
  case WM_PAINT:{PAINTSTRUCT p;HDC d=BeginPaint(w,&p);rw_paint(w,s,d);EndPaint(w,&p);return 0;}
  case WM_CTLCOLOREDIT:if(s&&s->kind==RW_RAW){HDC d=(HDC)wp;static HBRUSH b;if(!b)b=CreateSolidBrush(rgb(0x171413));SetTextColor(d,rgb(C_TEXT));SetBkColor(d,rgb(0x171413));return(LRESULT)b;}break;
  case WM_TIMER:if(s&&s->job&&InterlockedCompareExchange(&s->job->done,0,0)){RwJob*j=s->job;s->job=NULL;if(j->kind==0){axyne_release_catalog_clear(&s->catalog);s->catalog=j->catalog;memset(&j->catalog,0,sizeof(j->catalog));s->failed=j->status!=AXYNE_STATUS_OK;s->loading=0;s->show_after=s->catalog.show_after_update;if(s->kind==RW_TOAST){if(s->catalog.update_available&&s->catalog.suppressed){rw_release(j);DestroyWindow(w);return 0;}s->toast_mode=s->catalog.update_available?1:0;SetTimer(w,RW_TOAST_TIMER,9000,NULL);}else s->selected=s->catalog.count?0:-1;}else if(j->kind==2)s->show_after=j->enabled;rw_release(j);InvalidateRect(w,NULL,FALSE);}else if(s&&wp==RW_TOAST_TIMER)DestroyWindow(w);return 0;
- case WM_LBUTTONUP:if(s){int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);RECT r;GetClientRect(w,&r);if(s->kind==RW_TOAST){if(y<28&&x>r.right-40){DestroyWindow(w);return 0;}if(y>55&&x>r.right-95){HWND owner=s->owner;DestroyWindow(w);axyne_release_ui_open(owner,0);return 0;}if(y>55&&x>r.right-195&&x<r.right-95&&s->catalog.latest_version){RwJob*j=rw_start(1,0,s->catalog.latest_version);if(j)rw_release(j);DestroyWindow(w);return 0;}if(y>55){DestroyWindow(w);return 0;}}
+ case WM_LBUTTONUP:if(s){int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);RECT r;GetClientRect(w,&r);if(s->kind==RW_TOAST){if(y<28&&x>r.right-40){DestroyWindow(w);return 0;}if(y>=67&&y<95&&x>=r.right-140&&x<r.right-12){HWND owner=s->owner;DestroyWindow(w);axyne_release_ui_open(owner,0);return 0;}if(y>=67&&y<95&&x>=r.right-308&&x<r.right-148&&s->catalog.latest_version){RwJob*j=rw_start(1,0,s->catalog.latest_version);if(j)rw_release(j);DestroyWindow(w);return 0;}if(y>55){DestroyWindow(w);return 0;}}
  else if(s->kind==RW_RAW){if(y<32&&x>r.right-42)DestroyWindow(w);}
  else {if(y<32&&x>r.right-42){DestroyWindow(w);return 0;}if(x<220&&y>=82){int idx=(y-82+s->scroll)/56;int actual=visible_index(s,idx);if(actual>=0)s->selected=actual;}else if(y>=120&&y<160&&x>=252){s->filter=(x-252)/89;if(s->filter>4)s->filter=4;}else if(y>r.bottom-82&&x<260){s->show_after=!s->show_after;RwJob*j=rw_start(2,s->show_after,NULL);if(j){if(s->job)rw_release(s->job);s->job=j;}}else if(y>r.bottom-82&&x>r.right-145)DestroyWindow(w);else if(y>r.bottom-82&&x>r.right-310){AxyneReleaseEntry*entry=s->selected>=0&&(size_t)s->selected<s->catalog.count?&s->catalog.entries[s->selected]:NULL;rw_open_raw(w,entry?entry->notes:NULL);}}InvalidateRect(w,NULL,FALSE);}return 0;
  case WM_MOUSEWHEEL:if(s&&s->kind==RW_WINDOW){s->scroll-=GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*48;if(s->scroll<0)s->scroll=0;InvalidateRect(w,NULL,FALSE);}return 0;
