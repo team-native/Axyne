@@ -90,6 +90,18 @@ const char *axyne_plugin_platform(void);
 /* -1/0/1 comparing MAJOR.MINOR.PATCH prefixes (missing parts are 0). */
 int axyne_plugin_version_compare(const char *left, const char *right);
 
+typedef enum AxynePluginMarketplaceVersionState {
+    AXYNE_PLUGIN_MARKETPLACE_NOT_INSTALLED = 0,
+    AXYNE_PLUGIN_MARKETPLACE_VERSION_UNKNOWN,
+    AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE,
+    AXYNE_PLUGIN_MARKETPLACE_UPDATE_AVAILABLE
+} AxynePluginMarketplaceVersionState;
+
+/* Classifies catalog and installed versions without treating missing catalog
+ * metadata as proof that an installed plugin is up to date. */
+AxynePluginMarketplaceVersionState axyne_plugin_marketplace_version_state(
+    const char *marketplace_version, const char *installed_version);
+
 /* Parses manifest JSON. `directory` becomes plugin->directory. Requires id
  * (lower-case slug), name and MAJOR.MINOR.PATCH version; INVALID_ARGUMENT
  * otherwise. enabled = 1, compatible is computed against `ide_version`. */
@@ -125,6 +137,13 @@ AxyneStatus axyne_plugins_uninstall(AxynePluginSet *set, const char *id,
 AxyneStatus axyne_plugins_install_zip(AxynePluginSet *set, const char *zip_path,
                                       const char *ide_version, char **installed_id,
                                       AxyneError *error);
+
+/* Marketplace install: when expected_id is non-NULL, the staged manifest
+ * must match it and be strictly newer than any installed copy on disk.
+ * Both checks happen before replacement. NULL preserves local ZIP behavior. */
+AxyneStatus axyne_plugins_install_zip_expected(AxynePluginSet *set, const char *zip_path,
+                                               const char *ide_version, const char *expected_id,
+                                               char **installed_id, AxyneError *error);
 
 /* 1 when `command` applies to the file at `path` (NULL = no file). */
 int axyne_plugin_command_applies(const AxynePluginCommand *command, const char *path);

@@ -4,21 +4,85 @@
 #include "axyne/settings.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <stdatomic.h>
+#endif
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #define AXYNE_PLUGIN_SEP '\\'
+static wchar_t *wide_path(const char *path);
 #else
 #include <dirent.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #define AXYNE_PLUGIN_SEP '/'
+#endif
+
+#ifdef AXYNE_PLUGINS_TESTING
+static unsigned test_rename_calls;
+static unsigned test_rename_failure_mask;
+static int test_backup_collision_armed;
+static char test_occupied_backup_path[2048];
+
+int axyne_plugins_test_should_fail_rename(void)
+{
+    unsigned call = ++test_rename_calls;
+    return call <= 32 && (test_rename_failure_mask & (1u << (call - 1))) != 0;
+}
+
+int axyne_plugins_test_occupy_backup(const char *path)
+{
+    if (!test_backup_collision_armed) return 0;
+    test_backup_collision_armed = 0;
+    (void)snprintf(test_occupied_backup_path, sizeof(test_occupied_backup_path), "%s", path);
+#ifdef _WIN32
+    {
+        FILE *file;
+        wchar_t *wide = wide_path(path);
+        errno_t result;
+        if (wide == NULL) return -1;
+        result = _wfopen_s(&file, wide, L"wb");
+        free(wide);
+        if (result != 0) return -1;
+        (void)fputs("occupied", file);
+        return fclose(file) == 0 ? 0 : -1;
+    }
+#else
+    return symlink("axyne-missing-target", path) == 0 ? 0 : -1;
+#endif
+}
+
+const char *axyne_plugins_test_last_occupied_backup_path(void)
+{
+    return test_occupied_backup_path;
+}
+
+void axyne_plugins_test_set_rename_failure_mask(unsigned mask)
+{
+    test_rename_calls = 0;
+    test_rename_failure_mask = mask;
+}
+
+void axyne_plugins_test_arm_backup_collision(void)
+{
+    test_backup_collision_armed = 1;
+}
+
+void axyne_plugins_test_reset(void)
+{
+    test_rename_calls = 0;
+    test_rename_failure_mask = 0;
+    test_backup_collision_armed = 0;
+    test_occupied_backup_path[0] = '\0';
+}
 #endif
 
 /* ---- small helpers ------------------------------------------------------- */
@@ -111,6 +175,17 @@ int axyne_plugin_version_compare(const char *left, const char *right)
         if (*b == '.') ++b;
     }
     return 0;
+}
+
+AxynePluginMarketplaceVersionState axyne_plugin_marketplace_version_state(
+    const char *marketplace_version, const char *installed_version)
+{
+    if (installed_version == NULL) return AXYNE_PLUGIN_MARKETPLACE_NOT_INSTALLED;
+    if (marketplace_version == NULL || marketplace_version[0] == '\0')
+        return AXYNE_PLUGIN_MARKETPLACE_VERSION_UNKNOWN;
+    return axyne_plugin_version_compare(marketplace_version, installed_version) <= 0
+               ? AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE
+               : AXYNE_PLUGIN_MARKETPLACE_UPDATE_AVAILABLE;
 }
 
 /* ---- file system ---------------------------------------------------------- */
@@ -294,6 +369,10 @@ static int remove_tree(const char *path)
 
 static int rename_path(const char *from, const char *to)
 {
+#ifdef AXYNE_PLUGINS_TESTING
+    extern int axyne_plugins_test_should_fail_rename(void);
+    if (axyne_plugins_test_should_fail_rename()) return 0;
+#endif
 #ifdef _WIN32
     wchar_t *a = wide_path(from), *b = wide_path(to);
     int ok = a != NULL && b != NULL && MoveFileExW(a, b, 0);
@@ -302,6 +381,81 @@ static int rename_path(const char *from, const char *to)
 #else
     return rename(from, to) == 0;
 #endif
+}
+
+static int create_directory_exclusive(const char *path)
+{
+#ifdef _WIN32
+    wchar_t *wide = wide_path(path);
+    DWORD error;
+    int created;
+    if (wide == NULL) return -1;
+    created = CreateDirectoryW(wide, NULL) != 0;
+    error = created ? ERROR_SUCCESS : GetLastError();
+    free(wide);
+    if (created) return 1;
+    return error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS ? 0 : -1;
+#else
+    if (mkdir(path, 0700) == 0) return 1;
+    return errno == EEXIST ? 0 : -1;
+#endif
+}
+
+#ifdef _WIN32
+static volatile LONG install_counter;
+static unsigned next_install_counter(void)
+{
+    return (unsigned)InterlockedIncrement(&install_counter);
+}
+#else
+static atomic_uint install_counter;
+static unsigned next_install_counter(void)
+{
+    return atomic_fetch_add_explicit(&install_counter, 1, memory_order_relaxed) + 1;
+}
+#endif
+
+static AxyneStatus reserve_unique_directory(const char *parent, const char *prefix,
+                                            int recovery, char **reserved_path,
+                                            AxyneError *error)
+{
+    unsigned attempt;
+    *reserved_path = NULL;
+    for (attempt = 0; attempt < 64; ++attempt) {
+        char name[80];
+        char *path;
+        int reserved;
+        (void)snprintf(name, sizeof(name), "%s-%lu-%u", prefix,
+#ifdef _WIN32
+                       (unsigned long)GetCurrentProcessId(),
+#else
+                       (unsigned long)getpid(),
+#endif
+                       next_install_counter());
+        path = join_path(parent, name);
+        if (path == NULL) return plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
+#ifdef AXYNE_PLUGINS_TESTING
+        if (recovery) {
+            extern int axyne_plugins_test_occupy_backup(const char *path);
+            if (axyne_plugins_test_occupy_backup(path) != 0) {
+                free(path);
+                return plugin_error(error, AXYNE_STATUS_IO_ERROR,
+                                    "cannot prepare the injected recovery-path collision");
+            }
+        }
+#else
+        (void)recovery;
+#endif
+        reserved = create_directory_exclusive(path);
+        if (reserved == 1) {
+            *reserved_path = path;
+            return AXYNE_STATUS_OK;
+        }
+        free(path);
+        if (reserved < 0)
+            return plugin_error(error, AXYNE_STATUS_IO_ERROR, "cannot reserve a plugin transaction folder");
+    }
+    return plugin_error(error, AXYNE_STATUS_IO_ERROR, "cannot reserve a unique plugin transaction folder");
 }
 
 static char *read_file(const char *path, size_t *length)
@@ -835,31 +989,28 @@ static AxyneStatus extract_zip(const char *zip_path, const char *destination, Ax
 AxyneStatus axyne_plugins_install_zip(AxynePluginSet *set, const char *zip_path, const char *ide_version,
                                       char **installed_id, AxyneError *error)
 {
-    char staging_name[64];
-    char *staging = NULL, *target = NULL, *backup = NULL;
+    return axyne_plugins_install_zip_expected(set, zip_path, ide_version, NULL, installed_id, error);
+}
+
+AxyneStatus axyne_plugins_install_zip_expected(AxynePluginSet *set, const char *zip_path,
+                                               const char *ide_version, const char *expected_id,
+                                               char **installed_id, AxyneError *error)
+{
+    char *staging = NULL, *target = NULL, *backup = NULL, *backup_previous = NULL;
     AxynePlugin *plugin = NULL;
     AxynePlugin *existing;
     AxyneStatus status;
     int was_enabled = 1;
-    static unsigned counter;
+    int previous_moved = 0;
+    int backup_preserved = 0;
     if (installed_id != NULL) *installed_id = NULL;
     if (set == NULL || set->plugins_dir == NULL || zip_path == NULL)
         return plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "a loaded plugin set and a package are required");
     if (!is_file(zip_path)) return plugin_error(error, AXYNE_STATUS_NOT_FOUND, "package %s was not found", zip_path);
     if (!make_directories(set->plugins_dir))
         return plugin_error(error, AXYNE_STATUS_IO_ERROR, "cannot create %s", set->plugins_dir);
-    (void)snprintf(staging_name, sizeof(staging_name), ".install-%lu-%u",
-#ifdef _WIN32
-                   (unsigned long)GetCurrentProcessId(),
-#else
-                   (unsigned long)getpid(),
-#endif
-                   ++counter);
-    staging = join_path(set->plugins_dir, staging_name);
-    if (staging == NULL) return plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
-    (void)remove_tree(staging);
-    if (!make_directories(staging)) { free(staging); return plugin_error(error, AXYNE_STATUS_IO_ERROR, "cannot create a staging folder"); }
-
+    status = reserve_unique_directory(set->plugins_dir, ".install", 0, &staging, error);
+    if (status != AXYNE_STATUS_OK) return status;
     status = extract_zip(zip_path, staging, error);
     if (status == AXYNE_STATUS_OK) {
         plugin = load_plugin_dir(staging, ide_version, error);
@@ -868,26 +1019,59 @@ AxyneStatus axyne_plugins_install_zip(AxynePluginSet *set, const char *zip_path,
     if (status == AXYNE_STATUS_OK && !plugin->compatible)
         status = plugin_error(error, AXYNE_STATUS_UNSUPPORTED,
                               "%s %s does not support this platform or IDE version", plugin->name, plugin->version);
+    if (status == AXYNE_STATUS_OK && expected_id != NULL && strcmp(plugin->id, expected_id) != 0)
+        status = plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                              "package id %s does not match expected id %s", plugin->id, expected_id);
     if (status == AXYNE_STATUS_OK) {
         target = join_path(set->plugins_dir, plugin->id);
-        backup = join_path(set->plugins_dir, ".previous");
-        if (target == NULL || backup == NULL) status = plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
+        if (target == NULL) status = plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
+    }
+    if (status == AXYNE_STATUS_OK && expected_id != NULL && is_directory(target)) {
+        /* The in-memory set may predate this download. Recheck the actual
+         * installed manifest before moving either directory. */
+        AxynePlugin *current = load_plugin_dir(target, ide_version, error);
+        if (current == NULL)
+            status = error != NULL ? error->code : AXYNE_STATUS_INVALID_ARGUMENT;
+        else if (axyne_plugin_version_compare(plugin->version, current->version) <= 0)
+            status = plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT,
+                                  "package version %s must be newer than installed version %s",
+                                  plugin->version, current->version);
+        axyne_plugin_free(current);
+    }
+    if (status == AXYNE_STATUS_OK) {
+        status = reserve_unique_directory(set->plugins_dir, ".previous", 1, &backup, error);
+        if (status == AXYNE_STATUS_OK) {
+            backup_previous = join_path(backup, "previous");
+            if (backup_previous == NULL)
+                status = plugin_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
+        }
     }
     if (status == AXYNE_STATUS_OK) {
         existing = axyne_plugins_find(set, plugin->id);
         if (existing != NULL) was_enabled = existing->enabled;
-        (void)remove_tree(backup);
         /* Keep the old copy until the new one is in place. */
-        if (is_directory(target) && !rename_path(target, backup))
-            status = plugin_error(error, AXYNE_STATUS_IO_ERROR,
-                                  "cannot replace %s (is a plugin process still running?)", target);
-        else if (!rename_path(staging, target)) {
-            (void)rename_path(backup, target);
-            status = plugin_error(error, AXYNE_STATUS_IO_ERROR, "cannot move the plugin into %s", target);
-        } else {
-            (void)remove_tree(backup);
+        if (status == AXYNE_STATUS_OK && is_directory(target)) {
+            if (!rename_path(target, backup_previous))
+                status = plugin_error(error, AXYNE_STATUS_IO_ERROR,
+                                      "cannot replace %s (is a plugin process still running?)", target);
+            else
+                previous_moved = 1;
+        }
+        if (status == AXYNE_STATUS_OK) {
+            if (!rename_path(staging, target)) {
+                if (previous_moved && !rename_path(backup_previous, target)) {
+                    backup_preserved = 1;
+                    status = plugin_error(error, AXYNE_STATUS_IO_ERROR,
+                                          "cannot move the plugin into %s; previous installation is preserved at %s",
+                                          target, backup_previous);
+                } else {
+                    status = plugin_error(error, AXYNE_STATUS_IO_ERROR,
+                                          "cannot move the plugin into %s", target);
+                }
+            }
         }
     }
+    if (backup != NULL && !backup_preserved) (void)remove_tree(backup);
     (void)remove_tree(staging);
     if (status == AXYNE_STATUS_OK) {
         char *id = copy_text(plugin->id);
@@ -906,7 +1090,7 @@ AxyneStatus axyne_plugins_install_zip(AxynePluginSet *set, const char *zip_path,
         else free(id);
     }
     axyne_plugin_free(plugin);
-    free(staging); free(target); free(backup);
+    free(staging); free(target); free(backup); free(backup_previous);
     if (status == AXYNE_STATUS_OK) plugin_ok(error);
     return status;
 }

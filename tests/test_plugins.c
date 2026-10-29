@@ -3,8 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "axyne/plugins.h"
+#include "plugins_test_hooks.h"
 
 static const char *const manifest =
     "{\"id\":\"demo-preview\",\"name\":\"Demo Preview\",\"version\":\"1.2.0\","
@@ -50,6 +54,11 @@ static int parse_checks(void)
     AXYNE_TEST_CHECK(axyne_plugin_parse("not json", 8, "/p", "", &error) == NULL);
     AXYNE_TEST_EQ_INT(axyne_plugin_version_compare("0.10.0", "0.9.9"), 1);
     AXYNE_TEST_EQ_INT(axyne_plugin_version_compare("1.0.0", "1.0"), 0);
+    AXYNE_TEST_EQ_INT(axyne_plugin_marketplace_version_state(NULL, NULL), AXYNE_PLUGIN_MARKETPLACE_NOT_INSTALLED);
+    AXYNE_TEST_EQ_INT(axyne_plugin_marketplace_version_state(NULL, "1.0.0"), AXYNE_PLUGIN_MARKETPLACE_VERSION_UNKNOWN);
+    AXYNE_TEST_EQ_INT(axyne_plugin_marketplace_version_state("", "1.0.0"), AXYNE_PLUGIN_MARKETPLACE_VERSION_UNKNOWN);
+    AXYNE_TEST_EQ_INT(axyne_plugin_marketplace_version_state("1.0.0", "1.0.0"), AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE);
+    AXYNE_TEST_EQ_INT(axyne_plugin_marketplace_version_state("1.2.0", "1.0.0"), AXYNE_PLUGIN_MARKETPLACE_UPDATE_AVAILABLE);
     return 1;
 }
 
@@ -204,11 +213,145 @@ static int set_checks(const char *root)
         (void)snprintf(command, sizeof(command), "cd '%s' && /usr/bin/ditto -c -k manifest.json '%s'", source, package);
 #endif
         AXYNE_TEST_EQ_INT(system(command), 0);
+        /* A package for another selected slug must not replace zeta. */
+        AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, package, "0.1.0", "alpha", &installed, &error),
+                          AXYNE_STATUS_INVALID_ARGUMENT);
+        AXYNE_TEST_CHECK(installed == NULL);
+        AXYNE_TEST_STREQ(axyne_plugins_find(&set, "zeta")->version, "1.0.0");
+        {
+            char path[1024];
+            AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), one, "manifest.json"));
+            AXYNE_TEST_CHECK(axyne_test_read_equals(path, "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.0.0\"}"));
+        }
+        AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, package, "0.1.0", "zeta", &installed, &error),
+                          AXYNE_STATUS_OK);
+        free(installed);
+        installed = NULL;
+        /* Equal versions are stale updates, even when the manifest differs. */
+        AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, package, "0.1.0", "zeta", &installed, &error),
+                          AXYNE_STATUS_INVALID_ARGUMENT);
+        AXYNE_TEST_CHECK(installed == NULL);
+        /* Simulate an installed version changing after the list was loaded. */
+        {
+            char path[1024];
+            AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), one, "manifest.json"));
+            AXYNE_TEST_CHECK(axyne_test_write(path, "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.10.0\"}"));
+        }
+        AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, package, "0.1.0", "zeta", &installed, &error),
+                          AXYNE_STATUS_INVALID_ARGUMENT);
+        AXYNE_TEST_CHECK(installed == NULL);
+        {
+            char path[1024];
+            AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), one, "manifest.json"));
+            AXYNE_TEST_CHECK(axyne_test_read_equals(path, "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.10.0\"}"));
+        }
+        /* An explicit local ZIP install still permits a reinstall/downgrade. */
         AXYNE_TEST_STATUS(axyne_plugins_install_zip(&set, package, "0.1.0", &installed, &error), AXYNE_STATUS_OK);
         AXYNE_TEST_STREQ(installed, "zeta");
         free(installed);
         AXYNE_TEST_STREQ(axyne_plugins_find(&set, "zeta")->version, "1.1.0");
         AXYNE_TEST_EQ_INT(axyne_plugins_find(&set, "zeta")->enabled, 0); /* kept disabled */
+        {
+            char update_source[1024], update_package[1024];
+            char message[2048];
+            char *backup_marker;
+            AXYNE_TEST_CHECK(axyne_test_path(update_source, sizeof(update_source), root, "package-update"));
+            AXYNE_TEST_CHECK(write_manifest(update_source,
+                "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.2.0\"}"));
+            AXYNE_TEST_CHECK(axyne_test_path(update_package, sizeof(update_package), root, "zeta-update.zip"));
+#ifdef _WIN32
+            (void)snprintf(command, sizeof(command), "tar -a -cf \"%s\" -C \"%s\" manifest.json", update_package, update_source);
+#else
+            (void)snprintf(command, sizeof(command), "cd '%s' && /usr/bin/ditto -c -k manifest.json '%s'", update_source, update_package);
+#endif
+            AXYNE_TEST_EQ_INT(system(command), 0);
+
+            /* A staging move failure restores the original installation. */
+            axyne_plugins_test_reset();
+            axyne_plugins_test_set_rename_failure_mask(1u << 1);
+            AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, update_package, "0.1.0", "zeta", &installed, &error),
+                              AXYNE_STATUS_IO_ERROR);
+            axyne_plugins_test_reset();
+            AXYNE_TEST_CHECK(installed == NULL);
+            AXYNE_TEST_CONTAINS(error.message, "cannot move the plugin into");
+            AXYNE_TEST_STREQ(axyne_plugins_find(&set, "zeta")->version, "1.1.0");
+            {
+                char path[1024];
+                AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), one, "manifest.json"));
+                AXYNE_TEST_CHECK(axyne_test_read_equals(path,
+                    "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.1.0\"}"));
+            }
+
+            /* Failure of the first move leaves the original in place and removes the reservation. */
+            axyne_plugins_test_reset();
+            axyne_plugins_test_set_rename_failure_mask(1u << 0);
+            AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, update_package, "0.1.0", "zeta", &installed, &error),
+                              AXYNE_STATUS_IO_ERROR);
+            axyne_plugins_test_reset();
+            AXYNE_TEST_CHECK(installed == NULL);
+            AXYNE_TEST_CONTAINS(error.message, "cannot replace");
+            AXYNE_TEST_STREQ(axyne_plugins_find(&set, "zeta")->version, "1.1.0");
+            {
+                AxyneDirectoryList entries = {0};
+                int no_recovery_dirs = 1;
+                AXYNE_TEST_STATUS(axyne_fs_list_directory(plugins, &entries, &error), AXYNE_STATUS_OK);
+                for (size_t i = 0; i < entries.count; ++i)
+                    if (strncmp(entries.entries[i].name, ".previous-", 10) == 0)
+                        no_recovery_dirs = 0;
+                axyne_fs_free_directory_list(&entries);
+                AXYNE_TEST_CHECK(no_recovery_dirs);
+            }
+
+            /* A dangling-symlink collision during update is skipped; rollback restores the old manifest. */
+            axyne_plugins_test_reset();
+            axyne_plugins_test_arm_backup_collision();
+            axyne_plugins_test_set_rename_failure_mask(1u << 1);
+            AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, update_package, "0.1.0", "zeta", &installed, &error),
+                              AXYNE_STATUS_IO_ERROR);
+            AXYNE_TEST_CHECK(installed == NULL);
+            AXYNE_TEST_CONTAINS(error.message, "cannot move the plugin into");
+            {
+                const char *occupied = axyne_plugins_test_last_occupied_backup_path();
+                AXYNE_TEST_CHECK(occupied != NULL && occupied[0] != '\0');
+#ifdef _WIN32
+                AXYNE_TEST_CHECK(axyne_test_read_equals(occupied, "occupied"));
+#else
+                {
+                    char target[64];
+                    ssize_t length = readlink(occupied, target, sizeof(target) - 1);
+                    AXYNE_TEST_CHECK(length > 0);
+                    target[length] = '\0';
+                    AXYNE_TEST_STREQ(target, "axyne-missing-target");
+                }
+#endif
+            }
+            axyne_plugins_test_reset();
+            AXYNE_TEST_STREQ(axyne_plugins_find(&set, "zeta")->version, "1.1.0");
+            {
+                char path[1024];
+                AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), one, "manifest.json"));
+                AXYNE_TEST_CHECK(axyne_test_read_equals(path,
+                    "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.1.0\"}"));
+            }
+
+            /* If rollback itself fails, the previous directory remains at the reported path. */
+            axyne_plugins_test_set_rename_failure_mask((1u << 1) | (1u << 2));
+            AXYNE_TEST_STATUS(axyne_plugins_install_zip_expected(&set, update_package, "0.1.0", "zeta", &installed, &error),
+                              AXYNE_STATUS_IO_ERROR);
+            axyne_plugins_test_reset();
+            AXYNE_TEST_CHECK(installed == NULL);
+            backup_marker = strstr(error.message, "previous installation is preserved at ");
+            AXYNE_TEST_CHECK(backup_marker != NULL);
+            backup_marker += strlen("previous installation is preserved at ");
+            AXYNE_TEST_CHECK(strlen(backup_marker) < sizeof(message));
+            (void)snprintf(message, sizeof(message), "%s", backup_marker);
+            {
+                char path[2048];
+                AXYNE_TEST_CHECK(axyne_test_path(path, sizeof(path), message, "manifest.json"));
+                AXYNE_TEST_CHECK(axyne_test_read_equals(path,
+                    "{\"id\":\"zeta\",\"name\":\"Zeta\",\"version\":\"1.1.0\"}"));
+            }
+        }
         AXYNE_TEST_STATUS(axyne_plugins_install_zip(&set, "missing.zip", "0.1.0", NULL, &error),
                           AXYNE_STATUS_NOT_FOUND);
     }
