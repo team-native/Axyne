@@ -9283,8 +9283,8 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
         AxyneMemoryUsage memory;
         LRESULT line = 0, column = 0, eol = SC_EOL_LF, codepage = SC_CP_UTF8;
         const wchar_t *eol_name = L"LF";
-        int bar_width = 96;
-        int bar_left = width - 12 - bar_width;
+        int bar_width = 60; /* Figma meter: 60x5, 8px after the text, 14px inset */
+        int bar_left = width - 14 - bar_width;
         int metadata_right;
         int metadata_left;
         RECT rect;
@@ -9336,7 +9336,7 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
             metadata[0] = L'\0';
         }
         axyne_fill(dc, status_metadata_left, status_top, width, height, AXYNE_STATUS_BG);
-        metadata_right = bar_left - 16 - axyne_measure_text(state->font_small, gauge_wide);
+        metadata_right = bar_left - 20 - axyne_measure_text(state->font_small, gauge_wide);
         metadata_left = max(status_metadata_left,
                             metadata_right - axyne_measure_text(state->font_small, metadata) - 4);
         rect.left = metadata_left;
@@ -9345,10 +9345,10 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
         rect.bottom = height;
         axyne_text_rect(dc, state->font_small, AXYNE_TEXT, rect, metadata, DT_RIGHT | DT_END_ELLIPSIS);
         rect.left = metadata_right + 4;
-        rect.right = bar_left - 4;
+        rect.right = bar_left - 8;
         axyne_text_rect(dc, state->font_small, AXYNE_TEXT, rect, gauge_wide, DT_RIGHT);
-        axyne_round_fill(dc, bar_left, status_top + 8, width - 12, status_top + 16,
-                         4, axyne_blend(AXYNE_STATUS_BG, AXYNE_TEXT, 20),
+        axyne_round_fill(dc, bar_left, status_top + 10, bar_left + bar_width, status_top + 15,
+                         3, axyne_blend(AXYNE_STATUS_BG, AXYNE_TEXT, 20),
                          axyne_blend(AXYNE_STATUS_BG, AXYNE_TEXT, 20));
         {
             int fill = (int)((double)bar_width * (double)memory.resident_bytes /
@@ -9357,8 +9357,8 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
                 AXYNE_MEMORY_LEVEL_NORMAL ? AXYNE_ACCENT : AXYNE_RUN_TEXT;
             if (fill > bar_width) fill = bar_width;
             if (fill > 0)
-                axyne_round_fill(dc, bar_left, status_top + 8, bar_left + fill,
-                                 status_top + 16, 4, fill_color, fill_color);
+                axyne_round_fill(dc, bar_left, status_top + 10, bar_left + fill,
+                                 status_top + 15, 3, fill_color, fill_color);
         }
     }
 }

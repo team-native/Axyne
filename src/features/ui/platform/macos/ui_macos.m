@@ -7226,7 +7226,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         NSString *metadata;
         NSFont *statusFont = [NSFont fontWithName:@"SF Pro Text" size:11];
         NSDictionary *statusAttributes;
-        CGFloat memoryWidth, metadataWidth, barWidth = 96;
+        CGFloat memoryWidth, metadataWidth, barWidth = 60;
         CGFloat cursorX;
         CGFloat fillWidth;
 
@@ -7266,23 +7266,23 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             : @"";
         statusAttributes = @{NSFontAttributeName: statusFont != nil ? statusFont : [NSFont systemFontOfSize:11]};
         memoryWidth = [[NSString stringWithUTF8String:gauge] sizeWithAttributes:statusAttributes].width;
-        cursorX = width - 12 - barWidth;
+        cursorX = width - 14 - barWidth;
         metadata = [self label:metadata fittingWidth:MAX(0,
-            cursorX - 10 - memoryWidth - 18 - 180)
+            cursorX - 8 - memoryWidth - 18 - 180)
             size:11 family:@"SF Pro Text"];
         metadataWidth = [metadata sizeWithAttributes:statusAttributes].width;
         [axyne_preference_color(_preferences.theme.toolbar) setFill];
         NSRectFill(NSMakeRect(180, statusTop, MAX(0, width - 180), AXYNE_STATUS));
         [[axyne_preference_color(0x343942) colorWithAlphaComponent:1.0] setFill];
-        NSRectFill(NSMakeRect(cursorX, statusTop + 8, barWidth, 8));
+        NSRectFill(NSMakeRect(cursorX, statusTop + 10, barWidth, 5));
         fillWidth = MIN(barWidth, barWidth * (CGFloat)memory.resident_bytes /
             (CGFloat)AXYNE_MEMORY_BUDGET_BYTES);
         if (fillWidth > 0) {
             [axyne_preference_color(axyne_memory_usage_level(memory.resident_bytes) ==
                 AXYNE_MEMORY_LEVEL_NORMAL ? 0xa66bf0 : 0xe5a445) setFill];
-            NSRectFill(NSMakeRect(cursorX, statusTop + 8, fillWidth, 8));
+            NSRectFill(NSMakeRect(cursorX, statusTop + 10, fillWidth, 5));
         }
-        cursorX -= 10 + memoryWidth;
+        cursorX -= 8 + memoryWidth;
         [self drawLabel:[NSString stringWithUTF8String:gauge]
             at:NSMakePoint(cursorX, statusTop + 5) size:11 color:text family:@"SF Pro Text"];
         cursorX -= 18 + metadataWidth;
