@@ -10,6 +10,7 @@
 
 int axyne_test_documents_search(const char *root);
 int axyne_test_settings_preferences(const char *root);
+int axyne_test_runner_profiles(const char *root);
 int axyne_test_runner_git_lsp(const char *root, const char *source_root);
 int axyne_test_process_stability(const char *root);
 int axyne_test_git_repair(const char *root);
@@ -73,6 +74,8 @@ int main(int argc, char **argv)
         return axyne_test_documents_search(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "settings-preferences") == 0)
         return axyne_test_settings_preferences(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (strcmp(argv[1], "runner-profiles") == 0)
+        return axyne_test_runner_profiles(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "runner-git-lsp") == 0 && argc >= 4)
         return axyne_test_runner_git_lsp(root, argv[3]) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "process-stability") == 0)

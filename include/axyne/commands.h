@@ -20,17 +20,17 @@ extern "C" {
  * understood by axyne_key_sequence_parse (keymap.h): "Ctrl+Shift+S",
  * "Ctrl+K Ctrl+O" (two-stroke chord), "Cmd+Alt+Z", "F5". */
 
-typedef enum AxynePlatform {
-    AXYNE_PLATFORM_WINDOWS = 1,
-    AXYNE_PLATFORM_MACOS = 2
-} AxynePlatform;
+typedef enum AxyneCommandPlatform {
+    AXYNE_COMMAND_PLATFORM_WINDOWS = 1,
+    AXYNE_COMMAND_PLATFORM_MACOS = 2
+} AxyneCommandPlatform;
 
 /* Platform mask for AxyneCommandInfo.platforms. */
-enum { AXYNE_PLATFORM_BOTH = AXYNE_PLATFORM_WINDOWS | AXYNE_PLATFORM_MACOS };
+enum { AXYNE_COMMAND_PLATFORM_BOTH = AXYNE_COMMAND_PLATFORM_WINDOWS | AXYNE_COMMAND_PLATFORM_MACOS };
 
 /* The platform this translation unit was built for. Every non-Apple build
- * (including the Linux test build) reports AXYNE_PLATFORM_WINDOWS. */
-AxynePlatform axyne_platform_current(void);
+ * (including the Linux test build) reports AXYNE_COMMAND_PLATFORM_WINDOWS. */
+AxyneCommandPlatform axyne_command_platform_current(void);
 
 /* Top-level menu an entry belongs to (CONTEXT = explorer context menu). */
 typedef enum AxyneCommandGroup {
@@ -217,7 +217,7 @@ typedef struct AxyneCommandInfo {
     const char *keywords;  /* English palette keywords, space separated */
     AxyneCommandGroup group;
     unsigned flags;        /* AXYNE_COMMAND_FLAG_* */
-    unsigned platforms;    /* AXYNE_PLATFORM_* mask */
+    unsigned platforms;    /* AXYNE_COMMAND_PLATFORM_* mask */
     /* Default key sequences (canonical text), [0] primary shown in menus,
      * [1] alias; NULL = none. */
     const char *windows_keys[AXYNE_COMMAND_DEFAULT_KEYS];
@@ -240,12 +240,12 @@ AxyneCommandId axyne_command_id(const char *name);
 /* "" for an unknown id. */
 const char *axyne_command_name(AxyneCommandId id);
 /* The title shown on `platform` ("" for an unknown id). */
-const char *axyne_command_title(AxyneCommandId id, AxynePlatform platform);
+const char *axyne_command_title(AxyneCommandId id, AxyneCommandPlatform platform);
 /* Non-zero when the command exists on `platform`. */
-int axyne_command_available(AxyneCommandId id, AxynePlatform platform);
+int axyne_command_available(AxyneCommandId id, AxyneCommandPlatform platform);
 /* Default key sequence `index` (0 primary, 1 alias) on `platform`, or NULL. */
 const char *axyne_command_default_keys(AxyneCommandId id,
-                                       AxynePlatform platform, size_t index);
+                                       AxyneCommandPlatform platform, size_t index);
 /* Mapping from the palette command table and from the 11 legacy preference
  * actions; AXYNE_COMMAND_NONE when there is no mapping. */
 AxyneCommandId axyne_command_from_palette(int palette_id);
