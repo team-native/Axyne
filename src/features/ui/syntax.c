@@ -388,3 +388,34 @@ const AxyneSyntaxLanguage *axyne_syntax_for_path(const char *path)
     id = extension_language(dot + 1, strlen(dot + 1));
     return axyne_syntax_by_id(id != NULL ? id : "text");
 }
+
+static int style_in(unsigned int style, const unsigned char *list, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; ++i)
+        if (list[i] == style) return 1;
+    return 0;
+}
+
+int axyne_syntax_style_is_text(const AxyneSyntaxLanguage *language,
+                               unsigned int style)
+{
+    /* Comment and string styles of each lexer; see the SCE_* notes above
+     * (cpp also: string EOL 12, verbatim 13, doc keywords 17/18, raw 20). */
+    static const unsigned char cpp[] = { 1, 2, 3, 6, 7, 12, 13, 15, 17, 18, 20 };
+    static const unsigned char python[] = { 1, 3, 4, 6, 7, 12, 13, 16, 17, 18, 19 };
+    static const unsigned char html[] = { 6, 7, 9, 42, 43, 44, 48, 49 };
+    static const unsigned char bash[] = { 2, 5, 6 };
+    static const unsigned char css[] = { 9, 13, 14 };
+    static const unsigned char cmake[] = { 1, 2, 3, 4 };
+    if (language == NULL || language->lexer == NULL) return 0;
+#define AXYNE_STYLE_IN(list) style_in(style, list, sizeof(list))
+    if (strcmp(language->lexer, "cpp") == 0) return AXYNE_STYLE_IN(cpp);
+    if (strcmp(language->lexer, "python") == 0) return AXYNE_STYLE_IN(python);
+    if (strcmp(language->lexer, "hypertext") == 0) return AXYNE_STYLE_IN(html);
+    if (strcmp(language->lexer, "bash") == 0) return AXYNE_STYLE_IN(bash);
+    if (strcmp(language->lexer, "css") == 0) return AXYNE_STYLE_IN(css);
+    if (strcmp(language->lexer, "cmake") == 0) return AXYNE_STYLE_IN(cmake);
+#undef AXYNE_STYLE_IN
+    return 0;
+}

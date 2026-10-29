@@ -74,6 +74,12 @@ int main(void)
             CHECK(axyne_syntax_style_bold(md, style) == (style >= 6 && style <= 11));
         CHECK(!axyne_syntax_style_bold(axyne_syntax_by_id("cpp"), 6));
         CHECK(!axyne_syntax_style_bold(NULL, 6));
+        CHECK(axyne_syntax_style_is_text(axyne_syntax_by_id("cpp"), 1));
+        CHECK(axyne_syntax_style_is_text(axyne_syntax_by_id("cpp"), 6));
+        CHECK(!axyne_syntax_style_is_text(axyne_syntax_by_id("cpp"), 11));
+        CHECK(axyne_syntax_style_is_text(axyne_syntax_by_id("python"), 3));
+        CHECK(!axyne_syntax_style_is_text(axyne_syntax_by_id("python"), 11));
+        CHECK(!axyne_syntax_style_is_text(NULL, 1));
         CHECK(cmake != NULL && cmake->keywords[0] != NULL &&
               strstr(cmake->keywords[0], "target_link_options") != NULL);
         CHECK(cmake != NULL && cmake->keywords[2] != NULL &&
