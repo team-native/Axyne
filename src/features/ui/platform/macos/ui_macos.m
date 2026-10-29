@@ -1447,17 +1447,6 @@ static void axyne_macos_lsp_diagnostics(AxyneLspClient *client, const char *path
     });
 }
 
-static void axyne_macos_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
-                                       const AxyneLspLocation *locations,
-                                       size_t count, void *user_data)
-{
-    char text[160];
-    (void)client; (void)locations;
-    (void)snprintf(text, sizeof(text), "LSP: request %llu returned %zu location%s",
-                   (unsigned long long)request_id, count, count == 1 ? "" : "s");
-    axyne_macos_lsp_status((AxyneWorkspaceView *)user_data, text);
-}
-
 static void axyne_macos_lsp_error(AxyneLspClient *client, AxyneStatus status,
                                   const char *message, void *user_data)
 {
@@ -2750,6 +2739,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     config.language_id = axyne_lsp_language_id(language);
     if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_macos_lsp_diagnostics;
+    config.on_completion = axyne_macos_lsp_completion;
     config.on_navigation = axyne_macos_lsp_navigation;
     config.on_error = axyne_macos_lsp_error;
     config.user_data = self;

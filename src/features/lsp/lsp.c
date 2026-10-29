@@ -1092,7 +1092,8 @@ static int lsp_send_position_request_locked(AxyneLspClient *client,
             lsp_buffer_dispose(&body); return 0;
         }
     }
-    if (!LSP_APPEND_LITERAL(&body, "}}}")) { lsp_buffer_dispose(&body); return 0; }
+    /* Closes params and the message (position closed above). */
+    if (!LSP_APPEND_LITERAL(&body, "}}")) { lsp_buffer_dispose(&body); return 0; }
     ok = lsp_send_body_locked(client, body.data, body.length);
     lsp_buffer_dispose(&body);
     return ok;
@@ -1112,10 +1113,10 @@ static int lsp_send_initialize_locked(AxyneLspClient *client)
     if (client->root_uri == NULL) {
         if (!LSP_APPEND_LITERAL(&body, "null")) goto fail;
     } else if (!lsp_json_cstr(&body, client->root_uri)) goto fail;
-    if (!LSP_APPEND_LITERAL(&body, ",\"capabilities\":{\"textDocument\":{\"publishDiagnostics\":{}}},\"initializationOptions\":") ||
+    if (!LSP_APPEND_LITERAL(&body, ",\"capabilities\":{\"textDocument\":{\"publishDiagnostics\":{},\"completion\":{\"completionItem\":{\"snippetSupport\":false}},\"definition\":{}}},\"initializationOptions\":") ||
         !lsp_buffer_append(&body, client->initialization_options_json,
                            strlen(client->initialization_options_json)) ||
-        !LSP_APPEND_LITERAL(&body, "}}}")) goto fail;
+        !LSP_APPEND_LITERAL(&body, "}}")) goto fail; /* params, message */
     ok = lsp_send_body_locked(client, body.data, body.length);
     if (!ok) {
         (void)lsp_take_request(client, id);
@@ -1281,7 +1282,9 @@ static int lsp_process_frames_locked(AxyneLspClient *client, LspEvent *event)
     content_length = SIZE_MAX;
     {
         const char *line = client->input.data;
-        const char *header_end = client->input.data + header_length;
+        /* Every header line, the last included, ends with CRLF: the separator
+         * starts at the last line's CRLF, so keep those two bytes. */
+        const char *header_end = client->input.data + header_length + 2;
         while (line < header_end) {
             const char *line_end = memchr(line, '\n', (size_t)(header_end - line));
             const char *colon;

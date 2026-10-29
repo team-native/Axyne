@@ -345,18 +345,6 @@ static void axyne_lsp_diagnostics(AxyneLspClient *client, const char *path,
         axyne_free_lsp_diagnostics_message(message);
 }
 
-static void axyne_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
-                                 const AxyneLspLocation *locations,
-                                 size_t count, void *user_data)
-{
-    char text[160];
-    AxyneWindowState *state = (AxyneWindowState *)user_data;
-    (void)client; (void)locations;
-    (void)snprintf(text, sizeof(text), "LSP: request %llu returned %zu location%s",
-                   (unsigned long long)request_id, count, count == 1 ? "" : "s");
-    axyne_lsp_status(state, text);
-}
-
 static void axyne_lsp_error(AxyneLspClient *client, AxyneStatus status,
                             const char *message, void *user_data)
 {
@@ -2616,7 +2604,8 @@ static int axyne_lsp_ensure(AxyneWindowState *state)
     config.language_id = axyne_lsp_language_id(language);
     if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_lsp_diagnostics;
-    config.on_navigation = axyne_lsp_navigation;
+    config.on_completion = axyne_win_lsp_completion;
+    config.on_navigation = axyne_win_lsp_navigation;
     config.on_error = axyne_lsp_error;
     config.user_data = state;
     status = axyne_lsp_create(&config, &state->lsp, &error);
@@ -2646,6 +2635,11 @@ static int axyne_lsp_open_active(AxyneWindowState *state)
     return 1;
 }
 
+int axyne_win_lsp_open_active(AxyneWindowState *state)
+{
+    return axyne_lsp_open_active(state);
+}
+
 static void axyne_lsp_sync_active(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
@@ -2658,32 +2652,26 @@ static void axyne_lsp_sync_active(AxyneWindowState *state)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
 }
 
+void axyne_win_lsp_sync_active(AxyneWindowState *state)
+{
+    axyne_lsp_sync_active(state);
+}
+
+static int axyne_win_lsp_nav_command(AxyneWindowState *state, AxyneCommandId id)
+{
+    if (id != AXYNE_COMMAND_EDIT_GO_TO_DEFINITION &&
+        id != AXYNE_COMMAND_EDIT_FIND_REFERENCES)
+        return 0;
+    return axyne_win_lsp_nav_dispatch(state,
+                                      id == AXYNE_COMMAND_EDIT_FIND_REFERENCES);
+}
+
 static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int references)
 {
-    AxyneDocument *doc;
-    AxyneLspPosition position;
-    AxyneError error;
-    AxyneStatus status;
-    uint64_t request_id = 0;
-    LRESULT current, line_start;
     (void)window;
-    if (!axyne_capture_editor(state) || !axyne_lsp_open_active(state)) return;
-    doc = axyne_active(state);
-    current = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
-    position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION, current, 0);
-    line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, position.line, 0);
-    position.character = axyne_lsp_utf16_character(
-        doc->contents + (size_t)line_start, (size_t)(current - line_start),
-        (size_t)(current - line_start));
-    status = references ? axyne_lsp_references(state->lsp, doc, position,
-                                                &request_id, &error) :
-        axyne_lsp_definition(state->lsp, doc, position, &request_id, &error);
-    if (status != AXYNE_STATUS_OK)
-        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
-    else
-        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
-                       "LSP: request %llu sent", (unsigned long long)request_id);
-    InvalidateRect((HWND)GetParent(state->editor), NULL, FALSE);
+    (void)axyne_win_lsp_nav_command(
+        state, references ? AXYNE_COMMAND_EDIT_FIND_REFERENCES
+                          : AXYNE_COMMAND_EDIT_GO_TO_DEFINITION);
 }
 
 static void axyne_update_title(HWND window, AxyneWindowState *state)
@@ -10957,6 +10945,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 axyne_lsp_destroy(state->lsp);
                 state->lsp = NULL;
             }
+            axyne_win_lsp_nav_drain(window);
             {
                 MSG pending_message;
                 while (PeekMessageW(&pending_message, window,
