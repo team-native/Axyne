@@ -1,5 +1,6 @@
 #include "axyne/completion.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -231,4 +232,53 @@ char *axyne_completion_build(const char *text, size_t length, size_t caret,
     return axyne_completion_build_slice(text + begin, end - begin, caret - begin,
                                         begin > 0, end < length, keyword_sets,
                                         keyword_set_count, prefix_bytes);
+}
+
+int axyne_completion_describe_word(const char *text, size_t length,
+                                   size_t caret, const char *word,
+                                   char *out, size_t size)
+{
+    size_t word_length, i = 0, uses = 0, first = 0, line = 1, first_line = 0;
+    if (out != NULL && size > 0) out[0] = '\0';
+    if (text == NULL || word == NULL || out == NULL || size == 0) return 0;
+    word_length = strlen(word);
+    if (word_length == 0) return 0;
+    while (i < length) {
+        size_t start;
+        if (text[i] == '\n') { ++line; ++i; continue; }
+        if (!is_word_byte((unsigned char)text[i])) { ++i; continue; }
+        start = i;
+        while (i < length && is_word_byte((unsigned char)text[i])) ++i;
+        if (caret >= start && caret <= i) continue; /* the word being typed */
+        if (i - start != word_length || memcmp(text + start, word, word_length) != 0)
+            continue;
+        if (uses++ == 0) { first = start; first_line = line; }
+    }
+    if (uses == 0) return 0;
+    {
+        size_t begin = first, end = first, n;
+        int written;
+        while (begin > 0 && text[begin - 1] != '\n') --begin;
+        while (end < length && text[end] != '\n' && text[end] != '\r') ++end;
+        while (begin < end && (text[begin] == ' ' || text[begin] == '\t')) ++begin;
+        n = end - begin;
+        if (n > 80) n = 80;
+        written = snprintf(out, size, "%zu use%s \xc2\xb7 line %zu: %.*s", uses,
+                           uses == 1 ? "" : "s", first_line, (int)n, text + begin);
+        if (written < 0) { out[0] = '\0'; return 0; }
+    }
+    return 1;
+}
+
+const char *axyne_completion_kind_name(int kind)
+{
+    static const char *const names[] = {
+        "text", "method", "function", "constructor", "field", "variable",
+        "class", "interface", "module", "property", "unit", "value", "enum",
+        "keyword", "snippet", "color", "file", "reference", "folder",
+        "enum member", "constant", "struct", "event", "operator",
+        "type parameter"
+    };
+    if (kind < 1 || kind > (int)(sizeof(names) / sizeof(names[0]))) return NULL;
+    return names[kind - 1];
 }

@@ -51,4 +51,18 @@ char *axyne_completion_build_slice(const char *text, size_t length,
                                    size_t keyword_set_count,
                                    size_t *prefix_bytes);
 
+
+/* Short note for a document word in the completion list: how often it occurs
+ * and the first line using it, e.g. "3 uses · line 12: int count = 0;". The
+ * occurrence at `caret` (the word being typed) is not counted. Writes at most
+ * `size` bytes to `out` (NUL-terminated) and returns 0 when the word does not
+ * occur elsewhere. */
+int axyne_completion_describe_word(const char *text, size_t length,
+                                   size_t caret, const char *word,
+                                   char *out, size_t size);
+
+/* Display name of an LSP CompletionItemKind (1 = "text" ... 25 = "type
+ * parameter"); NULL for unknown kinds. */
+const char *axyne_completion_kind_name(int kind);
+
 #endif
