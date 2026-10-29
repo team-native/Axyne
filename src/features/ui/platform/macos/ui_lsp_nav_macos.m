@@ -303,7 +303,6 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
 
 - (void)lspNavDocumentWillClose:(AxyneDocument *)document
 {
-    if (_lsp != NULL) [self closeLspDocument:document];
     AxyneMacLspNavState *ui = (AxyneMacLspNavState *)_lspNavUi;
     if (ui != nil && document != NULL && document->path != NULL) {
         if (ui->completionPath != NULL && strcmp(ui->completionPath, document->path) == 0) {
