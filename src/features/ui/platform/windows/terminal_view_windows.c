@@ -114,6 +114,7 @@ HWND axyne_terminal_view_create(HWND parent,HINSTANCE instance) {
 }
 AxyneStatus axyne_terminal_view_start(HWND w,const AxyneTerminalSpec *spec,AxyneError *error) {TerminalView *v=view(w);if(!v)return AXYNE_STATUS_INVALID_ARGUMENT;AxyneTerminalSpec owned=*spec;owned.on_changed=changed;owned.on_exit=exited;owned.user_data=v;return axyne_terminal_start(v->terminal,&owned,error);}
 void axyne_terminal_view_stop(HWND w){TerminalView *v=view(w);if(v)axyne_terminal_terminate(v->terminal,NULL);}
+void axyne_terminal_view_clear(HWND w){TerminalView *v=view(w);if(!v)return;v->first=v->last=-1;axyne_terminal_clear(v->terminal);InvalidateRect(w,NULL,FALSE);}
 int axyne_terminal_view_running(HWND w){TerminalView *v=view(w);return v&&axyne_terminal_running(v->terminal);}
 AxyneTerminal *axyne_terminal_view_model(HWND w){TerminalView *v=view(w);return v?v->terminal:NULL;}
 void axyne_terminal_view_theme(HWND w,HFONT font,uint32_t fg,uint32_t bg){TerminalView *v=view(w);if(!v)return;LOGFONTW lf={0};GetObjectW(font,sizeof lf,&lf);for(int i=0;i<8;++i){if(v->fonts[i])DeleteObject(v->fonts[i]);lf.lfWeight=i&1?FW_BOLD:FW_NORMAL;lf.lfItalic=(BYTE)((i&2)!=0);lf.lfUnderline=(BYTE)((i&4)!=0);v->fonts[i]=CreateFontIndirectW(&lf);}HDC dc=GetDC(w);HGDIOBJ old=SelectObject(dc,v->fonts[0]);TEXTMETRICW metrics;GetTextMetricsW(dc,&metrics);v->width=max(1,metrics.tmAveCharWidth);v->height=max(1,metrics.tmHeight+2);SelectObject(dc,old);ReleaseDC(w,dc);v->foreground=fg;v->background=bg;axyne_terminal_set_colors(v->terminal,fg,bg);resize(w,v);InvalidateRect(w,NULL,FALSE);}

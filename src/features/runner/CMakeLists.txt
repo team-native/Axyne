@@ -1,8 +1,10 @@
 add_library(axyne_runner STATIC
     "${CMAKE_CURRENT_LIST_DIR}/runner.c"
+    "${CMAKE_CURRENT_LIST_DIR}/runner_profiles.c"
     "${CMAKE_CURRENT_LIST_DIR}/build_target.c"
     "${CMAKE_CURRENT_LIST_DIR}/language.c"
     "${CMAKE_CURRENT_LIST_DIR}/build_selector.c"
+    "${CMAKE_CURRENT_LIST_DIR}/lsp_servers.c"
 )
 target_include_directories(axyne_runner PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(axyne_runner PUBLIC axyne_process)
