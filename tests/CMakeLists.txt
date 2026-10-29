@@ -414,3 +414,20 @@ endif()
 add_test(NAME axyne-menu-consistency
     COMMAND $<TARGET_FILE:axyne_menu_consistency_tests> "${PROJECT_SOURCE_DIR}")
 set_tests_properties(axyne-menu-consistency PROPERTIES TIMEOUT 30)
+
+# Shared configuration contract on every host; HTTP only on native targets.
+add_executable(axyne_server_client_tests test_server_client.c)
+target_link_libraries(axyne_server_client_tests PRIVATE axyne_server_client)
+add_test(NAME axyne-server-client COMMAND axyne_server_client_tests
+    "${AXYNE_TEST_FIXTURE_DIR}/server-client")
+if(WIN32 OR APPLE)
+    add_executable(axyne_http_client_tests test_http_client.c)
+    target_link_libraries(axyne_http_client_tests PRIVATE axyne_server_client)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME axyne-http-client COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/run_http_client.py"
+            "$<TARGET_FILE:axyne_http_client_tests>")
+        set_tests_properties(axyne-http-client PROPERTIES TIMEOUT 50)
+    endif()
+endif()

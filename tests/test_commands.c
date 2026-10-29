@@ -6,7 +6,7 @@
 #include "axyne/palette.h"
 #include "axyne/preferences.h"
 
-static int axyne_test_keys_duplicate(AxynePlatform platform)
+static int axyne_test_keys_duplicate(AxyneCommandPlatform platform)
 {
     size_t count = axyne_command_count();
     for (size_t i = 0; i < count; ++i) {
@@ -58,7 +58,7 @@ int axyne_test_commands(const char *root)
         AXYNE_TEST_CHECK(info->keywords != NULL && info->keywords[0] != '\0');
         AXYNE_TEST_CHECK(info->group < AXYNE_COMMAND_GROUP_COUNT);
         AXYNE_TEST_CHECK(info->platforms != 0 &&
-                         (info->platforms & ~(unsigned)AXYNE_PLATFORM_BOTH) == 0);
+                         (info->platforms & ~(unsigned)AXYNE_COMMAND_PLATFORM_BOTH) == 0);
         AXYNE_TEST_CHECK(axyne_command_find(info->name) == info);
         AXYNE_TEST_EQ_INT(axyne_command_id(info->name), info->id);
         /* Ids are unique: the lookup above finds this entry, not another. */
@@ -73,19 +73,19 @@ int axyne_test_commands(const char *root)
             AXYNE_TEST_CHECK(info->legacy_action < 0 ||
                              info->legacy_action != other->legacy_action);
         }
-        AXYNE_TEST_CHECK(axyne_command_title(info->id, AXYNE_PLATFORM_WINDOWS) ==
+        AXYNE_TEST_CHECK(axyne_command_title(info->id, AXYNE_COMMAND_PLATFORM_WINDOWS) ==
                          info->title);
         if (info->mac_title != NULL)
-            AXYNE_TEST_CHECK(axyne_command_title(info->id, AXYNE_PLATFORM_MACOS) ==
+            AXYNE_TEST_CHECK(axyne_command_title(info->id, AXYNE_COMMAND_PLATFORM_MACOS) ==
                              info->mac_title);
     }
     AXYNE_TEST_CHECK(axyne_command_find("file.unknown") == NULL);
     AXYNE_TEST_CHECK(axyne_command_find(NULL) == NULL);
     AXYNE_TEST_STREQ(axyne_command_name(AXYNE_COMMAND_FILE_SAVE_ALL), "file.saveAll");
     AXYNE_TEST_STREQ(axyne_command_title(AXYNE_COMMAND_FILE_SAVE_ALL,
-                                         AXYNE_PLATFORM_WINDOWS), "모두 저장");
+                                         AXYNE_COMMAND_PLATFORM_WINDOWS), "모두 저장");
     AXYNE_TEST_STREQ(axyne_command_title(AXYNE_COMMAND_FILE_EXIT,
-                                         AXYNE_PLATFORM_MACOS), "Axyne 종료");
+                                         AXYNE_COMMAND_PLATFORM_MACOS), "Axyne 종료");
     AXYNE_TEST_STREQ(axyne_command_name(AXYNE_COMMAND_COUNT), "");
 
     /* Every palette command maps to exactly one registry command. */
@@ -111,43 +111,43 @@ int axyne_test_commands(const char *root)
 
     /* Defaults from the gap report (D1/D2) and Figma. */
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_DEBUG_START,
-                         AXYNE_PLATFORM_WINDOWS, 0), "F5");
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 0), "F5");
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_DEBUG_RUN_WITHOUT_DEBUGGING,
-                         AXYNE_PLATFORM_WINDOWS, 0), "Ctrl+F5");
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 0), "Ctrl+F5");
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_DEBUG_STOP,
-                         AXYNE_PLATFORM_MACOS, 0), "Shift+F5");
+                         AXYNE_COMMAND_PLATFORM_MACOS, 0), "Shift+F5");
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_FILE_OPEN_FOLDER,
-                         AXYNE_PLATFORM_WINDOWS, 0), "Ctrl+K Ctrl+O");
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 0), "Ctrl+K Ctrl+O");
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_FILE_OPEN_FOLDER,
-                         AXYNE_PLATFORM_WINDOWS, 1), "Ctrl+Shift+O");
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 1), "Ctrl+Shift+O");
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_FILE_OPEN_FOLDER,
-                         AXYNE_PLATFORM_MACOS, 0), "Cmd+K Cmd+O");
+                         AXYNE_COMMAND_PLATFORM_MACOS, 0), "Cmd+K Cmd+O");
     AXYNE_TEST_STREQ(axyne_command_default_keys(AXYNE_COMMAND_HELP_KEYBOARD_SHORTCUTS,
-                         AXYNE_PLATFORM_WINDOWS, 0), "Ctrl+K Ctrl+R");
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 0), "Ctrl+K Ctrl+R");
     AXYNE_TEST_CHECK(axyne_command_default_keys(AXYNE_COMMAND_FILE_SAVE,
-                         AXYNE_PLATFORM_WINDOWS, 2) == NULL);
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 2) == NULL);
 
     /* Platform availability. */
     AXYNE_TEST_CHECK(axyne_command_available(AXYNE_COMMAND_DEBUG_EXTERNAL_WINDBG,
-                                             AXYNE_PLATFORM_WINDOWS));
+                                             AXYNE_COMMAND_PLATFORM_WINDOWS));
     AXYNE_TEST_CHECK(!axyne_command_available(AXYNE_COMMAND_DEBUG_EXTERNAL_WINDBG,
-                                              AXYNE_PLATFORM_MACOS));
+                                              AXYNE_COMMAND_PLATFORM_MACOS));
     AXYNE_TEST_CHECK(axyne_command_available(AXYNE_COMMAND_TERMINAL_NEW_ZSH,
-                                             AXYNE_PLATFORM_MACOS));
+                                             AXYNE_COMMAND_PLATFORM_MACOS));
     AXYNE_TEST_CHECK(axyne_command_default_keys(AXYNE_COMMAND_HELP_CONTENTS,
-                         AXYNE_PLATFORM_WINDOWS, 0) == NULL);
+                         AXYNE_COMMAND_PLATFORM_WINDOWS, 0) == NULL);
 
     /* No two commands share a default key text per platform (debug-context
      * bindings excepted). The keymap test repeats this on parsed keys. */
-    AXYNE_TEST_CHECK(!axyne_test_keys_duplicate(AXYNE_PLATFORM_WINDOWS));
-    AXYNE_TEST_CHECK(!axyne_test_keys_duplicate(AXYNE_PLATFORM_MACOS));
+    AXYNE_TEST_CHECK(!axyne_test_keys_duplicate(AXYNE_COMMAND_PLATFORM_WINDOWS));
+    AXYNE_TEST_CHECK(!axyne_test_keys_duplicate(AXYNE_COMMAND_PLATFORM_MACOS));
 
     AXYNE_TEST_STREQ(axyne_command_group_title(AXYNE_COMMAND_GROUP_BUILD), "빌드");
     AXYNE_TEST_STREQ(axyne_command_group_title(AXYNE_COMMAND_GROUP_COUNT), "");
 #ifdef __APPLE__
-    AXYNE_TEST_EQ_INT(axyne_platform_current(), AXYNE_PLATFORM_MACOS);
+    AXYNE_TEST_EQ_INT(axyne_command_platform_current(), AXYNE_COMMAND_PLATFORM_MACOS);
 #else
-    AXYNE_TEST_EQ_INT(axyne_platform_current(), AXYNE_PLATFORM_WINDOWS);
+    AXYNE_TEST_EQ_INT(axyne_command_platform_current(), AXYNE_COMMAND_PLATFORM_WINDOWS);
 #endif
     return 1;
 }
