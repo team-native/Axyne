@@ -73,16 +73,19 @@ static int command_requirement_checks(const char *root)
         "\"requires\":[\"surely-not-installed-viewer\"]},"
         "{\"id\":\"other\",\"title\":\"Other\",\"program\":\"./bundled.cmd\","
         "\"requires\":[\"surely-not-installed-extra\"]},"
-        "{\"id\":\"legacy\",\"title\":\"Legacy\",\"program\":\"./bundled.cmd\"}]}";
+        "{\"id\":\"legacy\",\"title\":\"Legacy\",\"program\":\"./bundled.cmd\"},"
+        "{\"id\":\"bad\",\"title\":\"Bad\",\"program\":\"./bundled.cmd\",\"requires\":[5,\"\"]}]}";
     AxyneError error;
     AxynePluginInvocation invocation;
     AxynePlugin *plugin;
     const char *missing = NULL;
     plugin = axyne_plugin_parse(json, strlen(json), root, "0.1.0", &error);
     AXYNE_TEST_CHECK(plugin != NULL);
-    AXYNE_TEST_CHECK(plugin->command_count == 4);
+    AXYNE_TEST_CHECK(plugin->command_count == 5);
     AXYNE_TEST_CHECK(plugin->commands[0].has_requires && plugin->commands[0].require_count == 0);
     AXYNE_TEST_CHECK(!plugin->commands[3].has_requires);
+    /* An invalid list falls back to the plugin requirements. */
+    AXYNE_TEST_CHECK(!plugin->commands[4].has_requires);
 
     /* An empty list runs even though a plugin requirement is missing. */
     AXYNE_TEST_CHECK(axyne_plugin_command_missing_requirement(plugin, &plugin->commands[0], &missing) == NULL &&

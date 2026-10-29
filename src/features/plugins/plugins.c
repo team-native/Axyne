@@ -664,8 +664,13 @@ AxynePlugin *axyne_plugin_parse(const char *json_text, size_t length, const char
                     size_t require_total = 0;
                     if (requires_pointer != NULL &&
                         axyne_settings_get_count(json, requires_pointer, &require_total, NULL) == AXYNE_STATUS_OK) {
-                        command->has_requires = 1;
+                        size_t k;
                         command->required_programs = json_strings(json, requires_pointer, &command->require_count, 0);
+                        /* Only a fully valid list of names replaces the plugin requirements. */
+                        command->has_requires = command->require_count == require_total;
+                        for (k = 0; command->has_requires && k < command->require_count; ++k)
+                            if (command->required_programs[k] == NULL || command->required_programs[k][0] == '\0')
+                                command->has_requires = 0;
                     }
                     free(requires_pointer);
                 }
