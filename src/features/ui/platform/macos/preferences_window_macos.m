@@ -399,6 +399,7 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
     AxynePreferences _base;
     AxynePreferences _draft;
     AxynePreferencesWindowHooks _hooks;
+    BOOL _fontFamilyChanged;
     NSView *_pages[AXYNE_PW_PAGE_COUNT];
     AxynePWButton *_sidebar[AXYNE_PW_PAGE_COUNT];
     NSInteger _page;
@@ -563,8 +564,25 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
         [page addSubview:button];
     }
     /* The 렌더링 group is Windows only; nothing is built here. */
-    (void)[self fieldWithLabel:@"Undo history (MB)" x:AXYNE_PW_CONTENT_LEFT
-                            y:y + 94 + 22 width:160 page:page field:&_undoField trailing:0];
+    const CGFloat undoRowY = y + 94 + 22;
+    NSString *const undoLabelText = @"문서당 실행 취소 기록 한도";
+    NSTextField *undoLabel = [self labelWithText:undoLabelText font:axyne_pw_font(11, NO)
+                                            color:AXYNE_PW_COLOR_MUTED];
+    NSRect undoLabelFrame = [undoLabel frame];
+    undoLabelFrame.origin = NSMakePoint(AXYNE_PW_CONTENT_LEFT,
+        undoRowY + (AXYNE_PW_FIELD_HEIGHT - undoLabelFrame.size.height) / 2);
+    [undoLabel setFrame:undoLabelFrame];
+    [page addSubview:undoLabel];
+    const CGFloat undoFieldX = NSMaxX(undoLabelFrame) + 12;
+    (void)[self boxWithWidth:64 x:undoFieldX y:undoRowY page:page field:&_undoField
+                    trailing:0 label:undoLabelText];
+    NSTextField *undoUnit = [self labelWithText:@"MB" font:axyne_pw_font(11, NO)
+                                            color:AXYNE_PW_COLOR_MUTED];
+    NSRect undoUnitFrame = [undoUnit frame];
+    undoUnitFrame.origin = NSMakePoint(undoFieldX + 64 + 12,
+        undoRowY + (AXYNE_PW_FIELD_HEIGHT - undoUnitFrame.size.height) / 2);
+    [undoUnit setFrame:undoUnitFrame];
+    [page addSubview:undoUnit];
 }
 
 /* One form row: caption, full-width field and a muted hint below it. */
@@ -816,7 +834,10 @@ enum { AXYNE_PW_RESULT_CLOSE = 0, AXYNE_PW_RESULT_OPEN_FILE = 1 };
 
 - (void)loadControls
 {
-    [_fontField setStringValue:[NSString stringWithUTF8String:_draft.editor.font_family]];
+    NSString *fontFamily = _draft.editor.font_family[0] != '\0'
+        ? [NSString stringWithUTF8String:_draft.editor.font_family] : @"Menlo";
+    [_fontField setStringValue:fontFamily ?: @""];
+    _fontFamilyChanged = NO;
     [_sizeField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.font_size]];
     [_tabField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.tab_width]];
     [_undoField setStringValue:[NSString stringWithFormat:@"%u", _draft.editor.undo_limit_mb]];
@@ -892,7 +913,11 @@ static BOOL axyne_pw_parse_unsigned(NSString *text, unsigned long *value)
         if (focus) *focus = _fontField;
         return NO;
     }
-    (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", utf8);
+    if (_draft.editor.font_family[0] == '\0' && !_fontFamilyChanged) {
+        out->editor.font_family[0] = '\0';
+    } else {
+        (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", utf8);
+    }
     {
         struct { NSTextField *field; char *target; size_t size; NSInteger page; } texts[] = {
             { _cmakeField, out->build.cmake_path, sizeof(out->build.cmake_path), AXYNE_PW_PAGE_BUILD },
@@ -1029,6 +1054,7 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
 - (void)pickFont:(id)sender
 {
     NSString *family = [sender representedObject];
+    _fontFamilyChanged = YES;
     [_fontField setStringValue:family != nil ? family : @""];
     [self updateButtons];
 }
@@ -1121,6 +1147,7 @@ static BOOL axyne_pw_differs(const AxynePreferences *a, const AxynePreferences *
 - (void)controlTextDidChange:(NSNotification *)notification
 {
     NSTextField *field = [notification object];
+    if (field == _fontField) _fontFamilyChanged = YES;
     for (size_t i = 0; i < _draft.binding_count; ++i) {
         AxynePreferenceAction action = _draft.bindings[i].action;
         if (field == _keyField[action]) {

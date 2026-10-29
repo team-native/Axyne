@@ -488,7 +488,7 @@ void axyne_preferences_defaults(AxynePreferences *preferences)
     if (preferences == NULL) return;
     memset(preferences, 0, sizeof(*preferences));
     preferences->editor.tab_width = 4;
-    preferences->editor.font_size = 11;
+    preferences->editor.font_size = 10;
     preferences->editor.insert_spaces = 1;
     preferences->editor.word_wrap = 0;
     preferences->editor.show_whitespace = 0;
@@ -497,7 +497,7 @@ void axyne_preferences_defaults(AxynePreferences *preferences)
     preferences->editor.auto_indent = 1;
     preferences->editor.rendering = AXYNE_RENDERING_DIRECTWRITE;
     preferences->editor.font_family[0] = '\0';
-    preferences->editor.undo_limit_mb = 64;
+    preferences->editor.undo_limit_mb = 8;
     preferences->editor.show_line_endings = 0;
     preferences->editor.inline_diagnostics = 1;
     axyne_theme_defaults(&preferences->theme, AXYNE_THEME_DARK);

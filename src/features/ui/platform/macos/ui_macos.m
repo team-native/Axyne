@@ -2504,7 +2504,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         : @"Menlo";
     const char *fontUTF8 = [fontName UTF8String];
     unsigned int fontSize = _preferences.editor.font_size;
-    if (fontSize < 6 || fontSize > 72) fontSize = 11;
+    if (fontSize < 6 || fontSize > 72) fontSize = 10;
     NSFont *terminalFont = [NSFont fontWithName:fontName size:fontSize];
     if (terminalFont == nil)
         terminalFont = [NSFont userFixedPitchFontOfSize:fontSize];

@@ -124,7 +124,8 @@ static int axyne_test_settings_v2(const char *root)
     /* Defaults. */
     axyne_preferences_defaults(original);
     V2_CHECK(original->files.auto_save == 0 && original->files.auto_save_delay_ms == 1000);
-    V2_CHECK(original->editor.undo_limit_mb == 64 && original->editor.inline_diagnostics == 1 &&
+    V2_CHECK(original->editor.font_size == 10 && original->editor.undo_limit_mb == 8 &&
+             original->editor.inline_diagnostics == 1 &&
              original->editor.show_line_endings == 0);
     V2_CHECK(strcmp(original->build.build_directory, "build/${config}") == 0);
     V2_CHECK(original->version == AXYNE_PREFERENCES_VERSION);
