@@ -397,7 +397,8 @@ elseif(WIN32)
     target_include_directories(axyne_editor_runtime_tests PRIVATE
         "${axyne_scintilla_SOURCE_DIR}/include")
     target_link_libraries(axyne_editor_runtime_tests PRIVATE
-        axyne_ui axyne_debugger axyne_git axyne_lsp axyne_runner axyne_core)
+        axyne_ui axyne_debugger axyne_git axyne_lsp axyne_runner axyne_core
+        comctl32)
     if(MSVC)
         target_compile_options(axyne_editor_runtime_tests PRIVATE /W4 /utf-8)
     endif()

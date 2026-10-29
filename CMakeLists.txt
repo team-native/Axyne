@@ -155,7 +155,7 @@ if(WIN32)
         src/platform/windows/main.c
         "${CMAKE_CURRENT_BINARY_DIR}/axyne_version.rc"
     )
-    target_link_libraries(axyne PRIVATE axyne_core user32)
+    target_link_libraries(axyne PRIVATE axyne_core user32 comctl32)
     add_dependencies(axyne axyne_scintilla axyne_lexilla)
     add_custom_command(TARGET axyne POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

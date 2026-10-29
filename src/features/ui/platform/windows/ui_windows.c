@@ -7,6 +7,7 @@
 #include <wchar.h>
 #include <ctype.h>
 #include <string.h>
+#include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -59,6 +60,20 @@ enum {
     AXYNE_MIN_CLIENT_WIDTH = 940
 };
 
+static LRESULT CALLBACK axyne_terminal_count_proc(HWND window, UINT message,
+    WPARAM w_param, LPARAM l_param, UINT_PTR subclass_id, DWORD_PTR ref_data)
+{
+    (void)subclass_id;
+    (void)ref_data;
+    if (message == WM_CONTEXTMENU) {
+        SendMessageW(GetParent(window), WM_CONTEXTMENU, (WPARAM)window, l_param);
+        return 0;
+    }
+    if (message == WM_NCDESTROY)
+        RemoveWindowSubclass(window, axyne_terminal_count_proc, subclass_id);
+    return DefSubclassProc(window, message, w_param, l_param);
+}
+
 enum {
     AXYNE_TERMINAL_OUTPUT = 5001,
     AXYNE_TERMINAL_START,
@@ -73,6 +88,7 @@ enum {
     AXYNE_TERMINAL_NEW_SESSION,
     AXYNE_TERMINAL_NEXT_SESSION,
     AXYNE_TERMINAL_SPLIT,
+    AXYNE_TERMINAL_COLLAPSE,
     AXYNE_PANEL_CLEAR,
     AXYNE_PANEL_CLOSE,
     AXYNE_PROBLEMS_FILTER = 5040, /* problems panel filter EDIT control id */
@@ -177,6 +193,8 @@ static int axyne_panel_height(const AxyneWindowState *state)
         ? AXYNE_UI_TERMINAL_PANEL : AXYNE_UI_PANEL;
     int height = state->panel_size > 0 ? state->panel_size : default_height;
     if (state->panel_hidden) return 0;
+    if (state->panel_collapsed && state->panel_tab == AXYNE_WIN_PANEL_TERMINAL)
+        return AXYNE_UI_TERMINAL_HEADER;
     if (state->client_height <= 0) return height;
     return axyne_layout_clamp_panel(height, state->client_height,
         AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
@@ -1334,19 +1352,16 @@ static int axyne_is_shell_view(const AxyneWindowState *state, HWND window)
     return 0;
 }
 
-/* The terminal tab reads "터미널 · cmd" (and "2/3" with several sessions). */
+/* Keep the tab label stable; session identity and count live in the panel body. */
 static void axyne_terminal_update_label(AxyneWindowState *state)
 {
-    const char *name = state->shell_count > 0 ? state->shell_names[state->shell_active] : "";
-    wchar_t *wide = axyne_wide(name);
-    if (wide == NULL || wide[0] == L'\0')
-        (void)swprintf_s(state->terminal_tab_label, 48, L"터미널");
-    else if (state->shell_count > 1)
-        (void)swprintf_s(state->terminal_tab_label, 48, L"터미널 · %ls %d/%d", wide,
-                         state->shell_active + 1, state->shell_count);
-    else
-        (void)swprintf_s(state->terminal_tab_label, 48, L"터미널 · %ls", wide);
-    free(wide);
+    (void)swprintf_s(state->terminal_tab_label, 48, L"터미널");
+    if (state->terminal_next_session != NULL) {
+        wchar_t count[32];
+        (void)swprintf_s(count, 32, L"터미널 %d개", state->shell_count);
+        SetWindowTextW(state->terminal_next_session, count);
+        InvalidateRect(state->terminal_next_session, NULL, FALSE);
+    }
 }
 
 static void axyne_terminal_select_session(HWND window, AxyneWindowState *state, int index)
@@ -2033,11 +2048,17 @@ static void axyne_create_terminal_controls(HWND window, AxyneWindowState *state,
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_NEW_SESSION, instance, NULL);
     state->terminal_next_session = CreateWindowW(L"BUTTON", L"\u21C4",
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_NEXT_SESSION, instance, NULL);
+    if (state->terminal_next_session != NULL)
+        SetWindowSubclass(state->terminal_next_session, axyne_terminal_count_proc, 1, 0);
     state->terminal_split = CreateWindowW(L"BUTTON", L"\u25EB",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_SPLIT, instance, NULL);
+    state->terminal_collapse = CreateWindowW(L"BUTTON", L"\u2303",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window,
+        (HMENU)AXYNE_TERMINAL_COLLAPSE, instance, NULL);
+    axyne_terminal_update_label(state);
     state->terminal_start = CreateWindowW(L"BUTTON", L"\u25B6",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
         (HMENU)AXYNE_TERMINAL_START, instance, NULL);
@@ -5103,6 +5124,7 @@ static void axyne_select_panel_tab(HWND window, AxyneWindowState *state,
     if (!axyne_panel_tab_enabled(state, (int)tab)) return;
     state->panel_tab = tab;
     state->panel_hidden = 0;
+    state->panel_collapsed = 0;
     axyne_layout(window, state);
     if (!focus) return;
     if (tab == AXYNE_WIN_PANEL_TERMINAL) axyne_start_terminal_panel(window, state);
@@ -9066,18 +9088,23 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                                  max(0, terminal_bottom - terminal_top), SWP_NOZORDER | SWP_NOACTIVATE);
                 ShowWindow(state->shell_views[i], shown ? SW_SHOW : SW_HIDE);
             }
-            SetWindowPos(state->terminal_new_session, NULL, width - 256, panel_action_top, 24, 22,
+            SetWindowPos(state->terminal_new_session, NULL, width - 122, panel_action_top, 24, 22,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            SetWindowPos(state->terminal_next_session, NULL, width - 230, panel_action_top, 24, 22,
+            SetWindowPos(state->terminal_next_session, NULL, width - 168,
+                         bottom_top + axyne_panel_height(state) - 32, 110, 18,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            SetWindowPos(state->terminal_split, NULL, width - 204, panel_action_top, 24, 22,
+            SetWindowPos(state->terminal_split, NULL, width - 92, panel_action_top, 24, 22,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(state->terminal_collapse, NULL, width - 62, panel_action_top, 24, 22,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             ShowWindow(state->terminal_new_session,
                        terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
             ShowWindow(state->terminal_next_session,
-                       terminal_selected && !state->panel_hidden && state->shell_count > 1 ? SW_SHOW : SW_HIDE);
+                       terminal_selected && !state->panel_hidden && !state->panel_collapsed ? SW_SHOW : SW_HIDE);
             ShowWindow(state->terminal_split,
-                       terminal_selected && !state->panel_hidden && state->shell_count > 1 ? SW_SHOW : SW_HIDE);
+                       terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
+            ShowWindow(state->terminal_collapse,
+                       terminal_selected && !state->panel_hidden ? SW_SHOW : SW_HIDE);
         }
         SetWindowPos(state->terminal_start, NULL, width - 172, panel_action_top,
                      52, 22, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -9087,12 +9114,15 @@ static void axyne_layout(HWND window, AxyneWindowState *state)
                      24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(state->panel_close, NULL, width - 36, panel_action_top,
                      24, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-        ShowWindow(state->panel_clear, state->panel_hidden ? SW_HIDE : SW_SHOW);
+        ShowWindow(state->panel_clear,
+                   state->panel_hidden || terminal_selected ? SW_HIDE : SW_SHOW);
         ShowWindow(state->panel_close, state->panel_hidden ? SW_HIDE : SW_SHOW);
         ShowWindow(state->terminal_output,
                    output_shown ? SW_SHOW : SW_HIDE);
-        ShowWindow(state->terminal_start, state->panel_hidden ? SW_HIDE : SW_SHOW);
-        ShowWindow(state->terminal_stop, state->panel_hidden ? SW_HIDE : SW_SHOW);
+        ShowWindow(state->terminal_start,
+                   state->panel_hidden || terminal_selected ? SW_HIDE : SW_SHOW);
+        ShowWindow(state->terminal_stop,
+                   state->panel_hidden || terminal_selected ? SW_HIDE : SW_SHOW);
         ShowWindow(state->debug_start, SW_HIDE);
         ShowWindow(state->debug_pause, SW_HIDE);
         ShowWindow(state->debug_continue, SW_HIDE);
@@ -9627,6 +9657,12 @@ static void axyne_legacy_command(HWND window, AxyneWindowState *state, UINT comm
             state->shell_peer = (state->shell_active + 1) % state->shell_count;
         axyne_layout(window, state);
         SetFocus(state->shell_view); /* never left in a hidden pane */
+    }
+    else if (command == AXYNE_TERMINAL_COLLAPSE) {
+        state->panel_collapsed = !state->panel_collapsed;
+        SetWindowTextW(state->terminal_collapse,
+                       state->panel_collapsed ? L"\u2304" : L"\u2303");
+        axyne_layout(window, state);
     }
     else if (command == AXYNE_PANEL_CLEAR) {
         if (state->panel_tab == AXYNE_WIN_PANEL_TERMINAL)
@@ -10729,6 +10765,30 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         }
         break;
     }
+    case WM_CONTEXTMENU:
+        if (state != NULL && (HWND)w_param == state->terminal_next_session) {
+            HMENU menu = CreatePopupMenu();
+            POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+            UINT selected;
+            if (point.x == -1 && point.y == -1) {
+                RECT rect;
+                GetWindowRect(state->terminal_next_session, &rect);
+                point.x = rect.left;
+                point.y = rect.bottom;
+            }
+            if (menu != NULL) {
+                AppendMenuW(menu, MF_STRING, AXYNE_TERMINAL_START, L"터미널 시작");
+                AppendMenuW(menu, MF_STRING, AXYNE_TERMINAL_STOP, L"터미널 중지");
+                AppendMenuW(menu, MF_STRING, AXYNE_PANEL_CLEAR, L"터미널 지우기");
+                AppendMenuW(menu, MF_STRING, AXYNE_TERMINAL_NEXT_SESSION, L"다음 세션");
+                selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                          point.x, point.y, 0, window, NULL);
+                DestroyMenu(menu);
+                if (selected != 0) axyne_legacy_command(window, state, selected);
+            }
+            return 0;
+        }
+        break;
     case WM_COMMAND: {
         if (state != NULL && LOWORD(w_param) == AXYNE_GIT_MODE &&
             HIWORD(w_param) == CBN_SELCHANGE) {
@@ -10835,6 +10895,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             (item->CtlID == AXYNE_TERMINAL_START || item->CtlID == AXYNE_TERMINAL_STOP ||
              item->CtlID == AXYNE_TERMINAL_NEW_SESSION || item->CtlID == AXYNE_TERMINAL_NEXT_SESSION ||
              item->CtlID == AXYNE_TERMINAL_SPLIT ||
+             item->CtlID == AXYNE_TERMINAL_COLLAPSE ||
              item->CtlID == AXYNE_PANEL_CLEAR || item->CtlID == AXYNE_PANEL_CLOSE ||
              item->CtlID == AXYNE_CMD_CANCEL_BUILD)) {
             if (item->CtlID == AXYNE_PANEL_CLEAR || item->CtlID == AXYNE_PANEL_CLOSE) {
@@ -10852,11 +10913,16 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             wchar_t label[32];
             RECT rect = item->rcItem;
             int disabled = (item->itemState & ODS_DISABLED) != 0;
+            HFONT font = item->CtlID == AXYNE_TERMINAL_NEXT_SESSION
+                ? state->font_tiny : state->ui_font;
+            UINT text_flags = item->CtlID == AXYNE_TERMINAL_NEXT_SESSION
+                ? DT_RIGHT | DT_VCENTER | DT_SINGLELINE : DT_CENTER;
             GetWindowTextW(item->hwndItem, label, 32);
             axyne_fill(item->hDC, rect.left, rect.top, rect.right, rect.bottom,
-                (item->itemState & ODS_SELECTED) != 0 ? AXYNE_SELECTION_BG : AXYNE_BUTTON_BG);
-            axyne_text_rect(item->hDC, state->ui_font, disabled ? AXYNE_MUTED : AXYNE_TEXT,
-                           rect, label, DT_CENTER);
+                item->CtlID == AXYNE_TERMINAL_NEXT_SESSION ? AXYNE_PANEL
+                : (item->itemState & ODS_SELECTED) != 0 ? AXYNE_SELECTION_BG : AXYNE_BUTTON_BG);
+            axyne_text_rect(item->hDC, font, disabled ? AXYNE_MUTED : AXYNE_TEXT,
+                           rect, label, text_flags);
             if ((item->itemState & ODS_FOCUS) != 0) {
                 InflateRect(&rect, -2, -2);
                 DrawFocusRect(item->hDC, &rect);
