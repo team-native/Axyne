@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "axyne/completion.h"
 #include "axyne/syntax.h"
 
 enum {
@@ -20,12 +21,17 @@ struct AxyneWinLspNavUi {
     char *definition_path;
     uint64_t references_request;
     char *references_path;
+    /* Words and details of the LSP list on screen, for the detail panel. */
+    char **shown_words;
+    char **shown_details;
+    size_t shown_count;
 };
 
 typedef struct AxyneWinLspCompletionMessage {
     AxyneLspClient *client;
     uint64_t request_id;
     char **words;
+    char **details; /* "kind · detail" per word, entries may be NULL */
     size_t count;
 } AxyneWinLspCompletionMessage;
 
@@ -40,8 +46,12 @@ typedef struct AxyneWinLspNavigationMessage {
 static void axyne_win_lsp_free_completion(AxyneWinLspCompletionMessage *message)
 {
     if (message == NULL) return;
-    for (size_t i = 0; i < message->count; ++i) free(message->words[i]);
+    for (size_t i = 0; i < message->count; ++i) {
+        free(message->words[i]);
+        if (message->details != NULL) free(message->details[i]);
+    }
     free(message->words);
+    free(message->details);
     free(message);
 }
 
@@ -93,6 +103,31 @@ static void axyne_win_lsp_set_status(AxyneWindowState *state, const char *text)
     (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s",
                    text != NULL ? text : "");
     InvalidateRect(state->main_window, NULL, FALSE);
+}
+
+static void axyne_win_lsp_forget_shown(struct AxyneWinLspNavUi *ui)
+{
+    for (size_t i = 0; i < ui->shown_count; ++i) {
+        free(ui->shown_words[i]);
+        free(ui->shown_details[i]);
+    }
+    free(ui->shown_words);
+    free(ui->shown_details);
+    ui->shown_words = NULL;
+    ui->shown_details = NULL;
+    ui->shown_count = 0;
+}
+
+const char *axyne_win_lsp_completion_detail(AxyneWindowState *state,
+                                            const char *word)
+{
+    struct AxyneWinLspNavUi *ui;
+    if (state == NULL || state->lsp_nav_ui == NULL || word == NULL) return NULL;
+    ui = state->lsp_nav_ui;
+    for (size_t i = 0; i < ui->shown_count; ++i)
+        if (ui->shown_words[i] != NULL && strcmp(ui->shown_words[i], word) == 0)
+            return ui->shown_details[i];
+    return NULL;
 }
 
 static void axyne_win_lsp_show_completion(
@@ -174,9 +209,36 @@ static void axyne_win_lsp_show_completion(
         length += word_length;
     }
     list[length] = '\0';
+    /* The words stay alive in ui (matches point into them) so the detail
+     * panel can look up the selected entry while the list is open. */
+    axyne_win_lsp_forget_shown(ui);
+    ui->shown_words = message->words;
+    ui->shown_details = message->details;
+    ui->shown_count = message->count;
+    message->words = NULL;
+    message->details = NULL;
+    message->count = 0;
     axyne_win_completion_show_list(state, prefix_length, list, '\n');
     free(list);
     free(matches);
+}
+
+static char *axyne_win_lsp_format_detail(const AxyneLspCompletionItem *item)
+{
+    const char *kind = axyne_completion_kind_name(item->kind);
+    const char *detail = item->detail;
+    size_t size;
+    char *text;
+    while (detail != NULL && (*detail == ' ' || *detail == '\t')) ++detail;
+    if (detail != NULL && detail[0] == '\0') detail = NULL;
+    if (kind == NULL && detail == NULL) return NULL;
+    size = (kind != NULL ? strlen(kind) : 0) + (detail != NULL ? strlen(detail) : 0) + 8;
+    text = (char *)malloc(size);
+    if (text == NULL) return NULL;
+    (void)snprintf(text, size, "%s%s%s", kind != NULL ? kind : "",
+                   kind != NULL && detail != NULL ? " \xc2\xb7 " : "",
+                   detail != NULL ? detail : "");
+    return text;
 }
 
 void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
@@ -194,7 +256,8 @@ void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
     message->client = client;
     message->request_id = request_id;
     message->words = (char **)calloc(count, sizeof(*message->words));
-    if (message->words == NULL) {
+    message->details = (char **)calloc(count, sizeof(*message->details));
+    if (message->words == NULL || message->details == NULL) {
         axyne_win_lsp_free_completion(message);
         return;
     }
@@ -218,6 +281,7 @@ void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
         if (message->words[message->count] == NULL) break;
         memcpy(message->words[message->count], word, length);
         message->words[message->count][length] = '\0';
+        message->details[message->count] = axyne_win_lsp_format_detail(&items[i]);
         ++message->count;
     }
     if (!PostMessageW(state->main_window, AXYNE_WM_LSP_COMPLETION, 0,
@@ -482,6 +546,7 @@ static void axyne_win_lsp_nav_destroy(AxyneWindowState *state)
 {
     if (state == NULL || state->lsp_nav_ui == NULL) return;
     axyne_win_lsp_clear_request_paths(state->lsp_nav_ui);
+    axyne_win_lsp_forget_shown(state->lsp_nav_ui);
     free(state->lsp_nav_ui);
     state->lsp_nav_ui = NULL;
 }
