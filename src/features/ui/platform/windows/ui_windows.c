@@ -15,6 +15,8 @@
 #include "axyne/app_paths.h"
 #include "axyne/memory_usage.h"
 #include "terminal_view_windows.h"
+#include "splash_windows.h"
+#include "axyne/build_config.h"
 #include "axyne/ui_design.h"
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
@@ -73,8 +75,11 @@ enum {
     AXYNE_PROBLEMS_FILTER = 5040, /* problems panel filter EDIT control id */
     AXYNE_PROBLEMS_TIMER = 5121,  /* coalesced problems list rebuild */
     AXYNE_OUTLINE_TIMER = 5122,   /* debounced outline rescan after edits */
+    AXYNE_SPLASH_TIMER = 5123,    /* loading screen minimum display time */
     AXYNE_STATUS_TIMER = 5124     /* refresh process memory in the status bar */
 };
+
+enum { AXYNE_SPLASH_MIN_MS = 450 };
 
 static const wchar_t AXYNE_WINDOW_CLASS[] = L"AxyneWindow";
 static COLORREF AXYNE_BG;
@@ -239,8 +244,7 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
        AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31,
-       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32,
-       AXYNE_WM_RESTORE_WORKSPACE = WM_APP + 33 };
+       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -3358,6 +3362,16 @@ static int axyne_workspace_open_root(HWND window, AxyneWindowState *state,
     axyne_git_panel_reset(window, state);
     InvalidateRect(window, NULL, FALSE);
     return 1;
+}
+
+/* Shows the window built behind the loading screen once startup is complete. */
+static void axyne_show_main_window(HWND window, AxyneWindowState *state,
+                                   int show_command)
+{
+    ShowWindow(window, show_command);
+    UpdateWindow(window);
+    SetForegroundWindow(window);
+    if (state->editor != NULL) SetFocus(state->editor);
 }
 
 static int axyne_workspace_select_root(HWND window, AxyneWindowState *state)
@@ -9952,12 +9966,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             if (axyne_app_state_load(state->app_state_path, &state->app_state, &state_error) != AXYNE_STATUS_OK)
                 axyne_log_warn("state", "ignoring %s: %s", state->app_state_path, state_error.message);
         }
-        PostMessageW(window, AXYNE_WM_RESTORE_WORKSPACE, 0, 0);
         return 0;
     }
-    case AXYNE_WM_RESTORE_WORKSPACE:
-        if (state != NULL) axyne_workspace_restore(window, state);
-        return 0;
     case WM_SIZE:
         axyne_layout(window, state);
         return 0;
@@ -10015,6 +10025,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         break;
     case WM_TIMER:
         if (state != NULL && axyne_win_hooks_timer(state, (UINT_PTR)w_param)) return 0;
+        if (state != NULL && !state->splash_timer_thread &&
+            state->splash_timer_id != 0 && w_param == state->splash_timer_id) {
+            KillTimer(window, state->splash_timer_id);
+            state->splash_timer_id = 0;
+            axyne_show_main_window(window, state, state->splash_show_command);
+            axyne_splash_close(state->splash);
+            state->splash = NULL;
+            return 0;
+        }
         if (state != NULL && w_param == AXYNE_STATUS_TIMER) {
             InvalidateRect(window, NULL, FALSE);
             return 0;
@@ -10681,6 +10700,14 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         return 1;
     case WM_DESTROY:
         KillTimer(window, AXYNE_STATUS_TIMER);
+        if (state != NULL && state->splash_timer_id != 0) {
+            if (state->splash_timer_thread)
+                KillTimer(NULL, state->splash_timer_id);
+            else
+                KillTimer(window, state->splash_timer_id);
+            state->splash_timer_id = 0;
+            state->splash_timer_thread = 0;
+        }
         if (state != NULL) axyne_cancel_outline_timer(state);
         /* Child controls still exist during the parent's WM_DESTROY. Their
          * handles are already invalid by WM_NCDESTROY, so release every tab's
@@ -10703,6 +10730,8 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case WM_NCDESTROY:
         if (state != NULL) {
             axyne_win_hooks_destroy(state);
+            axyne_splash_close(state->splash);
+            state->splash = NULL;
             if (state->action_process != NULL) {
                 axyne_process_release(state->action_process);
                 state->action_process = NULL;
@@ -10835,43 +10864,113 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
         return 1;
     }
 
+    RECT bounds = {0, 0, 1440, 900};
+    RECT splash_bounds;
+    {
+        RECT work;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+            int width = min(1440, (int)(work.right - work.left));
+            int height = min(900, (int)(work.bottom - work.top));
+            bounds.left = work.left + ((work.right - work.left) - width) / 2;
+            bounds.top = work.top + ((work.bottom - work.top) - height) / 2;
+            bounds.right = bounds.left + width;
+            bounds.bottom = bounds.top + height;
+        }
+        splash_bounds = bounds;
+        if ((show_command == SW_SHOWMAXIMIZED || show_command == SW_MAXIMIZE) &&
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0))
+            splash_bounds = work;
+    }
+    AxyneSplash *splash = axyne_splash_show(instance, &splash_bounds,
+                                            AXYNE_CONFIG_VERSION);
+    ULONGLONG splash_shown_at = GetTickCount64();
     AxyneWindowState *state = (AxyneWindowState *)HeapAlloc(
         GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*state));
     if (state == NULL) {
+        axyne_splash_close(splash);
         UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
     if (axyne_explorer_initialize(&state->explorer, NULL) != AXYNE_STATUS_OK) {
+        axyne_splash_close(splash);
         HeapFree(GetProcessHeap(), 0, state);
         UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
     if (axyne_documents_initialize_empty(&state->documents, NULL) != AXYNE_STATUS_OK) {
+        axyne_splash_close(splash);
         axyne_explorer_destroy(&state->explorer);
         HeapFree(GetProcessHeap(), 0, state);
         UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
+    axyne_splash_step(splash, AXYNE_STARTUP_SETTINGS);
     axyne_load_global_preferences(state);
+    axyne_splash_step(splash, AXYNE_STARTUP_WORKSPACE);
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1440, 900,
+        WS_OVERLAPPEDWINDOW, bounds.left, bounds.top,
+        bounds.right - bounds.left, bounds.bottom - bounds.top,
         NULL, NULL, instance, state);
     if (window == NULL) {
+        axyne_splash_close(splash);
         axyne_documents_destroy(&state->documents);
+        free(state->global_preferences_path);
+        free(state->global_settings_write_path);
         HeapFree(GetProcessHeap(), 0, state);
         UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
         DeleteObject(window_class.hbrBackground);
         return 1;
     }
-    ShowWindow(window, show_command);
-    UpdateWindow(window);
+    axyne_workspace_restore(window, state);
+    axyne_splash_step(splash, AXYNE_STARTUP_EDITOR);
+    axyne_layout(window, state);
+    axyne_splash_step(splash, AXYNE_STARTUP_STEP_COUNT);
+    {
+        ULONGLONG elapsed = GetTickCount64() - splash_shown_at;
+        if (splash != NULL && elapsed < AXYNE_SPLASH_MIN_MS) {
+            UINT interval = (UINT)(AXYNE_SPLASH_MIN_MS - elapsed);
+            state->splash = splash;
+            state->splash_show_command = show_command;
+            state->splash_timer_id = SetTimer(window, AXYNE_SPLASH_TIMER,
+                                               interval, NULL);
+            if (state->splash_timer_id == 0) {
+                state->splash_timer_id = SetTimer(NULL, 0, interval, NULL);
+                state->splash_timer_thread = state->splash_timer_id != 0;
+            }
+            if (state->splash_timer_id == 0) {
+                DestroyWindow(window);
+                UnregisterClassW(AXYNE_WINDOW_CLASS, instance);
+                DeleteObject(window_class.hbrBackground);
+                return 1;
+            }
+        } else {
+            axyne_show_main_window(window, state, show_command);
+            axyne_splash_close(splash);
+        }
+    }
 
     MSG message;
     int result = 0;
     while (GetMessageW(&message, NULL, 0, 0) > 0) {
+        if (message.hwnd == NULL && message.message == WM_TIMER) {
+            AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
+                window, GWLP_USERDATA);
+            if (current != NULL && current->splash_timer_thread &&
+                current->splash_timer_id != 0 &&
+                message.wParam == current->splash_timer_id) {
+                KillTimer(NULL, current->splash_timer_id);
+                current->splash_timer_id = 0;
+                current->splash_timer_thread = 0;
+                axyne_show_main_window(window, current,
+                                       current->splash_show_command);
+                axyne_splash_close(current->splash);
+                current->splash = NULL;
+                continue;
+            }
+        }
         if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN) {
             AxyneWindowState *current = (AxyneWindowState *)GetWindowLongPtrW(
                 window, GWLP_USERDATA);

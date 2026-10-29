@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "splash_windows.h"
+
 #include "axyne/build_selector.h"
 #include "axyne/app_state.h"
 #include "axyne/app_paths.h"
@@ -238,6 +240,10 @@ typedef struct AxyneWindowState {
     char *global_settings_write_path;
     char *workspace_settings_write_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
+    AxyneSplash *splash;
+    int splash_show_command;
+    UINT_PTR splash_timer_id;
+    int splash_timer_thread;
     AxyneAppState app_state;
     char *app_state_path;
     AxyneLspClient *lsp;

@@ -1,5 +1,7 @@
 #include "ui_macos_internal.h"
 #include "axyne/memory_usage.h"
+#include "axyne/build_config.h"
+#import "splash_macos.h"
 
 /* Menu text at the Figma 12pt size. Only the font is set so AppKit keeps
  * choosing the colour (which also dims disabled entries) and draws the
@@ -1677,22 +1679,6 @@ static BOOL axyne_macos_is_image_path(const char *path)
         _appStatePath = axyne_app_path(AXYNE_APP_PATH_STATE);
         if (_appStatePath != NULL)
             (void)axyne_app_state_load(_appStatePath, &_appState, NULL);
-        /* Reopen the last workspace once the window is up. The queue block
-         * must not retain this view: editor-runtime tests intentionally do
-         * not drain the main queue before releasing it. */
-        AxyneDiscoveryBox *restoreBox = (AxyneDiscoveryBox *)calloc(1, sizeof(*restoreBox));
-        if (restoreBox != NULL) {
-            restoreBox->target = self;
-            _restoreBox = restoreBox;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (restoreBox->target != nil) {
-                    AxyneWorkspaceView *view = restoreBox->target;
-                    view->_restoreBox = NULL;
-                    [view restoreWorkspace];
-                }
-                free(restoreBox);
-            });
-        }
         _terminalOutput = [[NSTextView alloc] initWithFrame:NSZeroRect];
         [_terminalOutput setEditable:NO];
         [_terminalOutput setSelectable:YES];
@@ -7108,7 +7094,6 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
     if (_refreshBox != NULL) _refreshBox->target = nil;
-    if (_restoreBox != NULL) _restoreBox->target = nil;
     [self cancelProblemsRefresh];
     [self cancelOutlineRefresh];
     axyne_palette_ctl_destroy(&_palette);
@@ -7614,6 +7599,14 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
 {
     (void)notification;
     NSRect frame = NSMakeRect(0, 0, 1440, 900);
+    NSRect visible = [[NSScreen mainScreen] visibleFrame];
+    NSRect splashFrame = NSMakeRect(NSMidX(visible) - 720, NSMidY(visible) - 450,
+                                    1440, 900);
+    AxyneSplashController *splash = [[AxyneSplashController alloc]
+        initWithFrame:NSIntersectionRect(splashFrame, visible)
+              version:@AXYNE_CONFIG_VERSION];
+    NSDate *splashShownAt = [NSDate date];
+    [splash setStep:AXYNE_STARTUP_SETTINGS];
     _window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
@@ -7627,8 +7620,28 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     [_window setContentView:workspace];
     [_window setDelegate:self];
     axyne_install_menu([NSApplication sharedApplication], workspace);
-    [_window center];
-    [_window makeKeyAndOrderFront:nil];
+    if (NSIsEmptyRect(visible))
+        [_window center];
+    else
+        [_window setFrame:[_window frameRectForContentRect:
+            NSIntersectionRect(splashFrame, visible)] display:NO];
+    [splash setStep:AXYNE_STARTUP_WORKSPACE];
+    [workspace restoreWorkspace];
+    [splash setStep:AXYNE_STARTUP_EDITOR];
+    [workspace layoutSubtreeIfNeeded];
+    [splash setStep:AXYNE_STARTUP_STEP_COUNT];
+    {
+        NSTimeInterval remaining = splash != nil ?
+            0.45 + [splashShownAt timeIntervalSinceNow] : 0;
+        NSWindow *window = _window;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(remaining > 0 ? remaining * NSEC_PER_SEC : 0)),
+                       dispatch_get_main_queue(), ^{
+            [window makeKeyAndOrderFront:nil];
+            [splash close];
+            [splash release];
+        });
+    }
     /* Without explicit activation a binary started from a terminal or a
      * fresh build keeps another app's menu bar and ignores menu clicks. */
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];

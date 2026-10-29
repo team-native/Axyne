@@ -235,7 +235,6 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneDocumentSet _documents;
     AxyneExplorer _explorer;
     AxyneWatcher *_watcher;
-    AxyneDiscoveryBox *_restoreBox;
     NSInteger _explorerSelection;
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
