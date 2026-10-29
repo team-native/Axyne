@@ -3808,8 +3808,16 @@ static BOOL axyne_macos_is_image_path(const char *path)
 {
     if (_panelHidden) return 0;
     return axyne_layout_clamp_panel(
-        (int)(_panelSize > 0 ? _panelSize : AXYNE_UI_PANEL),
+        (int)(_panelSize > 0 ? _panelSize :
+            (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL
+                ? AXYNE_UI_TERMINAL_PANEL : AXYNE_UI_PANEL)),
         (int)NSHeight([self bounds]), AXYNE_UI_MENU + AXYNE_UI_TOOLBAR + AXYNE_UI_TABS);
+}
+
+- (CGFloat)panelHeaderHeight
+{
+    return _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL
+        ? AXYNE_UI_TERMINAL_HEADER : AXYNE_UI_PANEL_HEADER;
 }
 
 /* Splitter under `point` (view coordinates): 1 = sidebar/editor border,
@@ -6646,6 +6654,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     CGFloat width = NSWidth(bounds);
     CGFloat statusTop = NSHeight(bounds) - AXYNE_STATUS;
     CGFloat bottomTop = NSHeight(bounds) - AXYNE_STATUS - [self panelHeight];
+    CGFloat panelHeaderHeight = [self panelHeaderHeight];
     CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     [_editorView setFrame:NSMakeRect([self sidebarWidth], editorTop,
         MAX(0, width - [self sidebarWidth]), MAX(0, bottomTop - editorTop))];
@@ -6672,8 +6681,11 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     /* Output tab: build/run/debugger text; Terminal tab: the native shell
      * grid in the same rect. */
     BOOL terminal = _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL;
-    [_terminalScroll setFrame:NSMakeRect([self sidebarWidth] + 16, bottomTop + 32,
-        MAX(0, width - [self sidebarWidth] - 24), MAX(0, [self panelHeight] - 32))];
+    CGFloat panelActionTop = bottomTop + (panelHeaderHeight - 28) / 2.0;
+    [_terminalScroll setFrame:NSMakeRect([self sidebarWidth] + 16,
+        bottomTop + panelHeaderHeight,
+        MAX(0, width - [self sidebarWidth] - 24),
+        MAX(0, [self panelHeight] - panelHeaderHeight))];
     [_terminalScroll setHidden:_panelMode != AXYNE_BOTTOM_PANEL_OUTPUT];
     {
         /* The active session fills the panel; split shows the next session
@@ -6691,34 +6703,44 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             [_shellViews[i] setFrame:frame];
             [_shellViews[i] setHidden:!shown];
         }
-        [_terminalNewSession setFrame:NSMakeRect(width - 228, bottomTop + 2, 28, 28)];
-        [_terminalNextSession setFrame:NSMakeRect(width - 196, bottomTop + 2, 28, 28)];
-        [_terminalSplit setFrame:NSMakeRect(width - 164, bottomTop + 2, 28, 28)];
+        [_terminalNewSession setFrame:NSMakeRect(width - 228, panelActionTop, 28, 28)];
+        [_terminalNextSession setFrame:NSMakeRect(width - 196, panelActionTop, 28, 28)];
+        [_terminalSplit setFrame:NSMakeRect(width - 164, panelActionTop, 28, 28)];
         [_terminalNewSession setHidden:!terminal || _panelHidden];
         [_terminalNextSession setHidden:!terminal || _panelHidden || _shellCount < 2];
         [_terminalSplit setHidden:!terminal || _panelHidden || _shellCount < 2];
     }
-    [_problemsView setFrame:NSMakeRect([self sidebarWidth], bottomTop + 32,
-        MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32))];
+    [_problemsView setFrame:NSMakeRect([self sidebarWidth],
+        bottomTop + panelHeaderHeight,
+        MAX(0, width - [self sidebarWidth]),
+        MAX(0, [self panelHeight] - panelHeaderHeight))];
     [_problemsView setHidden:_panelMode != AXYNE_BOTTOM_PANEL_PROBLEMS];
     {
-        /* Tab strip from the tab model: visible tabs left to right, 2px
-         * apart (the "문제  N" label grows with the count and pushes the
-         * following tabs). Hidden tabs keep their last frame. */
+        /* Tab strip uses the tight output spacing or the wider terminal
+         * spacing from the corresponding Figma frame. */
         CGFloat tabX = [self sidebarWidth] + 8;
+        CGFloat tabGap = _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL ? 24 : 2;
         for (NSInteger tab = 0; tab < AXYNE_BOTTOM_PANEL_TAB_COUNT; ++tab) {
             NSButton *button = [self bottomPanelTabButton:(AxyneBottomPanelTab)tab];
             CGFloat tabWidth;
             if (![self bottomPanelTabVisible:(AxyneBottomPanelTab)tab]) continue;
+            if (_panelMode == AXYNE_BOTTOM_PANEL_TERMINAL) {
+                [button setFont:tab == AXYNE_BOTTOM_PANEL_TERMINAL
+                    ? [NSFont boldSystemFontOfSize:13]
+                    : [NSFont systemFontOfSize:13]];
+            } else {
+                [button setFont:[NSFont systemFontOfSize:11]];
+            }
             tabWidth = [self bottomPanelTabWidth:(AxyneBottomPanelTab)tab];
-            [button setFrame:NSMakeRect(tabX, bottomTop, tabWidth, 32)];
-            tabX += tabWidth + 2;
+            [button setFrame:NSMakeRect(tabX, bottomTop, tabWidth,
+                panelHeaderHeight)];
+            tabX += tabWidth + tabGap;
         }
     }
-    [_terminalStart setFrame:NSMakeRect(width - 132, bottomTop + 2, 28, 28)];
-    [_terminalStop setFrame:NSMakeRect(width - 100, bottomTop + 2, 28, 28)];
-    [_clearOutput setFrame:NSMakeRect(width - 68, bottomTop + 2, 28, 28)];
-    [_closePanel setFrame:NSMakeRect(width - 36, bottomTop + 2, 28, 28)];
+    [_terminalStart setFrame:NSMakeRect(width - 132, panelActionTop, 28, 28)];
+    [_terminalStop setFrame:NSMakeRect(width - 100, panelActionTop, 28, 28)];
+    [_clearOutput setFrame:NSMakeRect(width - 68, panelActionTop, 28, 28)];
+    [_closePanel setFrame:NSMakeRect(width - 36, panelActionTop, 28, 28)];
     CGFloat x = 8;
     size_t icon = 0;
     for (NSButton *button in @[_newButton, _openButton, _saveButton, _undoButton, _redoButton]) {
@@ -6765,8 +6787,9 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
          * that shows its own view for the selected tab replaces the default
          * output, terminal grid and problems views. */
         NSRect content = _panelHidden ? NSZeroRect :
-            NSMakeRect([self sidebarWidth], bottomTop + 32,
-                MAX(0, width - [self sidebarWidth]), MAX(0, [self panelHeight] - 32));
+            NSMakeRect([self sidebarWidth], bottomTop + panelHeaderHeight,
+                MAX(0, width - [self sidebarWidth]),
+                MAX(0, [self panelHeight] - panelHeaderHeight));
         AxyneBottomPanelTab selectedTab = (AxyneBottomPanelTab)_panelMode;
         BOOL ownedTab = NO;
 #define AXYNE_MAC_HOOK(feature) \
@@ -6908,6 +6931,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     NSRect bounds = [self bounds];
     CGFloat width = NSWidth(bounds), height = NSHeight(bounds);
     CGFloat bottomTop = height - AXYNE_STATUS - [self panelHeight];
+    CGFloat panelHeaderHeight = [self panelHeaderHeight];
     CGFloat statusTop = height - AXYNE_STATUS;
     CGFloat editorTop = AXYNE_CONTENT_TOP + AXYNE_TABS;
     BOOL light = _preferences.theme.preset == AXYNE_THEME_LIGHT ||
@@ -6956,10 +6980,12 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     NSRectFill(NSMakeRect(0, AXYNE_CONTENT_TOP, [self sidebarWidth], AXYNE_TABS));
     if (!_panelHidden) {
         [tabBackground setFill];
-        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop, width - [self sidebarWidth], 32));
+        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop, width - [self sidebarWidth],
+                              panelHeaderHeight));
         [axyne_preference_color(axyne_macos_output_background(&_preferences.theme)) setFill];
-        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop + 32, width - [self sidebarWidth],
-            MAX(0, [self panelHeight] - 32)));
+        NSRectFill(NSMakeRect([self sidebarWidth], bottomTop + panelHeaderHeight,
+            width - [self sidebarWidth],
+            MAX(0, [self panelHeight] - panelHeaderHeight)));
     }
     [toolbar setFill]; NSRectFill(NSMakeRect(0, statusTop, width, AXYNE_STATUS));
     [border setFill];
@@ -6981,8 +7007,11 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             if ([self bottomPanelTabVisible:(AxyneBottomPanelTab)tab])
                 lastTab = [self bottomPanelTabButton:(AxyneBottomPanelTab)tab];
         [axyne_preference_color(reference ? 0xa66bf0 : _preferences.theme.accent) setFill];
+        CGFloat indicatorHeight = _panelMode == AXYNE_BOTTOM_PANEL_TERMINAL ? 2 : 3;
         if (selected != nil)
-            NSRectFill(NSMakeRect(NSMinX([selected frame]), bottomTop + 29, NSWidth([selected frame]), 3));
+            NSRectFill(NSMakeRect(NSMinX([selected frame]),
+                bottomTop + panelHeaderHeight - indicatorHeight,
+                NSWidth([selected frame]), indicatorHeight));
         NSString *shell = _terminalRunner.executable == NULL ? @"" :
             [[NSString stringWithUTF8String:_terminalRunner.executable] lastPathComponent];
         [self drawLabel:shell at:NSMakePoint(MAX([self sidebarWidth] + 148,
