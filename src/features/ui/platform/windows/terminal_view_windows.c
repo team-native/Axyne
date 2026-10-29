@@ -29,7 +29,7 @@ static int cell_text(const AxyneTerminalCell *cell,wchar_t *text) {
     if(!n) text[n++]=L' ';return n;
 }
 static void resize(HWND w,TerminalView *v) {
-    RECT rect;GetClientRect(w,&rect);int rows=(rect.bottom-8)/v->height,cols=(rect.right-8)/v->width;
+    RECT rect;GetClientRect(w,&rect);int rows=(rect.bottom-28)/v->height,cols=(rect.right-36)/v->width;
     rows=max(1,min(512,rows));cols=max(1,min(1024,cols));
     AxyneTerminalSnapshot s={0};if(axyne_terminal_snapshot(v->terminal,&s,NULL)==AXYNE_STATUS_OK) {
         int different=s.rows!=rows||s.columns!=cols;axyne_terminal_snapshot_free(&s);if(different)axyne_terminal_resize(v->terminal,rows,cols,NULL);
@@ -37,7 +37,7 @@ static void resize(HWND w,TerminalView *v) {
 }
 static int index_at(HWND w,TerminalView *v,int x,int y) {
     (void)w;AxyneTerminalSnapshot s={0};if(axyne_terminal_snapshot(v->terminal,&s,NULL)!=AXYNE_STATUS_OK)return -1;
-    int index=max(0,min(s.rows-1,(y-4)/v->height))*s.columns+max(0,min(s.columns-1,(x-4)/v->width));axyne_terminal_snapshot_free(&s);return index;
+    int index=max(0,min(s.rows-1,(y-14)/v->height))*s.columns+max(0,min(s.columns-1,(x-18)/v->width));axyne_terminal_snapshot_free(&s);return index;
 }
 static void copy(HWND w,TerminalView *v) {
     if(v->first<0)return;AxyneTerminalSnapshot s={0};if(axyne_terminal_snapshot(v->terminal,&s,NULL)!=AXYNE_STATUS_OK)return;
@@ -96,10 +96,10 @@ static LRESULT CALLBACK proc(HWND w,UINT message,WPARAM wp,LPARAM lp) {
             for(int r=0;r<s.rows;++r)for(int c=0;c<s.columns;++c){int index=r*s.columns+c;AxyneTerminalCell *cell=&s.cells[index];if(!cell->width)continue;
                 uint32_t fg=cell->foreground,bg=cell->background;if(cell->attributes&AXYNE_TERMINAL_REVERSE){uint32_t temp=fg;fg=bg;bg=temp;}
                 int selected=first>=0&&index>=first&&index<=last;SetTextColor(dc,selected?GetSysColor(COLOR_HIGHLIGHTTEXT):color(fg));SetBkColor(dc,selected?GetSysColor(COLOR_HIGHLIGHT):color(bg));
-                unsigned font=(cell->attributes&AXYNE_TERMINAL_BOLD?1:0)|(cell->attributes&AXYNE_TERMINAL_ITALIC?2:0)|(cell->attributes&AXYNE_TERMINAL_UNDERLINE?4:0);HGDIOBJ old=SelectObject(dc,v->fonts[font]);wchar_t text[12];int n=cell_text(cell,text);RECT rect={4+c*v->width,4+r*v->height,4+(c+cell->width)*v->width,4+(r+1)*v->height};ExtTextOutW(dc,rect.left,rect.top,ETO_OPAQUE|ETO_CLIPPED,&rect,text,(UINT)n,NULL);SelectObject(dc,old);
+                unsigned font=(cell->attributes&AXYNE_TERMINAL_BOLD?1:0)|(cell->attributes&AXYNE_TERMINAL_ITALIC?2:0)|(cell->attributes&AXYNE_TERMINAL_UNDERLINE?4:0);HGDIOBJ old=SelectObject(dc,v->fonts[font]);wchar_t text[12];int n=cell_text(cell,text);RECT rect={18+c*v->width,14+r*v->height,18+(c+cell->width)*v->width,14+(r+1)*v->height};ExtTextOutW(dc,rect.left,rect.top,ETO_OPAQUE|ETO_CLIPPED,&rect,text,(UINT)n,NULL);SelectObject(dc,old);
             }
-            if(s.cursor_visible&&GetFocus()==w){RECT cursor={4+s.cursor_column*v->width,4+(s.cursor_row+1)*v->height-2,4+(s.cursor_column+1)*v->width,4+(s.cursor_row+1)*v->height};HBRUSH b=CreateSolidBrush(color(v->foreground));FillRect(dc,&cursor,b);DeleteObject(b);}
-            HIMC imc=ImmGetContext(w);COMPOSITIONFORM form={0};form.dwStyle=CFS_POINT;form.ptCurrentPos.x=4+s.cursor_column*v->width;form.ptCurrentPos.y=4+s.cursor_row*v->height;ImmSetCompositionWindow(imc,&form);ImmReleaseContext(w,imc);
+            if(s.cursor_visible&&GetFocus()==w){RECT cursor={18+s.cursor_column*v->width,14+(s.cursor_row+1)*v->height-2,18+(s.cursor_column+1)*v->width,14+(s.cursor_row+1)*v->height};HBRUSH b=CreateSolidBrush(color(v->foreground));FillRect(dc,&cursor,b);DeleteObject(b);}
+            HIMC imc=ImmGetContext(w);COMPOSITIONFORM form={0};form.dwStyle=CFS_POINT;form.ptCurrentPos.x=18+s.cursor_column*v->width;form.ptCurrentPos.y=14+s.cursor_row*v->height;ImmSetCompositionWindow(imc,&form);ImmReleaseContext(w,imc);
             axyne_terminal_snapshot_free(&s);}
         EndPaint(w,&paint);return 0;
     }
@@ -117,4 +117,4 @@ void axyne_terminal_view_stop(HWND w){TerminalView *v=view(w);if(v)axyne_termina
 void axyne_terminal_view_clear(HWND w){TerminalView *v=view(w);if(!v)return;v->first=v->last=-1;axyne_terminal_clear(v->terminal);InvalidateRect(w,NULL,FALSE);}
 int axyne_terminal_view_running(HWND w){TerminalView *v=view(w);return v&&axyne_terminal_running(v->terminal);}
 AxyneTerminal *axyne_terminal_view_model(HWND w){TerminalView *v=view(w);return v?v->terminal:NULL;}
-void axyne_terminal_view_theme(HWND w,HFONT font,uint32_t fg,uint32_t bg){TerminalView *v=view(w);if(!v)return;LOGFONTW lf={0};GetObjectW(font,sizeof lf,&lf);for(int i=0;i<8;++i){if(v->fonts[i])DeleteObject(v->fonts[i]);lf.lfWeight=i&1?FW_BOLD:FW_NORMAL;lf.lfItalic=(BYTE)((i&2)!=0);lf.lfUnderline=(BYTE)((i&4)!=0);v->fonts[i]=CreateFontIndirectW(&lf);}HDC dc=GetDC(w);HGDIOBJ old=SelectObject(dc,v->fonts[0]);TEXTMETRICW metrics;GetTextMetricsW(dc,&metrics);v->width=max(1,metrics.tmAveCharWidth);v->height=max(1,metrics.tmHeight+2);SelectObject(dc,old);ReleaseDC(w,dc);v->foreground=fg;v->background=bg;axyne_terminal_set_colors(v->terminal,fg,bg);resize(w,v);InvalidateRect(w,NULL,FALSE);}
+void axyne_terminal_view_theme(HWND w,HFONT font,uint32_t fg,uint32_t bg){TerminalView *v=view(w);if(!v)return;LOGFONTW lf={0};GetObjectW(font,sizeof lf,&lf);for(int i=0;i<8;++i){if(v->fonts[i])DeleteObject(v->fonts[i]);lf.lfWeight=i&1?FW_BOLD:FW_NORMAL;lf.lfItalic=(BYTE)((i&2)!=0);lf.lfUnderline=(BYTE)((i&4)!=0);v->fonts[i]=CreateFontIndirectW(&lf);}HDC dc=GetDC(w);HGDIOBJ old=SelectObject(dc,v->fonts[0]);TEXTMETRICW metrics;GetTextMetricsW(dc,&metrics);v->width=max(1,metrics.tmAveCharWidth);v->height=max(1,metrics.tmHeight+7);SelectObject(dc,old);ReleaseDC(w,dc);v->foreground=fg;v->background=bg;axyne_terminal_set_colors(v->terminal,fg,bg);resize(w,v);InvalidateRect(w,NULL,FALSE);}

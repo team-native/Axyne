@@ -77,12 +77,12 @@ static void exited(AxyneTerminal *terminal, int code, void *context) {
 - (void)setFont:(NSFont *)font foreground:(uint32_t)fg background:(uint32_t)bg {
     [font retain]; [_font release]; _font = font; _foreground = fg; _background = bg;
     _cellWidth = MAX(1, ceil([@"M" sizeWithAttributes:@{NSFontAttributeName:font}].width));
-    _cellHeight = MAX(1, ceil([font ascender]-[font descender]+[font leading]+2));
+    _cellHeight = MAX(1, ceil([font ascender]-[font descender]+[font leading]+7));
     axyne_terminal_set_colors(_terminal, fg, bg); [self resizeGrid]; [self setNeedsDisplay:YES];
 }
 - (void)resizeGrid {
-    int rows = MAX(1, MIN(512, (int)((NSHeight([self bounds])-8)/_cellHeight)));
-    int cols = MAX(1, MIN(1024, (int)((NSWidth([self bounds])-8)/_cellWidth)));
+    int rows = MAX(1, MIN(512, (int)((NSHeight([self bounds])-28)/_cellHeight)));
+    int cols = MAX(1, MIN(1024, (int)((NSWidth([self bounds])-36)/_cellWidth)));
     AxyneTerminalSnapshot s = {0};
     if (axyne_terminal_snapshot(_terminal, &s, NULL) == AXYNE_STATUS_OK) {
         BOOL different = s.rows != rows || s.columns != cols; axyne_terminal_snapshot_free(&s);
@@ -99,7 +99,7 @@ static void exited(AxyneTerminal *terminal, int code, void *context) {
         if (!cell->width) continue;
         uint32_t fg=cell->foreground, bg=cell->background;
         if (cell->attributes & AXYNE_TERMINAL_REVERSE) { uint32_t temp=fg; fg=bg; bg=temp; }
-        NSRect rect=NSMakeRect(4+c*_cellWidth, 4+r*_cellHeight, _cellWidth*MAX(1,cell->width), _cellHeight);
+        NSRect rect=NSMakeRect(18+c*_cellWidth, 14+r*_cellHeight, _cellWidth*MAX(1,cell->width), _cellHeight);
         BOOL selected = first >= 0 && index >= first && index <= last;
         [(selected ? [NSColor selectedTextBackgroundColor] : color(bg)) setFill]; NSRectFill(rect);
         if (!cell->width) continue;
@@ -108,14 +108,14 @@ static void exited(AxyneTerminal *terminal, int code, void *context) {
         [cellString(cell) drawAtPoint:rect.origin withAttributes:@{NSFontAttributeName:font, NSForegroundColorAttributeName:selected ? [NSColor selectedTextColor] : color(fg), NSUnderlineStyleAttributeName:@(cell->attributes & AXYNE_TERMINAL_UNDERLINE ? NSUnderlineStyleSingle : 0)}];
     }
     if (s.cursor_visible && [[self window] firstResponder] == self) {
-        [color(_foreground) setFill]; NSRectFill(NSMakeRect(4+s.cursor_column*_cellWidth, 4+(s.cursor_row+1)*_cellHeight-2, _cellWidth, 2));
+        [color(_foreground) setFill]; NSRectFill(NSMakeRect(18+s.cursor_column*_cellWidth, 14+(s.cursor_row+1)*_cellHeight-2, _cellWidth, 2));
     }
-    if ([_marked length]) [_marked drawAtPoint:NSMakePoint(4+s.cursor_column*_cellWidth,4+s.cursor_row*_cellHeight)];
+    if ([_marked length]) [_marked drawAtPoint:NSMakePoint(18+s.cursor_column*_cellWidth,14+s.cursor_row*_cellHeight)];
     axyne_terminal_snapshot_free(&s);
 }
 - (NSInteger)cellAtPoint:(NSPoint)point {
     AxyneTerminalSnapshot s={0}; if (axyne_terminal_snapshot(_terminal,&s,NULL)!=AXYNE_STATUS_OK) return -1;
-    int c=MAX(0,MIN(s.columns-1,(int)((point.x-4)/_cellWidth))), r=MAX(0,MIN(s.rows-1,(int)((point.y-4)/_cellHeight)));
+    int c=MAX(0,MIN(s.columns-1,(int)((point.x-18)/_cellWidth))), r=MAX(0,MIN(s.rows-1,(int)((point.y-14)/_cellHeight)));
     NSInteger index=r*s.columns+c; axyne_terminal_snapshot_free(&s); return index;
 }
 - (void)mouseDown:(NSEvent *)event {
@@ -182,6 +182,6 @@ static void exited(AxyneTerminal *terminal, int code, void *context) {
 - (NSArray *)validAttributesForMarkedText { return @[]; }
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actual { (void)range;if(actual)*actual=NSMakeRange(NSNotFound,0);return nil; }
 - (NSUInteger)characterIndexForPoint:(NSPoint)point { (void)point;return NSNotFound; }
-- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual { (void)range;if(actual)*actual=NSMakeRange(0,0); AxyneTerminalSnapshot s={0};axyne_terminal_snapshot(_terminal,&s,NULL);NSRect rect=NSMakeRect(4+s.cursor_column*_cellWidth,4+s.cursor_row*_cellHeight,_cellWidth,_cellHeight);axyne_terminal_snapshot_free(&s);return [[self window] convertRectToScreen:[self convertRect:rect toView:nil]]; }
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual { (void)range;if(actual)*actual=NSMakeRange(0,0); AxyneTerminalSnapshot s={0};axyne_terminal_snapshot(_terminal,&s,NULL);NSRect rect=NSMakeRect(18+s.cursor_column*_cellWidth,14+s.cursor_row*_cellHeight,_cellWidth,_cellHeight);axyne_terminal_snapshot_free(&s);return [[self window] convertRectToScreen:[self convertRect:rect toView:nil]]; }
 - (void)doCommandBySelector:(SEL)selector { (void)selector; }
 @end
