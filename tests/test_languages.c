@@ -670,12 +670,10 @@ static int lsp_server_checks(const char *root)
     AXYNE_TEST_CHECK(axyne_test_write(file, ""));
 #else
     AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "kotlin-lsp"));
-    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh
-"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh\n"));
     AXYNE_TEST_CHECK(chmod(file, 0755) == 0);
     AXYNE_TEST_CHECK(axyne_test_path(file, sizeof(file), bin, "xcrun"));
-    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh
-"));
+    AXYNE_TEST_CHECK(axyne_test_write(file, "#!/bin/sh\n"));
     AXYNE_TEST_CHECK(chmod(file, 0755) == 0);
 #endif
     AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_KOTLIN, &command, &error),
