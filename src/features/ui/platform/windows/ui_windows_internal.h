@@ -210,6 +210,8 @@ typedef struct AxyneWindowState {
     int runtimes_discovered;
     int build_menu_open; /* chevron points up while the popup is open */
     int runtime_discovery_posted;
+    HWND completion_detail; /* detail panel beside the completion list */
+    char completion_detail_text[512];
     AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
     int pending_run;
     AxyneDebugger debugger;
@@ -600,6 +602,9 @@ void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
 void axyne_win_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
                               const AxyneLspLocation *locations,
                               size_t count, void *user_data);
+/* "kind · detail" of `word` in the LSP completion list on screen, or NULL. */
+const char *axyne_win_lsp_completion_detail(AxyneWindowState *state,
+                                            const char *word);
 void axyne_win_lsp_sync_active(AxyneWindowState *state);
 int axyne_win_lsp_open_active(AxyneWindowState *state);
 int axyne_win_lsp_nav_dispatch(AxyneWindowState *state, int references);
