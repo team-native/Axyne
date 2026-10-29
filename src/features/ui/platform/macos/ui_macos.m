@@ -239,7 +239,7 @@ typedef NS_ENUM(NSInteger, AxynePaletteHit) {
         [self setWantsLayer:YES];
         [self setAccessibilityElement:YES];
         [self setAccessibilityRole:NSAccessibilityListRole];
-        [self setAccessibilityLabel:@"명령 ?�레??결과"];
+        [self setAccessibilityLabel:@"명령 팔레트 결과"];
     }
     return self;
 }
@@ -440,7 +440,7 @@ typedef NS_ENUM(NSInteger, AxynePaletteHit) {
         [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
         axyne_palette_rgb(0xc9a2f7, 1), header, NSTextAlignmentLeft);
     if (c->list.count > 0) {
-        axyne_palette_draw_text([NSString stringWithFormat:@"%zu�??�치", c->list.count],
+        axyne_palette_draw_text([NSString stringWithFormat:@"%zu개 일치", c->list.count],
             [NSFont systemFontOfSize:11], axyne_palette_rgb(0x8b919b, 1), header,
             NSTextAlignmentRight);
     }
@@ -485,7 +485,7 @@ typedef NS_ENUM(NSInteger, AxynePaletteHit) {
     NSRectFill(NSMakeRect(NSMinX(popup) + 1, NSMaxY(popup) - 1 - 32 - 1, NSWidth(popup) - 2, 1));
     {
         NSArray *glyphs = @[@"", @">", @"@", @":"];
-        NSArray *labels = @[@"?�일", @"명령", @"기호", @"�??�동"];
+        NSArray *labels = @[@"파일", @"명령", @"기호", @"줄 이동"];
         NSFont *mono = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
         NSFont *sans = [NSFont systemFontOfSize:11];
         CGFloat chipsRight = 0;
@@ -509,9 +509,9 @@ typedef NS_ENUM(NSInteger, AxynePaletteHit) {
                            NSHeight(chip)), NSTextAlignmentLeft);
             chipsRight = NSMaxX(chip);
         }
-        NSString *hint = c->mode == AXYNE_PALETTE_MODE_COMMAND ? @"?�↓ ?�동 · Enter ?�행 · Esc ?�기"
-            : (c->mode == AXYNE_PALETTE_MODE_FILE ? @"?�↓ ?�동 · Enter ?�기 · Esc ?�기"
-                                                  : @"?�↓ ?�동 · Enter ?�동 · Esc ?�기");
+        NSString *hint = c->mode == AXYNE_PALETTE_MODE_COMMAND ? @"↑↓ 이동 · Enter 실행 · Esc 닫기"
+            : (c->mode == AXYNE_PALETTE_MODE_FILE ? @"↑↓ 이동 · Enter 열기 · Esc 닫기"
+                                                  : @"↑↓ 이동 · Enter 이동 · Esc 닫기");
         axyne_palette_draw_text(hint, sans, axyne_palette_rgb(0x8b919b, 1),
             NSMakeRect(chipsRight + 12, NSMaxY(popup) - 28, NSMaxX(popup) - 8 - chipsRight - 12, 22),
             NSTextAlignmentRight);
@@ -556,7 +556,7 @@ static const CGFloat AXYNE_GUIDE_COLUMN_GAP = 32;
     if (self != nil) {
         [self setAccessibilityElement:YES];
         [self setAccessibilityRole:NSAccessibilityGroupRole];
-        [self setAccessibilityLabel:@"?�축???�내"];
+        [self setAccessibilityLabel:@"단축키 안내"];
     }
     return self;
 }
@@ -853,7 +853,7 @@ static char *axyne_problems_copy_text(const char *text)
     self = [super initWithFrame:frame];
     if (self != nil) {
         _selected = -1;
-        _summary = [@"?�류 0�?· 경고 0�?· ?�보 0�? copy];
+        _summary = [@"오류 0개 · 경고 0개 · 정보 0개" copy];
         _messageFont = [[NSFont systemFontOfSize:12] retain];
         _groupFont = [[NSFont systemFontOfSize:11] retain];
         _monoFont = [axyne_problems_mono_font(10) retain];
@@ -873,7 +873,7 @@ static char *axyne_problems_copy_text(const char *text)
         [[_filter cell] setUsesSingleLineMode:YES];
         [[_filter cell] setScrollable:YES];
         [_filter setDelegate:self];
-        [_filter setAccessibilityLabel:@"문제 ?�터"];
+        [_filter setAccessibilityLabel:@"문제 필터"];
         [self addSubview:_filter];
         [self setAccessibilityLabel:@"문제 목록"];
         [self setAccessibilityRole:NSAccessibilityListRole];
@@ -908,7 +908,7 @@ static char *axyne_problems_copy_text(const char *text)
 - (void)updateFilterAppearance
 {
     NSAttributedString *placeholder = [[[NSAttributedString alloc]
-        initWithString:@"?�터 (?? C4244, editor.c)"
+        initWithString:@"필터 (예: C4244, editor.c)"
             attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:10],
                          NSForegroundColorAttributeName:_faintColor}] autorelease];
     [_filter setTextColor:_textColor];
@@ -1239,7 +1239,7 @@ static char *axyne_problems_copy_text(const char *text)
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(list);
     if (_rowCount == 0) {
-        axyne_problems_draw_text(@"문제가 ?�습?�다", _messageFont, _mutedColor,
+        axyne_problems_draw_text(@"문제가 없습니다", _messageFont, _mutedColor,
             NSMakeRect(0, NSMinY(list), NSWidth(list), NSHeight(list)), NSTextAlignmentCenter);
     } else {
         size_t first = (size_t)floor(_scroll / AXYNE_PROBLEMS_ROW);
@@ -1666,8 +1666,6 @@ static BOOL axyne_macos_is_image_path(const char *path)
             status = readPath == NULL ? AXYNE_STATUS_NOT_FOUND :
                 axyne_preferences_load_global(readPath, &_globalPreferences,
                                                &preferenceError);
-            if (_globalPreferencesPath != NULL)
-                (void)axyne_runner_profiles_load(&_runnerProfiles, _globalPreferencesPath, NULL);
             free(readPath);
             _preferences = _globalPreferences;
             [self rebuildKeymap];
@@ -1697,9 +1695,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [self addSubview:_terminalScroll];
         _shellView = [[AxyneTerminalView alloc] initWithFrame:NSZeroRect];
         [_shellView setHidden:YES]; [self addSubview:_shellView];
-        _newButton = axyne_macos_toolbar_button(@"??, self, @selector(newDocument:));
-        _openButton = axyne_macos_toolbar_button(@"??, self, @selector(openDocument:));
-        _saveButton = axyne_macos_toolbar_button(@"??, self, @selector(saveDocument:));
+        _newButton = axyne_macos_toolbar_button(@"▱", self, @selector(newDocument:));
+        _openButton = axyne_macos_toolbar_button(@"▰", self, @selector(openDocument:));
+        _saveButton = axyne_macos_toolbar_button(@"▣", self, @selector(saveDocument:));
         _emptyView = [[AxyneEmptyEditorView alloc] initWithFrame:NSZeroRect];
         [_emptyView setHidden:YES];
         [self addSubview:_emptyView];
@@ -1712,12 +1710,12 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_imagePreview setHidden:YES];
         [self addSubview:_imagePreview];
         _emptyGuideDirty = YES;
-        _undoButton = axyne_macos_toolbar_button(@"??, self, @selector(undo:));
-        _redoButton = axyne_macos_toolbar_button(@"??, self, @selector(redo:));
+        _undoButton = axyne_macos_toolbar_button(@"↶", self, @selector(undo:));
+        _redoButton = axyne_macos_toolbar_button(@"↷", self, @selector(redo:));
         _targetButton = axyne_macos_toolbar_button(@"Debug", self, @selector(showBuildTargetMenu:));
-        _searchButton = axyne_macos_toolbar_button(@"?�일 ?�동", self, @selector(quickFile:));
-        _buildButton = axyne_macos_toolbar_button(@"빌드  ?�B", self, @selector(buildDocument:));
-        _runButton = axyne_macos_toolbar_button(@"?�행  F5", self, @selector(runDocument:));
+        _searchButton = axyne_macos_toolbar_button(@"파일 이동", self, @selector(quickFile:));
+        _buildButton = axyne_macos_toolbar_button(@"빌드  ⌘B", self, @selector(buildDocument:));
+        _runButton = axyne_macos_toolbar_button(@"실행  F5", self, @selector(runDocument:));
         [self addSubview:_newButton]; [self addSubview:_openButton];
         [self addSubview:_saveButton]; [self addSubview:_undoButton];
         [self addSubview:_redoButton]; [self addSubview:_buildButton];
@@ -1728,8 +1726,8 @@ static BOOL axyne_macos_is_image_path(const char *path)
          * until the debug feature shows it. */
         _outputTab = axyne_macos_toolbar_button(@"출력", self, @selector(selectPanel:));
         _problemsTab = axyne_macos_toolbar_button(@"문제", self, @selector(selectPanel:));
-        _terminalTab = axyne_macos_toolbar_button(@"?��???, self, @selector(selectPanel:));
-        _debugConsoleTab = axyne_macos_toolbar_button(@"?�버�?콘솔", self, @selector(selectPanel:));
+        _terminalTab = axyne_macos_toolbar_button(@"터미널", self, @selector(selectPanel:));
+        _debugConsoleTab = axyne_macos_toolbar_button(@"디버그 콘솔", self, @selector(selectPanel:));
         [_outputTab setTag:AXYNE_BOTTOM_PANEL_OUTPUT];
         [_problemsTab setTag:AXYNE_BOTTOM_PANEL_PROBLEMS];
         [_terminalTab setTag:AXYNE_BOTTOM_PANEL_TERMINAL];
@@ -1738,19 +1736,19 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_debugConsoleTab setHidden:YES];
         [self addSubview:_outputTab]; [self addSubview:_problemsTab]; [self addSubview:_terminalTab];
         [self addSubview:_debugConsoleTab];
-        _clearOutput = axyne_macos_toolbar_button(@"??, self, @selector(clearOutput:));
-        [_clearOutput setToolTip:@"출력 지?�기"];
+        _clearOutput = axyne_macos_toolbar_button(@"⊘", self, @selector(clearOutput:));
+        [_clearOutput setToolTip:@"출력 지우기"];
         [self addSubview:_clearOutput];
         _problemsView = [[AxyneProblemsView alloc] initWithFrame:NSZeroRect];
         [_problemsView setDelegate:self];
         [_problemsView setHidden:YES];
         [self addSubview:_problemsView];
-        _terminalStart = axyne_macos_toolbar_button(@"??, self, @selector(startTerminal:));
-        [_terminalStart setToolTip:@"?��????�작"];
+        _terminalStart = axyne_macos_toolbar_button(@"▷", self, @selector(startTerminal:));
+        [_terminalStart setToolTip:@"터미널 시작"];
         [_terminalStart setTarget:self]; [_terminalStart setAction:@selector(startTerminal:)];
         [self addSubview:_terminalStart];
         _terminalStop = axyne_macos_toolbar_button(@"×", self, @selector(stopTerminal:));
-        [_terminalStop setToolTip:@"?�로?�스 중�?"]; [_terminalStop setTarget:self];
+        [_terminalStop setToolTip:@"프로세스 중지"]; [_terminalStop setTarget:self];
         [_terminalStop setAction:@selector(stopTerminal:)]; [_terminalStop setEnabled:NO];
         [self addSubview:_terminalStop];
         _debugStart = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -1775,13 +1773,13 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [_debugBreakpoint setEnabled:NO]; [self addSubview:_debugBreakpoint];
         for (NSButton *button in @[_debugStart, _debugPause, _debugContinue,
                                    _debugNext, _debugBreakpoint]) [button setHidden:YES];
-        [_newButton setToolTip:@"???�일 (?�N)"];
-        [_openButton setToolTip:@"?�일 ?�기 (?�O)"];
-        [_saveButton setToolTip:@"?�??(?�S)"];
-        [_undoButton setToolTip:@"?�행 취소 (?�Z)"];
-        [_redoButton setToolTip:@"?�시 ?�행 (?�⌘Z)"];
-        [_searchButton setToolTip:@"?�일 ?�동 (?�P)"];
-        [_targetButton setToolTip:@"빌드 ?�???�택"];
+        [_newButton setToolTip:@"새 파일 (⌘N)"];
+        [_openButton setToolTip:@"파일 열기 (⌘O)"];
+        [_saveButton setToolTip:@"저장 (⌘S)"];
+        [_undoButton setToolTip:@"실행 취소 (⌘Z)"];
+        [_redoButton setToolTip:@"다시 실행 (⇧⌘Z)"];
+        [_searchButton setToolTip:@"파일 이동 (⌘P)"];
+        [_targetButton setToolTip:@"빌드 대상 선택"];
         [self applyPreferences];
         [self refreshActionControls];
     }
@@ -1803,21 +1801,21 @@ static BOOL axyne_macos_is_image_path(const char *path)
     NSFont *small = [NSFont systemFontOfSize:11];
     [target setLeadingAligned:YES]; [target setContentInset:10];
     [target setRichTitle:axyne_macos_segments(@[
-        @[@"?? ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted]])];
+        @[@"▷  ", small, text], @[[target title], small, reference ? axyne_preference_color(0x8b919b) : muted]])];
     /* Figma 6:399: the chevron sits at the right edge of the chip (10px inset),
      * not right after the label. */
     [target setLabelColor:muted];
     [target setChevronState:_buildMenuOpen ? 2 : 1];
     [run setContentInset:14];
     [run setRichTitle:axyne_macos_segments(@[
-        @[@"?? ", small, onAccent],
-        @[@"?�행  F5", [NSFont boldSystemFontOfSize:11], onAccent]])];
+        @[@"▷  ", small, onAccent],
+        @[@"실행  F5", [NSFont boldSystemFontOfSize:11], onAccent]])];
     [search setLeadingAligned:YES]; [search setContentInset:10];
     [search setRichTitle:axyne_macos_segments(@[
-        @[@"?? ", [NSFont systemFontOfSize:12], muted],
-        @[@"?�일 ?�동", small, placeholder]])];
+        @[@"⌕  ", [NSFont systemFontOfSize:12], muted],
+        @[@"파일 이동", small, placeholder]])];
     [search setTrailingTitle:axyne_macos_segments(@[
-        @[@"?�P", [NSFont systemFontOfSize:10], shortcut]])];
+        @[@"⌘P", [NSFont systemFontOfSize:10], shortcut]])];
     for (NSButton *button in @[target, run, search]) [button setNeedsDisplay:YES];
 }
 
@@ -1878,7 +1876,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     if (_emptyView == nil) return;
     if (empty && (!_emptyShown || _emptyGuideDirty)) {
         static const char *const labels[AXYNE_GUIDE_COUNT] = {
-            "???�일", "?�일 ?�기", "?�더 ?�기", "?�일 ?�동", "명령 ?�행", "?�일?�서 찾기" };
+            "새 파일", "파일 열기", "폴더 열기", "파일 이동", "명령 실행", "파일에서 찾기" };
         AxyneGuideRow guide[AXYNE_GUIDE_COUNT];
         size_t count = axyne_empty_guide_rows(&_preferences, 1, guide, AXYNE_GUIDE_COUNT);
         NSMutableArray *rows = [NSMutableArray arrayWithCapacity:count];
@@ -1952,9 +1950,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
 }
 
 - (void)quickFile:(id)sender { (void)sender; [self openPaletteWithInput:@""]; }
-/* 보기 > 명령 ?�레??(the palette in command mode). */
+/* 보기 > 명령 팔레트 (the palette in command mode). */
 - (void)showCommandPalette:(id)sender { (void)sender; [self openPaletteWithInput:@">"]; }
-/* ?�집 > ?�볼�??�동: the palette's symbol mode on the current file. */
+/* 편집 > 심볼로 이동: the palette's symbol mode on the current file. */
 - (void)goToSymbol:(id)sender { (void)sender; [self openPaletteWithInput:@"@"]; }
 - (void)configureRunnerAction:(id)sender { (void)sender; (void)[self configureRunner]; [self refreshActionControls]; }
 
@@ -2025,7 +2023,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     NSMenu *menu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
     [menu setAutoenablesItems:NO];
     if (count == 0) {
-        NSMenuItem *none = [[[NSMenuItem alloc] initWithTitle:@"???�어??빌드 ?�정???�습?�다"
+        NSMenuItem *none = [[[NSMenuItem alloc] initWithTitle:@"이 언어는 빌드 설정이 없습니다"
             action:NULL keyEquivalent:@""] autorelease];
         [none setEnabled:NO];
         [menu addItem:none];
@@ -2130,7 +2128,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 }
 
 /* Width of a tab button: its title plus padding; the Figma sizes for the
- * three base tabs (출력 38, ?��???50, 문제 38 until it shows a count). */
+ * three base tabs (출력 38, 터미널 50, 문제 38 until it shows a count). */
 - (CGFloat)bottomPanelTabWidth:(AxyneBottomPanelTab)tab
 {
     NSButton *button = [self bottomPanelTabButton:tab];
@@ -2856,7 +2854,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         ? [NSString stringWithUTF8String:doc->title] : @"Untitled";
     if (name == nil) name = @"Untitled";
     [[self window] setTitle:[NSString stringWithFormat:@"%@%@ - Axyne",
-        doc != NULL && doc->is_dirty ? @"??" : @"", name]];
+        doc != NULL && doc->is_dirty ? @"● " : @"", name]];
 }
 
 - (void)notification:(SCNotification *)notification
@@ -3086,9 +3084,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
         /* Nothing was opened: no tab is created and a preview tab stays. */
         NSAlert *alert = [[[NSAlert alloc] init] autorelease];
         [alert setAlertStyle:NSAlertStyleInformational];
-        [alert setMessageText:[NSString stringWithFormat:@"바이?�리 ?�일?� ?�시?????�습?�다: %@",
+        [alert setMessageText:[NSString stringWithFormat:@"바이너리 파일은 표시할 수 없습니다: %@",
             [path lastPathComponent]]];
-        [alert addButtonWithTitle:@"?�인"];
+        [alert addButtonWithTitle:@"확인"];
         [alert runModal];
         return;
     }
@@ -3494,7 +3492,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [NSGraphicsContext restoreGraphicsState];
 }
 
-/* Rows that fit below the "?�색�? header (above the outline section). */
+/* Rows that fit below the "탐색기" header (above the outline section). */
 - (NSInteger)explorerVisibleRows
 {
     CGFloat bottom = [self explorerTreeBottom];
@@ -4211,7 +4209,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
 - (NSRect)sidebarTabRect:(NSInteger)tab
 {
     NSDictionary *attributes = @{NSFontAttributeName: [NSFont systemFontOfSize:11]};
-    CGFloat first = ceil([@"?�색�? sizeWithAttributes:attributes].width) + 8;
+    CGFloat first = ceil([@"탐색기" sizeWithAttributes:attributes].width) + 8;
     CGFloat second = ceil([@"Git" sizeWithAttributes:attributes].width) + 8;
     CGFloat top = AXYNE_CONTENT_TOP + AXYNE_TABS;
     if (tab == 0) return NSMakeRect(8, top, first, AXYNE_UI_EXPLORER_HEADER);
@@ -4389,7 +4387,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     return [self existingGlobalPreferencesPath] != nil;
 }
 
-/* "settings.json ?�기" needs the file written from now on (D3). When only the
+/* "settings.json 열기" needs the file written from now on (D3). When only the
  * old preferences.json exists its bytes are copied verbatim, so a workspace
  * keeps every override (never an empty profile); when no file exists at all,
  * settings.json is created from the effective profile (a new workspace file
@@ -4424,7 +4422,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     return YES;
 }
 
-/* Tools > settings.json ?�기: opens the global settings.json, copied from the
+/* Tools > settings.json 열기: opens the global settings.json, copied from the
  * old preferences.json first when only that exists (disabled while neither
  * exists). */
 - (void)openPreferencesFile:(id)sender
@@ -4500,15 +4498,15 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [self refreshRecentMenu];
 }
 
-/* File > 최근 ??��: recent files, then the recent folders group and 최근
- * ??�� 지?�기 (D6). Until the file feature persists folders the folder group
+/* File > 최근 항목: recent files, then the recent folders group and 최근
+ * 항목 지우기 (D6). Until the file feature persists folders the folder group
  * shows its empty placeholder and the clear entry stays disabled. */
 - (void)refreshRecentMenu
 {
     if (_recentMenu == nil) return;
     [_recentMenu removeAllItems];
     if (_documents.recent_count == 0) {
-        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"최근 ??�� ?�음"
+        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"최근 항목 없음"
             action:nil keyEquivalent:@""];
         [empty setEnabled:NO];
         [_recentMenu addItem:empty];
@@ -4526,7 +4524,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
     [_recentMenu addItem:[NSMenuItem separatorItem]];
     {
-        NSMenuItem *folders = [[NSMenuItem alloc] initWithTitle:@"최근 ?�더 ?�음"
+        NSMenuItem *folders = [[NSMenuItem alloc] initWithTitle:@"최근 폴더 없음"
             action:nil keyEquivalent:@""];
         [folders setEnabled:NO];
         [_recentMenu addItem:folders];
@@ -4920,7 +4918,7 @@ static BOOL axyne_macos_is_image_path(const char *path)
         _explorerSelection = row;
         _hasExplorerSelection = YES;
     }
-    /* Explorer context menu from the registry (?�색�?group). */
+    /* Explorer context menu from the registry (탐색기 group). */
     NSMenu *menu = [[[NSMenu alloc] initWithTitle:@"Workspace"] autorelease];
     [menu addItem:[self commandMenuItem:AXYNE_COMMAND_FILE_OPEN_FOLDER]];
     [menu addItem:[NSMenuItem separatorItem]];
@@ -5001,7 +4999,7 @@ static int axyne_macos_preferences_save_hook(void *context, AxynePreferences *ed
     return YES;
 }
 
-/* Opens the Figma preferences window. The "settings.json ?�기" link closes it
+/* Opens the Figma preferences window. The "settings.json 열기" link closes it
  * and opens the profile's settings.json as an editor document; it is made
  * by -ensureSettingsFile: first (copy of the old preferences.json, or the
  * profile when neither file exists, D3). */
@@ -5721,33 +5719,6 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
                        stream:AXYNE_PROCESS_STDERR];
 }
 
-/* terminal.defaultProfile -> login shell: "" = zsh, a full path, or a shell
- * name looked up in the usual bin folders. Unknown names keep zsh. */
-- (void)applyTerminalProfile
-{
-    const char *profile = _preferences.terminal.default_profile;
-    NSString *shell = @"/bin/zsh";
-    AxyneRunnerSpec spec = {0};
-    const char *shellArgs[] = {"-l", "-i"};
-    if (profile[0] != '\0') {
-        NSString *name = [[NSString stringWithUTF8String:profile] stringByExpandingTildeInPath];
-        NSFileManager *files = [NSFileManager defaultManager];
-        if ([name rangeOfString:@"/"].location != NSNotFound) {
-            /* A path: absolute, ~-relative, or relative to the home folder. */
-            if (![name hasPrefix:@"/"]) name = [NSHomeDirectory() stringByAppendingPathComponent:name];
-            if ([files isExecutableFileAtPath:name]) shell = name;
-        } else if (name != nil) {
-            for (NSString *dir in @[@"/bin", @"/usr/bin", @"/usr/local/bin", @"/opt/homebrew/bin"]) {
-                NSString *candidate = [dir stringByAppendingPathComponent:[name lowercaseString]];
-                if ([files isExecutableFileAtPath:candidate]) { shell = candidate; break; }
-            }
-        }
-    }
-    spec.executable = [shell fileSystemRepresentation];
-    spec.arguments = shellArgs; spec.argument_count = 2;
-    (void)axyne_runner_configure(&_terminalRunner, &spec, NULL);
-}
-
 - (void)startTerminal:(id)sender
 {
     (void)sender;
@@ -5758,7 +5729,6 @@ static void axyne_macos_git_batch_run(AxyneMacGitBatch *batch)
     [self setNeedsLayout:YES];
     [self setNeedsDisplay:YES];
     if ([_shellView running]) { [[self window] makeFirstResponder:_shellView]; return; }
-    [self applyTerminalProfile];
     AxyneProcessSpec processSpec = {0}; AxyneError error = {0};
     AxyneStatus status = axyne_runner_process_spec(&_terminalRunner, NULL, NULL, NULL, &processSpec, &error);
     if (status == AXYNE_STATUS_OK) {
@@ -5785,28 +5755,29 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
                                                    capacity:capacity] ? 1 : 0;
 }
 
-/* Runner ?�정 (preferences window chrome, see app_dialogs.h): the panel stays
+/* Runner 설정 (preferences window chrome, see app_dialogs.h): the panel stays
  * open on a rejected configuration and shows the reason. */
 - (BOOL)configureRunner
 {
-    AxyneDocument *doc = [self activeDocument];
-    AxyneLanguageId language = doc != NULL ? axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
-    const AxyneRunnerConfig empty = {0};
-    const AxyneRunnerConfig *config = axyne_runner_profiles_get(&_runnerProfiles, language, &_actionRunner);
-    if (config == NULL) config = &empty;
-    NSString *arguments = axyne_macos_runner_lines(config->arguments, config->argument_count);
-    NSString *environment = axyne_macos_runner_lines(config->environment, config->environment_count);
+    NSString *executable = _actionRunner.executable != NULL
+        ? [NSString stringWithUTF8String:_actionRunner.executable] : nil;
+    NSString *workingDirectory = _actionRunner.working_directory != NULL
+        ? [NSString stringWithUTF8String:_actionRunner.working_directory] : nil;
+    NSString *arguments = axyne_macos_runner_lines(_actionRunner.arguments,
+                                                    _actionRunner.argument_count);
+    NSString *environment = axyne_macos_runner_lines(_actionRunner.environment,
+                                                      _actionRunner.environment_count);
     AxyneRunnerDialogValues initial = {
-        config->executable != NULL ? config->executable : "",
+        executable != nil ? [executable UTF8String] : "",
         [arguments UTF8String],
-        config->working_directory != NULL ? config->working_directory : "",
-        [environment UTF8String], language, &_runnerProfiles, &_actionRunner
+        workingDirectory != nil ? [workingDirectory UTF8String] : "",
+        [environment UTF8String]
     };
     AxyneRunnerDialogHooks hooks = { self, axyne_macos_runner_save_hook };
     return axyne_runner_dialog_show([self window], &initial, &hooks) != 0;
 }
 
-/* Validates and persists the selected Runner profile. On failure the
+/* Validates and stores the dialog's values in _actionRunner. On failure the
  * Korean reason is written to `message`. */
 - (BOOL)applyRunnerValues:(const AxyneRunnerDialogValues *)values
                     error:(char *)message capacity:(size_t)capacity
@@ -5831,10 +5802,10 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         !axyne_macos_runner_split_lines(environment, &environmentValues,
                                         &environmentCount)) {
         (void)snprintf(message, capacity,
-                       "Runner ?�정???�바르�? ?�습?�다. ?�정???��? 못했?�니??");
+                       "Runner 설정이 올바르지 않습니다. 설정을 읽지 못했습니다.");
     } else if (executable[0] == '\0') {
         (void)snprintf(message, capacity,
-                       "Runner ?�정???�바르�? ?�습?�다. ?�행 ?�일???�력?�세??");
+                       "Runner 설정이 올바르지 않습니다. 실행 파일을 입력하세요.");
     } else {
         spec.executable = executable;
         spec.arguments = (const char *const *)argumentValues;
@@ -5842,15 +5813,14 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         spec.working_directory = workingDirectory[0] != '\0' ? workingDirectory : NULL;
         spec.environment = (const char *const *)environmentValues;
         spec.environment_count = environmentCount;
-        status = axyne_runner_profiles_save(&_runnerProfiles, values->language,
-            &spec, _globalPreferencesPath, &error);
+        status = axyne_runner_configure(&_actionRunner, &spec, &error);
         if (status == AXYNE_STATUS_OK)
             accepted = YES;
         else
-            (void)snprintf(message, capacity, "Runner ?�정???�바르�? ?�습?�다. %s",
+            (void)snprintf(message, capacity, "Runner 설정이 올바르지 않습니다. %s",
                            status == AXYNE_STATUS_INVALID_ARGUMENT
-                               ? "?�경 변?�는 NAME=VALUE ?�식?�어???�며 ?�름??겹칠 ???�습?�다."
-                               : "?�정???�용?��? 못했?�니??");
+                               ? "환경 변수는 NAME=VALUE 형식이어야 하며 이름이 겹칠 수 없습니다."
+                               : "설정을 적용하지 못했습니다.");
     }
     free(executable);
     free(arguments);
@@ -5898,7 +5868,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
 }
 
 /* Build and Run resolve the active file's language, the build target and the
- * discovered runtimes into a plan; the manual runner (Runner ?�정) overrides
+ * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
  * it. Run executes the build step first when the plan has one. */
 - (void)startAction:(BOOL)run
 {
@@ -5928,7 +5898,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     [self clearPendingRun];
     memset(&plan, 0, sizeof(plan));
     status = axyne_language_resolve_runner(AXYNE_LANGUAGE_NONE, &_runtimes, &_buildTarget,
-        doc->path, axyne_runner_profiles_get(&_runnerProfiles, axyne_language_for_path(doc->path), &_actionRunner),
+        doc->path, _actionRunner.executable != NULL ? &_actionRunner : NULL,
         &plan, message, sizeof(message));
     if (status != AXYNE_STATUS_OK) {
         /* Missing runtime or unknown language: the resolver's text goes to the
@@ -5941,7 +5911,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         return;
     }
     if (!run && !plan.has_build && !plan.overridden) {
-        const char *none = "[build] ???�어?�는 빌드 ?�계가 ?�습?�다.\n";
+        const char *none = "[build] 이 언어에는 빌드 단계가 없습니다.\n";
         [_terminalOutput setString:@""];
         [self terminalAppend:none length:strlen(none) stream:AXYNE_PROCESS_STDOUT];
         axyne_language_plan_free(&plan);
@@ -5960,7 +5930,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     axyne_language_plan_free(&plan);
 }
 
-/* ?�리: deletes the active file's build output (the {out} of its build step).
+/* 정리: deletes the active file's build output (the {out} of its build step).
  * YES when the build may go on (nothing to delete counts). */
 - (BOOL)cleanBuildOutput
 {
@@ -5972,12 +5942,12 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     NSString *line;
     [self selectOutputPanel];
     if (_actionProcess != NULL || axyne_debugger_is_active(&_debugger)) {
-        const char *busy = "[build] ?�른 ?�업???�행 중입?�다. 먼�? 중�??�세??\n";
+        const char *busy = "[build] 다른 작업이 실행 중입니다. 먼저 중지하세요.\n";
         [self terminalAppend:busy length:strlen(busy) stream:AXYNE_PROCESS_STDERR];
         return NO;
     }
     if (doc == NULL || doc->is_untitled || doc->path == NULL) {
-        const char *unsaved = "[build] ?�?�된 ?�일?�서�??�리?????�습?�다.\n";
+        const char *unsaved = "[build] 저장된 파일에서만 정리할 수 있습니다.\n";
         [self terminalAppend:unsaved length:strlen(unsaved) stream:AXYNE_PROCESS_STDERR];
         return NO;
     }
@@ -5991,17 +5961,17 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
         line = [NSString stringWithFormat:@"%s\n", message[0] != '\0' ? message : "Build could not be resolved."];
         ok = NO;
     } else if (!plan.has_build || plan.output_path == NULL) {
-        line = @"[build] ???�어?�는 ?�리??빌드 ?�출물이 ?�습?�다.\n";
+        line = @"[build] 이 언어에는 정리할 빌드 산출물이 없습니다.\n";
     } else {
         NSString *output = [NSString stringWithUTF8String:plan.output_path];
         NSFileManager *files = [NSFileManager defaultManager];
         BOOL directory = NO;
         if (output == nil || ![files fileExistsAtPath:output isDirectory:&directory]) {
-            line = [NSString stringWithFormat:@"[build] ?�리???�출물이 ?�습?�다: %s\n", plan.output_path];
+            line = [NSString stringWithFormat:@"[build] 정리할 산출물이 없습니다: %s\n", plan.output_path];
         } else if (!directory && [files removeItemAtPath:output error:NULL]) {
-            line = [NSString stringWithFormat:@"[build] ?�리: %s ??��\n", plan.output_path];
+            line = [NSString stringWithFormat:@"[build] 정리: %s 삭제\n", plan.output_path];
         } else {
-            line = [NSString stringWithFormat:@"[build] ?�출물을 ??��?��? 못했?�니?? %s\n", plan.output_path];
+            line = [NSString stringWithFormat:@"[build] 산출물을 삭제하지 못했습니다: %s\n", plan.output_path];
             ok = NO;
         }
     }
@@ -6022,7 +5992,7 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     (void)[self cleanBuildOutput];
 }
 
-/* ?�시 빌드: remove the previous output, then build from scratch. */
+/* 다시 빌드: remove the previous output, then build from scratch. */
 - (void)rebuildDocument:(id)sender
 {
     (void)sender;
@@ -6030,8 +6000,8 @@ static int axyne_macos_runner_save_hook(void *context, const AxyneRunnerDialogVa
     if ([self cleanBuildOutput]) [self startAction:NO];
 }
 
-/* Tools > ???��???> zsh / bash: starts that login shell once (the default
- * ???��???keeps its own shell). */
+/* Tools > 새 터미널 > zsh / bash: starts that login shell once (the default
+ * 새 터미널 keeps its own shell). */
 - (void)startShellTerminal:(id)sender
 {
     const char *shell = [sender tag] == 1 ? "/bin/bash" : "/bin/zsh";
@@ -6561,14 +6531,14 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (font == nil) font = [NSFont systemFontOfSize:size];
     attributes = @{NSFontAttributeName: font};
     if ([label sizeWithAttributes:attributes].width <= width) return label;
-    /* Largest prefix length whose prefix + "?? fits. */
+    /* Largest prefix length whose prefix + "…" fits. */
     high = length;
     while (low < high) {
         NSUInteger middle = (low + high + 1) / 2;
         NSRange range = [label rangeOfComposedCharacterSequencesForRange:
             NSMakeRange(0, middle)];
         NSString *candidate = [[label substringWithRange:range]
-            stringByAppendingString:@"??];
+            stringByAppendingString:@"…"];
         if (NSMaxRange(range) <= middle &&
             [candidate sizeWithAttributes:attributes].width <= width) low = middle;
         else high = middle - 1;
@@ -6580,7 +6550,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         while ([prefix length] > 0 && [[NSCharacterSet whitespaceCharacterSet]
                characterIsMember:[prefix characterAtIndex:[prefix length] - 1]])
             prefix = [prefix substringToIndex:[prefix length] - 1];
-        return [prefix stringByAppendingString:@"??];
+        return [prefix stringByAppendingString:@"…"];
     }
 }
 
@@ -6614,7 +6584,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         /* Header-like row: no chevron, always expanded. */
         nameX = 12;
     } else if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
-        [self drawLabel:axyne_explorer_is_expanded(&_explorer, node->path) ? @"?? : @"??
+        [self drawLabel:axyne_explorer_is_expanded(&_explorer, node->path) ? @"⌄" : @"›"
             at:NSMakePoint(x, explorerY + 4) size:11 color:muted family:@"SF Pro Text"];
         nameX = x + 16;
     } else {
@@ -6785,7 +6755,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
             withAttributes:axyne_macos_tab_title_attributes(doc->preview != 0,
                 active ? axyne_preference_color(light ? 0x24272d : 0xe6e7ea) : muted)];
         [NSGraphicsContext restoreGraphicsState];
-        [self drawLabel:doc->is_dirty ? @"?? : @"×"
+        [self drawLabel:doc->is_dirty ? @"●" : @"×"
             at:NSMakePoint(NSMaxX(frame) - (doc->is_dirty ? 19 : 22),
                            AXYNE_CONTENT_TOP + (doc->is_dirty ? 13 : 10))
             size:doc->is_dirty ? 7 : 13
@@ -6794,12 +6764,12 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     }
     [NSGraphicsContext restoreGraphicsState];
     if (!_explorerHidden) {
-        /* Two-tab header: ?�색�?| Git. The active tab is bright with an
+        /* Two-tab header: 탐색기 | Git. The active tab is bright with an
          * accent underline, like the active editor tab. */
         for (NSInteger sidebarTab = 0; sidebarTab < 2; ++sidebarTab) {
             NSRect tabRect = [self sidebarTabRect:sidebarTab];
             BOOL activeSidebarTab = sidebarTab == _sidebarTab;
-            [self drawLabel:sidebarTab == 0 ? @"?�색�? : @"Git"
+            [self drawLabel:sidebarTab == 0 ? @"탐색기" : @"Git"
                 at:NSMakePoint(NSMinX(tabRect) + 4, editorTop + 8) size:11
                 color:axyne_preference_color(activeSidebarTab ? (light ? 0x24272d : 0xe6e7ea)
                     : (light ? 0x68707d : 0x8b919b)) family:@"SF Pro Text"];
@@ -6816,7 +6786,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(NSMakeRect(0, explorerY, [self sidebarWidth] - 1, MAX(0, treeBottom - explorerY)));
         if (_explorer.root == NULL) {
-            [self drawLabel:@"?�더 ?�기?? at:NSMakePoint(16, explorerY + 3)
+            [self drawLabel:@"폴더 열기…" at:NSMakePoint(16, explorerY + 3)
                 size:12 color:text family:@"SF Pro Text"];
         } else {
             size_t pinned[AXYNE_EXPLORER_MAX_PINNED];
@@ -6864,8 +6834,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
 - (void)drawDefaultStatusAtTop:(CGFloat)statusTop width:(CGFloat)width
                           text:(NSColor *)text muted:(NSColor *)muted
 {
-    NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"???�행 ?�패 (%d)", _lastExitCode] :
-        (_activeAction != 0 ? @"???�행 �? : (_hasExitStatus ? @"???�행 ?�료" : @"준�?));
+    NSString *status = _lastExitFailed ? [NSString stringWithFormat:@"✗ 실행 실패 (%d)", _lastExitCode] :
+        (_activeAction != 0 ? @"● 실행 중" : (_hasExitStatus ? @"✓ 실행 완료" : @"준비"));
     if (_chordHint != nil) {
         /* A pending Cmd+K chord replaces the run state until it resolves. */
         [self drawLabel:_chordHint at:NSMakePoint(12, statusTop + 5) size:11
@@ -6881,8 +6851,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
         NSInteger line = [self sendEditorMessage:SCI_LINEFROMPOSITION wParam:caret lParam:0] + 1;
         NSInteger column = [self sendEditorMessage:SCI_GETCOLUMN wParam:caret lParam:0] + 1;
-        NSString *editing = [NSString stringWithFormat:@"�?%ld, ??%ld    %@: %u    UTF-8",
-            (long)line, (long)column, _preferences.editor.insert_spaces ? @"공백" : @"??,
+        NSString *editing = [NSString stringWithFormat:@"줄 %ld, 열 %ld    %@: %u    UTF-8",
+            (long)line, (long)column, _preferences.editor.insert_spaces ? @"공백" : @"탭",
             _preferences.editor.tab_width];
         [self drawLabel:editing at:NSMakePoint(MAX(180, width - 320), statusTop + 5)
             size:11 color:text family:@"SF Pro Text"];
@@ -6963,7 +6933,6 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
         _actionProcess = NULL;
     }
     axyne_runner_destroy(&_terminalRunner);
-    axyne_runner_profiles_destroy(&_runnerProfiles);
     axyne_runner_destroy(&_actionRunner);
     [self clearPendingRun];
     axyne_runtime_free(&_runtimes);
@@ -7119,7 +7088,7 @@ static int axyne_macos_palette_document(void *user, char **path, char **text,
     [[_paletteField cell] setUsesSingleLineMode:YES];
     [[_paletteField cell] setScrollable:YES];
     [[_paletteField cell] setWraps:NO];
-    [_paletteField setAccessibilityLabel:@"?�일, 명령, 기호 검??];
+    [_paletteField setAccessibilityLabel:@"파일, 명령, 기호 검색"];
     [_paletteField setStringValue:initial];
     [_paletteField setDelegate:self];
     [self addSubview:_paletteField positioned:NSWindowAbove relativeTo:_paletteOverlay];
@@ -7505,18 +7474,18 @@ static void axyne_install_menu(NSApplication *application,
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Axyne"
         action:nil keyEquivalent:@""];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Axyne"];
-    NSMenuItem *aboutItem = [appMenu addItemWithTitle:@"Axyne ?�보"
+    NSMenuItem *aboutItem = [appMenu addItemWithTitle:@"Axyne 정보"
         action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [aboutItem setTarget:application];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"?�경?�정??
+    NSMenuItem *preferencesItem = [appMenu addItemWithTitle:@"환경설정…"
         action:@selector(showGlobalPreferences:) keyEquivalent:@","];
     [preferencesItem setTarget:workspace];
     [appMenu addItemWithTitle:@"Axyne 종료" action:@selector(terminate:)
                  keyEquivalent:@"q"];
     [appItem setSubmenu:appMenu];
     [mainMenu addItem:appItem];
-    /* Bar order: ?�일, ?�집, 보기, 빌드, ?�버�? ?�구, ?��?�? Every entry is a
+    /* Bar order: 파일, 편집, 보기, 빌드, 디버그, 도구, 도움말. Every entry is a
      * registry command (ui_commands_macos.m); its key equivalent comes from
      * the effective key map and is refreshed when the bindings change. */
     for (NSUInteger menuIndex = 0; menuIndex < AXYNE_UI_MENU_COUNT; ++menuIndex) {

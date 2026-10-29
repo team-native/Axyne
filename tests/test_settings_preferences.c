@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "axyne/filesystem.h"
+#include "axyne/commands.h"
 #include "axyne/keymap.h"
 #include "axyne/log.h"
 #include "axyne/preferences.h"
@@ -24,7 +25,7 @@ static int axyne_test_shortcut_capture(const char *root)
     binding = axyne_preferences_find_binding(draft, AXYNE_ACTION_SAVE);
     AXYNE_TEST_CHECK(binding != NULL && binding->enabled);
     AXYNE_TEST_STREQ(binding->key, "P");
-    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_platform_current() == AXYNE_PLATFORM_MACOS ?
+    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_command_platform_current() == AXYNE_COMMAND_PLATFORM_MACOS ?
         AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND) |
         AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT);
     /* The old chord cannot shadow the captured single-stroke binding. */
@@ -35,7 +36,7 @@ static int axyne_test_shortcut_capture(const char *root)
     AXYNE_TEST_STATUS(axyne_preferences_save_global(draft, path, NULL), AXYNE_STATUS_OK);
     AXYNE_TEST_STATUS(axyne_preferences_load_global(path, loaded, NULL), AXYNE_STATUS_OK);
     binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
-    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_platform_current() == AXYNE_PLATFORM_MACOS ?
+    AXYNE_TEST_EQ_INT(binding->modifiers, (axyne_command_platform_current() == AXYNE_COMMAND_PLATFORM_MACOS ?
         AXYNE_KEY_MODIFIER_CONTROL : AXYNE_KEY_MODIFIER_COMMAND) |
         AXYNE_KEY_MODIFIER_ALT | AXYNE_KEY_MODIFIER_SHIFT);
     AXYNE_TEST_STREQ(binding->key, "P");
