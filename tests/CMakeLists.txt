@@ -35,6 +35,7 @@ add_executable(axyne_tests
     test_main.c
     test_documents_search.c
     test_settings_preferences.c
+    test_runner_profiles.c
     test_runner_git_lsp.c
     test_process_stability.c
     test_git_repair.c
@@ -96,6 +97,12 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> settings-preferences
             "${AXYNE_TEST_FIXTURE_DIR}/settings-preferences"
 )
+add_test(
+    NAME axyne-runner-profiles
+    COMMAND $<TARGET_FILE:axyne_tests> runner-profiles
+            "${AXYNE_TEST_FIXTURE_DIR}/runner-profiles"
+)
+set_tests_properties(axyne-runner-profiles PROPERTIES TIMEOUT 60)
 add_test(
     NAME axyne-runner-git-lsp
     COMMAND $<TARGET_FILE:axyne_tests> runner-git-lsp
