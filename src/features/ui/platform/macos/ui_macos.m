@@ -2701,24 +2701,39 @@ static BOOL axyne_macos_is_image_path(const char *path)
 
 - (BOOL)ensureLsp
 {
-    const char *command = getenv("AXYNE_LSP_COMMAND");
+    AxyneDocument *doc = [self activeDocument];
+    AxyneLanguageId language = doc != NULL && doc->path != NULL ?
+        axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
+    AxyneLspServerCommand server = {0};
     AxyneLspConfig config = {0};
     AxyneError error;
-    if (_lsp != NULL) return YES;
-    if (command == NULL || command[0] == '\0') {
-        [self setLspStatus:@"LSP: set AXYNE_LSP_COMMAND to a local server executable"];
+    AxyneStatus status;
+    if (_lsp != NULL && _lspLanguage == language) return YES;
+    if (_lsp != NULL) {
+        axyne_lsp_destroy(_lsp);
+        _lsp = NULL;
+    }
+    status = axyne_lsp_server_resolve(language, &server, &error);
+    if (status != AXYNE_STATUS_OK) {
+        [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
         return NO;
     }
-    config.command = command;
-    config.language_id = "plaintext";
+    config.command = server.executable;
+    config.arguments = (const char *const *)server.arguments;
+    config.argument_count = server.argument_count;
+    config.language_id = axyne_lsp_language_id(language);
+    if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_macos_lsp_diagnostics;
     config.on_navigation = axyne_macos_lsp_navigation;
     config.on_error = axyne_macos_lsp_error;
     config.user_data = self;
-    if (axyne_lsp_create(&config, &_lsp, &error) != AXYNE_STATUS_OK) {
+    status = axyne_lsp_create(&config, &_lsp, &error);
+    axyne_lsp_server_command_clear(&server);
+    if (status != AXYNE_STATUS_OK) {
         [self setLspStatus:[NSString stringWithFormat:@"LSP: %s", error.message]];
         return NO;
     }
+    _lspLanguage = language;
     return YES;
 }
 

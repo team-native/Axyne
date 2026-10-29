@@ -2424,27 +2424,41 @@ static int axyne_command_needs_document(UINT command)
 
 static int axyne_lsp_ensure(AxyneWindowState *state)
 {
-    const char *command = getenv("AXYNE_LSP_COMMAND");
-    AxyneLspConfig config;
+    AxyneDocument *doc = axyne_active(state);
+    AxyneLanguageId language = doc != NULL && doc->path != NULL ?
+        axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
+    AxyneLspServerCommand server = {0};
+    AxyneLspConfig config = {0};
     AxyneError error;
-    if (state->lsp != NULL) return 1;
-    if (command == NULL || command[0] == '\0') {
-        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
-                       "LSP: set AXYNE_LSP_COMMAND to a local server executable");
-        return 0;
+    AxyneStatus status;
+    if (state->lsp != NULL && state->lsp_language == language) return 1;
+    if (state->lsp != NULL) {
+        axyne_lsp_destroy(state->lsp);
+        state->lsp = NULL;
     }
-    memset(&config, 0, sizeof(config));
-    config.command = command;
-    config.language_id = "plaintext";
-    config.on_diagnostics = axyne_lsp_diagnostics;
-    config.on_navigation = axyne_lsp_navigation;
-    config.on_error = axyne_lsp_error;
-    config.user_data = state;
-    if (axyne_lsp_create(&config, &state->lsp, &error) != AXYNE_STATUS_OK) {
+    status = axyne_lsp_server_resolve(language, &server, &error);
+    if (status != AXYNE_STATUS_OK) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                        "LSP: %s", error.message);
         return 0;
     }
+    config.command = server.executable;
+    config.arguments = (const char *const *)server.arguments;
+    config.argument_count = server.argument_count;
+    config.language_id = axyne_lsp_language_id(language);
+    if (config.language_id == NULL) config.language_id = "plaintext";
+    config.on_diagnostics = axyne_lsp_diagnostics;
+    config.on_navigation = axyne_lsp_navigation;
+    config.on_error = axyne_lsp_error;
+    config.user_data = state;
+    status = axyne_lsp_create(&config, &state->lsp, &error);
+    axyne_lsp_server_command_clear(&server);
+    if (status != AXYNE_STATUS_OK) {
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                       "LSP: %s", error.message);
+        return 0;
+    }
+    state->lsp_language = language;
     return 1;
 }
 

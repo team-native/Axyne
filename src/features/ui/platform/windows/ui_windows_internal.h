@@ -22,6 +22,7 @@
 #include "axyne/git_panel.h"
 #include "axyne/language.h"
 #include "axyne/lsp.h"
+#include "axyne/lsp_servers.h"
 #include "axyne/outline.h"
 #include "axyne/palette_controller.h"
 #include "axyne/preferences.h"
@@ -234,6 +235,7 @@ typedef struct AxyneWindowState {
     char *workspace_settings_write_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
     AxyneLspClient *lsp;
+    AxyneLanguageId lsp_language;
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */
