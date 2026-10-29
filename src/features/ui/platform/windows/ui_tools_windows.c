@@ -10,6 +10,8 @@
 #include <string.h>
 
 enum {
+    AXYNE_TOOLS_MARKETPLACE_ID = 2991,
+    AXYNE_TOOLS_ACCOUNT_ID = 2992,
     AXYNE_TOOLS_EXTENSIONS_ID = 60000,
     AXYNE_TOOLS_PLUGIN_ID_BASE = 60001,
     AXYNE_TOOLS_PLUGIN_ID_LIMIT = 65000,
@@ -80,6 +82,8 @@ static void axyne_win_tools_menu_populate(AxyneWindowState *state,
         axyne_win_menu_add(plugins_menu, 0, "명령 목록이 너무 깁니다 (일부 숨김)", NULL,
                            AXYNE_WIN_MENU_DISABLED);
     axyne_win_menu_add(menu, AXYNE_TOOLS_EXTENSIONS_ID, "확장...", NULL, 0);
+    axyne_win_menu_add(menu, AXYNE_TOOLS_MARKETPLACE_ID, "마켓플레이스...", NULL, 0);
+    axyne_win_menu_add(menu, AXYNE_TOOLS_ACCOUNT_ID, "Axyne 계정...", NULL, 0);
 }
 
 static void axyne_win_tools_run_plugin(AxyneWindowState *state, unsigned target)
@@ -171,6 +175,12 @@ static int axyne_win_tools_message(AxyneWindowState *state, HWND window,
         axyne_win_tools_ensure_plugins(state);
         axyne_extensions_window_show(window, &state->plugins,
                                      AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_INSTALLED);
+    } else if (id == AXYNE_TOOLS_MARKETPLACE_ID || id == AXYNE_TOOLS_ACCOUNT_ID) {
+        axyne_win_tools_ensure_plugins(state);
+        axyne_extensions_window_show(window, &state->plugins,
+            AXYNE_CONFIG_VERSION,
+            id == AXYNE_TOOLS_MARKETPLACE_ID ? AXYNE_EXTENSIONS_MARKETPLACE
+                                             : AXYNE_EXTENSIONS_ACCOUNT);
     } else if (id >= AXYNE_TOOLS_PLUGIN_ID_BASE && id < AXYNE_TOOLS_PLUGIN_ID_LIMIT) {
         axyne_win_tools_run_plugin(state, id - AXYNE_TOOLS_PLUGIN_ID_BASE);
     } else {

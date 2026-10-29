@@ -28,6 +28,8 @@
     NSMenuItem *pluginsItem;
     NSMenu *pluginsMenu;
     NSMenuItem *extensionsItem;
+    NSMenuItem *marketplaceItem;
+    NSMenuItem *accountItem;
     if (menu == nil) return;
     if ([menu numberOfItems] != 0) [menu addItem:[NSMenuItem separatorItem]];
     pluginsItem = [[NSMenuItem alloc] initWithTitle:@"플러그인" action:nil keyEquivalent:@""];
@@ -42,11 +44,23 @@
     [pluginsMenu release];
     [pluginsItem release];
 
-    extensionsItem = [[NSMenuItem alloc] initWithTitle:@"확장..."
+    extensionsItem = [[NSMenuItem alloc] initWithTitle:@"확장…"
         action:@selector(toolsShowExtensions:) keyEquivalent:@""];
     [extensionsItem setTarget:self];
     [menu addItem:extensionsItem];
     [extensionsItem release];
+
+    marketplaceItem = [[NSMenuItem alloc] initWithTitle:@"마켓플레이스…"
+        action:@selector(toolsShowMarketplace:) keyEquivalent:@""];
+    [marketplaceItem setTarget:self];
+    [menu addItem:marketplaceItem];
+    [marketplaceItem release];
+
+    accountItem = [[NSMenuItem alloc] initWithTitle:@"Axyne 계정…"
+        action:@selector(toolsShowAccount:) keyEquivalent:@""];
+    [accountItem setTarget:self];
+    [menu addItem:accountItem];
+    [accountItem release];
 }
 
 - (void)menuNeedsUpdate:(NSMenu *)menu
@@ -174,6 +188,22 @@
     [self ensurePlugins];
     axyne_extensions_window_show([self window], &_plugins,
                                  AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_INSTALLED);
+}
+
+- (void)toolsShowMarketplace:(id)sender
+{
+    (void)sender;
+    [self ensurePlugins];
+    axyne_extensions_window_show([self window], &_plugins,
+                                 AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_MARKETPLACE);
+}
+
+- (void)toolsShowAccount:(id)sender
+{
+    (void)sender;
+    [self ensurePlugins];
+    axyne_extensions_window_show([self window], &_plugins,
+                                 AXYNE_CONFIG_VERSION, AXYNE_EXTENSIONS_ACCOUNT);
 }
 
 - (NSInteger)toolsValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item

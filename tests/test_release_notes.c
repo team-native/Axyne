@@ -104,7 +104,3 @@ int main(int argc, char **argv)
     axyne_settings_free_json(raw); axyne_settings_destroy(state); free(path);
     return 0;
 }
-
-
-
-

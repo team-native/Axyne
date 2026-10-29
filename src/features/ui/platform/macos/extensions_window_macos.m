@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "axyne/account.h"
+#include "axyne/app_paths.h"
 #include "../../extensions_window.h"
 #include "../../preferences_window.h"
 
@@ -17,8 +19,28 @@ typedef enum EwAction {
     EW_HIT_INSTALL,
     EW_HIT_TOGGLE,
     EW_HIT_REMOVE,
-    EW_HIT_OPEN_FOLDER
+    EW_HIT_OPEN_FOLDER,
+    EW_HIT_MARKET_INSTALL,
+    EW_HIT_SEARCH,
+    EW_HIT_SUBMIT,
+    EW_HIT_SWITCH_MODE,
+    EW_HIT_LOGOUT
 } EwAction;
+
+/* Text fields are real NSTextField subviews; the box around each is drawn. */
+typedef enum EwField {
+    EW_FIELD_SEARCH = 0,
+    EW_FIELD_EMAIL,
+    EW_FIELD_NAME,
+    EW_FIELD_PASSWORD,
+    EW_FIELD_COUNT
+} EwField;
+
+enum {
+    EW_ACCOUNT_Y = AXYNE_PW_TITLE_HEIGHT + 76,
+    EW_ACCOUNT_ROW = 62,
+    EW_ACCOUNT_WIDTH = 340
+};
 
 enum {
     EW_PAGE_Y = AXYNE_PW_TITLE_HEIGHT,
@@ -65,7 +87,17 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     BOOL _done;
     EwHit _hits[EW_MAX_HITS];
     int _hitCount;
+    NSTextField *_fields[EW_FIELD_COUNT];
+    char *_configDir;
+    char *_server;
+    AxyneAccount _account;
+    AxyneMarketList _market;
+    BOOL _marketLoaded;
+    BOOL _registerMode;
+    NSString *_notice;
+    BOOL _noticeError;
 }
+- (void)openPage:(int)page;
 @end
 
 @implementation AxyneExtensionsView
@@ -109,9 +141,23 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     [self addHit:rect action:action index:index];
 }
 
+- (void)dealloc
+{
+    int i;
+    for (i = 0; i < EW_FIELD_COUNT; ++i) [_fields[i] release];
+    axyne_market_list_clear(&_market);
+    axyne_account_clear(&_account);
+    free(_server);
+    axyne_app_path_free(_configDir);
+    [_notice release];
+    [super dealloc];
+}
+
 - (CGFloat)maxScroll
 {
-    CGFloat content = (CGFloat)_plugins->count * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP);
+    size_t rows = _page == AXYNE_EXTENSIONS_MARKETPLACE ? _market.count
+                : _page == AXYNE_EXTENSIONS_INSTALLED ? _plugins->count : 0;
+    CGFloat content = (CGFloat)rows * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP);
     return content > ew_list_height() ? content - ew_list_height() : 0;
 }
 
@@ -178,9 +224,329 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     [NSGraphicsContext restoreGraphicsState];
 }
 
+- (void)setNotice:(NSString *)prefix detail:(const char *)detail error:(BOOL)isError
+{
+    NSString *text = detail != NULL && detail[0] ? [NSString stringWithFormat:@"%@ %@", prefix, ew_string(detail)] : prefix;
+    [_notice release];
+    _notice = [text retain];
+    _noticeError = isError;
+}
+
+- (BOOL)fieldBox:(EwField)field rect:(NSRect *)box
+{
+    int row;
+    if (field == EW_FIELD_SEARCH) {
+        if (_page != AXYNE_EXTENSIONS_MARKETPLACE) return NO;
+        *box = NSMakeRect(EW_LEFT + 140, EW_PAGE_Y + 16, EW_RIGHT - 76 - (EW_LEFT + 140), AXYNE_PW_FIELD_HEIGHT);
+        return YES;
+    }
+    if (_page != AXYNE_EXTENSIONS_ACCOUNT || axyne_account_signed_in(&_account)) return NO;
+    if (field == EW_FIELD_NAME && !_registerMode) return NO;
+    row = field == EW_FIELD_EMAIL ? 0 : field == EW_FIELD_NAME ? 1 : _registerMode ? 2 : 1;
+    *box = NSMakeRect(EW_LEFT, EW_ACCOUNT_Y + row * EW_ACCOUNT_ROW + 20, EW_ACCOUNT_WIDTH, AXYNE_PW_FIELD_HEIGHT);
+    return YES;
+}
+
+- (void)createFields
+{
+    int i;
+    for (i = 0; i < EW_FIELD_COUNT; ++i) {
+        NSTextField *field = i == EW_FIELD_PASSWORD ? [[NSSecureTextField alloc] initWithFrame:NSZeroRect]
+                                                    : [[NSTextField alloc] initWithFrame:NSZeroRect];
+        [field setBezeled:NO];
+        [field setBordered:NO];
+        [field setDrawsBackground:NO];
+        [field setFocusRingType:NSFocusRingTypeNone];
+        [field setTextColor:ew_color(AXYNE_PW_COLOR_TEXT)];
+        [field setFont:[NSFont systemFontOfSize:12]];
+        [[field cell] setUsesSingleLineMode:YES];
+        [[field cell] setScrollable:YES];
+        [[field cell] setSendsActionOnEndEditing:NO];
+        [field setTarget:self];
+        [field setAction:i == EW_FIELD_SEARCH ? @selector(searchAction:) : @selector(submitAction:)];
+        [field setHidden:YES];
+        [self addSubview:field];
+        _fields[i] = field;
+    }
+    [_fields[EW_FIELD_SEARCH] setPlaceholderString:@"플러그인 검색"];
+    [_fields[EW_FIELD_EMAIL] setNextKeyView:_fields[EW_FIELD_NAME]];
+    [_fields[EW_FIELD_NAME] setNextKeyView:_fields[EW_FIELD_PASSWORD]];
+    [_fields[EW_FIELD_PASSWORD] setNextKeyView:_fields[EW_FIELD_EMAIL]];
+}
+
+- (void)layoutFields
+{
+    int i;
+    for (i = 0; i < EW_FIELD_COUNT; ++i) {
+        NSRect box;
+        if ([self fieldBox:(EwField)i rect:&box]) {
+            [_fields[i] setFrame:NSMakeRect(box.origin.x + 9, box.origin.y + 7, box.size.width - 18, box.size.height - 13)];
+            [_fields[i] setHidden:NO];
+        } else {
+            if ([_fields[i] currentEditor] != nil) [[self window] makeFirstResponder:self];
+            [_fields[i] setHidden:YES];
+        }
+    }
+}
+
+- (void)drawField:(EwField)field label:(NSString *)label
+{
+    NSRect box;
+    NSBezierPath *path;
+    if (![self fieldBox:field rect:&box]) return;
+    if (label != nil)
+        [self text:label rect:NSMakeRect(box.origin.x, box.origin.y - 20, box.size.width, 16)
+              font:[NSFont systemFontOfSize:11] color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
+    path = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(box, 0.5, 0.5) xRadius:6 yRadius:6];
+    [ew_color(AXYNE_PW_COLOR_FIELD) setFill];
+    [ew_color(AXYNE_PW_COLOR_BORDER) setStroke];
+    [path fill];
+    [path stroke];
+}
+
+- (void)drawNotice:(NSRect)rect
+{
+    NSMutableParagraphStyle *style;
+    if ([_notice length] == 0) return;
+    style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [style setLineBreakMode:NSLineBreakByWordWrapping];
+    [_notice drawInRect:rect withAttributes:@{
+        NSFontAttributeName: [NSFont systemFontOfSize:11],
+        NSForegroundColorAttributeName: ew_color(_noticeError ? 0xe57373u : AXYNE_PW_COLOR_MUTED),
+        NSParagraphStyleAttributeName: style }];
+}
+
+- (void)drawMarketplace
+{
+    NSFont *small = [NSFont systemFontOfSize:11];
+    size_t i;
+    [self text:@"마켓플레이스" rect:NSMakeRect(EW_LEFT, EW_PAGE_Y + AXYNE_PW_CONTENT_TOP, 136, 22)
+          font:[NSFont systemFontOfSize:16 weight:NSFontWeightSemibold] color:AXYNE_PW_COLOR_TEXT
+         align:NSTextAlignmentLeft];
+    [self drawField:EW_FIELD_SEARCH label:nil];
+    [self button:NSMakeRect(EW_RIGHT - 68, EW_PAGE_Y + 16, 68, AXYNE_PW_FIELD_HEIGHT) label:@"검색" accent:NO
+          action:EW_HIT_SEARCH index:0];
+    if (_market.count == 0) {
+        NSRect rect = NSMakeRect(EW_LEFT, EW_LIST_Y + 40, EW_RIGHT - EW_LEFT, 80);
+        if ([_notice length] > 0) [self drawNotice:rect];
+        else [self text:_marketLoaded ? @"조건에 맞는 플러그인이 없습니다." : @"불러오는 중…"
+                   rect:NSMakeRect(EW_LEFT, EW_LIST_Y + 40, EW_RIGHT - EW_LEFT, 20)
+                   font:[NSFont systemFontOfSize:12] color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentCenter];
+        return;
+    }
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(NSMakeRect(EW_LEFT, EW_LIST_Y, EW_RIGHT - EW_LEFT, ew_list_height()));
+    for (i = 0; i < _market.count; ++i) {
+        const AxyneMarketItem *item = &_market.items[i];
+        const AxynePlugin *installed = axyne_plugins_find(_plugins, item->slug);
+        BOOL same = installed != NULL && item->version != NULL && strcmp(installed->version, item->version) == 0;
+        CGFloat top = EW_LIST_Y + (CGFloat)i * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP) - _scroll;
+        NSRect row = NSMakeRect(EW_LEFT, top, EW_RIGHT - EW_LEFT, AXYNE_EW_ROW_HEIGHT);
+        NSString *developer = ew_string(item->developer);
+        if (NSMaxY(row) < EW_LIST_Y || top > EW_LIST_Y + ew_list_height()) continue;
+        [ew_color(AXYNE_PW_COLOR_FIELD) setFill];
+        [ew_color(AXYNE_PW_COLOR_BORDER) setStroke];
+        {
+            NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(row, 0.5, 0.5) xRadius:8 yRadius:8];
+            [path fill];
+            [path stroke];
+        }
+        [self text:[NSString stringWithFormat:@"%@  v%@", ew_string(item->name),
+                    item->version != NULL ? ew_string(item->version) : @"?"]
+              rect:NSMakeRect(row.origin.x + 14, top + 10, row.size.width - 134, 18)
+              font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] color:AXYNE_PW_COLOR_TEXT
+             align:NSTextAlignmentLeft];
+        [self text:ew_string(item->description) rect:NSMakeRect(row.origin.x + 14, top + 30, row.size.width - 134, 16)
+              font:small color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
+        [self text:[NSString stringWithFormat:@"%@%@다운로드 %ld회%@", developer, [developer length] ? @" · " : @"",
+                    item->downloads, installed == NULL ? @"" : same ? @" · 설치됨" : @" · 새 버전 있음"]
+              rect:NSMakeRect(row.origin.x + 14, top + 50, row.size.width - 134, 16) font:small
+             color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
+        if (same)
+            [self text:@"설치됨" rect:NSMakeRect(NSMaxX(row) - 104, top + 23, 92, 30)
+                  font:[NSFont systemFontOfSize:12] color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentCenter];
+        else
+            [self button:NSMakeRect(NSMaxX(row) - 104, top + 23, 92, 30)
+                   label:installed != NULL ? @"업데이트" : @"설치" accent:YES
+                  action:EW_HIT_MARKET_INSTALL index:(int)i];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+- (void)drawAccount
+{
+    BOOL signedIn = axyne_account_signed_in(&_account);
+    NSRect notice;
+    [self text:signedIn ? @"Axyne 계정" : _registerMode ? @"Axyne 계정 만들기" : @"Axyne 계정 로그인"
+          rect:NSMakeRect(EW_LEFT, EW_PAGE_Y + AXYNE_PW_CONTENT_TOP, EW_RIGHT - EW_LEFT, 22)
+          font:[NSFont systemFontOfSize:16 weight:NSFontWeightSemibold] color:AXYNE_PW_COLOR_TEXT
+         align:NSTextAlignmentLeft];
+    if (signedIn) {
+        [self text:ew_string(_account.display_name) rect:NSMakeRect(EW_LEFT, EW_ACCOUNT_Y, EW_RIGHT - EW_LEFT, 22)
+              font:[NSFont systemFontOfSize:16 weight:NSFontWeightSemibold] color:AXYNE_PW_COLOR_TEXT
+             align:NSTextAlignmentLeft];
+        [self text:ew_string(_account.email) rect:NSMakeRect(EW_LEFT, EW_ACCOUNT_Y + 28, EW_RIGHT - EW_LEFT, 18)
+              font:[NSFont systemFontOfSize:12] color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
+        [self button:NSMakeRect(EW_LEFT, EW_ACCOUNT_Y + 66, 110, AXYNE_PW_BUTTON_HEIGHT) label:@"로그아웃" accent:NO
+              action:EW_HIT_LOGOUT index:0];
+        notice = NSMakeRect(EW_LEFT, EW_ACCOUNT_Y + 116, EW_RIGHT - EW_LEFT, 60);
+    } else {
+        CGFloat y = EW_ACCOUNT_Y + (_registerMode ? 3 : 2) * EW_ACCOUNT_ROW + 4;
+        NSRect link = NSMakeRect(EW_LEFT + 136, y, EW_ACCOUNT_WIDTH - 76, AXYNE_PW_BUTTON_HEIGHT);
+        [self drawField:EW_FIELD_EMAIL label:@"이메일"];
+        [self drawField:EW_FIELD_NAME label:@"이름"];
+        [self drawField:EW_FIELD_PASSWORD label:@"비밀번호"];
+        [self button:NSMakeRect(EW_LEFT, y, 120, AXYNE_PW_BUTTON_HEIGHT) label:_registerMode ? @"가입하기" : @"로그인"
+              accent:YES action:EW_HIT_SUBMIT index:0];
+        [self text:_registerMode ? @"이미 계정이 있나요? 로그인" : @"계정이 없나요? 회원가입" rect:link
+              font:[NSFont systemFontOfSize:12] color:AXYNE_PW_COLOR_ACCENT align:NSTextAlignmentLeft];
+        [self addHit:link action:EW_HIT_SWITCH_MODE index:0];
+        notice = NSMakeRect(EW_LEFT, y + 48, EW_RIGHT - EW_LEFT, 60);
+    }
+    [self drawNotice:notice];
+    [self text:[NSString stringWithFormat:@"서버: %@  (설정 폴더의 server.json에서 변경)", ew_string(_server)]
+          rect:NSMakeRect(EW_LEFT, EW_FOOTER_Y - 30, EW_RIGHT - EW_LEFT, 18) font:[NSFont systemFontOfSize:11]
+         color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
+}
+
+- (char *)fieldText:(EwField)field
+{
+    const char *text = [[_fields[field] stringValue] UTF8String];
+    size_t length = text != NULL ? strlen(text) : 0;
+    char *copy = (char *)malloc(length + 1);
+    if (copy != NULL) { if (length) memcpy(copy, text, length); copy[length] = '\0'; }
+    return copy;
+}
+
+- (void)busy
+{
+    [self display];
+}
+
+- (void)search
+{
+    AxyneError error;
+    char *query = [self fieldText:EW_FIELD_SEARCH];
+    [_notice release];
+    _notice = nil;
+    [self busy];
+    axyne_market_list_clear(&_market);
+    if (axyne_market_list(_server, query, "macos", _ideVersion, &_market, &error) != AXYNE_STATUS_OK)
+        [self setNotice:@"마켓플레이스를 불러오지 못했습니다." detail:error.message error:YES];
+    _marketLoaded = YES;
+    _scroll = 0;
+    free(query);
+    [self setNeedsDisplay:YES];
+}
+
+- (void)searchAction:(id)sender { (void)sender; [self search]; }
+
+- (void)marketInstall:(int)index
+{
+    const AxyneMarketItem *item;
+    NSString *zip;
+    char *installed = NULL;
+    AxyneError error;
+    if (index < 0 || (size_t)index >= _market.count) return;
+    item = &_market.items[index];
+    /* The slug never becomes part of a path here. */
+    zip = [NSTemporaryDirectory() stringByAppendingPathComponent:
+           [NSString stringWithFormat:@"axyne-%@.zip", [[NSUUID UUID] UUIDString]]];
+    [self busy];
+    if (axyne_market_download(_server, item->slug, "macos", _ideVersion, [zip fileSystemRepresentation], &error)
+        != AXYNE_STATUS_OK)
+        [self message:@"플러그인을 내려받지 못했습니다." detail:error.message];
+    else if (axyne_plugins_install_zip(_plugins, [zip fileSystemRepresentation], _ideVersion, &installed, &error)
+             != AXYNE_STATUS_OK)
+        [self message:@"플러그인을 설치하지 못했습니다." detail:error.message];
+    else if (installed != NULL && strcmp(installed, item->slug) != 0)
+        [self message:@"내려받은 패키지의 id가 목록과 다릅니다." detail:installed];
+    else
+        [self setNotice:@"설치했습니다:" detail:item->name error:NO];
+    [[NSFileManager defaultManager] removeItemAtPath:zip error:NULL];
+    free(installed);
+}
+
+- (void)submitAccount
+{
+    AxyneError error;
+    AxyneStatus status;
+    char *email = [self fieldText:EW_FIELD_EMAIL];
+    char *name = [self fieldText:EW_FIELD_NAME];
+    char *password = [self fieldText:EW_FIELD_PASSWORD];
+    [_notice release];
+    _notice = nil;
+    if (email == NULL || name == NULL || password == NULL) goto done;
+    if (email[0] == '\0' || password[0] == '\0' || (_registerMode && name[0] == '\0')) {
+        [self setNotice:_registerMode ? @"이메일, 이름, 비밀번호를 입력하세요." : @"이메일과 비밀번호를 입력하세요."
+                 detail:NULL error:YES];
+        goto done;
+    }
+    [self busy];
+    status = _registerMode ? axyne_account_register(_server, email, name, password, &error) : AXYNE_STATUS_OK;
+    if (status != AXYNE_STATUS_OK) {
+        [self setNotice:@"가입하지 못했습니다." detail:error.message error:YES];
+    } else if ((status = axyne_account_login(_server, email, password, &_account, &error)) != AXYNE_STATUS_OK) {
+        [self setNotice:_registerMode ? @"가입했지만 로그인하지 못했습니다." : @"로그인하지 못했습니다."
+                 detail:error.message error:YES];
+        _registerMode = NO;
+    } else {
+        if (axyne_account_save(_configDir, &_account, &error) != AXYNE_STATUS_OK)
+            [self setNotice:@"로그인했지만 계정 정보를 저장하지 못했습니다." detail:error.message error:YES];
+        else
+            [self setNotice:_registerMode ? @"가입하고 로그인했습니다." : @"로그인했습니다." detail:NULL error:NO];
+        _registerMode = NO;
+    }
+    [_fields[EW_FIELD_PASSWORD] setStringValue:@""];
+done:
+    if (password != NULL) memset(password, 0, strlen(password));
+    free(email); free(name); free(password);
+    [self layoutFields];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)submitAction:(id)sender { (void)sender; [self submitAccount]; }
+
+- (void)logout
+{
+    [self busy];
+    axyne_account_logout(_server, &_account);
+    (void)axyne_account_save(_configDir, &_account, NULL);
+    [self setNotice:@"로그아웃했습니다." detail:NULL error:NO];
+    [self layoutFields];
+}
+
+/* Page entry: the marketplace loads on first view. */
+- (void)openPage:(int)page
+{
+    _page = page;
+    _scroll = 0;
+    [_notice release];
+    _notice = nil;
+    [self layoutFields];
+    [[self window] makeFirstResponder:self];
+    [self setNeedsDisplay:YES];
+    if (page == AXYNE_EXTENSIONS_MARKETPLACE && !_marketLoaded) [self search];
+    if (page == AXYNE_EXTENSIONS_ACCOUNT && axyne_account_signed_in(&_account)) {
+        /* Confirm the stored session (renewing it if needed). */
+        AxyneError error;
+        AxyneStatus status;
+        [self busy];
+        status = axyne_account_refresh_profile(_server, &_account, &error);
+        if (status == AXYNE_STATUS_OK || status == AXYNE_STATUS_PERMISSION_DENIED)
+            (void)axyne_account_save(_configDir, &_account, NULL);
+        if (status == AXYNE_STATUS_PERMISSION_DENIED)
+            [self setNotice:@"로그인이 만료되었습니다. 다시 로그인하세요." detail:NULL error:YES];
+        else if (status != AXYNE_STATUS_OK)
+            [self setNotice:@"계정 정보를 확인하지 못했습니다." detail:error.message error:YES];
+        [self layoutFields];
+        [self setNeedsDisplay:YES];
+    }
+}
+
 - (void)drawRect:(NSRect)dirty
 {
-    static NSString *const pages[AXYNE_EXTENSIONS_PAGE_COUNT] = { @"설치됨" };
+    static NSString *const pages[AXYNE_EXTENSIONS_PAGE_COUNT] = { @"설치됨", @"마켓플레이스", @"계정" };
     NSRect close = NSMakeRect(AXYNE_PW_WIDTH - AXYNE_PW_TITLE_HEIGHT, 0, AXYNE_PW_TITLE_HEIGHT, AXYNE_PW_TITLE_HEIGHT);
     int i;
     (void)dirty;
@@ -204,6 +570,8 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
         [self addHit:item action:EW_HIT_NAV index:i];
     }
     if (_page == AXYNE_EXTENSIONS_INSTALLED) [self drawInstalled];
+    else if (_page == AXYNE_EXTENSIONS_MARKETPLACE) [self drawMarketplace];
+    else [self drawAccount];
     [ew_color(AXYNE_PW_COLOR_CHROME) setFill];
     NSRectFill(NSMakeRect(0, EW_FOOTER_Y, AXYNE_PW_WIDTH, AXYNE_PW_FOOTER_HEIGHT));
     [ew_color(AXYNE_PW_COLOR_CHROME_LINE) setFill];
@@ -249,7 +617,17 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     AxynePlugin *plugin = hit.index >= 0 && (size_t)hit.index < _plugins->count ? &_plugins->items[hit.index] : NULL;
     switch (hit.action) {
     case EW_HIT_CLOSE: _done = YES; [NSApp stopModal]; break;
-    case EW_HIT_NAV: _page = hit.index; _scroll = 0; break;
+    case EW_HIT_NAV: [self openPage:hit.index]; break;
+    case EW_HIT_SEARCH: [self search]; break;
+    case EW_HIT_MARKET_INSTALL: [self marketInstall:hit.index]; break;
+    case EW_HIT_SUBMIT: [self submitAccount]; break;
+    case EW_HIT_LOGOUT: [self logout]; break;
+    case EW_HIT_SWITCH_MODE:
+        _registerMode = !_registerMode;
+        [_notice release];
+        _notice = nil;
+        [self layoutFields];
+        break;
     case EW_HIT_INSTALL: [self install]; break;
     case EW_HIT_TOGGLE:
         if (plugin != NULL && axyne_plugins_set_enabled(_plugins, plugin->id, !plugin->enabled, &error) != AXYNE_STATUS_OK)
@@ -288,7 +666,8 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
     int i;
     for (i = _hitCount - 1; i >= 0; --i) {
-        BOOL inList = _hits[i].action == EW_HIT_TOGGLE || _hits[i].action == EW_HIT_REMOVE;
+        BOOL inList = _hits[i].action == EW_HIT_TOGGLE || _hits[i].action == EW_HIT_REMOVE ||
+                      _hits[i].action == EW_HIT_MARKET_INSTALL;
         if (inList && (point.y < EW_LIST_Y || point.y >= EW_LIST_Y + ew_list_height())) continue;
         if (NSPointInRect(point, _hits[i].rect)) { [self activate:_hits[i]]; return; }
     }
@@ -332,7 +711,11 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
     view->_plugins = plugins;
     view->_ideVersion = ide_version;
     view->_page = page < AXYNE_EXTENSIONS_PAGE_COUNT ? (int)page : 0;
+    view->_configDir = axyne_app_path(AXYNE_APP_PATH_CONFIG_DIR);
+    view->_server = axyne_server_base_url(view->_configDir);
+    axyne_account_load(view->_configDir, &view->_account);
     [panel setContentView:view];
+    [view createFields];
     if (owner != nil) {
         NSRect bounds = [owner frame];
         [panel setFrameOrigin:NSMakePoint(NSMidX(bounds) - AXYNE_PW_WIDTH / 2, NSMidY(bounds) - AXYNE_PW_HEIGHT / 2)];
@@ -340,6 +723,8 @@ void axyne_extensions_window_show(void *native_owner, AxynePluginSet *plugins,
         [panel center];
     }
     [panel makeFirstResponder:view];
+    [panel makeKeyAndOrderFront:nil];
+    [view openPage:view->_page];
     [NSApp runModalForWindow:panel];
     [panel orderOut:nil];
     [panel release];

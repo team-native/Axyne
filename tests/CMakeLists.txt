@@ -64,11 +64,13 @@ add_executable(axyne_tests
     test_memory_usage.c
     test_log.c
     test_plugins.c
+    test_account.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(axyne_tests PRIVATE
     axyne_plugins
+    axyne_account
     axyne_runner
     axyne_git
     axyne_lsp
@@ -222,6 +224,25 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/keymap"
 )
 add_test(
+    NAME axyne-account
+    COMMAND $<TARGET_FILE:axyne_tests> account
+            "${AXYNE_TEST_FIXTURE_DIR}/account"
+)
+add_executable(axyne_account_refresh_tests
+    test_account_refresh.c
+    "${PROJECT_SOURCE_DIR}/src/features/account/account.c"
+)
+target_include_directories(axyne_account_refresh_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_compile_definitions(axyne_account_refresh_tests PRIVATE AXYNE_ACCOUNT_TESTING)
+target_link_libraries(axyne_account_refresh_tests PRIVATE axyne_core)
+if(MSVC)
+    target_compile_options(axyne_account_refresh_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(axyne_account_refresh_tests PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME axyne-account-refresh-token COMMAND axyne_account_refresh_tests)
+set_tests_properties(axyne-account-refresh-token PROPERTIES TIMEOUT 10)
+add_test(
     NAME axyne-plugins
     COMMAND $<TARGET_FILE:axyne_tests> plugins
             "${AXYNE_TEST_FIXTURE_DIR}/plugins"
@@ -253,6 +274,7 @@ set_tests_properties(
     axyne-app-paths
     axyne-app-state
     axyne-plugins
+    axyne-account
     axyne-keymap
     axyne-commands
     axyne-build-target

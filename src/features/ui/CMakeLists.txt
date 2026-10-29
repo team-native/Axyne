@@ -72,7 +72,7 @@ target_include_directories(axyne_ui
     PRIVATE "${axyne_scintilla_SOURCE_DIR}/include" "${AXYNE_GENERATED_INCLUDE_DIR}"
 )
 target_link_libraries(axyne PRIVATE axyne_ui)
-target_link_libraries(axyne_ui PRIVATE axyne_terminal axyne_server_client axyne_plugins)
+target_link_libraries(axyne_ui PRIVATE axyne_terminal axyne_server_client axyne_plugins axyne_account)
 
 if(MSVC)
     target_compile_options(axyne_ui PRIVATE /W4 /utf-8)
