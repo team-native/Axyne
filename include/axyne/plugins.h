@@ -49,6 +49,9 @@ typedef struct AxynePluginCommand {
     char *cwd;          /* "" = workspace folder, else the file's folder */
     char **extensions;  /* lower case, no dot; empty = always available */
     size_t extension_count;
+    char **required_programs; /* programs this command needs; see has_requires */
+    size_t require_count;
+    int has_requires;   /* 0 = command needs every plugin requirement */
 } AxynePluginCommand;
 
 typedef struct AxynePluginRequirement {
@@ -150,6 +153,14 @@ int axyne_plugin_command_applies(const AxynePluginCommand *command, const char *
 
 /* First requirement whose program is not found, or NULL. */
 const AxynePluginRequirement *axyne_plugin_missing_requirement(const AxynePlugin *plugin);
+
+/* Like axyne_plugin_missing_requirement, but only checks the programs the
+ * command lists in its own "requires" (all plugin requirements when it has
+ * none). Writes a listed program that is no plugin requirement to
+ * `missing_program` when it is not on PATH. NULL/NULL = runnable. */
+const AxynePluginRequirement *axyne_plugin_command_missing_requirement(
+    const AxynePlugin *plugin, const AxynePluginCommand *command,
+    const char **missing_program);
 
 typedef struct AxynePluginContext {
     const char *file;             /* active saved file or NULL */

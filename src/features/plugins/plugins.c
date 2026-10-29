@@ -545,6 +545,7 @@ void axyne_plugin_free(AxynePlugin *plugin)
         free(command->id); free(command->title); free(command->program); free(command->cwd);
         free_strings(command->args, command->arg_count);
         free_strings(command->extensions, command->extension_count);
+        free_strings(command->required_programs, command->require_count);
     }
     free(plugin->commands);
     for (i = 0; i < plugin->requirement_count; ++i) {
@@ -658,6 +659,21 @@ AxynePlugin *axyne_plugin_parse(const char *json_text, size_t length, const char
                 command->cwd = json_string(json, cwd);
                 command->args = json_strings(json, args, &command->arg_count, 0);
                 command->extensions = json_strings(json, extensions, &command->extension_count, 1);
+                {
+                    char *requires_pointer = member_pointer("/commands", i, "requires");
+                    size_t require_total = 0;
+                    if (requires_pointer != NULL &&
+                        axyne_settings_get_count(json, requires_pointer, &require_total, NULL) == AXYNE_STATUS_OK) {
+                        size_t k;
+                        command->required_programs = json_strings(json, requires_pointer, &command->require_count, 0);
+                        /* Only a fully valid list of names replaces the plugin requirements. */
+                        command->has_requires = command->require_count == require_total;
+                        for (k = 0; command->has_requires && k < command->require_count; ++k)
+                            if (command->required_programs[k] == NULL || command->required_programs[k][0] == '\0')
+                                command->has_requires = 0;
+                    }
+                    free(requires_pointer);
+                }
             }
             free(id); free(title); free(program); free(args); free(cwd); free(extensions);
             if (command->id != NULL && command->title != NULL && command->program != NULL &&
@@ -667,6 +683,7 @@ AxynePlugin *axyne_plugin_parse(const char *json_text, size_t length, const char
                 free(command->id); free(command->title); free(command->program); free(command->cwd);
                 free_strings(command->args, command->arg_count);
                 free_strings(command->extensions, command->extension_count);
+                free_strings(command->required_programs, command->require_count);
                 memset(command, 0, sizeof(*command));
             }
         }
@@ -1205,6 +1222,32 @@ const AxynePluginRequirement *axyne_plugin_missing_requirement(const AxynePlugin
     return NULL;
 }
 
+const AxynePluginRequirement *axyne_plugin_command_missing_requirement(
+    const AxynePlugin *plugin, const AxynePluginCommand *command,
+    const char **missing_program)
+{
+    size_t i, k;
+    if (missing_program != NULL) *missing_program = NULL;
+    if (plugin == NULL) return NULL;
+    if (command == NULL || !command->has_requires) return axyne_plugin_missing_requirement(plugin);
+    for (i = 0; i < command->require_count; ++i) {
+        const AxynePluginRequirement *known = NULL;
+        int script = 0;
+        char *found;
+        for (k = 0; k < plugin->requirement_count; ++k)
+            if (strcmp(plugin->requirements[k].program, command->required_programs[i]) == 0) {
+                known = &plugin->requirements[k];
+                break;
+            }
+        found = find_program(command->required_programs[i], &script);
+        if (found != NULL) { free(found); continue; }
+        if (known != NULL) return known;
+        if (missing_program != NULL) *missing_program = command->required_programs[i];
+        return NULL;
+    }
+    return NULL;
+}
+
 void axyne_plugin_invocation_clear(AxynePluginInvocation *invocation)
 {
     if (invocation == NULL) return;
@@ -1301,7 +1344,9 @@ AxyneStatus axyne_plugin_command_prepare(const AxynePlugin *plugin, const AxyneP
         return plugin_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "plugin command is required");
     memset(invocation, 0, sizeof(*invocation));
 
-    requirement = axyne_plugin_missing_requirement(plugin);
+    requirement = axyne_plugin_command_missing_requirement(plugin, command, &missing);
+    if (requirement == NULL && missing != NULL)
+        return plugin_error(error, AXYNE_STATUS_NOT_FOUND, "%s was not found on PATH", missing);
     if (requirement != NULL) {
         if (requirement->hint[0] != '\0')
             return plugin_error(error, AXYNE_STATUS_NOT_FOUND, "%s was not found on PATH. %s",

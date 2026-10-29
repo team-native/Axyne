@@ -76,10 +76,11 @@
     [menu removeAllItems];
     for (i = 0; i < _plugins.count; ++i) {
         const AxynePlugin *plugin = &_plugins.items[i];
-        BOOL requirementsMet;
         if (!plugin->enabled || !plugin->compatible) continue;
-        requirementsMet = axyne_plugin_missing_requirement(plugin) == NULL;
         for (j = 0; j < plugin->command_count; ++j, ++target) {
+            const char *missingProgram = NULL;
+            BOOL requirementsMet = axyne_plugin_command_missing_requirement(
+                plugin, &plugin->commands[j], &missingProgram) == NULL && missingProgram == NULL;
             NSString *name = [NSString stringWithUTF8String:plugin->name];
             NSString *title = [NSString stringWithUTF8String:plugin->commands[j].title];
             NSString *label = [NSString stringWithFormat:@"%@: %@",

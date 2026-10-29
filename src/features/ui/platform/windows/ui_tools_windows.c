@@ -55,15 +55,17 @@ static void axyne_win_tools_menu_populate(AxyneWindowState *state,
     path = document != NULL && !document->is_untitled ? document->path : NULL;
     for (i = 0; i < state->plugins.count; ++i) {
         const AxynePlugin *plugin = &state->plugins.items[i];
-        int requirements_met;
         if (!plugin->enabled || !plugin->compatible) continue;
-        requirements_met = axyne_plugin_missing_requirement(plugin) == NULL;
         for (j = 0; j < plugin->command_count; ++j) {
+            const char *missing_program = NULL;
+            int requirements_met;
             unsigned flags;
             if (target >= AXYNE_TOOLS_PLUGIN_ID_CAPACITY) {
                 truncated = 1;
                 break;
             }
+            requirements_met = axyne_plugin_command_missing_requirement(
+                plugin, &plugin->commands[j], &missing_program) == NULL && missing_program == NULL;
             flags = requirements_met &&
                     axyne_plugin_command_applies(&plugin->commands[j], path)
                 ? 0 : AXYNE_WIN_MENU_DISABLED;

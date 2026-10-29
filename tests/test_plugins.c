@@ -62,6 +62,61 @@ static int parse_checks(void)
     return 1;
 }
 
+static int command_requirement_checks(const char *root)
+{
+    static const char *const json =
+        "{\"id\":\"split\",\"name\":\"Split\",\"version\":\"1.0.0\","
+        "\"requires\":[{\"program\":\"surely-not-installed-viewer\",\"hint\":\"install the viewer\"}],"
+        "\"commands\":["
+        "{\"id\":\"setup\",\"title\":\"Setup\",\"program\":\"./bundled.cmd\",\"requires\":[]},"
+        "{\"id\":\"view\",\"title\":\"View\",\"program\":\"./bundled.cmd\","
+        "\"requires\":[\"surely-not-installed-viewer\"]},"
+        "{\"id\":\"other\",\"title\":\"Other\",\"program\":\"./bundled.cmd\","
+        "\"requires\":[\"surely-not-installed-extra\"]},"
+        "{\"id\":\"legacy\",\"title\":\"Legacy\",\"program\":\"./bundled.cmd\"},"
+        "{\"id\":\"bad\",\"title\":\"Bad\",\"program\":\"./bundled.cmd\",\"requires\":[5,\"\"]}]}";
+    AxyneError error;
+    AxynePluginInvocation invocation;
+    AxynePlugin *plugin;
+    const char *missing = NULL;
+    plugin = axyne_plugin_parse(json, strlen(json), root, "0.1.0", &error);
+    AXYNE_TEST_CHECK(plugin != NULL);
+    AXYNE_TEST_CHECK(plugin->command_count == 5);
+    AXYNE_TEST_CHECK(plugin->commands[0].has_requires && plugin->commands[0].require_count == 0);
+    AXYNE_TEST_CHECK(!plugin->commands[3].has_requires);
+    /* An invalid list falls back to the plugin requirements. */
+    AXYNE_TEST_CHECK(!plugin->commands[4].has_requires);
+
+    /* An empty list runs even though a plugin requirement is missing. */
+    AXYNE_TEST_CHECK(axyne_plugin_command_missing_requirement(plugin, &plugin->commands[0], &missing) == NULL &&
+                     missing == NULL);
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[0], NULL, &invocation, &error),
+                      AXYNE_STATUS_OK);
+    axyne_plugin_invocation_clear(&invocation);
+
+    /* A listed plugin requirement reports its hint. */
+    AXYNE_TEST_CHECK(axyne_plugin_command_missing_requirement(plugin, &plugin->commands[1], &missing) ==
+                     &plugin->requirements[0]);
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[1], NULL, &invocation, &error),
+                      AXYNE_STATUS_NOT_FOUND);
+    AXYNE_TEST_CONTAINS(error.message, "install the viewer");
+
+    /* A listed program that is no plugin requirement is still checked. */
+    AXYNE_TEST_CHECK(axyne_plugin_command_missing_requirement(plugin, &plugin->commands[2], &missing) == NULL);
+    AXYNE_TEST_CHECK(missing != NULL && strcmp(missing, "surely-not-installed-extra") == 0);
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[2], NULL, &invocation, &error),
+                      AXYNE_STATUS_NOT_FOUND);
+    AXYNE_TEST_CONTAINS(error.message, "surely-not-installed-extra");
+
+    /* Without "requires" a command keeps needing every plugin requirement. */
+    AXYNE_TEST_CHECK(axyne_plugin_command_missing_requirement(plugin, &plugin->commands[3], &missing) ==
+                     &plugin->requirements[0]);
+    AXYNE_TEST_STATUS(axyne_plugin_command_prepare(plugin, &plugin->commands[3], NULL, &invocation, &error),
+                      AXYNE_STATUS_NOT_FOUND);
+    axyne_plugin_free(plugin);
+    return 1;
+}
+
 static int prepare_checks(const char *root)
 {
     AxyneError error;
@@ -363,5 +418,5 @@ int axyne_test_plugins(const char *root)
 {
     AXYNE_TEST_CHECK(axyne_test_make_directory(root));
     AXYNE_TEST_CHECK(axyne_test_register_cleanup(root));
-    return parse_checks() && prepare_requirement_checks(root) && prepare_checks(root) && set_checks(root);
+    return parse_checks() && prepare_requirement_checks(root) && command_requirement_checks(root) && prepare_checks(root) && set_checks(root);
 }
