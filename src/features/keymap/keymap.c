@@ -167,9 +167,9 @@ AxyneStatus axyne_key_sequence_parse(const char *text, AxyneKeySequence *sequenc
     return AXYNE_STATUS_OK;
 }
 
-AxyneKeyFormat axyne_key_format_for(AxynePlatform platform)
+AxyneKeyFormat axyne_key_format_for(AxyneCommandPlatform platform)
 {
-    return platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEY_FORMAT_MACOS
+    return platform == AXYNE_COMMAND_PLATFORM_MACOS ? AXYNE_KEY_FORMAT_MACOS
                                             : AXYNE_KEY_FORMAT_WINDOWS;
 }
 
@@ -358,6 +358,20 @@ static int command_is_native(AxyneCommandId command)
     return info != NULL && (info->flags & AXYNE_COMMAND_FLAG_NATIVE_KEY) != 0;
 }
 
+/* A registry default of a NATIVE_KEY command without Ctrl/Alt/Cmd (Tab,
+ * Shift+Tab): a text-editing key the focused control must always receive, so
+ * a user binding never takes it over. Other native keys (Ctrl+Z, Alt+F4 ...)
+ * yield to a user binding the user chose explicitly. */
+static int entry_is_hard_native(const AxyneKeymapEntry *entry)
+{
+    if (entry->user || !command_is_native(entry->command)) return 0;
+    for (size_t i = 0; i < entry->sequence.count; ++i)
+        if ((entry->sequence.strokes[i].mods &
+             (AXYNE_KEYMOD_CTRL | AXYNE_KEYMOD_ALT | AXYNE_KEYMOD_CMD)) != 0)
+            return 0;
+    return 1;
+}
+
 static int sequence_valid(const AxyneKeySequence *sequence)
 {
     if (sequence == NULL || sequence->count < 1 ||
@@ -389,15 +403,15 @@ static AxyneStatus keymap_append(AxyneKeymap *map, const AxyneKeySequence *seque
     return AXYNE_STATUS_OK;
 }
 
-AxyneStatus axyne_keymap_init(AxyneKeymap *map, AxynePlatform platform)
+AxyneStatus axyne_keymap_init(AxyneKeymap *map, AxyneCommandPlatform platform)
 {
     size_t count = axyne_command_count();
-    if (map == NULL || (platform != AXYNE_PLATFORM_WINDOWS &&
-                        platform != AXYNE_PLATFORM_MACOS))
+    if (map == NULL || (platform != AXYNE_COMMAND_PLATFORM_WINDOWS &&
+                        platform != AXYNE_COMMAND_PLATFORM_MACOS))
         return AXYNE_STATUS_INVALID_ARGUMENT;
     memset(map, 0, sizeof(*map));
     map->platform = platform;
-    map->altgr_exclusion = platform == AXYNE_PLATFORM_WINDOWS;
+    map->altgr_exclusion = platform == AXYNE_COMMAND_PLATFORM_WINDOWS;
     for (size_t i = 0; i < count; ++i) {
         const AxyneCommandInfo *info = axyne_command_at(i);
         for (size_t k = 0; k < AXYNE_COMMAND_DEFAULT_KEYS; ++k) {
@@ -433,8 +447,19 @@ AxyneStatus axyne_keymap_set_command(AxyneKeymap *map, AxyneCommandId command,
         return AXYNE_STATUS_INVALID_ARGUMENT;
     for (size_t i = 0; i < count; ++i)
         if (!sequence_valid(&sequences[i])) return AXYNE_STATUS_INVALID_ARGUMENT;
-    for (size_t i = 0; i < map->count; ++i)
-        if (map->entries[i].command != command) map->entries[kept++] = map->entries[i];
+    /* The command's old bindings go; so do other commands' registry defaults
+     * on the same keys in the same context class (a user binding wins over a
+     * default: Run on Ctrl+D takes Ctrl+D from 줄 복제), except hard-native
+     * keys. */
+    for (size_t i = 0; i < map->count; ++i) {
+        const AxyneKeymapEntry *entry = &map->entries[i];
+        int taken = 0;
+        if (entry->command != command && !entry->user && !entry_is_hard_native(entry) &&
+            command_is_debug(entry->command) == command_is_debug(command))
+            for (size_t k = 0; k < count && !taken; ++k)
+                taken = axyne_key_sequence_equal(&entry->sequence, &sequences[k]);
+        if (entry->command != command && !taken) map->entries[kept++] = *entry;
+    }
     map->count = kept;
     for (size_t i = 0; i < count; ++i) {
         int duplicate = 0;
@@ -476,25 +501,37 @@ void axyne_keymap_set_altgr_exclusion(AxyneKeymap *map, int enabled)
     if (map != NULL) map->altgr_exclusion = enabled != 0;
 }
 
-/* Best entry for `sequence`: a debug-context binding wins while debugging;
- * debug-context bindings never match outside a debug session. Returns NULL
- * when nothing matches. */
+/* Best entry for `sequence`: a debug-context binding wins while debugging
+ * (debug-context bindings never match outside a debug session); otherwise a
+ * hard-native default (Tab) wins, then a user binding, then a registry
+ * default. Within a class the first entry wins. Returns NULL when nothing
+ * matches. */
 static const AxyneKeymapEntry *keymap_match(const AxyneKeymap *map,
                                             const AxyneKeySequence *sequence,
                                             unsigned int context)
 {
-    const AxyneKeymapEntry *plain = NULL;
+    const AxyneKeymapEntry *debug_user = NULL, *debug_default = NULL;
+    const AxyneKeymapEntry *hard = NULL, *user = NULL, *plain = NULL;
     int debugging = (context & AXYNE_KEYMAP_CONTEXT_DEBUGGING) != 0;
     for (size_t i = 0; i < map->count; ++i) {
         const AxyneKeymapEntry *entry = &map->entries[i];
         if (!axyne_key_sequence_equal(&entry->sequence, sequence)) continue;
         if (command_is_debug(entry->command)) {
-            if (debugging) return entry;
+            if (!debugging) continue;
+            if (entry->user) { if (debug_user == NULL) debug_user = entry; }
+            else if (debug_default == NULL) debug_default = entry;
+        } else if (entry_is_hard_native(entry)) {
+            if (hard == NULL) hard = entry;
+        } else if (entry->user) {
+            if (user == NULL) user = entry;
         } else if (plain == NULL) {
             plain = entry;
         }
     }
-    return plain;
+    if (debug_user != NULL) return debug_user;
+    if (debug_default != NULL) return debug_default;
+    if (hard != NULL) return hard;
+    return user != NULL ? user : plain;
 }
 
 static int keymap_is_prefix(const AxyneKeymap *map, AxyneKeyStroke stroke,
@@ -679,7 +716,7 @@ AxyneCommandId axyne_keymap_find_conflict(const AxyneKeymap *map,
 /* ---- preferences -------------------------------------------------------- */
 
 int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
-                                    AxynePlatform platform, AxyneKeyStroke *stroke)
+                                    AxyneCommandPlatform platform, AxyneKeyStroke *stroke)
 {
     AxyneKeyStroke parsed;
     unsigned mods = 0;
@@ -687,7 +724,7 @@ int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
         axyne_key_stroke_parse(key, &parsed) != AXYNE_STATUS_OK || parsed.mods != 0)
         return 0;
     if (modifiers & AXYNE_KEY_MODIFIER_COMMAND)
-        mods |= platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEYMOD_CMD : AXYNE_KEYMOD_CTRL;
+        mods |= platform == AXYNE_COMMAND_PLATFORM_MACOS ? AXYNE_KEYMOD_CMD : AXYNE_KEYMOD_CTRL;
     if (modifiers & AXYNE_KEY_MODIFIER_CONTROL) mods |= AXYNE_KEYMOD_CTRL;
     if (modifiers & AXYNE_KEY_MODIFIER_SHIFT) mods |= AXYNE_KEYMOD_SHIFT;
     if (modifiers & AXYNE_KEY_MODIFIER_ALT) mods |= AXYNE_KEYMOD_ALT;
@@ -696,7 +733,7 @@ int axyne_keymap_stroke_from_legacy(unsigned int modifiers, const char *key,
     return 1;
 }
 
-int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
+int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxyneCommandPlatform platform,
                                   unsigned int *modifiers, char *key, size_t key_capacity)
 {
     AxyneKeyStroke bare;
@@ -704,11 +741,11 @@ int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
     char text[32];
     if (stroke.key == AXYNE_KEY_NONE) return 0;
     if (stroke.mods & AXYNE_KEYMOD_CMD) {
-        if (platform != AXYNE_PLATFORM_MACOS) return 0;
+        if (platform != AXYNE_COMMAND_PLATFORM_MACOS) return 0;
         legacy |= AXYNE_KEY_MODIFIER_COMMAND;
     }
     if (stroke.mods & AXYNE_KEYMOD_CTRL)
-        legacy |= platform == AXYNE_PLATFORM_MACOS ? AXYNE_KEY_MODIFIER_CONTROL
+        legacy |= platform == AXYNE_COMMAND_PLATFORM_MACOS ? AXYNE_KEY_MODIFIER_CONTROL
                                                    : AXYNE_KEY_MODIFIER_COMMAND;
     if (stroke.mods & AXYNE_KEYMOD_SHIFT) legacy |= AXYNE_KEY_MODIFIER_SHIFT;
     if (stroke.mods & AXYNE_KEYMOD_ALT) legacy |= AXYNE_KEY_MODIFIER_ALT;
@@ -723,7 +760,7 @@ int axyne_keymap_stroke_to_legacy(AxyneKeyStroke stroke, AxynePlatform platform,
 }
 
 static int legacy_binding_equal(const AxyneKeyBinding *a, const AxyneKeyBinding *b,
-                                AxynePlatform platform)
+                                AxyneCommandPlatform platform)
 {
     AxyneKeyStroke x, y;
     if (a->enabled != b->enabled) return 0;
@@ -785,7 +822,7 @@ AxyneStatus axyne_keymap_apply_preferences(AxyneKeymap *map,
     return result;
 }
 
-AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxynePlatform platform,
+AxyneStatus axyne_keymap_build(AxyneKeymap *map, AxyneCommandPlatform platform,
                                const struct AxynePreferences *preferences)
 {
     AxyneStatus status = axyne_keymap_init(map, platform);

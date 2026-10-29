@@ -12,8 +12,9 @@ extern "C" {
  * the adapters and the Figma metrics so both stay visually identical.
  *
  * Pages: editor, font and color (theme), key bindings. Settings without a
- * backing preference (build, terminal, comparer, undo history limit) are
- * intentionally absent. The rendering group is shown on Windows only.
+ * backing preference (build, terminal, comparer) are intentionally absent.
+ * The editor page includes the persisted undo history limit; the rendering
+ * group is shown on Windows only.
  *
  * Checkbox pair mapping for the Figma "show whitespace and tabs" / "show
  * space characters" row: the first drives editor.show_whitespace (visible
