@@ -11,10 +11,9 @@ extern "C" {
  * itself is native on each platform; this header holds the contract shared by
  * the adapters and the Figma metrics so both stay visually identical.
  *
- * Pages: editor, font and color (theme), key bindings. Settings without a
- * backing preference (build, terminal, comparer) are intentionally absent.
- * The editor page includes the persisted undo history limit; the rendering
- * group is shown on Windows only.
+ * Pages: editor, font and color (theme), key bindings. Windows also exposes
+ * the existing build, terminal, and comparer preferences. The editor page
+ * includes the persisted undo history limit; rendering is Windows-only.
  *
  * Checkbox pair mapping for the Figma "show whitespace and tabs" / "show
  * space characters" row: the first drives editor.show_whitespace (visible
@@ -37,6 +36,13 @@ typedef struct AxynePreferencesWindowHooks {
 int axyne_preferences_window_show(void *native_owner, int workspace,
                                   const AxynePreferences *initial,
                                   const AxynePreferencesWindowHooks *hooks);
+
+#ifdef _WIN32
+/* Opens the Windows preferences window directly on its terminal profile page. */
+int axyne_preferences_window_show_terminal(void *native_owner, int workspace,
+                                           const AxynePreferences *initial,
+                                           const AxynePreferencesWindowHooks *hooks);
+#endif
 
 enum {
     AXYNE_PW_WIDTH = 760,

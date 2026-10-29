@@ -392,6 +392,8 @@ if(APPLE)
     set_tests_properties(axyne-editor-runtime PROPERTIES TIMEOUT 60)
 elseif(WIN32)
     add_executable(axyne_editor_runtime_tests test_editor_runtime_windows.c)
+    target_compile_definitions(axyne_editor_runtime_tests PRIVATE
+        AXYNE_WINDOWS_UI_TESTING=1)
     target_include_directories(axyne_editor_runtime_tests PRIVATE
         "${axyne_scintilla_SOURCE_DIR}/include")
     target_link_libraries(axyne_editor_runtime_tests PRIVATE

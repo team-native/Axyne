@@ -44,6 +44,120 @@ static int editor_equals(HWND editor, const char *bytes, size_t length)
     return equal;
 }
 
+static AxyneStatus test_terminal_configure_failure(
+    AxyneRunnerConfig *config, const AxyneRunnerSpec *spec,
+    AxyneError *error)
+{
+    (void)config;
+    (void)spec;
+    if (error != NULL) {
+        error->code = AXYNE_STATUS_OUT_OF_MEMORY;
+        (void)snprintf(error->message, sizeof(error->message),
+                       "injected terminal profile configuration failure");
+    }
+    return AXYNE_STATUS_OUT_OF_MEMORY;
+}
+
+static int test_terminal_profiles(AxyneWindowState *state)
+{
+    wchar_t system_directory[MAX_PATH];
+    wchar_t explicit_path[MAX_PATH];
+    wchar_t findstr_path[MAX_PATH];
+    char *explicit_utf8;
+    char *findstr_utf8;
+    char *resolved;
+    char *previous_runner;
+    DWORD system_length = GetSystemDirectoryW(system_directory, MAX_PATH);
+    DWORD path_length;
+    wchar_t *previous_path;
+    AxyneError error = {0};
+
+    CHECK(system_length != 0 && system_length + 12 < MAX_PATH);
+    wcscpy_s(explicit_path, MAX_PATH, system_directory);
+    wcscat_s(explicit_path, MAX_PATH, L"\\cmd.exe");
+    wcscpy_s(findstr_path, MAX_PATH, system_directory);
+    wcscat_s(findstr_path, MAX_PATH, L"\\findstr.exe");
+    explicit_utf8 = axyne_utf8(explicit_path);
+    findstr_utf8 = axyne_utf8(findstr_path);
+    CHECK(explicit_utf8 != NULL && findstr_utf8 != NULL);
+
+    resolved = axyne_terminal_profile_executable(explicit_utf8);
+    CHECK(resolved != NULL && _stricmp(resolved, explicit_utf8) == 0);
+    free(resolved);
+    CHECK(axyne_terminal_profile_executable(".\\cmd.exe") == NULL);
+    CHECK(axyne_terminal_profile_executable(
+              "C:\\axyne-missing-terminal-profile.exe") == NULL);
+    CHECK(axyne_terminal_profile_executable(
+              "axyne-missing-terminal-profile-9f82") == NULL);
+
+    path_length = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    CHECK(path_length != 0);
+    previous_path = (wchar_t *)malloc((size_t)path_length * sizeof(wchar_t));
+    CHECK(previous_path != NULL);
+    CHECK(GetEnvironmentVariableW(L"PATH", previous_path, path_length) != 0);
+    CHECK(SetEnvironmentVariableW(L"PATH", system_directory));
+    resolved = axyne_terminal_profile_executable("findstr");
+    CHECK(SetEnvironmentVariableW(L"PATH", previous_path));
+    free(previous_path);
+    CHECK(resolved != NULL && _stricmp(resolved, findstr_utf8) == 0);
+    free(resolved);
+    free(findstr_utf8);
+
+    strcpy_s(state->preferences.terminal.default_profile,
+             sizeof(state->preferences.terminal.default_profile), explicit_utf8);
+    CHECK(axyne_terminal_apply_profile(state, &error));
+    CHECK(state->terminal_runner.executable != NULL &&
+          _stricmp(state->terminal_runner.executable, explicit_utf8) == 0);
+    previous_runner = _strdup(state->terminal_runner.executable);
+    CHECK(previous_runner != NULL);
+
+    strcpy_s(state->preferences.terminal.default_profile,
+             sizeof(state->preferences.terminal.default_profile), "findstr");
+    axyne_terminal_test_fail_wide_conversion = 1;
+    CHECK(!axyne_terminal_apply_profile(state, &error));
+    CHECK(error.code == AXYNE_STATUS_NOT_FOUND);
+    axyne_terminal_test_fail_wide_conversion = 0;
+    CHECK(_stricmp(state->terminal_runner.executable, previous_runner) == 0);
+
+    strcpy_s(state->preferences.terminal.default_profile,
+             sizeof(state->preferences.terminal.default_profile), explicit_utf8);
+    axyne_terminal_test_fail_utf8_conversion = 1;
+    CHECK(!axyne_terminal_apply_profile(state, &error));
+    CHECK(error.code == AXYNE_STATUS_NOT_FOUND);
+    axyne_terminal_test_fail_utf8_conversion = 0;
+    CHECK(_stricmp(state->terminal_runner.executable, previous_runner) == 0);
+
+    state->preferences.terminal.default_profile[0] = '\0';
+    axyne_terminal_test_fail_utf8_conversion = 1;
+    CHECK(!axyne_terminal_apply_profile(state, &error));
+    CHECK(error.code == AXYNE_STATUS_OUT_OF_MEMORY);
+    axyne_terminal_test_fail_utf8_conversion = 0;
+    CHECK(_stricmp(state->terminal_runner.executable, previous_runner) == 0);
+
+    strcpy_s(state->preferences.terminal.default_profile,
+             sizeof(state->preferences.terminal.default_profile),
+             "axyne-missing-terminal-profile-9f82");
+    CHECK(!axyne_terminal_apply_profile(state, &error));
+    CHECK(error.code == AXYNE_STATUS_NOT_FOUND);
+    CHECK(_stricmp(state->terminal_runner.executable, previous_runner) == 0);
+
+    strcpy_s(state->preferences.terminal.default_profile,
+             sizeof(state->preferences.terminal.default_profile), "cmd");
+    axyne_terminal_configure_runner = test_terminal_configure_failure;
+    CHECK(!axyne_terminal_apply_profile(state, &error));
+    CHECK(error.code == AXYNE_STATUS_OUT_OF_MEMORY);
+    CHECK(_stricmp(state->terminal_runner.executable, previous_runner) == 0);
+    axyne_terminal_configure_runner = axyne_runner_configure;
+
+    state->preferences.terminal.default_profile[0] = '\0';
+    CHECK(axyne_terminal_apply_profile(state, &error));
+    CHECK(state->terminal_runner.executable != NULL &&
+          _stricmp(state->terminal_runner.executable, explicit_utf8) == 0);
+    free(previous_runner);
+    free(explicit_utf8);
+    return EXIT_SUCCESS;
+}
+
 int main(void)
 {
     HINSTANCE instance = GetModuleHandleW(NULL);
@@ -70,6 +184,7 @@ int main(void)
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne editor test",
         WS_OVERLAPPEDWINDOW, 0, 0, 1440, 900, NULL, NULL, instance, state);
     CHECK(window != NULL && state->editor != NULL);
+    CHECK(test_terminal_profiles(state) == EXIT_SUCCESS);
     CHECK(state->scintilla_module != NULL && state->lexilla_module != NULL);
     CHECK(state->create_lexer != NULL);
     CHECK(editor_equals(state->editor, bytes, sizeof(bytes) - 1));

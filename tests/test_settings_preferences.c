@@ -209,6 +209,14 @@ static int axyne_test_settings_v2(const char *root)
              strcmp(loaded->external_tools[1].name, "\xed\x95\x9c\xea\xb8\x80 \"tool\"") == 0 &&
              strcmp(axyne_preference_args_get(&loaded->external_tools[0].args, 1), "${file}") == 0);
     V2_CHECK(strcmp(loaded->build.cmake_path, original->build.cmake_path) == 0);
+    V2_CHECK(strcmp(loaded->terminal.default_profile,
+                    original->terminal.default_profile) == 0);
+    V2_CHECK(strcmp(loaded->build.generator, original->build.generator) == 0);
+    V2_CHECK(strcmp(loaded->build.build_directory,
+                    original->build.build_directory) == 0);
+    V2_CHECK(loaded->diff.ignore_whitespace == original->diff.ignore_whitespace);
+    V2_CHECK(strcmp(loaded->diff.external_tool,
+                    original->diff.external_tool) == 0);
     V2_CHECK(loaded->build.configure_args.count == 3);
     binding = axyne_preferences_find_binding(loaded, AXYNE_ACTION_SAVE);
     V2_CHECK(binding != NULL && strcmp(binding->key, "Q") == 0);

@@ -1134,9 +1134,10 @@ static int pw_key(PwState *st, const MSG *msg)
     return 0;
 }
 
-int axyne_preferences_window_show(void *native_owner, int workspace,
-                                  const AxynePreferences *initial,
-                                  const AxynePreferencesWindowHooks *hooks)
+static int pw_show(void *native_owner, int workspace,
+                   const AxynePreferences *initial,
+                   const AxynePreferencesWindowHooks *hooks,
+                   int initial_page)
 {
     PwState *st;
     WNDCLASSEXW window_class;
@@ -1190,12 +1191,15 @@ int axyne_preferences_window_show(void *native_owner, int workspace,
     }
     pw_build(st);
     pw_load_controls(st);
-    pw_select_page(st, PW_PAGE_EDITOR);
+    if (initial_page < 0 || initial_page >= PW_PAGE_COUNT)
+        initial_page = PW_PAGE_EDITOR;
+    pw_select_page(st, initial_page);
     pw_update_buttons(st);
     if (owner != NULL) EnableWindow(owner, FALSE);
     ShowWindow(st->window, SW_SHOW);
     UpdateWindow(st->window);
-    SetFocus(st->edit_font);
+    SetFocus(initial_page == PW_PAGE_TERMINAL ? st->edit_term_profile
+                                              : st->edit_font);
     while (!st->done && GetMessageW(&msg, NULL, 0, 0) > 0) {
         if ((msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && (msg.hwnd == st->window || IsChild(st->window, msg.hwnd)) &&
             pw_key(st, &msg))
@@ -1215,6 +1219,20 @@ cleanup:
     DeleteObject(st->field_brush);
     free(st);
     return result;
+}
+
+int axyne_preferences_window_show(void *native_owner, int workspace,
+                                  const AxynePreferences *initial,
+                                  const AxynePreferencesWindowHooks *hooks)
+{
+    return pw_show(native_owner, workspace, initial, hooks, PW_PAGE_EDITOR);
+}
+
+int axyne_preferences_window_show_terminal(
+    void *native_owner, int workspace, const AxynePreferences *initial,
+    const AxynePreferencesWindowHooks *hooks)
+{
+    return pw_show(native_owner, workspace, initial, hooks, PW_PAGE_TERMINAL);
 }
 
 /* ------------------------------------------------------------------ */
