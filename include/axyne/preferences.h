@@ -87,7 +87,7 @@ typedef struct AxyneEditorPreferences {
     AxyneRenderingMode rendering;
     char font_family[AXYNE_PREFERENCE_TEXT_MAX];
     /* v2 */
-    unsigned int undo_limit_mb;  /* editor.undoLimitMb, 1-1024, default 64 */
+    unsigned int undo_limit_mb;  /* editor.undoLimitMb, 1-1024, default 8 */
     int show_line_endings;       /* editor.showLineEndings, default off */
     int inline_diagnostics;      /* editor.inlineDiagnostics, default on */
 } AxyneEditorPreferences;

@@ -58,6 +58,8 @@ static const wchar_t *const pw_page_titles[PW_PAGE_COUNT] = {
 };
 enum { PW_MAX_PAGE_WINDOWS = 80, PW_OPTION_COUNT = 6, PW_FONT_MENU_BASE = 4000 };
 
+static const wchar_t pw_undo_label[] = L"문서당 실행 취소 기록 한도";
+
 typedef struct PwState {
     HWND window;
     HWND owner;
@@ -66,6 +68,7 @@ typedef struct PwState {
     int done;
     int result;
     int loading;
+    int font_family_changed;
     AxynePreferences base;
     AxynePreferences draft;
     AxynePreferencesWindowHooks hooks;
@@ -232,14 +235,14 @@ enum {
     PW_SIZE_BOX_W = 120,
     PW_TAB_BOX_X = PW_LEFT + 392,
     PW_TAB_BOX_W = 116,
-    PW_UNDO_BOX_W = 160,
+    PW_UNDO_BOX_W = 64,
     PW_FIELD_Y = PW_LABEL_Y + 19,
     PW_DISPLAY_GROUP_Y = PW_LABEL_Y + 49 + 16,
     PW_DISPLAY_GROUP_H = 94,
     PW_RENDER_GROUP_Y = PW_DISPLAY_GROUP_Y + PW_DISPLAY_GROUP_H + 16,
     PW_RENDER_GROUP_H = 68,
-    PW_UNDO_LABEL_Y = PW_RENDER_GROUP_Y + PW_RENDER_GROUP_H + 18,
-    PW_UNDO_FIELD_Y = PW_UNDO_LABEL_Y + 19,
+    PW_UNDO_FIELD_Y = PW_RENDER_GROUP_Y + PW_RENDER_GROUP_H + 16,
+    PW_UNDO_LABEL_Y = PW_UNDO_FIELD_Y,
     PW_THEME_GROUP_Y = PW_LABEL_Y + 9,
     PW_KEY_ROW_Y = PW_LABEL_Y + 19,
     PW_KEY_ROW_PITCH = 32,
@@ -375,6 +378,25 @@ static int pw_args_parse(const char *text, AxynePreferenceArgs *args)
     return 1;
 }
 
+static int pw_undo_field_x(PwState *st)
+{
+    static const int fallback_label_width = 124;
+    SIZE size = { fallback_label_width, 0 };
+    HDC dc;
+    HGDIOBJ previous_font = NULL;
+    int label_length = (int)(sizeof(pw_undo_label) / sizeof(pw_undo_label[0])) - 1;
+
+    if (st == NULL || st->window == NULL) return PW_LEFT + fallback_label_width + 12;
+    dc = GetDC(st->window);
+    if (dc == NULL) return PW_LEFT + fallback_label_width + 12;
+    if (st->font11 != NULL) previous_font = SelectObject(dc, st->font11);
+    if (!GetTextExtentPoint32W(dc, pw_undo_label, label_length, &size) || size.cx <= 0)
+        size.cx = fallback_label_width;
+    if (previous_font != NULL && previous_font != HGDI_ERROR) SelectObject(dc, previous_font);
+    ReleaseDC(st->window, dc);
+    return PW_LEFT + (int)size.cx + 12;
+}
+
 static void pw_paint(PwState *st, HDC dc)
 {
     COLORREF muted = pw_rgb(AXYNE_PW_COLOR_MUTED);
@@ -389,15 +411,18 @@ static void pw_paint(PwState *st, HDC dc)
     pw_text(dc, st->font16_bold, pw_rgb(AXYNE_PW_COLOR_TEXT), pw_page_titles[st->page],
             PW_LEFT, PW_PAGE_Y + AXYNE_PW_CONTENT_TOP, 300, 22, DT_LEFT);
     if (st->page == PW_PAGE_EDITOR) {
+        int undo_field_x = pw_undo_field_x(st);
         pw_text(dc, st->font11, muted, L"글꼴", PW_LEFT, PW_LABEL_Y, 200, 14, DT_LEFT);
         pw_text(dc, st->font11, muted, L"크기 (pt)", PW_SIZE_BOX_X, PW_LABEL_Y, 100, 14, DT_LEFT);
         pw_text(dc, st->font11, muted, L"탭 크기", PW_TAB_BOX_X, PW_LABEL_Y, 100, 14, DT_LEFT);
         pw_field_frame(st, dc, PW_LEFT, PW_FIELD_Y, PW_FONT_BOX_W, st->edit_font);
         pw_field_frame(st, dc, PW_SIZE_BOX_X, PW_FIELD_Y, PW_SIZE_BOX_W, st->edit_size);
         pw_field_frame(st, dc, PW_TAB_BOX_X, PW_FIELD_Y, PW_TAB_BOX_W, st->edit_tab);
-        pw_text(dc, st->font11, muted, L"Undo history (MB)", PW_LEFT, PW_UNDO_LABEL_Y,
-                180, 14, DT_LEFT);
-        pw_field_frame(st, dc, PW_LEFT, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W, st->edit_undo);
+        pw_text(dc, st->font11, muted, pw_undo_label, PW_LEFT, PW_UNDO_LABEL_Y,
+                undo_field_x - PW_LEFT - 12, 30, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        pw_field_frame(st, dc, undo_field_x, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W, st->edit_undo);
+        pw_text(dc, st->font11, muted, L"MB", undo_field_x + PW_UNDO_BOX_W + 12,
+                PW_UNDO_FIELD_Y, 30, 30, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         pw_group_frame(st, dc, PW_DISPLAY_GROUP_Y, PW_DISPLAY_GROUP_H, L"표시");
         pw_group_frame(st, dc, PW_RENDER_GROUP_Y, PW_RENDER_GROUP_H, L"렌더링");
     } else if (st->page == PW_PAGE_THEME) {
@@ -663,7 +688,11 @@ static int pw_collect(PwState *st, AxynePreferences *out, const wchar_t **messag
         if (focus) *focus = st->edit_font;
         return 0;
     }
-    (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", text);
+    if (st->draft.editor.font_family[0] == '\0' && !st->font_family_changed) {
+        out->editor.font_family[0] = '\0';
+    } else {
+        (void)snprintf(out->editor.font_family, sizeof(out->editor.font_family), "%s", text);
+    }
     {
         static const struct { int page; size_t offset; size_t size; } texts[] = {
             { PW_PAGE_BUILD, offsetof(AxynePreferences, build.cmake_path), sizeof(((AxynePreferences *)0)->build.cmake_path) },
@@ -733,7 +762,9 @@ static void pw_load_controls(PwState *st)
     char text[32];
     int i;
     st->loading = 1;
-    pw_set_text_utf8(st->edit_font, st->draft.editor.font_family);
+    pw_set_text_utf8(st->edit_font, st->draft.editor.font_family[0] != '\0'
+                     ? st->draft.editor.font_family : "Cascadia Mono");
+    st->font_family_changed = 0;
     (void)snprintf(text, sizeof(text), "%u", st->draft.editor.font_size);
     pw_set_text_utf8(st->edit_size, text);
     (void)snprintf(text, sizeof(text), "%u", st->draft.editor.tab_width);
@@ -847,8 +878,10 @@ static void pw_show_font_menu(PwState *st)
                                   anchor.right, anchor.bottom, 0, st->window, NULL);
     DestroyMenu(menu);
     if (command == PW_FONT_MENU_BASE) {
+        st->font_family_changed = 1;
         SetWindowTextW(st->edit_font, L"");
     } else if (command > PW_FONT_MENU_BASE && command <= PW_FONT_MENU_BASE + list->count) {
+        st->font_family_changed = 1;
         SetWindowTextW(st->edit_font, list->names[command - PW_FONT_MENU_BASE - 1]);
     }
     free(list);
@@ -859,6 +892,7 @@ static void pw_command(PwState *st, int id, int notification, HWND source)
 {
     if (notification == EN_CHANGE) {
         if (st->loading) return;
+        if (id == PW_ID_EDIT_FONT) st->font_family_changed = 1;
         if (id >= PW_ID_KEY && (id - PW_ID_KEY) % 4 == 0) {
             int action = (id - PW_ID_KEY) / 4;
             AxyneKeyBinding *binding = (AxyneKeyBinding *)axyne_preferences_find_binding(
@@ -953,7 +987,8 @@ static void pw_build(PwState *st)
     st->edit_font = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_FONT, PW_LEFT, PW_FIELD_Y, PW_FONT_BOX_W - 20);
     st->edit_size = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_SIZE, PW_SIZE_BOX_X, PW_FIELD_Y, PW_SIZE_BOX_W);
     st->edit_tab = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_TAB, PW_TAB_BOX_X, PW_FIELD_Y, PW_TAB_BOX_W);
-    st->edit_undo = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_UNDO, PW_LEFT, PW_UNDO_FIELD_Y, PW_UNDO_BOX_W);
+    st->edit_undo = pw_edit(st, PW_PAGE_EDITOR, PW_ID_EDIT_UNDO, pw_undo_field_x(st),
+                            PW_UNDO_FIELD_Y, PW_UNDO_BOX_W);
     {
         HWND chevron = pw_button(st, PW_PAGE_EDITOR, PW_ID_FONT_MENU, PW_LEFT + PW_FONT_BOX_W - 29,
                                  PW_FIELD_Y + 1, 28, AXYNE_PW_FIELD_HEIGHT - 2, L"글꼴 목록");

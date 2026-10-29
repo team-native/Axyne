@@ -842,7 +842,7 @@ static void axyne_apply_editor_preferences(AxyneWindowState *state)
     const wchar_t *fallback = L"Cascadia Mono";
     const char *editor_font = "Cascadia Mono";
     unsigned int font_size = state->preferences.editor.font_size;
-    if (font_size < 6 || font_size > 72) font_size = 11;
+    if (font_size < 6 || font_size > 72) font_size = 10;
     if (state->preferences.editor.font_family[0] != '\0')
         font_name = axyne_wide(state->preferences.editor.font_family);
     if (state->code_font != NULL) DeleteObject(state->code_font);
