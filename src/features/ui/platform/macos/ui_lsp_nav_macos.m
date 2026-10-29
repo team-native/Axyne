@@ -142,7 +142,7 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
 - (NSInteger)lspNavValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item
 {
     (void)item;
-    if (command != AXYNE_COMMAND_LSP_DEFINITION && command != AXYNE_COMMAND_LSP_REFERENCES)
+    if (command != AXYNE_COMMAND_EDIT_GO_TO_DEFINITION && command != AXYNE_COMMAND_EDIT_FIND_REFERENCES)
         return AXYNE_MAC_COMMAND_UNHANDLED;
     return axyne_macos_lsp_document_supported([self activeDocument]) &&
         ![self imagePreviewShown] ? AXYNE_MAC_COMMAND_ENABLED : AXYNE_MAC_COMMAND_DISABLED;
@@ -159,9 +159,9 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
     NSInteger caret, line, line_start;
     BOOL references;
     (void)sender;
-    if (command != AXYNE_COMMAND_LSP_DEFINITION && command != AXYNE_COMMAND_LSP_REFERENCES)
+    if (command != AXYNE_COMMAND_EDIT_GO_TO_DEFINITION && command != AXYNE_COMMAND_EDIT_FIND_REFERENCES)
         return NO;
-    references = command == AXYNE_COMMAND_LSP_REFERENCES;
+    references = command == AXYNE_COMMAND_EDIT_FIND_REFERENCES;
     ui = [self lspNavState];
     if (ui == nil) return YES;
     if (references) {
