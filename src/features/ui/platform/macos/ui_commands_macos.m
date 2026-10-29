@@ -194,6 +194,7 @@ static SEL axyne_macos_base_action(AxyneCommandId command, NSInteger *tag, BOOL 
     case AXYNE_COMMAND_FILE_NEW: return @selector(newDocument:);
     case AXYNE_COMMAND_FILE_OPEN: return @selector(openDocument:);
     case AXYNE_COMMAND_FILE_OPEN_FOLDER: return @selector(openWorkspace:);
+    case AXYNE_COMMAND_FILE_CLEAR_RECENT: return @selector(clearRecent:);
     case AXYNE_COMMAND_FILE_SAVE: return @selector(saveDocument:);
     case AXYNE_COMMAND_FILE_SAVE_AS: return @selector(saveDocumentAs:);
     case AXYNE_COMMAND_FILE_CLOSE: return @selector(closeDocument:);

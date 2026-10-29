@@ -15,6 +15,8 @@
 #include <stdint.h>
 
 #include "axyne/build_selector.h"
+#include "axyne/app_state.h"
+#include "axyne/app_paths.h"
 #include "axyne/debugger.h"
 #include "axyne/document.h"
 #include "axyne/explorer.h"
@@ -234,6 +236,8 @@ typedef struct AxyneWindowState {
     char *global_settings_write_path;
     char *workspace_settings_write_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
+    AxyneAppState app_state;
+    char *app_state_path;
     AxyneLspClient *lsp;
     AxyneLanguageId lsp_language;
     char lsp_status[192];

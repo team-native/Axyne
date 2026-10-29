@@ -1672,6 +1672,26 @@ static BOOL axyne_macos_is_image_path(const char *path)
             if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_NOT_FOUND)
                 [self showWorkspaceError:@"Unable to load preferences" error:&preferenceError];
         }
+        axyne_app_state_init(&_appState);
+        _appStatePath = axyne_app_path(AXYNE_APP_PATH_STATE);
+        if (_appStatePath != NULL)
+            (void)axyne_app_state_load(_appStatePath, &_appState, NULL);
+        /* Reopen the last workspace once the window is up. The queue block
+         * must not retain this view: editor-runtime tests intentionally do
+         * not drain the main queue before releasing it. */
+        AxyneDiscoveryBox *restoreBox = (AxyneDiscoveryBox *)calloc(1, sizeof(*restoreBox));
+        if (restoreBox != NULL) {
+            restoreBox->target = self;
+            _restoreBox = restoreBox;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (restoreBox->target != nil) {
+                    AxyneWorkspaceView *view = restoreBox->target;
+                    view->_restoreBox = NULL;
+                    [view restoreWorkspace];
+                }
+                free(restoreBox);
+            });
+        }
         _terminalOutput = [[NSTextView alloc] initWithFrame:NSZeroRect];
         [_terminalOutput setEditable:NO];
         [_terminalOutput setSelectable:YES];
@@ -3135,6 +3155,9 @@ static BOOL axyne_macos_is_image_path(const char *path)
                 lParam:(intptr_t)evicted.native_editor_document];
         axyne_document_dispose(&evicted);
     }
+    if (!preview && _documents.documents[index].path != NULL &&
+        axyne_app_state_add_recent_file(&_appState, _documents.documents[index].path) == AXYNE_STATUS_OK)
+        [self persistAppState];
     [self refreshRecentMenu];
     [self setNeedsDisplay:YES];
 }
@@ -3223,8 +3246,32 @@ static BOOL axyne_macos_is_image_path(const char *path)
     }
     [self rebuildKeymap]; /* workspace keybindings */
     [_gitPanel workspaceChanged];
+    if (axyne_app_state_add_recent_folder(&_appState, path) == AXYNE_STATUS_OK)
+        [self persistAppState];
+    [self refreshRecentMenu];
     [self setNeedsDisplay:YES];
     return YES;
+}
+
+- (void)persistAppState
+{
+    if (_appStatePath != NULL)
+        (void)axyne_app_state_save(&_appState, _appStatePath, NULL);
+}
+
+- (void)restoreWorkspace
+{
+    NSString *path;
+    BOOL isDirectory = NO;
+    if (_explorer.root != NULL || _appState.recent_folder_count == 0) return;
+    path = [NSString stringWithUTF8String:_appState.recent_folders[0]];
+    if (path != nil && [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] &&
+        isDirectory) {
+        (void)[self selectWorkspaceURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+        return;
+    }
+    (void)axyne_app_state_remove_recent_folder(&_appState, _appState.recent_folders[0]);
+    [self persistAppState];
 }
 
 - (void)openWorkspace:(id)sender
@@ -4506,6 +4553,32 @@ static BOOL axyne_macos_is_image_path(const char *path)
     [self openPath:path];
 }
 
+- (void)openRecentFolder:(id)sender
+{
+    NSString *path = [sender representedObject];
+    BOOL isDirectory = NO;
+    if (path == nil || ![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
+        if (path != nil) {
+            const char *utf8 = [path fileSystemRepresentation];
+            if (utf8 != NULL) (void)axyne_app_state_remove_recent_folder(&_appState, utf8);
+            [self persistAppState];
+            [self refreshRecentMenu];
+        }
+        return;
+    }
+    (void)[self selectWorkspaceURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+}
+
+- (void)clearRecent:(id)sender
+{
+    (void)sender;
+    axyne_app_state_clear_recent(&_appState);
+    for (size_t i = 0; i < _documents.recent_count; ++i) free(_documents.recent_paths[i]);
+    _documents.recent_count = 0;
+    [self persistAppState];
+    [self refreshRecentMenu];
+}
+
 - (void)setRecentMenu:(NSMenu *)menu
 {
     [_recentMenu release];
@@ -4520,15 +4593,15 @@ static BOOL axyne_macos_is_image_path(const char *path)
 {
     if (_recentMenu == nil) return;
     [_recentMenu removeAllItems];
-    if (_documents.recent_count == 0) {
+    if (_appState.recent_file_count == 0 && _appState.recent_folder_count == 0) {
         NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"최근 항목 없음"
             action:nil keyEquivalent:@""];
         [empty setEnabled:NO];
         [_recentMenu addItem:empty];
         [empty release];
     }
-    for (size_t i = 0; i < _documents.recent_count; ++i) {
-        NSString *path = [NSString stringWithUTF8String:_documents.recent_paths[i]];
+    for (size_t i = 0; i < _appState.recent_file_count; ++i) {
+        NSString *path = [NSString stringWithUTF8String:_appState.recent_files[i]];
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:
             path != nil ? path : @"(Invalid path)"
             action:@selector(openRecent:) keyEquivalent:@""];
@@ -4538,11 +4611,21 @@ static BOOL axyne_macos_is_image_path(const char *path)
         [item release];
     }
     [_recentMenu addItem:[NSMenuItem separatorItem]];
+    for (size_t i = 0; i < _appState.recent_folder_count; ++i) {
+        NSString *path = [NSString stringWithUTF8String:_appState.recent_folders[i]];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:
+            path != nil ? path : @"(Invalid folder)"
+            action:@selector(openRecentFolder:) keyEquivalent:@""];
+        [item setTarget:self];
+        [item setRepresentedObject:path];
+        [_recentMenu addItem:item];
+        [item release];
+    }
     {
         NSMenuItem *folders = [[NSMenuItem alloc] initWithTitle:@"최근 폴더 없음"
             action:nil keyEquivalent:@""];
         [folders setEnabled:NO];
-        [_recentMenu addItem:folders];
+        if (_appState.recent_folder_count == 0) [_recentMenu addItem:folders];
         [folders release];
     }
     [_recentMenu addItem:[NSMenuItem separatorItem]];
@@ -6923,6 +7006,7 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     [self closePaletteRestoringFocus:NO];
     if (_discoveryBox != NULL) _discoveryBox->target = nil;
     if (_refreshBox != NULL) _refreshBox->target = nil;
+    if (_restoreBox != NULL) _restoreBox->target = nil;
     [self cancelProblemsRefresh];
     [self cancelOutlineRefresh];
     axyne_palette_ctl_destroy(&_palette);
@@ -6964,6 +7048,8 @@ static BOOL axyne_macos_same_file(const char *a, const char *b)
     if (_panelSplitterTracking != nil) [self removeTrackingArea:_panelSplitterTracking];
     [_panelSplitterTracking release];
     [_recentMenu release];
+    axyne_app_state_clear(&_appState);
+    axyne_app_path_free(_appStatePath);
     if (_editorView != nil) {
         /* The autocomplete popup must be gone before releasing any document
          * references or tearing down the Scintilla view. */

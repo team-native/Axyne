@@ -30,6 +30,8 @@
 #include "axyne/preferences.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/app_state.h"
+#include "axyne/app_paths.h"
 #include "axyne/lsp_servers.h"
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
@@ -232,9 +234,12 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxyneDocumentSet _documents;
     AxyneExplorer _explorer;
     AxyneWatcher *_watcher;
+    AxyneDiscoveryBox *_restoreBox;
     NSInteger _explorerSelection;
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
+    AxyneAppState _appState;
+    char *_appStatePath;
     BOOL _loadingEditor;
     AxyneRunnerConfig _terminalRunner;
     AxyneRunnerConfig _actionRunner;
@@ -406,6 +411,10 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)closeDocument:(id)sender;
 - (void)closeDocumentAtIndex:(size_t)index;
 - (void)openRecent:(id)sender;
+- (void)openRecentFolder:(id)sender;
+- (void)clearRecent:(id)sender;
+- (void)persistAppState;
+- (void)restoreWorkspace;
 - (void)openPath:(NSString *)path asPreview:(BOOL)preview;
 - (BOOL)confirmCloseAll;
 - (void)notification:(SCNotification *)notification;
