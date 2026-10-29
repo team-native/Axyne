@@ -283,7 +283,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     char *_globalPreferencesPath;
     char *_workspacePreferencesPath;
     unsigned char _workspaceBindingPresent[AXYNE_ACTION_COUNT];
-    AxyneLspClient *_lsp[AXYNE_LANGUAGE_COUNT];
+    AxyneLspClient *_lsp;
+    AxyneLanguageId _lspLanguage;
     NSString *_lspStatus;
     BOOL _explorerHidden; /* View > Explorer; zero-initialised means visible */
     BOOL _panelHidden;    /* View > Bottom Panel */

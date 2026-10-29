@@ -234,7 +234,8 @@ typedef struct AxyneWindowState {
     char *global_settings_write_path;
     char *workspace_settings_write_path;
     unsigned char workspace_binding_present[AXYNE_ACTION_COUNT];
-    AxyneLspClient *lsp[AXYNE_LANGUAGE_COUNT];
+    AxyneLspClient *lsp;
+    AxyneLanguageId lsp_language;
     char lsp_status[192];
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */

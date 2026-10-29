@@ -136,7 +136,7 @@ enum {
     AXYNE_GIT_MODE = 5031,
     AXYNE_GIT_REFRESH_TIMER = 5120,
     AXYNE_GIT_REFRESH_DELAY = 300,
-    AXYNE_GIT_GRAPH_STEP = 200, /* commits added per "??遺덈윭?ㅺ린" */
+    AXYNE_GIT_GRAPH_STEP = 200, /* commits added per "더 불러오기" */
     AXYNE_GIT_HSCROLL_STEP = 48 /* graph pixels per horizontal wheel notch */
 };
 
@@ -1690,7 +1690,7 @@ static void axyne_git_batch_complete(HWND window, AxyneWindowState *state,
     axyne_git_panel_after_git_operation(window, state);
 }
 
-/* 而ㅻ컠?? asks for the message first, then runs on the worker thread. */
+/* 커밋…: asks for the message first, then runs on the worker thread. */
 static void axyne_git_commit_command(HWND window, AxyneWindowState *state)
 {
     char *message = NULL;
@@ -1870,10 +1870,10 @@ static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues
         !axyne_runner_split_lines(arguments, &argument_values, &argument_count) ||
         !axyne_runner_split_lines(environment, &environment_values, &environment_count)) {
         (void)snprintf(message, capacity,
-                       "Runner ?ㅼ젙???щ컮瑜댁? ?딆뒿?덈떎. ?ㅼ젙???쎌? 紐삵뻽?듬땲??");
+                       "Runner 설정이 올바르지 않습니다. 설정을 읽지 못했습니다.");
     } else if (executable[0] == '\0') {
         (void)snprintf(message, capacity,
-                       "Runner ?ㅼ젙???щ컮瑜댁? ?딆뒿?덈떎. ?ㅽ뻾 ?뚯씪???낅젰?섏꽭??");
+                       "Runner 설정이 올바르지 않습니다. 실행 파일을 입력하세요.");
     } else {
         AxyneStatus status;
         spec.executable = executable;
@@ -1886,10 +1886,10 @@ static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues
         if (status == AXYNE_STATUS_OK)
             accepted = 1;
         else
-            (void)snprintf(message, capacity, "Runner ?ㅼ젙???щ컮瑜댁? ?딆뒿?덈떎. %s",
+            (void)snprintf(message, capacity, "Runner 설정이 올바르지 않습니다. %s",
                            status == AXYNE_STATUS_INVALID_ARGUMENT
-                               ? "?섍꼍 蹂?섎뒗 NAME=VALUE ?뺤떇?댁뼱???섎ŉ ?대쫫??寃뱀튌 ???놁뒿?덈떎."
-                               : "?ㅼ젙???곸슜?섏? 紐삵뻽?듬땲??");
+                               ? "환경 변수는 NAME=VALUE 형식이어야 하며 이름이 겹칠 수 없습니다."
+                               : "설정을 적용하지 못했습니다.");
     }
     free(executable);
     free(arguments);
@@ -1900,7 +1900,7 @@ static int axyne_runner_dialog_save(void *context, const AxyneRunnerDialogValues
     return accepted;
 }
 
-/* Build > Runner ?ㅼ젙: the preferences-style dialog (app_dialogs.h). */
+/* Build > Runner 설정: the preferences-style dialog (app_dialogs.h). */
 static int axyne_configure_runner(HWND owner, AxyneRunnerConfig *config)
 {
     char *arguments, *environment;
@@ -2018,7 +2018,7 @@ static int axyne_start_step(HWND window, AxyneWindowState *state,
     return 1;
 }
 
-/* ?뺣━: deletes the active file's build output (the {out} of its build step).
+/* 정리: deletes the active file's build output (the {out} of its build step).
  * Returns 1 when the build may go on (nothing to delete counts), 0 when the
  * output could not be removed or no build applies. Messages go to the output
  * panel. */
@@ -2034,12 +2034,12 @@ static int axyne_build_clean(HWND window, AxyneWindowState *state)
     state->panel_hidden = 0;
     axyne_layout(window, state);
     if (state->action_process != NULL || axyne_debugger_is_active(&state->debugger)) {
-        const char *busy = "[build] ?ㅻⅨ ?묒뾽???ㅽ뻾 以묒엯?덈떎. 癒쇱? 以묒??섏꽭??\r\n";
+        const char *busy = "[build] 다른 작업이 실행 중입니다. 먼저 중지하세요.\r\n";
         axyne_terminal_append_utf8(state->terminal_output, busy, AXYNE_PROCESS_STDERR);
         return 0;
     }
     if (doc->is_untitled || doc->path == NULL) {
-        const char *unsaved = "[build] ??λ맂 ?뚯씪?먯꽌留??뺣━?????덉뒿?덈떎.\r\n";
+        const char *unsaved = "[build] 저장된 파일에서만 정리할 수 있습니다.\r\n";
         axyne_terminal_append_utf8(state->terminal_output, unsaved, AXYNE_PROCESS_STDERR);
         return 0;
     }
@@ -2057,19 +2057,19 @@ static int axyne_build_clean(HWND window, AxyneWindowState *state)
         ok = 0;
     } else if (!plan.has_build || plan.output_path == NULL) {
         axyne_terminal_append_utf8(state->terminal_output,
-            "[build] ???몄뼱?먮뒗 ?뺣━??鍮뚮뱶 ?곗텧臾쇱씠 ?놁뒿?덈떎.\r\n", AXYNE_PROCESS_STDOUT);
+            "[build] 이 언어에는 정리할 빌드 산출물이 없습니다.\r\n", AXYNE_PROCESS_STDOUT);
     } else {
         wchar_t *wide = axyne_wide(plan.output_path);
         DWORD attributes = wide != NULL ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
         if (attributes == INVALID_FILE_ATTRIBUTES) {
-            (void)snprintf(line, sizeof(line), "[build] ?뺣━???곗텧臾쇱씠 ?놁뒿?덈떎: %s\r\n", plan.output_path);
+            (void)snprintf(line, sizeof(line), "[build] 정리할 산출물이 없습니다: %s\r\n", plan.output_path);
             axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDOUT);
         } else if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && DeleteFileW(wide)) {
-            (void)snprintf(line, sizeof(line), "[build] ?뺣━: %s ??젣\r\n", plan.output_path);
+            (void)snprintf(line, sizeof(line), "[build] 정리: %s 삭제\r\n", plan.output_path);
             axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDOUT);
         } else {
             (void)snprintf(line, sizeof(line),
-                           "[build] ?곗텧臾쇱쓣 ??젣?섏? 紐삵뻽?듬땲???ㅽ뻾 以묒씪 ???덉쓬): %s\r\n", plan.output_path);
+                           "[build] 산출물을 삭제하지 못했습니다(실행 중일 수 있음): %s\r\n", plan.output_path);
             axyne_terminal_append_utf8(state->terminal_output, line, AXYNE_PROCESS_STDERR);
             ok = 0;
         }
@@ -2079,8 +2079,8 @@ static int axyne_build_clean(HWND window, AxyneWindowState *state)
     return ok;
 }
 
-/* Tools > ???곕???> PowerShell / 紐낅졊 ?꾨＼?꾪듃 / WSL: starts that shell once
- * in the terminal panel (the default ???곕???keeps its own shell). */
+/* Tools > 새 터미널 > PowerShell / 명령 프롬프트 / WSL: starts that shell once
+ * in the terminal panel (the default 새 터미널 keeps its own shell). */
 static wchar_t *axyne_terminal_shell_path(AxyneCommandId id)
 {
     wchar_t system_directory[MAX_PATH], found[MAX_PATH];
@@ -2114,8 +2114,8 @@ static void axyne_start_terminal_shell(HWND window, AxyneWindowState *state, Axy
     axyne_layout(window, state);
     if (axyne_terminal_view_running(state->shell_view)) { free(executable); SetFocus(state->shell_view); return; }
     if (executable == NULL) {
-        MessageBoxW(window, id == AXYNE_COMMAND_TERMINAL_NEW_WSL ? L"WSL???ㅼ튂?섏뼱 ?덉? ?딆뒿?덈떎."
-                    : L"?몄쓣 李얠쓣 ???놁뒿?덈떎.", L"???곕???, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(window, id == AXYNE_COMMAND_TERMINAL_NEW_WSL ? L"WSL이 설치되어 있지 않습니다."
+                    : L"셸을 찾을 수 없습니다.", L"새 터미널", MB_OK | MB_ICONINFORMATION);
         return;
     }
     spec.executable = executable;
@@ -2127,7 +2127,7 @@ static void axyne_start_terminal_shell(HWND window, AxyneWindowState *state, Axy
     status = axyne_terminal_view_start(state->shell_view, &spec, &error);
     if (status != AXYNE_STATUS_OK) {
         wchar_t *text = axyne_wide(error.message);
-        MessageBoxW(window, text != NULL ? text : L"", L"?곕??먯쓣 ?쒖옉?????놁뒿?덈떎", MB_OK | MB_ICONERROR);
+        MessageBoxW(window, text != NULL ? text : L"", L"터미널을 시작할 수 없습니다", MB_OK | MB_ICONERROR);
         free(text);
     }
     free(home);
@@ -2137,7 +2137,7 @@ static void axyne_start_terminal_shell(HWND window, AxyneWindowState *state, Axy
 }
 
 /* Build and Run resolve the active file's language, the build target and the
- * discovered runtimes into a plan; the manual runner (Runner ?ㅼ젙) overrides
+ * discovered runtimes into a plan; the manual runner (Runner 설정) overrides
  * it. Run executes the build step first when the plan has one. */
 static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
 {
@@ -2189,7 +2189,7 @@ static void axyne_start_action(HWND window, AxyneWindowState *state, int run)
         return;
     }
     if (!run && !plan.has_build && !plan.overridden) {
-        const char *none = "[build] ???몄뼱?먮뒗 鍮뚮뱶 ?④퀎媛 ?놁뒿?덈떎.\r\n";
+        const char *none = "[build] 이 언어에는 빌드 단계가 없습니다.\r\n";
         SetWindowTextA(state->terminal_output, "");
         axyne_terminal_append_utf8(state->terminal_output, none, AXYNE_PROCESS_STDOUT);
         axyne_language_plan_free(&plan);
@@ -2283,7 +2283,7 @@ static int axyne_windows_preferences_save(void *context, AxynePreferences *edite
     return 1;
 }
 
-/* "settings.json ?닿린" needs the file written from now on (D3). When only the
+/* "settings.json 열기" needs the file written from now on (D3). When only the
  * old preferences.json exists it is copied verbatim, so a workspace keeps
  * every override; when no file exists at all, settings.json is created from
  * the effective profile (a new workspace file overrides nothing). */
@@ -2321,7 +2321,7 @@ static int axyne_ensure_settings_file(HWND owner, AxyneWindowState *state, int w
     return 1;
 }
 
-/* Opens the Figma preferences window. The "settings.json ?닿린" link closes it
+/* Opens the Figma preferences window. The "settings.json 열기" link closes it
  * and opens the profile's file as an editor document; a profile that was
  * never saved is created first so there is something to open. */
 static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
@@ -2425,59 +2425,51 @@ static int axyne_command_needs_document(UINT command)
 static int axyne_lsp_ensure(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
-    AxyneLanguageId language;
-    AxyneLanguageId slot;
+    AxyneLanguageId language = doc != NULL && doc->path != NULL ?
+        axyne_language_for_path(doc->path) : AXYNE_LANGUAGE_NONE;
     AxyneLspServerCommand server = {0};
-    const char *language_id;
-    AxyneLspConfig config;
+    AxyneLspConfig config = {0};
     AxyneError error;
-    if (doc == NULL || doc->path == NULL) return 0;
-    language = axyne_language_for_path(doc->path);
-    slot = axyne_lsp_server_slot(language);
-    if (slot == AXYNE_LANGUAGE_NONE && axyne_lsp_server_overridden())
-        slot = AXYNE_LANGUAGE_CPP;
-    if (slot < 0 || slot >= AXYNE_LANGUAGE_COUNT) {
-        (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
-                       "LSP: this file type is not supported");
-        return 0;
+    AxyneStatus status;
+    if (state->lsp != NULL && state->lsp_language == language) return 1;
+    if (state->lsp != NULL) {
+        axyne_lsp_destroy(state->lsp);
+        state->lsp = NULL;
     }
-    if (state->lsp[slot] != NULL) return 1;
-    if (axyne_lsp_server_resolve(language, &server, &error) != AXYNE_STATUS_OK) {
+    status = axyne_lsp_server_resolve(language, &server, &error);
+    if (status != AXYNE_STATUS_OK) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                        "LSP: %s", error.message);
         return 0;
     }
-    memset(&config, 0, sizeof(config));
     config.command = server.executable;
     config.arguments = (const char *const *)server.arguments;
     config.argument_count = server.argument_count;
-    language_id = axyne_lsp_language_id(language);
-    config.language_id = language_id != NULL ? language_id : "plaintext";
+    config.language_id = axyne_lsp_language_id(language);
+    if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_lsp_diagnostics;
     config.on_navigation = axyne_lsp_navigation;
     config.on_error = axyne_lsp_error;
     config.user_data = state;
-    if (axyne_lsp_create(&config, &state->lsp[slot], &error) != AXYNE_STATUS_OK) {
-        axyne_lsp_server_command_clear(&server);
+    status = axyne_lsp_create(&config, &state->lsp, &error);
+    axyne_lsp_server_command_clear(&server);
+    if (status != AXYNE_STATUS_OK) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                        "LSP: %s", error.message);
         return 0;
     }
-    axyne_lsp_server_command_clear(&server);
+    state->lsp_language = language;
     return 1;
 }
 
 static int axyne_lsp_open_active(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
-    AxyneLanguageId slot;
     AxyneError error;
     AxyneStatus status;
     if (doc == NULL || doc->is_untitled || doc->path == NULL) return 0;
     if (!axyne_lsp_ensure(state)) return 0;
-    slot = axyne_lsp_server_slot(axyne_language_for_path(doc->path));
-    if (slot == AXYNE_LANGUAGE_NONE && axyne_lsp_server_overridden()) slot = AXYNE_LANGUAGE_CPP;
-    status = axyne_lsp_did_open(state->lsp[slot], doc, &error);
+    status = axyne_lsp_did_open(state->lsp, doc, &error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                        "LSP: %s", error.message);
@@ -2489,15 +2481,11 @@ static int axyne_lsp_open_active(AxyneWindowState *state)
 static void axyne_lsp_sync_active(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
-    AxyneLanguageId slot;
     AxyneError error;
     AxyneStatus status;
-    if (doc == NULL || doc->is_untitled || doc->path == NULL) return;
-    slot = axyne_lsp_server_slot(axyne_language_for_path(doc->path));
-    if (slot == AXYNE_LANGUAGE_NONE && axyne_lsp_server_overridden()) slot = AXYNE_LANGUAGE_CPP;
-    if (slot < 0 || slot >= AXYNE_LANGUAGE_COUNT || state->lsp[slot] == NULL) return;
-    status = axyne_lsp_did_change(state->lsp[slot], doc, &error);
-    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(state->lsp[slot], doc, &error);
+    if (state->lsp == NULL || doc == NULL || doc->is_untitled || doc->path == NULL) return;
+    status = axyne_lsp_did_change(state->lsp, doc, &error);
+    if (status == AXYNE_STATUS_NOT_FOUND) status = axyne_lsp_did_open(state->lsp, doc, &error);
     if (status != AXYNE_STATUS_OK && status != AXYNE_STATUS_BUSY)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
 }
@@ -2509,22 +2497,19 @@ static void axyne_lsp_navigate(HWND window, AxyneWindowState *state, int referen
     AxyneError error;
     AxyneStatus status;
     uint64_t request_id = 0;
-    AxyneLanguageId slot;
     LRESULT current, line_start;
     (void)window;
     if (!axyne_capture_editor(state) || !axyne_lsp_open_active(state)) return;
     doc = axyne_active(state);
-    slot = axyne_lsp_server_slot(axyne_language_for_path(doc->path));
-    if (slot == AXYNE_LANGUAGE_NONE && axyne_lsp_server_overridden()) slot = AXYNE_LANGUAGE_CPP;
     current = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION, current, 0);
     line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, position.line, 0);
     position.character = axyne_lsp_utf16_character(
         doc->contents + (size_t)line_start, (size_t)(current - line_start),
         (size_t)(current - line_start));
-    status = references ? axyne_lsp_references(state->lsp[slot], doc, position,
+    status = references ? axyne_lsp_references(state->lsp, doc, position,
                                                 &request_id, &error) :
-        axyne_lsp_definition(state->lsp[slot], doc, position, &request_id, &error);
+        axyne_lsp_definition(state->lsp, doc, position, &request_id, &error);
     if (status != AXYNE_STATUS_OK)
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s", error.message);
     else
@@ -2623,7 +2608,12 @@ static void axyne_after_save_as(AxyneWindowState *state, const char *old_path)
     AxyneDocument *doc = axyne_active(state);
     if (old_path != NULL && old_path[0] != '\0' &&
         (doc == NULL || doc->path == NULL || !axyne_problems_path_equal(old_path, doc->path))) {
-        { AxyneDocument closed; size_t i; memset(&closed, 0, sizeof(closed)); closed.path = (char *)old_path; for (i = 0; i < AXYNE_LANGUAGE_COUNT; ++i) if (state->lsp[i] != NULL) (void)axyne_lsp_did_close(state->lsp[i], &closed, NULL); }
+        if (state->lsp != NULL) {
+            AxyneDocument closed;
+            memset(&closed, 0, sizeof(closed));
+            closed.path = (char *)old_path;
+            (void)axyne_lsp_did_close(state->lsp, &closed, NULL); /* NOT_FOUND is fine */
+        }
         axyne_problems_clear_lsp(state, old_path);
     }
     axyne_problems_refresh(state);
@@ -2756,7 +2746,7 @@ static void axyne_open_document(HWND window, AxyneWindowState *state,
 /* Informational notice that a binary file is not opened as text. */
 static void axyne_show_binary_notice(HWND window, const char *utf8_path)
 {
-    static const wchar_t prefix[] = L"諛붿씠?덈━ ?뚯씪? ?쒖떆?????놁뒿?덈떎: ";
+    static const wchar_t prefix[] = L"바이너리 파일은 표시할 수 없습니다: ";
     const char *name = utf8_path != NULL ? utf8_path : "";
     const char *slash = strrchr(name, '\\');
     const char *other = strrchr(name, '/');
@@ -2828,7 +2818,7 @@ static void axyne_open_document_ex(HWND window, AxyneWindowState *state,
     }
     if (replaced) {
         axyne_win_hooks_document_closed(state, &evicted);
-        for (size_t lsp_index = 0; lsp_index < AXYNE_LANGUAGE_COUNT; ++lsp_index) if (state->lsp[lsp_index] != NULL) (void)axyne_lsp_did_close(state->lsp[lsp_index], &evicted, NULL);
+        if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
         axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
             SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
@@ -2870,7 +2860,7 @@ static int axyne_open_virtual_document(HWND window, AxyneWindowState *state,
     }
     if (replaced) {
         axyne_win_hooks_document_closed(state, &evicted);
-        for (size_t lsp_index = 0; lsp_index < AXYNE_LANGUAGE_COUNT; ++lsp_index) if (state->lsp[lsp_index] != NULL) (void)axyne_lsp_did_close(state->lsp[lsp_index], &evicted, NULL);
+        if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, &evicted, NULL);
         axyne_problems_clear_lsp(state, evicted.path);
         if (evicted.owns_native_editor_document && state->editor != NULL)
             SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
@@ -2917,7 +2907,7 @@ static void axyne_close_tab(HWND window, AxyneWindowState *state, size_t index)
     }
     AxyneDocument *doc = &state->documents.documents[index];
     axyne_win_hooks_document_closed(state, doc);
-    for (size_t lsp_index = 0; lsp_index < AXYNE_LANGUAGE_COUNT; ++lsp_index) if (state->lsp[lsp_index] != NULL) (void)axyne_lsp_did_close(state->lsp[lsp_index], doc, NULL);
+    if (state->lsp != NULL) (void)axyne_lsp_did_close(state->lsp, doc, NULL);
     axyne_problems_clear_lsp(state, doc->path);
     if (doc->owns_native_editor_document && state->editor != NULL)
         SendMessageA(state->editor, SCI_RELEASEDOCUMENT, 0,
@@ -2973,7 +2963,7 @@ static int axyne_preferences_file_exists(const AxyneWindowState *state)
     return axyne_settings_file_exists(state->global_preferences_path);
 }
 
-/* Tools > settings.json ?닿린: opens the global settings.json (copied from the
+/* Tools > settings.json 열기: opens the global settings.json (copied from the
  * old preferences.json first when only that exists). */
 static void axyne_open_settings_json(HWND window, AxyneWindowState *state)
 {
@@ -4190,7 +4180,7 @@ void axyne_win_menu_destroy(AxyneWinMenu *menu)
     free(menu);
 }
 
-/* File > 理쒓렐 ??ぉ: the recent files (ids AXYNE_CMD_RECENT_BASE + i). */
+/* File > 최근 항목: the recent files (ids AXYNE_CMD_RECENT_BASE + i). */
 int axyne_win_menu_add_recent_files(AxyneWindowState *state, AxyneWinMenu *menu)
 {
     size_t i;
@@ -4384,7 +4374,7 @@ static const AxyneCommandId AXYNE_TOOLBAR_COMMANDS[] = {
     AXYNE_COMMAND_VIEW_QUICK_OPEN
 };
 
-/* Build-target label, "Debug 쨌 x64 (MSVC)", for the active file's language;
+/* Build-target label, "Debug · x64 (MSVC)", for the active file's language;
  * no parentheses until runtime discovery has run. The caller owns the string. */
 static wchar_t *axyne_target_label(AxyneWindowState *state)
 {
@@ -4446,24 +4436,24 @@ static void axyne_toolbar_layout(AxyneWindowState *state, int width,
     }
     x = 162;
     rects[5].left = x;
-    rects[5].right = x + 10 + axyne_measure_text(state->font_small, L"??) + 6 +
+    rects[5].right = x + 10 + axyne_measure_text(state->font_small, L"▷") + 6 +
         runner_width + 6 + AXYNE_CHEVRON_W + 10;
     /* On a narrow toolbar the selector shrinks (its label clips) so Build
      * and Run stay in view. */
-    target_limit = 14 + axyne_measure_text(state->font_small, L"鍮뚮뱶  Ctrl+B") + 14 + 8 +
-        14 + axyne_measure_text(state->font_small, L"??) + 6 +
-        axyne_measure_text(state->font_bold, L"?ㅽ뻾  F5") + 14 + 8;
+    target_limit = 14 + axyne_measure_text(state->font_small, L"빌드  Ctrl+B") + 14 + 8 +
+        14 + axyne_measure_text(state->font_small, L"▷") + 6 +
+        axyne_measure_text(state->font_bold, L"실행  F5") + 14 + 8;
     target_limit = width - 8 - target_limit - rects[5].left;
     if (target_limit < 96) target_limit = 96;
     if (rects[5].right - rects[5].left > target_limit)
         rects[5].right = rects[5].left + target_limit;
     x = rects[5].right + 8;
     rects[6].left = x;
-    rects[6].right = x + 14 + axyne_measure_text(state->font_small, L"鍮뚮뱶  Ctrl+B") + 14;
+    rects[6].right = x + 14 + axyne_measure_text(state->font_small, L"빌드  Ctrl+B") + 14;
     x = rects[6].right + 8;
     rects[7].left = x;
-    rects[7].right = x + 14 + axyne_measure_text(state->font_small, L"??) + 6 +
-        axyne_measure_text(state->font_bold, L"?ㅽ뻾  F5") + 14;
+    rects[7].right = x + 14 + axyne_measure_text(state->font_small, L"▷") + 6 +
+        axyne_measure_text(state->font_bold, L"실행  F5") + 14;
     for (i = 5; i < 8; ++i) {
         rects[i].top = AXYNE_TOP_MENU + 6;
         rects[i].bottom = rects[i].top + 26;
@@ -4507,7 +4497,7 @@ static void axyne_build_target_popup(HWND window, AxyneWindowState *state)
     menu = axyne_menu_create();
     if (menu == NULL) return;
     if (count == 0)
-        axyne_menu_add(menu, &pool, 0, L"???몄뼱??鍮뚮뱶 ?ㅼ젙???놁뒿?덈떎", NULL, MF_GRAYED);
+        axyne_menu_add(menu, &pool, 0, L"이 언어는 빌드 설정이 없습니다", NULL, MF_GRAYED);
     for (i = 0; i < count; ++i) {
         wchar_t *title;
         if (i == 0 || entries[i].group != entries[i - 1].group) {
@@ -4635,7 +4625,7 @@ static size_t axyne_max_first_tab(AxyneWindowState *state, int width)
 /* Bottom panel tab strip: one entry per AxyneWinPanelTab, painted and
  * hit-tested only while enabled (DEBUG_CONSOLE starts disabled). */
 static const wchar_t *const AXYNE_PANEL_LABELS[AXYNE_WIN_PANEL_COUNT] = {
-    L"異쒕젰", L"臾몄젣", L"?곕???, L"?붾쾭洹?肄섏넄"
+    L"출력", L"문제", L"터미널", L"디버그 콘솔"
 };
 
 enum { AXYNE_PANEL_TABS_DEFAULT = (1u << AXYNE_WIN_PANEL_OUTPUT) |
@@ -4648,7 +4638,7 @@ static int axyne_panel_tab_enabled(const AxyneWindowState *state, int tab)
            (state->panel_tabs_enabled & (1u << tab)) != 0;
 }
 
-/* The problems tab reads "臾몄젣  N" while there are problems. */
+/* The problems tab reads "문제  N" while there are problems. */
 static const wchar_t *axyne_panel_tab_label(const AxyneWindowState *state, int index)
 {
     if (index == AXYNE_WIN_PANEL_PROBLEMS && state->problems_tab_label[0] != L'\0')
@@ -5016,7 +5006,7 @@ static void axyne_palette_paint_popup(HWND popup, AxyneWindowState *state)
             free(title);
         }
         if (c->list.count > 0) {
-            (void)swprintf_s(buffer, 96, L"%zu媛??쇱튂", c->list.count);
+            (void)swprintf_s(buffer, 96, L"%zu개 일치", c->list.count);
             axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11),
                 axyne_pal_color(0x8b919b), area, buffer, DT_RIGHT);
         }
@@ -5066,7 +5056,7 @@ static void axyne_palette_paint_popup(HWND popup, AxyneWindowState *state)
                axyne_pal_color(0x2a2d33));
     {
         static const wchar_t *glyphs[] = {L"", L">", L"@", L":"};
-        static const wchar_t *labels[] = {L"?뚯씪", L"紐낅졊", L"湲고샇", L"以??대룞"};
+        static const wchar_t *labels[] = {L"파일", L"명령", L"기호", L"줄 이동"};
         int chips_right = 0;
         for (i = 0; i < 4; ++i) {
             RECT chip = axyne_palette_chip_rect(i, height);
@@ -5087,10 +5077,10 @@ static void axyne_palette_paint_popup(HWND popup, AxyneWindowState *state)
         }
         {
             const wchar_t *hint = c->mode == AXYNE_PALETTE_MODE_COMMAND
-                ? L"?묅넃 ?대룞 쨌 Enter ?ㅽ뻾 쨌 Esc ?リ린"
+                ? L"↑↓ 이동 · Enter 실행 · Esc 닫기"
                 : (c->mode == AXYNE_PALETTE_MODE_FILE
-                    ? L"?묅넃 ?대룞 쨌 Enter ?닿린 쨌 Esc ?リ린"
-                    : L"?묅넃 ?대룞 쨌 Enter ?대룞 쨌 Esc ?リ린");
+                    ? L"↑↓ 이동 · Enter 열기 · Esc 닫기"
+                    : L"↑↓ 이동 · Enter 이동 · Esc 닫기");
             RECT area = {chips_right + 12, height - 28, width - 8, height - 6};
             axyne_text_rect(dc, axyne_pal_font(state, AXYNE_PFONT_REGULAR11),
                 axyne_pal_color(0x8b919b), area, hint, DT_RIGHT);
@@ -5496,7 +5486,7 @@ static int axyne_palette_ensure_ui(HWND window, AxyneWindowState *state)
     }
     if (state->palette_popup == NULL) {
         state->palette_popup = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-            AXYNE_PALETTE_POPUP_CLASS, L"紐낅졊 ?붾젅??, WS_POPUP, 0, 0, 10, 10, window,
+            AXYNE_PALETTE_POPUP_CLASS, L"명령 팔레트", WS_POPUP, 0, 0, 10, 10, window,
             NULL, instance, NULL);
         if (state->palette_popup == NULL) return 0;
     }
@@ -5654,7 +5644,7 @@ static void axyne_paint_explorer_row(HDC dc, AxyneWindowState *state, size_t i,
     } else if (node->kind == AXYNE_FILE_KIND_DIRECTORY) {
         axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, slot,
             axyne_explorer_is_expanded(&state->explorer, node->path)
-                ? L"?? : L"??, DT_CENTER);
+                ? L"⌄" : L"›", DT_CENTER);
     } else {
         slot.right = x + AXYNE_UI_BADGE_WIDTH;
         axyne_paint_badge(dc, state->tab_badge_font, node->name, slot);
@@ -5679,7 +5669,7 @@ static void axyne_paint_explorer(HDC dc, AxyneWindowState *state,
                       bottom - axyne_outline_section_height(state, bottom));
     if (state->explorer.root == NULL) {
         RECT rect = {8, y, axyne_sidebar_width(state) - 8, y + AXYNE_UI_ROW};
-        axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect, L"?대뜑 ?닿린...", DT_LEFT);
+        axyne_text_rect(dc, state->ui_font, AXYNE_TEXT, rect, L"폴더 열기...", DT_LEFT);
         RestoreDC(dc, saved_dc);
         return;
     }
@@ -5782,7 +5772,7 @@ static void axyne_paint_outline(HDC dc, AxyneWindowState *state, int bottom)
     RestoreDC(dc, saved_dc);
 }
 
-/* ---- Sidebar tabs: ?먯깋湲?| Git ----------------------------------------- */
+/* ---- Sidebar tabs: 탐색기 | Git ----------------------------------------- */
 
 static int axyne_git_panel_visible(const AxyneWindowState *state)
 {
@@ -5791,7 +5781,7 @@ static int axyne_git_panel_visible(const AxyneWindowState *state)
 
 static const wchar_t *axyne_sidebar_tab_label(int index)
 {
-    return index == AXYNE_SIDEBAR_TAB_GIT ? L"Git" : L"?먯깋湲?;
+    return index == AXYNE_SIDEBAR_TAB_GIT ? L"Git" : L"탐색기";
 }
 
 /* Tab `index` of the two-tab header at the top of the sidebar. */
@@ -6024,11 +6014,11 @@ static void axyne_git_text_puts(AxyneGitText *text, const char *bytes)
 static void axyne_git_text_diff(AxyneGitText *text, const AxyneGitDiff *diff)
 {
     if (diff->length == 0 || diff->text == NULL)
-        axyne_git_text_puts(text, "(蹂寃??댁슜 ?놁쓬)\n");
+        axyne_git_text_puts(text, "(변경 내용 없음)\n");
     else
         axyne_git_text_append(text, diff->text, diff->length);
     if (diff->truncated)
-        axyne_git_text_puts(text, "\n[diff媛 1 MiB?먯꽌 ?섎졇?듬땲??\n");
+        axyne_git_text_puts(text, "\n[diff가 1 MiB에서 잘렸습니다]\n");
 }
 
 static void axyne_git_panel_sanitize_utf8(char *text);
@@ -6217,7 +6207,7 @@ static void axyne_git_panel_reset(HWND window, AxyneWindowState *state)
     if (axyne_git_panel_visible(state)) axyne_git_panel_refresh(window, state);
 }
 
-/* Commits the next refresh reads: the default until "??遺덈윭?ㅺ린" raised it. */
+/* Commits the next refresh reads: the default until "더 불러오기" raised it. */
 static int axyne_git_graph_request(const AxyneGitPanelUi *git)
 {
     return git->graph_limit > 0 ? git->graph_limit : AXYNE_GIT_GRAPH_DEFAULT_COUNT;
@@ -6270,7 +6260,7 @@ static void axyne_git_panel_after_git_operation(HWND window, AxyneWindowState *s
 enum { AXYNE_GIT_ITEM_COMMIT = 0, AXYNE_GIT_ITEM_FILE, AXYNE_GIT_ITEM_NOTE,
        AXYNE_GIT_ITEM_MORE };
 
-/* The last item is the "??遺덈윭?ㅺ린" row while more history may exist: the
+/* The last item is the "더 불러오기" row while more history may exist: the
  * shown graph filled its whole request (fewer rows means the history is
  * complete) and the cap is not reached; it stays, dimmed, while loading. */
 static int axyne_git_more_visible(const AxyneGitPanelUi *git)
@@ -6331,7 +6321,7 @@ static AxyneGitItem axyne_git_item_at(const AxyneGitPanelUi *git, size_t i)
 static int axyne_git_item_height(const AxyneGitItem *item)
 {
     return item->kind == AXYNE_GIT_ITEM_COMMIT ? AXYNE_GIT_GRAPH_ROW : AXYNE_GIT_ROW;
-    /* file, note and "??遺덈윭?ㅺ린" rows are AXYNE_GIT_ROW tall */
+    /* file, note and "더 불러오기" rows are AXYNE_GIT_ROW tall */
 }
 
 static int axyne_git_graph_content_height(const AxyneGitPanelUi *git)
@@ -6564,7 +6554,7 @@ static void axyne_git_panel_show_file_diff(HWND window, AxyneWindowState *state,
     job->kind = AXYNE_GITJOB_FILE_DIFF;
     job->staged = change->staged != 0;
     job->path = _strdup(change->path);
-    job->title = axyne_git_diff_title("蹂寃? ", change->path);
+    job->title = axyne_git_diff_title("변경: ", change->path);
     if (job->staged && change->orig_path != NULL) job->orig_path = _strdup(change->orig_path);
     if (job->path == NULL || job->title == NULL ||
         (job->staged && change->orig_path != NULL && job->orig_path == NULL)) {
@@ -6643,7 +6633,7 @@ static void axyne_git_panel_toggle_commit(HWND window, AxyneWindowState *state,
     InvalidateRect(window, NULL, FALSE);
 }
 
-/* "??遺덈윭?ㅺ린": raises the requested commit count by one step and refreshes
+/* "더 불러오기": raises the requested commit count by one step and refreshes
  * (the refresh runs on a worker; scroll and the expanded commit are kept
  * because the new rows only append below the old ones). */
 static void axyne_git_panel_load_more(HWND window, AxyneWindowState *state)
@@ -6992,7 +6982,7 @@ static void axyne_git_paint_changes(HDC dc, AxyneWindowState *state,
     int y = layout->changes_list.top;
     int saved_dc;
     size_t i;
-    (void)swprintf_s(title, 48, L"蹂寃??ы빆 (%llu)", (unsigned long long)git->changes.count);
+    (void)swprintf_s(title, 48, L"변경 사항 (%llu)", (unsigned long long)git->changes.count);
     label.left = 12;
     axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, label, title, DT_LEFT);
     saved_dc = SaveDC(dc);
@@ -7000,7 +6990,7 @@ static void axyne_git_paint_changes(HDC dc, AxyneWindowState *state,
                       layout->changes_list.right, layout->changes_list.bottom);
     if (git->changes.count == 0) {
         axyne_git_panel_message(dc, state, layout->changes_list.top,
-                                layout->changes_list.bottom, L"蹂寃??ы빆 ?놁쓬");
+                                layout->changes_list.bottom, L"변경 사항 없음");
     } else {
         for (i = (size_t)git->changes_scroll; i < git->changes.count &&
              (int)(i - (size_t)git->changes_scroll) < rows + 1; ++i) {
@@ -7311,10 +7301,10 @@ static int axyne_git_paint_commit_file_row(HDC dc, AxyneWindowState *state,
         RestoreDC(dc, saved_dc);
     }
     if (change == NULL) {
-        const wchar_t *note = git->expanded_state == 1 ? L"遺덈윭?ㅻ뒗 以?.."
-            : (git->expanded_state == 3 ? NULL : L"蹂寃쎈맂 ?뚯씪 ?놁쓬");
+        const wchar_t *note = git->expanded_state == 1 ? L"불러오는 중..."
+            : (git->expanded_state == 3 ? NULL : L"변경된 파일 없음");
         wchar_t *failure = git->expanded_state == 3 ? axyne_wide(git->expanded_error) : NULL;
-        const wchar_t *text = note != NULL ? note : (failure != NULL ? failure : L"Git ?ㅻ쪟");
+        const wchar_t *text = note != NULL ? note : (failure != NULL ? failure : L"Git 오류");
         rect.left = x;
         rect.top = y;
         rect.right = x + axyne_git_row_text_width(dc, state->font_small, text);
@@ -7452,27 +7442,27 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
                layout->separator_y + 1, AXYNE_BORDER);
     label.right -= 154;
     label.bottom = label.top + AXYNE_GIT_LABEL;
-    axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, label, L"洹몃옒??, DT_LEFT);
+    axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, label, L"그래프", DT_LEFT);
     label = layout->graph_label;
     label.top += AXYNE_GIT_LABEL;
     axyne_text_rect(dc, state->font_tiny, AXYNE_SIDEBAR_MUTED, label,
                     git->graph_mode == AXYNE_GIT_GRAPH_COMPACT
-                        ? L"HEAD first-parent only 쨌 side history omitted"
-                        : L"All branches 쨌 full merge ancestry", DT_LEFT);
+                        ? L"HEAD first-parent only · side history omitted"
+                        : L"All branches · full merge ancestry", DT_LEFT);
     if (layout->graph_list.bottom <= layout->graph_list.top) return;
     saved_dc = SaveDC(dc);
     IntersectClipRect(dc, layout->graph_list.left, layout->graph_list.top,
                       layout->graph_list.right, layout->graph_list.bottom);
     if (!git->graph_ok) {
         axyne_git_panel_message(dc, state, layout->graph_list.top,
-                                layout->graph_list.bottom, L"而ㅻ컠 洹몃옒?꾨? 遺덈윭?ㅼ? 紐삵뻽?듬땲??);
+                                layout->graph_list.bottom, L"커밋 그래프를 불러오지 못했습니다");
     } else if (git->graph.count == 0) {
         axyne_git_panel_message(dc, state, layout->graph_list.top,
-                                layout->graph_list.bottom, L"而ㅻ컠 ?놁쓬");
+                                layout->graph_list.bottom, L"커밋 없음");
     } else {
         size_t items = axyne_git_item_count(git);
         int content, dx, budget = axyne_git_ref_budget(width);
-        /* "??遺덈윭?ㅺ린" stays put while the rows scroll: where it sat when the
+        /* "더 불러오기" stays put while the rows scroll: where it sat when the
          * strip was at most 40% of the list. */
         int more_x = 10 + (strip < width * 40 / 100 ? strip : width * 40 / 100) + 8;
         axyne_git_graph_clamp_hscroll(dc, state, width);
@@ -7487,8 +7477,8 @@ static void axyne_git_paint_graph(HDC dc, AxyneWindowState *state,
                 if (more.right > more.left)
                     axyne_text_rect(dc, state->font_small,
                                     git->graph_loading ? AXYNE_SIDEBAR_MUTED : AXYNE_ACCENT,
-                                    more, git->graph_loading ? L"??遺덈윭?ㅻ뒗 以묅?
-                                                             : L"??遺덈윭?ㅺ린", DT_LEFT);
+                                    more, git->graph_loading ? L"더 불러오는 중…"
+                                                             : L"더 불러오기", DT_LEFT);
             } else if (item.kind == AXYNE_GIT_ITEM_COMMIT) {
                 int selected = git->selected_hash != NULL && row->hash != NULL &&
                                strcmp(git->selected_hash, row->hash) == 0;
@@ -7663,7 +7653,7 @@ static void axyne_git_panel_commit(HWND window, AxyneWindowState *state)
     message = wide != NULL ? axyne_utf8(wide) : NULL;
     free(wide);
     if (message == NULL) {
-        MessageBoxW(window, L"而ㅻ컠 硫붿떆吏瑜?蹂?섑븯吏 紐삵뻽?듬땲??", L"Axyne - Git",
+        MessageBoxW(window, L"커밋 메시지를 변환하지 못했습니다.", L"Axyne - Git",
                     MB_OK | MB_ICONERROR);
         return;
     }
@@ -7697,7 +7687,7 @@ static void axyne_git_paint_commit_box(HDC dc, AxyneWindowState *state,
     int saved_dc;
     if (!layout->fits) return;
     axyne_text_rect(dc, state->font_small, AXYNE_SIDEBAR_MUTED, layout->message_label,
-                    L"而ㅻ컠 硫붿떆吏", DT_LEFT);
+                    L"커밋 메시지", DT_LEFT);
     /* The EDIT control paints its own pixels. */
     saved_dc = SaveDC(dc);
     ExcludeClipRect(dc, layout->message_edit.left, layout->message_edit.top,
@@ -7707,11 +7697,11 @@ static void axyne_git_paint_commit_box(HDC dc, AxyneWindowState *state,
                      AXYNE_OUTPUT_BG,
                      state->git_panel.message_focus ? AXYNE_ACCENT : AXYNE_BORDER);
     RestoreDC(dc, saved_dc);
-    axyne_git_paint_button(dc, state->ui_font, layout->select_all_button, L"?꾩껜 ?좏깮",
+    axyne_git_paint_button(dc, state->ui_font, layout->select_all_button, L"전체 선택",
                            axyne_git_panel_can_select_all(state), 0);
-    axyne_git_paint_button(dc, state->font_bold, layout->commit_button, L"而ㅻ컠",
+    axyne_git_paint_button(dc, state->font_bold, layout->commit_button, L"커밋",
                            axyne_git_panel_can_commit(state), 1);
-    axyne_git_paint_button(dc, state->ui_font, layout->push_button, L"?몄떆",
+    axyne_git_paint_button(dc, state->ui_font, layout->push_button, L"푸시",
                            axyne_git_panel_can_push(state), 0);
 }
 
@@ -7722,18 +7712,18 @@ static void axyne_paint_git_panel(HDC dc, AxyneWindowState *state, int bottom)
     int saved_dc = SaveDC(dc);
     IntersectClipRect(dc, 0, top, axyne_sidebar_width(state) - 1, bottom);
     if (state->explorer.root == NULL) {
-        axyne_git_panel_message(dc, state, top, bottom, L"?대┛ ?대뜑媛 ?놁뒿?덈떎");
+        axyne_git_panel_message(dc, state, top, bottom, L"열린 폴더가 없습니다");
     } else if (!state->git_panel.loaded) {
-        axyne_git_panel_message(dc, state, top, bottom, L"遺덈윭?ㅻ뒗 以?..");
+        axyne_git_panel_message(dc, state, top, bottom, L"불러오는 중...");
     } else if (!state->git_panel.repo_ok) {
         wchar_t *text = NULL;
         if (strstr(state->git_panel.error, "not a Git repository") != NULL ||
             strstr(state->git_panel.error, "not a git repository") != NULL) {
-            axyne_git_panel_message(dc, state, top, bottom, L"Git ??μ냼媛 ?꾨떃?덈떎");
+            axyne_git_panel_message(dc, state, top, bottom, L"Git 저장소가 아닙니다");
         } else {
             text = axyne_wide(state->git_panel.error);
             axyne_git_panel_message(dc, state, top, bottom,
-                                    text != NULL ? text : L"Git ?ㅻ쪟");
+                                    text != NULL ? text : L"Git 오류");
             free(text);
         }
     } else {
@@ -7892,7 +7882,7 @@ static void axyne_problems_invalidate(AxyneWindowState *state)
     int status_top;
     if (state == NULL || state->main_window == NULL) return;
     status_top = state->client_height - AXYNE_STATUS;
-    /* The panel header too: the "臾몄젣  N" tab label changes with the list. */
+    /* The panel header too: the "문제  N" tab label changes with the list. */
     area.left = axyne_sidebar_width(state);
     area.right = state->client_width;
     area.top = status_top - axyne_panel_height(state);
@@ -8529,7 +8519,7 @@ static void axyne_problems_paint(HDC dc, AxyneWindowState *state)
             rect.left = field.left + 26; rect.right = field.right - 8;
             rect.top = field.top; rect.bottom = field.bottom;
             axyne_text_rect(dc, state->font_tiny, AXYNE_PROBLEM_FAINT, rect,
-                            L"?꾪꽣 (?? C4244, editor.c)", DT_LEFT);
+                            L"필터 (예: C4244, editor.c)", DT_LEFT);
         }
     }
     IntersectClipRect(dc, list.left, list.top + AXYNE_PROBLEMS_TOOLBAR, list.right,
@@ -8538,7 +8528,7 @@ static void axyne_problems_paint(HDC dc, AxyneWindowState *state)
         rect.left = list.left; rect.right = list.right;
         rect.top = list.top + AXYNE_PROBLEMS_TOOLBAR; rect.bottom = list.bottom;
         axyne_text_rect(dc, state->ui_font, AXYNE_PROBLEM_MUTED, rect,
-                        L"臾몄젣媛 ?놁뒿?덈떎", DT_CENTER);
+                        L"문제가 없습니다", DT_CENTER);
     } else {
         size_t first = (size_t)(state->problem_scroll / AXYNE_PROBLEMS_ROW);
         for (size_t i = first; i < state->problem_row_count; ++i) {
@@ -8687,8 +8677,8 @@ static void axyne_paint_empty_guide(HDC dc, AxyneWindowState *state, int left,
                                     int top, int right, int bottom)
 {
     static const wchar_t *const labels[AXYNE_GUIDE_COUNT] = {
-        L"???뚯씪", L"?뚯씪 ?닿린", L"?대뜑 ?닿린", L"?뚯씪 ?대룞", L"紐낅졊 ?ㅽ뻾",
-        L"?뚯씪?먯꽌 李얘린" };
+        L"새 파일", L"파일 열기", L"폴더 열기", L"파일 이동", L"명령 실행",
+        L"파일에서 찾기" };
     enum { ROW = 32, CHIP_HEIGHT = 20, CHIP_GAP = 4, CHIP_PAD = 7, COLUMN_GAP = 32 };
     AxyneGuideRow rows[AXYNE_GUIDE_COUNT];
     size_t i, k;
@@ -8767,14 +8757,14 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
     {
         wchar_t status[96];
         if (state->last_exit_failed) {
-            (void)swprintf_s(status, 96, L"???ㅽ뻾 ?ㅽ뙣 (exit %d)",
+            (void)swprintf_s(status, 96, L"✗ 실행 실패 (exit %d)",
                               state->last_exit_code);
         } else if (state->active_action != 0) {
-            (void)swprintf_s(status, 96, L"???ㅽ뻾 以?);
+            (void)swprintf_s(status, 96, L"● 실행 중");
         } else if (state->has_exit_status) {
-            (void)swprintf_s(status, 96, L"???ㅽ뻾 ?꾨즺 (exit 0)");
+            (void)swprintf_s(status, 96, L"✓ 실행 완료 (exit 0)");
         } else {
-            (void)swprintf_s(status, 96, L"以鍮?);
+            (void)swprintf_s(status, 96, L"준비");
         }
         RECT rect = {12, status_top, axyne_sidebar_size(state) - 8, height};
         axyne_text_rect(dc, state->ui_font,
@@ -8797,7 +8787,7 @@ static void axyne_paint_status(HDC dc, AxyneWindowState *state, int status_top,
         LRESULT line = SendMessageA(state->editor, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
         LRESULT column = SendMessageA(state->editor, SCI_GETCOLUMN, (WPARAM)caret, 0);
         RECT rect = {width - 246, status_top, width - 12, height};
-        (void)swprintf_s(position, 96, L"以?%lld, ??%lld     UTF-8",
+        (void)swprintf_s(position, 96, L"줄 %lld, 열 %lld     UTF-8",
                        (long long)line + 1, (long long)column + 1);
         axyne_text_rect(dc, state->ui_font, AXYNE_MUTED, rect, position, DT_RIGHT);
     }
@@ -8887,7 +8877,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
         }
     }
     {
-        static const wchar_t *const icons[] = {L"??, L"??, L"??, L"??, L"??};
+        static const wchar_t *const icons[] = {L"▱", L"▰", L"▣", L"↶", L"↷"};
         RECT rects[AXYNE_TOOLBAR_BUTTONS];
         wchar_t *runner = axyne_target_label(state);
         size_t i;
@@ -8904,8 +8894,8 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             int arrow = AXYNE_CHEVRON_W;
             axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 6,
                              AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
-            axyne_text_rect(dc, state->font_small, AXYNE_TEXT, part, L"??, DT_LEFT);
-            part.left += axyne_measure_text(state->font_small, L"??) + 6;
+            axyne_text_rect(dc, state->font_small, AXYNE_TEXT, part, L"▷", DT_LEFT);
+            part.left += axyne_measure_text(state->font_small, L"▷") + 6;
             part.right = rect.right - 10 - arrow - 6;
             axyne_text_rect(dc, state->font_small, AXYNE_MUTED, part,
                             runner != NULL ? runner : L"Debug", DT_LEFT);
@@ -8918,7 +8908,7 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                 ? AXYNE_TEXT : AXYNE_MUTED;
             axyne_round_fill(dc, rects[6].left, rects[6].top, rects[6].right,
                              rects[6].bottom, 3, AXYNE_BUTTON_BG, AXYNE_BUTTON_BG);
-            axyne_text_rect(dc, state->font_small, color, rects[6], L"鍮뚮뱶  Ctrl+B",
+            axyne_text_rect(dc, state->font_small, color, rects[6], L"빌드  Ctrl+B",
                             DT_CENTER);
         }
         {
@@ -8928,9 +8918,9 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
                 ? AXYNE_RUN_TEXT : axyne_blend(AXYNE_RUN_TEXT, AXYNE_ACCENT, 45);
             axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 4,
                              AXYNE_ACCENT, AXYNE_ACCENT);
-            axyne_text_rect(dc, state->font_small, color, part, L"??, DT_LEFT);
-            part.left += axyne_measure_text(state->font_small, L"??) + 6;
-            axyne_text_rect(dc, state->font_bold, color, part, L"?ㅽ뻾  F5", DT_LEFT);
+            axyne_text_rect(dc, state->font_small, color, part, L"▷", DT_LEFT);
+            part.left += axyne_measure_text(state->font_small, L"▷") + 6;
+            axyne_text_rect(dc, state->font_bold, color, part, L"실행  F5", DT_LEFT);
         }
         free(runner);
         if (rects[8].right > rects[8].left) {
@@ -8939,11 +8929,11 @@ static void axyne_paint_shell(HWND window, AxyneWindowState *state)
             int shortcut = axyne_measure_text(state->font_tiny, L"Ctrl+P");
             axyne_round_fill(dc, rect.left, rect.top, rect.right, rect.bottom, 4,
                              AXYNE_BG, AXYNE_SEARCH_BORDER);
-            axyne_text_rect(dc, state->ui_font, AXYNE_ICON, part, L"??, DT_LEFT);
-            part.left += axyne_measure_text(state->ui_font, L"??) + 8;
+            axyne_text_rect(dc, state->ui_font, AXYNE_ICON, part, L"⌕", DT_LEFT);
+            part.left += axyne_measure_text(state->ui_font, L"⌕") + 8;
             part.right = rect.right - 10 - shortcut - 8;
             axyne_text_rect(dc, state->font_small, AXYNE_PLACEHOLDER, part,
-                            L"?뚯씪 ?대룞, > 紐낅졊 ?ㅽ뻾", DT_LEFT);
+                            L"파일 이동, > 명령 실행", DT_LEFT);
             part.left = rect.right - 10 - shortcut;
             part.right = rect.right - 10;
             axyne_text_rect(dc, state->font_tiny, AXYNE_SHORTCUT, part, L"Ctrl+P", DT_RIGHT);
@@ -9381,7 +9371,7 @@ int axyne_win_base_command(AxyneWindowState *state, AxyneCommandId id)
         (void)axyne_build_clean(window, state);
         return 1;
     case AXYNE_COMMAND_BUILD_REBUILD:
-        /* ?ㅼ떆 鍮뚮뱶: remove the previous output, then build from scratch. */
+        /* 다시 빌드: remove the previous output, then build from scratch. */
         if (axyne_build_clean(window, state)) axyne_start_action(window, state, 0);
         return 1;
     case AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL: case AXYNE_COMMAND_TERMINAL_NEW_COMMAND_PROMPT:
@@ -10495,7 +10485,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                 state->git_process = NULL;
                 state->git_run = NULL;
             }
-            { size_t i; for (i = 0; i < AXYNE_LANGUAGE_COUNT; ++i) { if (state->lsp[i] != NULL) { axyne_lsp_destroy(state->lsp[i]); state->lsp[i] = NULL; } } }
+            if (state->lsp != NULL) {
+                axyne_lsp_destroy(state->lsp);
+                state->lsp = NULL;
+            }
             {
                 MSG pending_message;
                 while (PeekMessageW(&pending_message, window,
