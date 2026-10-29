@@ -35,6 +35,7 @@ add_executable(axyne_tests
     test_main.c
     test_documents_search.c
     test_settings_preferences.c
+    test_runner_profiles.c
     test_runner_git_lsp.c
     test_process_stability.c
     test_git_repair.c
@@ -62,10 +63,12 @@ add_executable(axyne_tests
     test_app_paths.c
     test_memory_usage.c
     test_log.c
+    test_plugins.c
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(axyne_tests PRIVATE
+    axyne_plugins
     axyne_runner
     axyne_git
     axyne_lsp
@@ -96,6 +99,12 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> settings-preferences
             "${AXYNE_TEST_FIXTURE_DIR}/settings-preferences"
 )
+add_test(
+    NAME axyne-runner-profiles
+    COMMAND $<TARGET_FILE:axyne_tests> runner-profiles
+            "${AXYNE_TEST_FIXTURE_DIR}/runner-profiles"
+)
+set_tests_properties(axyne-runner-profiles PROPERTIES TIMEOUT 60)
 add_test(
     NAME axyne-runner-git-lsp
     COMMAND $<TARGET_FILE:axyne_tests> runner-git-lsp
@@ -213,6 +222,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/keymap"
 )
 add_test(
+    NAME axyne-plugins
+    COMMAND $<TARGET_FILE:axyne_tests> plugins
+            "${AXYNE_TEST_FIXTURE_DIR}/plugins"
+)
+add_test(
     NAME axyne-app-state
     COMMAND $<TARGET_FILE:axyne_tests> app-state
             "${AXYNE_TEST_FIXTURE_DIR}/app-state"
@@ -238,6 +252,7 @@ set_tests_properties(
     axyne-memory-usage
     axyne-app-paths
     axyne-app-state
+    axyne-plugins
     axyne-keymap
     axyne-commands
     axyne-build-target
@@ -407,3 +422,36 @@ endif()
 add_test(NAME axyne-menu-consistency
     COMMAND $<TARGET_FILE:axyne_menu_consistency_tests> "${PROJECT_SOURCE_DIR}")
 set_tests_properties(axyne-menu-consistency PROPERTIES TIMEOUT 30)
+
+# Shared configuration contract on every host; HTTP only on native targets.
+add_executable(axyne_server_client_tests test_server_client.c)
+target_link_libraries(axyne_server_client_tests PRIVATE axyne_server_client)
+add_test(NAME axyne-server-client COMMAND axyne_server_client_tests
+    "${AXYNE_TEST_FIXTURE_DIR}/server-client")
+if(WIN32 OR APPLE)
+    add_executable(axyne_http_client_tests test_http_client.c)
+    target_link_libraries(axyne_http_client_tests PRIVATE axyne_server_client)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME axyne-http-client COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/run_http_client.py"
+            "$<TARGET_FILE:axyne_http_client_tests>")
+        set_tests_properties(axyne-http-client PROPERTIES TIMEOUT 50)
+    endif()
+endif()
+
+# Exercise the LSP JSON-RPC framing against a tiny local language server. The
+# response deliberately puts Content-Length after another header so the parser
+# must consume the complete header block.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_executable(axyne_lsp_protocol_tests test_lsp_protocol.c)
+    target_link_libraries(axyne_lsp_protocol_tests PRIVATE axyne_lsp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-protocol")
+    add_test(NAME axyne-lsp-protocol
+        COMMAND $<TARGET_FILE:axyne_lsp_protocol_tests>
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/lsp_test_server.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-protocol")
+    set_tests_properties(axyne-lsp-protocol PROPERTIES TIMEOUT 20)
+endif()
