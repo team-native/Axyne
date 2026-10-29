@@ -1158,6 +1158,167 @@ static int axyne_terminal_configure_default(AxyneWindowState *state)
     return 1;
 }
 
+static wchar_t *axyne_terminal_shell_path(AxyneCommandId id);
+
+#ifdef AXYNE_WINDOWS_UI_TESTING
+static int axyne_terminal_test_fail_wide_conversion;
+static int axyne_terminal_test_fail_utf8_conversion;
+#endif
+
+static wchar_t *axyne_terminal_profile_to_wide(const char *value)
+{
+#ifdef AXYNE_WINDOWS_UI_TESTING
+    if (axyne_terminal_test_fail_wide_conversion) return NULL;
+#endif
+    return axyne_wide(value);
+}
+
+static char *axyne_terminal_profile_to_utf8(const wchar_t *value)
+{
+#ifdef AXYNE_WINDOWS_UI_TESTING
+    if (axyne_terminal_test_fail_utf8_conversion) return NULL;
+#endif
+    return axyne_utf8(value);
+}
+
+/* Resolves terminal.defaultProfile without relying on the workspace as an
+ * implicit executable search location.
+ * Empty or unknown profiles retain the existing cmd.exe fallback. */
+static char *axyne_terminal_profile_executable(const char *profile)
+{
+    wchar_t found[MAX_PATH];
+    wchar_t system_directory[MAX_PATH];
+    wchar_t *wide;
+    const wchar_t *program;
+    const wchar_t *search_path;
+    UINT length;
+
+    if (profile == NULL || profile[0] == '\0' ||
+        _stricmp(profile, "cmd") == 0 || _stricmp(profile, "cmd.exe") == 0 ||
+        _stricmp(profile, "Command Prompt") == 0)
+        return NULL;
+    if (_stricmp(profile, "WSL") == 0 || _stricmp(profile, "wsl.exe") == 0) {
+        wchar_t *shell = axyne_terminal_shell_path(AXYNE_COMMAND_TERMINAL_NEW_WSL);
+        char *executable = shell != NULL
+            ? axyne_terminal_profile_to_utf8(shell) : NULL;
+        free(shell);
+        return executable;
+    }
+    if (_stricmp(profile, "PowerShell") == 0 ||
+        _stricmp(profile, "Windows PowerShell") == 0) {
+        DWORD attributes;
+        length = GetSystemDirectoryW(system_directory, MAX_PATH);
+        if (length == 0 || length + 40 >= MAX_PATH) return NULL;
+        wcscat_s(system_directory, MAX_PATH,
+                 L"\\WindowsPowerShell\\v1.0\\powershell.exe");
+        attributes = GetFileAttributesW(system_directory);
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+            ? axyne_terminal_profile_to_utf8(system_directory) : NULL;
+    }
+
+    wide = axyne_terminal_profile_to_wide(profile);
+    if (wide == NULL) return NULL;
+    if (wcschr(wide, L'\\') != NULL || wcschr(wide, L'/') != NULL ||
+        wcschr(wide, L':') != NULL) {
+        int absolute = (wide[0] != L'\0' && wide[1] == L':' &&
+                        (wide[2] == L'\\' || wide[2] == L'/')) ||
+                       (wide[0] == L'\\' && wide[1] == L'\\');
+        if (!absolute) {
+            free(wide);
+            return NULL;
+        }
+        DWORD attributes = absolute ? GetFileAttributesW(wide)
+                                    : INVALID_FILE_ATTRIBUTES;
+        char *path = attributes != INVALID_FILE_ATTRIBUTES &&
+                     (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+            ? axyne_terminal_profile_to_utf8(wide) : NULL;
+        free(wide);
+        return path;
+    }
+    program = _stricmp(profile, "PowerShell 7") == 0 ||
+              _stricmp(profile, "pwsh") == 0 ? L"pwsh" : wide;
+    search_path = _wgetenv(L"PATH");
+    length = search_path != NULL && search_path[0] != L'\0'
+        ? SearchPathW(search_path, program, L".exe", MAX_PATH, found, NULL)
+        : 0;
+    free(wide);
+    return length != 0 && length < MAX_PATH
+        ? axyne_terminal_profile_to_utf8(found) : NULL;
+}
+
+#ifdef AXYNE_WINDOWS_UI_TESTING
+static AxyneStatus (*axyne_terminal_configure_runner)(
+    AxyneRunnerConfig *config, const AxyneRunnerSpec *spec,
+    AxyneError *error) = axyne_runner_configure;
+#else
+#define axyne_terminal_configure_runner axyne_runner_configure
+#endif
+
+static int axyne_terminal_apply_profile(AxyneWindowState *state,
+                                       AxyneError *error)
+{
+    const char *profile;
+    char *executable;
+    AxyneRunnerSpec spec;
+    AxyneStatus status;
+    if (error != NULL) {
+        error->code = AXYNE_STATUS_OK;
+        error->message[0] = '\0';
+    }
+    if (state == NULL) {
+        if (error != NULL) {
+            error->code = AXYNE_STATUS_INVALID_ARGUMENT;
+            (void)snprintf(error->message, sizeof(error->message),
+                           "Terminal state is unavailable.");
+        }
+        return 0;
+    }
+    profile = state->preferences.terminal.default_profile;
+    executable = axyne_terminal_profile_executable(profile);
+    if (executable == NULL) {
+        wchar_t command_path[MAX_PATH];
+        UINT length = GetSystemDirectoryW(command_path, MAX_PATH);
+        int use_cmd = profile == NULL || profile[0] == '\0' ||
+            _stricmp(profile, "cmd") == 0 ||
+            _stricmp(profile, "cmd.exe") == 0 ||
+            _stricmp(profile, "Command Prompt") == 0;
+        if (!use_cmd) {
+            if (error != NULL) {
+                error->code = AXYNE_STATUS_NOT_FOUND;
+                (void)snprintf(error->message, sizeof(error->message),
+                               "The selected terminal profile could not be resolved.");
+            }
+            return 0;
+        }
+        if (length == 0 || length + 10 >= MAX_PATH) {
+            if (error != NULL) {
+                error->code = AXYNE_STATUS_NOT_FOUND;
+                (void)snprintf(error->message, sizeof(error->message),
+                               "The system command prompt could not be found.");
+            }
+            return 0;
+        }
+        wcscat_s(command_path, MAX_PATH, L"\\cmd.exe");
+        executable = axyne_terminal_profile_to_utf8(command_path);
+        if (executable == NULL) {
+            if (error != NULL) {
+                error->code = AXYNE_STATUS_OUT_OF_MEMORY;
+                (void)snprintf(error->message, sizeof(error->message),
+                               "Unable to resolve the system command prompt path.");
+            }
+            return 0;
+        }
+    }
+    memset(&spec, 0, sizeof(spec));
+    spec.executable = executable;
+    spec.has_runtime = 0;
+    status = axyne_terminal_configure_runner(&state->terminal_runner, &spec,
+                                             error);
+    free(executable);
+    return status == AXYNE_STATUS_OK;
+}
+
 /* ---- terminal sessions ------------------------------------------------------ */
 
 enum { AXYNE_WIN_TERMINAL_MAX = 4 };
@@ -1286,11 +1447,18 @@ static void axyne_new_terminal_session(HWND window, AxyneWindowState *state)
 
 static void axyne_start_terminal_panel(HWND window, AxyneWindowState *state)
 {
+    AxyneError error = {0};
     state->panel_tab = AXYNE_WIN_PANEL_TERMINAL;
     state->panel_hidden = 0;
     axyne_layout(window, state);
     if (axyne_terminal_view_running(state->shell_view)) { SetFocus(state->shell_view); return; }
-    AxyneProcessSpec process_spec = {0}; AxyneError error = {0};
+    if (!axyne_terminal_apply_profile(state, &error)) {
+        MessageBoxA(window, error.message[0] != '\0' ? error.message
+                    : "Unable to apply the selected terminal profile.",
+                    "Unable to start terminal", MB_OK | MB_ICONERROR);
+        return;
+    }
+    AxyneProcessSpec process_spec = {0};
     AxyneStatus status = axyne_runner_process_spec(&state->terminal_runner, NULL, NULL, NULL, &process_spec, &error);
     if (status == AXYNE_STATUS_OK) {
         AxyneTerminalSpec spec = {0}; spec.executable = process_spec.executable;
@@ -2481,7 +2649,7 @@ static int axyne_ensure_settings_file(HWND owner, AxyneWindowState *state, int w
  * and opens the profile's file as an editor document; a profile that was
  * never saved is created first so there is something to open. */
 static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
-                                    int workspace)
+                                    int workspace, int terminal_page)
 {
     AxynePreferences initial = workspace ? state->preferences : state->global_preferences;
     AxyneWindowsPreferencesContext context;
@@ -2503,7 +2671,10 @@ static int axyne_preferences_dialog(HWND owner, AxyneWindowState *state,
             memcpy(initial.binding_present, stored.binding_present, sizeof(initial.binding_present));
         }
     }
-    if (!axyne_preferences_window_show(owner, workspace, &initial, &hooks)) return 1;
+    if (terminal_page
+            ? !axyne_preferences_window_show_terminal(owner, workspace, &initial, &hooks)
+            : !axyne_preferences_window_show(owner, workspace, &initial, &hooks))
+        return 1;
     if (!axyne_ensure_settings_file(owner, state, workspace)) return 0;
     axyne_open_document(owner, state, write_path);
     return 1;
@@ -9418,11 +9589,11 @@ static void axyne_legacy_command(HWND window, AxyneWindowState *state, UINT comm
         InvalidateRect(window, NULL, FALSE);
     }
     else if (command == AXYNE_CMD_PREFERENCES)
-        (void)axyne_preferences_dialog(window, state, 0);
+        (void)axyne_preferences_dialog(window, state, 0, 0);
     else if (command == AXYNE_CMD_WORKSPACE_PREFERENCES) {
         if (state->workspace_preferences_path == NULL)
             MessageBoxA(window, "Open a workspace folder before editing workspace settings.", "Axyne - Preferences", MB_OK | MB_ICONINFORMATION);
-        else (void)axyne_preferences_dialog(window, state, 1);
+        else (void)axyne_preferences_dialog(window, state, 1, 0);
     }
     else if (command == AXYNE_TERMINAL_START) axyne_start_terminal_panel(window, state);
     else if (command == AXYNE_TERMINAL_STOP) axyne_terminal_stop(state);
@@ -9676,6 +9847,9 @@ int axyne_win_base_command_state(AxyneWindowState *state, AxyneCommandId id,
         out->enabled = !axyne_terminal_view_running(state->shell_view) ||
                        state->shell_count < AXYNE_WIN_TERMINAL_MAX;
         return 1;
+    case AXYNE_COMMAND_TERMINAL_SELECT_DEFAULT_PROFILE:
+        out->enabled = 1;
+        return 1;
     case AXYNE_COMMAND_TERMINAL_NEW_POWERSHELL: case AXYNE_COMMAND_TERMINAL_NEW_COMMAND_PROMPT:
         out->enabled = !axyne_terminal_view_running(state->shell_view);
         return 1;
@@ -9792,6 +9966,9 @@ int axyne_win_base_command(AxyneWindowState *state, AxyneCommandId id)
     case AXYNE_COMMAND_DEBUG_CLEAR_BREAKPOINTS: legacy = AXYNE_CMD_DEBUG_CLEAR_BREAKPOINTS; break;
     case AXYNE_COMMAND_TERMINAL_NEW:
         axyne_new_terminal_session(window, state);
+        return 1;
+    case AXYNE_COMMAND_TERMINAL_SELECT_DEFAULT_PROFILE:
+        (void)axyne_preferences_dialog(window, state, 0, 1);
         return 1;
     case AXYNE_COMMAND_TOOLS_SETTINGS: legacy = AXYNE_CMD_PREFERENCES; break;
     case AXYNE_COMMAND_TOOLS_WORKSPACE_SETTINGS: legacy = AXYNE_CMD_WORKSPACE_PREFERENCES; break;
