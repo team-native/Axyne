@@ -46,6 +46,8 @@
 #include "axyne/layout_metrics.h"
 #include "axyne/syntax.h"
 #include "axyne/completion.h"
+#include "axyne/plugins.h"
+#include "../../extensions_window.h"
 #include "Scintilla.h"
 #include "../../editor_document.h"
 #include "../../editor_actions.h"
@@ -238,6 +240,9 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     NSInteger _explorerSelection;
     BOOL _hasExplorerSelection;
     NSMenu *_recentMenu;
+    AxynePluginSet _plugins;
+    BOOL _pluginsLoaded;
+    NSMenu *_pluginsMenu;
     AxyneAppState _appState;
     char *_appStatePath;
     BOOL _loadingEditor;
@@ -827,6 +832,12 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 
 /* ui_tools_macos.m - Tools menu: external tools, keybindings, file associations, memory dialog (D23, D24). */
 @interface AxyneWorkspaceView (AxyneToolsFeature)
+- (void)toolsAppendPluginMenu:(NSMenu *)menu;
+- (NSInteger)toolsValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
+- (BOOL)toolsPerformCommand:(AxyneCommandId)command sender:(id)sender;
+- (void)toolsShowExtensions:(id)sender;
+- (void)toolsRunPluginCommand:(id)sender;
+- (void)menuNeedsUpdate:(NSMenu *)menu;
 - (NSInteger)toolsValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
 - (BOOL)toolsPerformCommand:(AxyneCommandId)command sender:(id)sender;
 - (void)toolsDocumentActivated:(AxyneDocument *)document;
@@ -840,6 +851,10 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (void)toolsApplyPreferences;
 - (void)toolsTeardown;
 @end
+
+void axyne_macos_terminal_output(AxyneProcess *process, AxyneProcessStream stream,
+                                 const char *bytes, size_t length, void *user_data);
+void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code, void *user_data);
 
 /* ui_help_macos.m - Help menu: getting started, log folder, updates, licenses (D22, D27, D28). */
 @interface AxyneWorkspaceView (AxyneHelpFeature)

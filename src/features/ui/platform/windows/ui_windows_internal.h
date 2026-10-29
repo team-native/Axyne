@@ -33,6 +33,7 @@
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
 #include "axyne/process.h"
+#include "axyne/plugins.h"
 #include "axyne/runner.h"
 #include "axyne/watcher.h"
 #include "Scintilla.h"
@@ -213,6 +214,8 @@ typedef struct AxyneWindowState {
     /* Build/run/single-step process (output panel); the interactive shell
      * lives in shell_view (native terminal, terminal_view_windows.c). */
     AxyneProcess *action_process;
+    AxynePluginSet plugins;
+    int plugins_loaded;
     AxyneProcess *git_process;
     AxyneGitUiRun *git_run;
     int git_batch_busy; /* a commit, push or pull runs on a worker thread */
@@ -358,6 +361,7 @@ typedef struct AxyneWinCommandState {
 typedef enum AxyneWinMenuSlot {
     AXYNE_WIN_MENU_SLOT_RECENT_FOLDERS = 0, /* File > 최근 항목, before the files */
     AXYNE_WIN_MENU_SLOT_EXTERNAL_TOOLS,     /* Tools > 외부 도구, before 외부 도구 구성… */
+    AXYNE_WIN_MENU_SLOT_PLUGINS,            /* Tools > 플러그인 */
     AXYNE_WIN_MENU_SLOT_COUNT
 } AxyneWinMenuSlot;
 
@@ -578,6 +582,10 @@ void axyne_win_output_append(AxyneWindowState *state, const char *utf8,
 void axyne_win_output_append_bytes(AxyneWindowState *state, const char *bytes,
                                    size_t length, AxyneProcessStream stream);
 void axyne_win_output_clear(AxyneWindowState *state);
+void axyne_terminal_output(AxyneProcess *process, AxyneProcessStream stream,
+                           const char *bytes, size_t length, void *user_data);
+void axyne_terminal_exit(AxyneProcess *process, int exit_code, void *user_data);
+void axyne_refresh_action_controls(AxyneWindowState *state);
 
 /* Non-zero while a build/run/terminal process or the debugger runs. */
 int axyne_win_process_busy(AxyneWindowState *state);

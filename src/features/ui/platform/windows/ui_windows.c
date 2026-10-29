@@ -1068,7 +1068,7 @@ static void axyne_terminal_append(HWND output, const char *bytes, size_t length,
     free(combined);
 }
 
-static void axyne_refresh_action_controls(AxyneWindowState *state)
+void axyne_refresh_action_controls(AxyneWindowState *state)
 {
     AxyneDocument *document;
     int terminal_active;
@@ -1102,7 +1102,7 @@ static void axyne_refresh_action_controls(AxyneWindowState *state)
         state->runtime_discovery_posted = 1;
 }
 
-static void axyne_terminal_output(AxyneProcess *process,
+void axyne_terminal_output(AxyneProcess *process,
                                   AxyneProcessStream stream,
                                   const char *bytes, size_t length,
                                   void *user_data)
@@ -1126,7 +1126,7 @@ static void axyne_terminal_output(AxyneProcess *process,
     }
 }
 
-static void axyne_terminal_exit(AxyneProcess *process, int exit_code,
+void axyne_terminal_exit(AxyneProcess *process, int exit_code,
                                 void *user_data)
 {
     AxyneWindowState *state = (AxyneWindowState *)user_data;
@@ -10715,8 +10715,9 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
         AxyneTerminalMessage *terminal_message =
             (AxyneTerminalMessage *)l_param;
         if (terminal_message != NULL) {
-            axyne_problems_feed_build(state, terminal_message->stream,
-                                      terminal_message->bytes, terminal_message->length);
+            if (state->active_action == 1 || state->active_action == 2)
+                axyne_problems_feed_build(state, terminal_message->stream,
+                                          terminal_message->bytes, terminal_message->length);
             axyne_terminal_append(state->terminal_output,
                                   terminal_message->bytes,
                                   terminal_message->length,
@@ -10734,8 +10735,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     case AXYNE_WM_TERMINAL_EXIT: {
         AxyneTerminalExitMessage *exit_message =
             (AxyneTerminalExitMessage *)l_param;
+        int action;
         if (exit_message == NULL) return 0;
-        axyne_problems_finish_build(state);
+        action = state->active_action;
+        if (action == 1 || action == 2) axyne_problems_finish_build(state);
         state->last_exit_code = exit_message->exit_code;
         state->last_exit_failed = state->last_exit_code != 0;
         state->has_exit_status = 1;
