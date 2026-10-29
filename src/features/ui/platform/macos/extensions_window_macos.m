@@ -339,7 +339,8 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     for (i = 0; i < _market.count; ++i) {
         const AxyneMarketItem *item = &_market.items[i];
         const AxynePlugin *installed = axyne_plugins_find(_plugins, item->slug);
-        BOOL same = installed != NULL && item->version != NULL && strcmp(installed->version, item->version) == 0;
+        AxynePluginMarketplaceVersionState versionState =
+            axyne_plugin_marketplace_version_state(item->version, installed != NULL ? installed->version : NULL);
         CGFloat top = EW_LIST_Y + (CGFloat)i * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP) - _scroll;
         NSRect row = NSMakeRect(EW_LEFT, top, EW_RIGHT - EW_LEFT, AXYNE_EW_ROW_HEIGHT);
         NSString *developer = ew_string(item->developer);
@@ -359,10 +360,13 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
         [self text:ew_string(item->description) rect:NSMakeRect(row.origin.x + 14, top + 30, row.size.width - 134, 16)
               font:small color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
         [self text:[NSString stringWithFormat:@"%@%@다운로드 %ld회%@", developer, [developer length] ? @" · " : @"",
-                    item->downloads, installed == NULL ? @"" : same ? @" · 설치됨" : @" · 새 버전 있음"]
+                    item->downloads,
+                    versionState == AXYNE_PLUGIN_MARKETPLACE_NOT_INSTALLED ? @""
+                    : versionState == AXYNE_PLUGIN_MARKETPLACE_VERSION_UNKNOWN ? @" · 버전 확인 불가"
+                    : versionState == AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE ? @" · 설치됨" : @" · 새 버전 있음"]
               rect:NSMakeRect(row.origin.x + 14, top + 50, row.size.width - 134, 16) font:small
              color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentLeft];
-        if (same)
+        if (versionState == AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE)
             [self text:@"설치됨" rect:NSMakeRect(NSMaxX(row) - 104, top + 23, 92, 30)
                   font:[NSFont systemFontOfSize:12] color:AXYNE_PW_COLOR_MUTED align:NSTextAlignmentCenter];
         else
@@ -456,11 +460,9 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     if (axyne_market_download(_server, item->slug, "macos", _ideVersion, [zip fileSystemRepresentation], &error)
         != AXYNE_STATUS_OK)
         [self message:@"플러그인을 내려받지 못했습니다." detail:error.message];
-    else if (axyne_plugins_install_zip(_plugins, [zip fileSystemRepresentation], _ideVersion, &installed, &error)
+    else if (axyne_plugins_install_zip_expected(_plugins, [zip fileSystemRepresentation], _ideVersion, item->slug, &installed, &error)
              != AXYNE_STATUS_OK)
         [self message:@"플러그인을 설치하지 못했습니다." detail:error.message];
-    else if (installed != NULL && strcmp(installed, item->slug) != 0)
-        [self message:@"내려받은 패키지의 id가 목록과 다릅니다." detail:installed];
     else
         [self setNotice:@"설치했습니다:" detail:item->name error:NO];
     [[NSFileManager defaultManager] removeItemAtPath:zip error:NULL];

@@ -836,6 +836,8 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 - (NSInteger)toolsValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;
 - (BOOL)toolsPerformCommand:(AxyneCommandId)command sender:(id)sender;
 - (void)toolsShowExtensions:(id)sender;
+- (void)toolsShowMarketplace:(id)sender;
+- (void)toolsShowAccount:(id)sender;
 - (void)toolsRunPluginCommand:(id)sender;
 - (void)menuNeedsUpdate:(NSMenu *)menu;
 - (NSInteger)toolsValidateCommand:(AxyneCommandId)command item:(NSMenuItem *)item;

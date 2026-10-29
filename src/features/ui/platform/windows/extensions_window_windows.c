@@ -345,7 +345,8 @@ static void ew_paint_marketplace(EwState *st, HDC dc)
     for (i = 0; i < st->market.count; ++i) {
         const AxyneMarketItem *item = &st->market.items[i];
         const AxynePlugin *installed = axyne_plugins_find(st->plugins, item->slug);
-        int same = installed != NULL && item->version != NULL && strcmp(installed->version, item->version) == 0;
+        AxynePluginMarketplaceVersionState version_state =
+            axyne_plugin_marketplace_version_state(item->version, installed != NULL ? installed->version : NULL);
         int top = EW_LIST_Y + (int)i * (AXYNE_EW_ROW_HEIGHT + AXYNE_EW_ROW_GAP) - st->scroll;
         RECT row = {EW_LEFT, top, EW_RIGHT, top + AXYNE_EW_ROW_HEIGHT};
         wchar_t line[512];
@@ -361,11 +362,13 @@ static void ew_paint_marketplace(EwState *st, HDC dc)
                      DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         (void)swprintf_s(line, 512, L"%ls%ls다운로드 %ld회%ls", developer != NULL ? developer : L"",
                          developer != NULL && developer[0] ? L" · " : L"", item->downloads,
-                         installed == NULL ? L"" : same ? L" · 설치됨" : L" · 새 버전 있음");
+                         version_state == AXYNE_PLUGIN_MARKETPLACE_NOT_INSTALLED ? L""
+                         : version_state == AXYNE_PLUGIN_MARKETPLACE_VERSION_UNKNOWN ? L" · 버전 확인 불가"
+                         : version_state == AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE ? L" · 설치됨" : L" · 새 버전 있음");
         rc = (RECT){row.left + 14, top + 50, row.right - 120, top + 66};
         ew_text(dc, st->font11, AXYNE_PW_COLOR_MUTED, line, rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         free(name); free(version); free(developer);
-        if (same) {
+        if (version_state == AXYNE_PLUGIN_MARKETPLACE_UP_TO_DATE) {
             rc = (RECT){row.right - 104, top + 23, row.right - 12, top + 53};
             ew_text(dc, st->font12, AXYNE_PW_COLOR_MUTED, L"설치됨", rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         } else {
@@ -535,10 +538,8 @@ static void ew_market_install(EwState *st, int index)
     ew_busy(st);
     if (axyne_market_download(st->server, item->slug, "windows", st->ide_version, zip_path, &error) != AXYNE_STATUS_OK) {
         ew_message(st, L"플러그인을 내려받지 못했습니다.", error.message, MB_ICONERROR);
-    } else if (axyne_plugins_install_zip(st->plugins, zip_path, st->ide_version, &installed, &error) != AXYNE_STATUS_OK) {
+    } else if (axyne_plugins_install_zip_expected(st->plugins, zip_path, st->ide_version, item->slug, &installed, &error) != AXYNE_STATUS_OK) {
         ew_message(st, L"플러그인을 설치하지 못했습니다.", error.message, MB_ICONERROR);
-    } else if (installed != NULL && strcmp(installed, item->slug) != 0) {
-        ew_message(st, L"내려받은 패키지의 id가 목록과 다릅니다.", installed, MB_ICONWARNING);
     } else {
         ew_set_notice(st, 0, L"설치했습니다:", item->name);
     }

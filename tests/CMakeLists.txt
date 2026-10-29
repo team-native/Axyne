@@ -68,8 +68,23 @@ add_executable(axyne_tests
 )
 
 target_include_directories(axyne_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+add_library(axyne_plugins_test_support STATIC
+    "${PROJECT_SOURCE_DIR}/src/features/plugins/plugins.c")
+target_include_directories(axyne_plugins_test_support PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_compile_definitions(axyne_plugins_test_support PRIVATE AXYNE_PLUGINS_TESTING)
+target_link_libraries(axyne_plugins_test_support PUBLIC axyne_process)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(axyne_plugins_test_support PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(axyne_plugins_test_support PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(axyne_plugins_test_support PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 target_link_libraries(axyne_tests PRIVATE
-    axyne_plugins
+    axyne_plugins_test_support
     axyne_account
     axyne_runner
     axyne_git
@@ -80,6 +95,7 @@ if(MSVC)
     # The palette and problems tests contain UTF-8 Korean literals.
     set_source_files_properties(test_palette_problems.c test_palette_controller.c
         PROPERTIES COMPILE_OPTIONS "/utf-8")
+    set_source_files_properties(test_plugins.c PROPERTIES COMPILE_OPTIONS "/utf-8")
     set_source_files_properties(test_languages.c PROPERTIES COMPILE_OPTIONS "/utf-8")
     set_source_files_properties(test_keymap.c PROPERTIES COMPILE_OPTIONS "/utf-8")
     set_source_files_properties(test_commands.c PROPERTIES COMPILE_OPTIONS "/utf-8")
