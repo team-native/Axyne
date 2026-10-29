@@ -267,7 +267,8 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_GIT_BATCH_COMPLETE = WM_APP + 28,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
        AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31,
-       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32 };
+       AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32,
+       AXYNE_WM_RUNTIMES_READY = WM_APP + 33 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -2277,12 +2278,53 @@ static AxyneLanguageId axyne_active_language(AxyneWindowState *state)
     return axyne_language_for_path(doc->path);
 }
 
-/* Runs PATH discovery and the version probes (two seconds each at most) once
- * per session, on the UI thread. Callers: the first click on the selector,
- * the first build or run, and the deferred first-editor-file message. */
+static DWORD WINAPI axyne_runtime_discovery_thread(LPVOID parameter)
+{
+    AxyneWindowState *state = (AxyneWindowState *)parameter;
+    AxyneError error;
+    if (axyne_runtime_discover(&state->runtime_result, &error) != AXYNE_STATUS_OK)
+        axyne_runtime_free(&state->runtime_result);
+    if (state->main_window != NULL)
+        PostMessageW(state->main_window, AXYNE_WM_RUNTIMES_READY, 0, 0);
+    return 0;
+}
+
+/* The version probes take up to two seconds each, so the deferred
+ * first-editor-file message runs them on a worker thread instead of stalling
+ * typing. Returns 0 when no thread could be started. */
+static int axyne_start_runtime_discovery(AxyneWindowState *state)
+{
+    if (state->runtimes_discovered || state->runtime_thread != NULL) return 1;
+    memset(&state->runtime_result, 0, sizeof(state->runtime_result));
+    state->runtime_thread = CreateThread(NULL, 0, axyne_runtime_discovery_thread,
+                                         state, 0, NULL);
+    return state->runtime_thread != NULL;
+}
+
+/* Joins the worker (if any) and adopts its result. */
+static void axyne_finish_runtime_discovery(HWND window, AxyneWindowState *state)
+{
+    if (state->runtime_thread == NULL) return;
+    WaitForSingleObject(state->runtime_thread, INFINITE);
+    CloseHandle(state->runtime_thread);
+    state->runtime_thread = NULL;
+    if (state->runtimes_discovered) {
+        axyne_runtime_free(&state->runtime_result);
+        return;
+    }
+    state->runtimes = state->runtime_result;
+    memset(&state->runtime_result, 0, sizeof(state->runtime_result));
+    state->runtimes_discovered = 1;
+    if (window != NULL) InvalidateRect(window, NULL, FALSE);
+}
+
+/* Runs PATH discovery and the version probes once per session. Callers that
+ * need the result now (the first click on the selector, the first build or
+ * run) wait for a background discovery already in flight. */
 static void axyne_discover_runtimes(HWND window, AxyneWindowState *state)
 {
     AxyneError error;
+    axyne_finish_runtime_discovery(window, state);
     if (state->runtimes_discovered) return;
     state->runtimes_discovered = 1;
     memset(&state->runtimes, 0, sizeof(state->runtimes));
@@ -11036,7 +11078,10 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
     }
     case AXYNE_WM_DISCOVER_RUNTIMES:
         state->runtime_discovery_posted = 0;
-        axyne_discover_runtimes(window, state);
+        if (!axyne_start_runtime_discovery(state)) axyne_discover_runtimes(window, state);
+        return 0;
+    case AXYNE_WM_RUNTIMES_READY:
+        axyne_finish_runtime_discovery(window, state);
         return 0;
     case AXYNE_WM_GIT_COMPLETE:
         if (state->git_run == (AxyneGitUiRun *)l_param) {
@@ -11243,6 +11288,7 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             axyne_runner_destroy(&state->terminal_runner);
             axyne_runner_destroy(&state->action_runner);
             axyne_clear_pending_run(state);
+            axyne_finish_runtime_discovery(NULL, state);
             axyne_runtime_free(&state->runtimes);
             if (AXYNE_EDIT_BACKGROUND_BRUSH != NULL) {
                 DeleteObject(AXYNE_EDIT_BACKGROUND_BRUSH);
