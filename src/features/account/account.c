@@ -9,6 +9,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef AXYNE_ACCOUNT_TESTING
+enum {
+    AXYNE_ACCOUNT_TEST_REFRESH_FAILURE_NONE = 0,
+    AXYNE_ACCOUNT_TEST_REFRESH_GET_OUT_OF_MEMORY = 1,
+    AXYNE_ACCOUNT_TEST_REFRESH_COPY_OUT_OF_MEMORY = 2
+};
+static int axyne_account_test_refresh_failure;
+void axyne_account_test_set_refresh_failure(int failure)
+{
+    axyne_account_test_refresh_failure = failure;
+}
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -279,17 +292,49 @@ static AxyneStatus fetch_profile(const char *base_url, AxyneAccount *account, in
 }
 
 /* Copies data.access_token / data.refresh_token from a session reply. */
-static AxyneStatus take_tokens(AxyneSettings *reply, AxyneAccount *account, AxyneError *error)
+static AxyneStatus take_tokens(AxyneSettings *reply, AxyneAccount *account, int replace_missing_refresh,
+                               AxyneError *error)
 {
     char *access = json_string(reply, "/data/access_token");
-    char *refresh = json_string(reply, "/data/refresh_token");
+    char *refresh_value = NULL, *refresh = NULL;
+    AxyneStatus refresh_status;
     if (access == NULL) {
         free(refresh);
         return fail(error, AXYNE_STATUS_IO_ERROR, "서버 응답에 토큰이 없습니다.");
     }
+#ifdef AXYNE_ACCOUNT_TESTING
+    if (axyne_account_test_refresh_failure == AXYNE_ACCOUNT_TEST_REFRESH_GET_OUT_OF_MEMORY) {
+        refresh_status = AXYNE_STATUS_OUT_OF_MEMORY;
+    } else
+#endif
+    {
+        refresh_status = axyne_settings_get_string(reply, "/data/refresh_token", &refresh_value, error);
+    }
+    if (refresh_status == AXYNE_STATUS_OK) {
+#ifdef AXYNE_ACCOUNT_TESTING
+        if (axyne_account_test_refresh_failure == AXYNE_ACCOUNT_TEST_REFRESH_COPY_OUT_OF_MEMORY) {
+            refresh = NULL;
+        } else
+#endif
+        {
+            refresh = copy_text(refresh_value);
+        }
+        axyne_settings_free_json(refresh_value);
+        if (refresh == NULL) {
+            free(access);
+            return fail(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory copying refresh token");
+        }
+    } else if (refresh_status != AXYNE_STATUS_NOT_FOUND) {
+        axyne_settings_free_json(refresh_value);
+        free(access);
+        return fail(error, refresh_status, "could not read refresh token from server response");
+    }
     free(account->access_token);
     account->access_token = access;
-    if (refresh != NULL) { free(account->refresh_token); account->refresh_token = refresh; }
+    if (refresh_status == AXYNE_STATUS_OK || replace_missing_refresh) {
+        free(account->refresh_token);
+        account->refresh_token = refresh;
+    }
     return ok(error);
 }
 
@@ -307,7 +352,7 @@ AxyneStatus axyne_account_login(const char *base_url, const char *email, const c
     memset(&next, 0, sizeof(next));
     status = api_call(base_url, "POST", "/auth/login", NULL, body, &reply, NULL, error);
     free(body);
-    if (status == AXYNE_STATUS_OK) status = take_tokens(reply, &next, error);
+    if (status == AXYNE_STATUS_OK) status = take_tokens(reply, &next, 0, error);
     axyne_settings_destroy(reply);
     if (status == AXYNE_STATUS_OK) {
         next.email = copy_text(email);
@@ -335,7 +380,7 @@ AxyneStatus axyne_account_refresh_profile(const char *base_url, AxyneAccount *ac
         if (body == NULL) return fail(error, AXYNE_STATUS_OUT_OF_MEMORY, "out of memory");
         status = api_call(base_url, "POST", "/auth/refresh", NULL, body, &reply, NULL, error);
         free(body);
-        if (status == AXYNE_STATUS_OK) status = take_tokens(reply, account, error);
+        if (status == AXYNE_STATUS_OK) status = take_tokens(reply, account, 1, error);
         axyne_settings_destroy(reply);
         if (status == AXYNE_STATUS_OK) status = fetch_profile(base_url, account, NULL, error);
     }

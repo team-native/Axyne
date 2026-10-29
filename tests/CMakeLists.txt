@@ -221,6 +221,20 @@ add_test(
     COMMAND $<TARGET_FILE:axyne_tests> account
             "${AXYNE_TEST_FIXTURE_DIR}/account"
 )
+add_executable(axyne_account_refresh_tests
+    test_account_refresh.c
+    "${PROJECT_SOURCE_DIR}/src/features/account/account.c"
+)
+target_include_directories(axyne_account_refresh_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_compile_definitions(axyne_account_refresh_tests PRIVATE AXYNE_ACCOUNT_TESTING)
+target_link_libraries(axyne_account_refresh_tests PRIVATE axyne_core)
+if(MSVC)
+    target_compile_options(axyne_account_refresh_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(axyne_account_refresh_tests PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME axyne-account-refresh-token COMMAND axyne_account_refresh_tests)
+set_tests_properties(axyne-account-refresh-token PROPERTIES TIMEOUT 10)
 add_test(
     NAME axyne-plugins
     COMMAND $<TARGET_FILE:axyne_tests> plugins
