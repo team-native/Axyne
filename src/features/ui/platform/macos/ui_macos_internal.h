@@ -303,6 +303,7 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     AxynePaletteController _palette;
     AxynePaletteOverlay *_paletteOverlay;
     NSTextField *_paletteField;
+    NSTimer *_statusTimer;
     NSTimer *_paletteTimer;
     /* Feature category objects (ui_<feature>_macos.m). Each starts nil, is
      * created lazily by its category and released by its Teardown hook; the
