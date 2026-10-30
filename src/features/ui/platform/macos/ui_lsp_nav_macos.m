@@ -336,7 +336,8 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
     AxyneDocument *document = [self activeDocument];
     if (notification == NULL || notification->nmhdr.code != SCN_CHARADDED) return;
     if (!axyne_macos_lsp_document_supported(document) || !axyne_syntax_completes(
-            axyne_syntax_for_path(document->path))) {
+            axyne_syntax_for_path(document->path)) ||
+        [self completionBlocked]) {
         if ([self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] != 0)
             (void)[self sendEditorMessage:SCI_AUTOCCANCEL wParam:0 lParam:0];
         return;

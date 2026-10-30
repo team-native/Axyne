@@ -174,14 +174,7 @@ static void axyne_win_lsp_show_completion(
         length += word_length;
     }
     list[length] = '\0';
-    SendMessageA(state->editor, SCI_AUTOCSETIGNORECASE, TRUE, 0);
-    SendMessageA(state->editor, SCI_AUTOCSETAUTOHIDE, TRUE, 0);
-    SendMessageA(state->editor, SCI_AUTOCSETCHOOSESINGLE, FALSE, 0);
-    SendMessageA(state->editor, SCI_AUTOCSETCANCELATSTART, FALSE, 0);
-    SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
-    SendMessageA(state->editor, SCI_AUTOCSETSEPARATOR, '\n', 0);
-    SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix_length,
-                 (LPARAM)list);
+    axyne_win_completion_show_list(state, prefix_length, list, '\n');
     free(list);
     free(matches);
 }
@@ -407,6 +400,19 @@ static int axyne_win_lsp_navigate(AxyneWindowState *state, int references)
     return 1;
 }
 
+/* '>' and ':' only trigger as the second half of "->" and "::"; a lone
+ * comparison or label colon must not open the list. */
+static int axyne_win_lsp_trigger_needs_pair(AxyneWindowState *state, int ch)
+{
+    LRESULT caret;
+    int previous;
+    if (ch != '>' && ch != ':') return 0;
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    if (caret < 2) return 1;
+    previous = (int)SendMessageA(state->editor, SCI_GETCHARAT, (WPARAM)(caret - 2), 0);
+    return ch == '>' ? previous != '-' : previous != ':';
+}
+
 static void axyne_win_lsp_request_completion(AxyneWindowState *state,
                                               const SCNotification *notification)
 {
@@ -428,6 +434,12 @@ static void axyne_win_lsp_request_completion(AxyneWindowState *state,
     if (!isalnum((unsigned char)notification->ch) && notification->ch != '_' &&
         notification->ch != '.' && notification->ch != '>' &&
         notification->ch != ':') {
+        if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+            SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
+        return;
+    }
+    if (axyne_win_lsp_trigger_needs_pair(state, notification->ch) ||
+        axyne_win_completion_blocked(state)) {
         if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
             SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
         return;

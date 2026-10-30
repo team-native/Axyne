@@ -48,4 +48,10 @@ int axyne_syntax_completes(const AxyneSyntaxLanguage *language);
 int axyne_syntax_style_bold(const AxyneSyntaxLanguage *language,
                             unsigned int style);
 
+/* Nonzero when `style` of `language` is a comment or a string literal: text
+ * where identifier completion makes no sense, so adapters keep the popup
+ * closed there. */
+int axyne_syntax_style_is_text(const AxyneSyntaxLanguage *language,
+                               unsigned int style);
+
 #endif
