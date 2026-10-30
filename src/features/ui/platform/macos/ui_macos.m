@@ -2547,9 +2547,142 @@ static BOOL axyne_macos_is_image_path(const char *path)
     (void)[self sendEditorMessage:SCI_AUTOCSETCHOOSESINGLE wParam:0 lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSETCANCELATSTART wParam:0 lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSETMAXHEIGHT wParam:8 lParam:0];
+    [self styleCompletionList];
     (void)[self sendEditorMessage:SCI_AUTOCSHOW wParam:(uintptr_t)prefix
                            lParam:(intptr_t)list];
     free(list);
+    [self completionDetailUpdate];
+}
+
+/* Match the palette popup: panel background, light text, purple selection. */
+- (void)styleCompletionList
+{
+    const AxyneThemePreferences *theme = &_preferences.theme;
+    (void)[self sendEditorMessage:SCI_SETELEMENTCOLOUR wParam:SC_ELEMENT_LIST
+        lParam:(intptr_t)(0xff000000u | (uint32_t)axyne_editor_color(theme->text))];
+    (void)[self sendEditorMessage:SCI_SETELEMENTCOLOUR wParam:SC_ELEMENT_LIST_BACK
+        lParam:(intptr_t)(0xff000000u | (uint32_t)axyne_editor_color(theme->panel))];
+    (void)[self sendEditorMessage:SCI_SETELEMENTCOLOUR wParam:SC_ELEMENT_LIST_SELECTED
+        lParam:(intptr_t)(0xff000000u | (uint32_t)axyne_editor_color(theme->text))];
+    (void)[self sendEditorMessage:SCI_SETELEMENTCOLOUR wParam:SC_ELEMENT_LIST_SELECTED_BACK
+        lParam:(intptr_t)(0xff000000u | (uint32_t)axyne_editor_color(0x3b2d55))];
+}
+
+/* Detail panel beside the completion list: the selected entry's LSP kind and
+ * type, or for document words how often and where the word is used. The head
+ * (before " · ") is drawn in the accent colour, the rest muted. */
+- (void)completionDetailHide
+{
+    if (_completionDetail != nil) [_completionDetail orderOut:nil];
+}
+
+- (void)completionDetailTeardown
+{
+    [self completionDetailHide];
+    [_completionDetail release];
+    _completionDetail = nil;
+    _completionDetailLabel = nil;
+}
+
+- (void)completionDetailUpdate
+{
+    char word[256], detail[512];
+    NSInteger length;
+    if (_editorView == nil ||
+        [self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] == 0) {
+        [self completionDetailHide];
+        return;
+    }
+    length = [self sendEditorMessage:SCI_AUTOCGETCURRENTTEXT wParam:0 lParam:0];
+    if (length <= 0 || length >= (NSInteger)sizeof(word)) { [self completionDetailHide]; return; }
+    (void)[self sendEditorMessage:SCI_AUTOCGETCURRENTTEXT wParam:0 lParam:(intptr_t)word];
+    word[length] = '\0';
+    detail[0] = '\0';
+    if ([self sendEditorMessage:SCI_AUTOCGETSEPARATOR wParam:0 lParam:0] == '\n') {
+        const char *lsp = [self lspNavCompletionDetail:word];
+        if (lsp != NULL) (void)snprintf(detail, sizeof(detail), "%s", lsp);
+    } else {
+        NSInteger size = [self sendEditorMessage:SCI_GETLENGTH wParam:0 lParam:0];
+        NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+        const char *text = (const char *)(intptr_t)[self sendEditorMessage:SCI_GETCHARACTERPOINTER
+                                                                    wParam:0 lParam:0];
+        if (text == NULL || !axyne_completion_describe_word(text, (size_t)size, (size_t)caret,
+                                                            word, detail, sizeof(detail)))
+            (void)snprintf(detail, sizeof(detail), "keyword");
+    }
+    if (detail[0] == '\0') { [self completionDetailHide]; return; }
+    [self completionDetailShow:detail];
+}
+
+- (void)completionDetailShow:(const char *)detail
+{
+    AxyneMacChromeColors colors = [self chromeColors];
+    NSWindow *window = [self window];
+    NSString *text = [NSString stringWithUTF8String:detail];
+    NSRange dot;
+    NSMutableAttributedString *styled;
+    NSFont *font = [NSFont systemFontOfSize:12];
+    NSRect anchor = NSZeroRect, frame;
+    NSSize size;
+    if (window == nil || text == nil) return;
+    if (_completionDetail == nil) {
+        NSView *content;
+        _completionDetail = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, 40)
+            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+            backing:NSBackingStoreBuffered defer:YES];
+        [_completionDetail setReleasedWhenClosed:NO];
+        [_completionDetail setHasShadow:YES];
+        [_completionDetail setIgnoresMouseEvents:YES];
+        content = [_completionDetail contentView];
+        [content setWantsLayer:YES];
+        [[content layer] setBorderWidth:1];
+        [[content layer] setCornerRadius:4];
+        _completionDetailLabel = [NSTextField wrappingLabelWithString:@""];
+        [_completionDetailLabel setSelectable:NO];
+        [content addSubview:_completionDetailLabel];
+    }
+    [[[_completionDetail contentView] layer] setBackgroundColor:[colors.panel CGColor]];
+    [[[_completionDetail contentView] layer] setBorderColor:[colors.border CGColor]];
+    styled = [[[NSMutableAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: font, NSForegroundColorAttributeName: colors.muted }] autorelease];
+    dot = [text rangeOfString:@" · "];
+    if (dot.location != NSNotFound) {
+        [styled addAttribute:NSForegroundColorAttributeName value:colors.accent
+                       range:NSMakeRange(0, dot.location)];
+        [styled replaceCharactersInRange:dot withString:@"\n"];
+    } else {
+        [styled addAttribute:NSForegroundColorAttributeName value:colors.accent
+                       range:NSMakeRange(0, [text length])];
+    }
+    [_completionDetailLabel setAttributedStringValue:styled];
+    [_completionDetailLabel setPreferredMaxLayoutWidth:320];
+    size = [_completionDetailLabel fittingSize];
+    if (size.width > 320) size.width = 320;
+    [_completionDetailLabel setFrame:NSMakeRect(8, 5, size.width, size.height)];
+    /* Scintilla shows its list in a child window of ours; sit to its right. */
+    for (NSWindow *child in [window childWindows]) {
+        if (child != _completionDetail && [child isVisible]) { anchor = [child frame]; break; }
+    }
+    if (NSIsEmptyRect(anchor)) {
+        NSInteger caret = [self sendEditorMessage:SCI_GETCURRENTPOS wParam:0 lParam:0];
+        NSPoint point = NSMakePoint(
+            [self sendEditorMessage:SCI_POINTXFROMPOSITION wParam:0 lParam:(intptr_t)caret],
+            [self sendEditorMessage:SCI_POINTYFROMPOSITION wParam:0 lParam:(intptr_t)caret]);
+        point = [window convertPointToScreen:[_editorView convertPoint:point toView:nil]];
+        anchor = NSMakeRect(point.x, point.y - 20, 0, 0);
+    }
+    frame = NSMakeRect(NSMaxX(anchor) + 2, NSMaxY(anchor) - size.height - 10,
+                       size.width + 16, size.height + 10);
+    {
+        NSRect limit = [window frame];
+        if (NSMaxX(frame) > NSMaxX(limit)) frame.origin.x = NSMinX(anchor) - NSWidth(frame) - 2;
+        if (frame.origin.x < NSMinX(limit)) frame.origin.x = NSMinX(limit);
+        if (frame.origin.y < NSMinY(limit)) frame.origin.y = NSMinY(limit);
+    }
+    [_completionDetail setFrame:frame display:YES];
+    if ([_completionDetail parentWindow] != window)
+        [window addChildWindow:_completionDetail ordered:NSWindowAbove];
+    [_completionDetail orderFront:nil];
 }
 
 - (void)applyPreferences
@@ -2968,6 +3101,14 @@ static BOOL axyne_macos_is_image_path(const char *path)
             [self autoIndentFromNotification:&typed];
         });
     }
+    if (notification->nmhdr.code == SCN_AUTOCSELECTIONCHANGE)
+        [self completionDetailUpdate];
+    else if (notification->nmhdr.code == SCN_AUTOCCANCELLED ||
+             notification->nmhdr.code == SCN_AUTOCCOMPLETED ||
+             notification->nmhdr.code == SCN_AUTOCSELECTION ||
+             (notification->nmhdr.code == SCN_UPDATEUI &&
+              [self sendEditorMessage:SCI_AUTOCACTIVE wParam:0 lParam:0] == 0))
+        [self completionDetailHide];
     if (notification->nmhdr.code == SCN_UPDATEUI) {
         [self updateLineNumberMargin];
         [self updateBraceHighlight];
