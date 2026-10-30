@@ -25,16 +25,17 @@ typedef struct AxyneMemoryUsage {
     int has_private;
 } AxyneMemoryUsage;
 
-/* Budget of the default state (docs/PERFORMANCE_BUDGET.md: 100 MB) and the
+/* Gauge maximum (250 MB, raised from the 100 MB default-state budget so usage
+ * above 100 MB stays visible) and the
  * gauge thresholds. "MB" means MiB (1024 * 1024 bytes) everywhere here. */
 #define AXYNE_MEMORY_MB ((uint64_t)1024 * 1024)
-#define AXYNE_MEMORY_BUDGET_BYTES (100 * AXYNE_MEMORY_MB)
-#define AXYNE_MEMORY_WARNING_BYTES (80 * AXYNE_MEMORY_MB)
+#define AXYNE_MEMORY_BUDGET_BYTES (250 * AXYNE_MEMORY_MB)
+#define AXYNE_MEMORY_WARNING_BYTES (200 * AXYNE_MEMORY_MB)
 
 typedef enum AxyneMemoryLevel {
-    AXYNE_MEMORY_LEVEL_NORMAL = 0, /* <= 80 MB */
-    AXYNE_MEMORY_LEVEL_WARNING,    /* > 80 MB  (warning color) */
-    AXYNE_MEMORY_LEVEL_ERROR       /* > 100 MB (error color) */
+    AXYNE_MEMORY_LEVEL_NORMAL = 0, /* <= 200 MB */
+    AXYNE_MEMORY_LEVEL_WARNING,    /* > 200 MB (warning color) */
+    AXYNE_MEMORY_LEVEL_ERROR       /* > 250 MB (error color) */
 } AxyneMemoryLevel;
 
 /* Fills `usage`; UNSUPPORTED on a platform without a sampler, IO_ERROR when
