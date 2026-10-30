@@ -14,6 +14,9 @@
     char *definitionPath;
     uint64_t referencesRequest;
     char *referencesPath;
+    char **shownWords;   /* last LSP list, parallel to shownDetails */
+    char **shownDetails;
+    size_t shownCount;
 }
 @end
 
@@ -24,6 +27,7 @@ typedef struct AxyneMacLspCompletion {
     AxyneLspClient *client;
     uint64_t request;
     char **words;
+    char **details;
     size_t count;
 } AxyneMacLspCompletion;
 
@@ -56,6 +60,38 @@ static char *axyne_macos_lsp_completion_word(const AxyneLspCompletionItem *item)
     return copy;
 }
 
+/* "kind · detail" for the completion detail panel, or NULL with neither. */
+static char *axyne_macos_lsp_format_detail(const AxyneLspCompletionItem *item)
+{
+    const char *kind = axyne_completion_kind_name(item->kind);
+    const char *detail = item->detail;
+    size_t size;
+    char *text;
+    while (detail != NULL && (*detail == ' ' || *detail == '\t')) ++detail;
+    if (detail != NULL && detail[0] == '\0') detail = NULL;
+    if (kind == NULL && detail == NULL) return NULL;
+    size = (kind != NULL ? strlen(kind) : 0) + (detail != NULL ? strlen(detail) : 0) + 8;
+    text = (char *)malloc(size);
+    if (text == NULL) return NULL;
+    (void)snprintf(text, size, "%s%s%s", kind != NULL ? kind : "",
+                   kind != NULL && detail != NULL ? " \xc2\xb7 " : "",
+                   detail != NULL ? detail : "");
+    return text;
+}
+
+static void axyne_macos_lsp_forget_shown(AxyneMacLspNavState *ui)
+{
+    for (size_t i = 0; i < ui->shownCount; ++i) {
+        free(ui->shownWords[i]);
+        free(ui->shownDetails[i]);
+    }
+    free(ui->shownWords);
+    free(ui->shownDetails);
+    ui->shownWords = NULL;
+    ui->shownDetails = NULL;
+    ui->shownCount = 0;
+}
+
 void axyne_macos_lsp_completion(AxyneLspClient *client, uint64_t request_id,
                                 const AxyneLspCompletionItem *items,
                                 size_t count, void *user_data)
@@ -69,16 +105,24 @@ void axyne_macos_lsp_completion(AxyneLspClient *client, uint64_t request_id,
     message->client = client;
     message->request = request_id;
     message->words = count > 0 ? (char **)calloc(count, sizeof(char *)) : NULL;
+    message->details = count > 0 ? (char **)calloc(count, sizeof(char *)) : NULL;
     for (size_t i = 0; i < count && message->words != NULL; ++i) {
         char *word = axyne_macos_lsp_completion_word(&items[i]);
-        if (word != NULL) message->words[message->count++] = word;
+        if (word == NULL) continue;
+        if (message->details != NULL)
+            message->details[message->count] = axyne_macos_lsp_format_detail(&items[i]);
+        message->words[message->count++] = word;
     }
     [view retain];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [view lspNavApplyCompletion:message->words count:message->count
+        [view lspNavApplyCompletion:message->words details:message->details count:message->count
                              client:message->client request:message->request];
-        for (size_t i = 0; i < message->count; ++i) free(message->words[i]);
+        for (size_t i = 0; i < message->count; ++i) {
+            free(message->words[i]);
+            if (message->details != NULL) free(message->details[i]);
+        }
         free(message->words);
+        free(message->details);
         free(message);
         [view release];
     });
@@ -201,7 +245,7 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
     return YES;
 }
 
-- (void)lspNavApplyCompletion:(char **)words count:(size_t)count
+- (void)lspNavApplyCompletion:(char **)words details:(char **)details count:(size_t)count
                        client:(AxyneLspClient *)client request:(uint64_t)request
 {
     AxyneMacLspNavState *ui = (AxyneMacLspNavState *)_lspNavUi;
@@ -254,9 +298,36 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
     (void)[self sendEditorMessage:SCI_AUTOCSETCANCELATSTART wParam:0 lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSETMAXHEIGHT wParam:8 lParam:0];
     (void)[self sendEditorMessage:SCI_AUTOCSETSEPARATOR wParam:'\n' lParam:0];
+    axyne_macos_lsp_forget_shown(ui);
+    ui->shownWords = (char **)calloc(count, sizeof(char *));
+    ui->shownDetails = (char **)calloc(count, sizeof(char *));
+    if (ui->shownWords != NULL && ui->shownDetails != NULL && details != NULL) {
+        for (size_t i = 0; i < count; ++i) {
+            if (words[i] == NULL || details[i] == NULL) continue;
+            ui->shownWords[ui->shownCount] = strdup(words[i]);
+            ui->shownDetails[ui->shownCount] = strdup(details[i]);
+            if (ui->shownWords[ui->shownCount] == NULL || ui->shownDetails[ui->shownCount] == NULL) {
+                free(ui->shownWords[ui->shownCount]);
+                free(ui->shownDetails[ui->shownCount]);
+                break;
+            }
+            ++ui->shownCount;
+        }
+    }
+    [self styleCompletionList];
     (void)[self sendEditorMessage:SCI_AUTOCSHOW wParam:(uintptr_t)prefix_length lParam:(intptr_t)list];
     free(list);
     free(matches);
+    [self completionDetailUpdate];
+}
+
+- (const char *)lspNavCompletionDetail:(const char *)word
+{
+    AxyneMacLspNavState *ui = (AxyneMacLspNavState *)_lspNavUi;
+    if (ui == nil || word == NULL) return NULL;
+    for (size_t i = 0; i < ui->shownCount; ++i)
+        if (strcmp(ui->shownWords[i], word) == 0) return ui->shownDetails[i];
+    return NULL;
 }
 
 - (void)lspNavApplyNavigation:(char *)uri line:(size_t)line character:(size_t)character
@@ -402,7 +473,9 @@ static int axyne_macos_lsp_word_compare(const void *left, const void *right)
         free(ui->completionPath);
         free(ui->definitionPath);
         free(ui->referencesPath);
+        axyne_macos_lsp_forget_shown(ui);
     }
+    [self completionDetailTeardown];
     [_lspNavUi release];
     _lspNavUi = nil;
 }
