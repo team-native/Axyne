@@ -189,6 +189,20 @@ static int test_slice(void)
     return 1;
 }
 
+static int test_describe(void)
+{
+    char out[160];
+    const char *text = "int count = 0;\ncount++;\ncou";
+    size_t length = strlen(text);
+    CHECK(axyne_completion_describe_word(text, length, length, "count", out, sizeof(out)));
+    CHECK(strcmp(out, "2 uses \xc2\xb7 line 1: int count = 0;") == 0);
+    CHECK(!axyne_completion_describe_word(text, length, length, "cou", out, sizeof(out)));
+    CHECK(!axyne_completion_describe_word(text, length, length, "missing", out, sizeof(out)));
+    CHECK(strcmp(axyne_completion_kind_name(3), "function") == 0);
+    CHECK(axyne_completion_kind_name(0) == NULL && axyne_completion_kind_name(26) == NULL);
+    return 1;
+}
+
 int axyne_test_completion(const char *root)
 {
     (void)root;
@@ -200,5 +214,6 @@ int axyne_test_completion(const char *root)
     CHECK(test_utf8());
     CHECK(test_large_document());
     CHECK(test_slice());
+    CHECK(test_describe());
     return 1;
 }

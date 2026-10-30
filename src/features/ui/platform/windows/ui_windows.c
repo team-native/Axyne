@@ -905,6 +905,8 @@ static void axyne_fit_completion_popup(AxyneWindowState *state)
                      SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+static void axyne_completion_detail_update(AxyneWindowState *state);
+
 void axyne_win_completion_show_list(AxyneWindowState *state, size_t prefix,
                                     const char *list, char separator)
 {
@@ -916,8 +918,189 @@ void axyne_win_completion_show_list(AxyneWindowState *state, size_t prefix,
     SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
     SendMessageA(state->editor, SCI_AUTOCSETMAXWIDTH, 60, 0);
     SendMessageA(state->editor, SCI_AUTOCSETSEPARATOR, (WPARAM)(unsigned char)separator, 0);
+    /* Match the palette popup: panel background, light text, accent-tinted selection. */
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_TEXT));
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_PANEL));
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_TEXT));
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_SELECTION));
     SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix, (LPARAM)list);
     axyne_fit_completion_popup(state);
+    axyne_completion_detail_update(state);
+}
+
+/* Detail panel: a borderless popup beside the completion list showing the
+ * selected entry's LSP kind and type, or, for document words, how often and
+ * where the word is used. Styled like the palette popup: panel fill, border,
+ * the head (kind or use count) in the accent colour and the rest muted. */
+static const wchar_t *axyne_completion_detail_rest(const wchar_t *text)
+{
+    const wchar_t *dot = wcsstr(text, L" \x00b7 ");
+    return dot != NULL ? dot + 3 : NULL;
+}
+
+static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
+                                                     WPARAM w_param, LPARAM l_param)
+{
+    AxyneWindowState *state = (AxyneWindowState *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    if (message == WM_NCCREATE) {
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          (LONG_PTR)((CREATESTRUCTW *)l_param)->lpCreateParams);
+    } else if (message == WM_MOUSEACTIVATE) {
+        return MA_NOACTIVATE;
+    } else if (message == WM_PAINT && state != NULL) {
+        PAINTSTRUCT paint;
+        RECT rect;
+        wchar_t text[512];
+        HDC dc = BeginPaint(window, &paint);
+        const wchar_t *rest;
+        RECT head;
+        HBRUSH fill = CreateSolidBrush(axyne_win_color(AXYNE_WIN_COLOR_PANEL));
+        HBRUSH edge = CreateSolidBrush(axyne_win_color(AXYNE_WIN_COLOR_BORDER));
+        GetClientRect(window, &rect);
+        FillRect(dc, &rect, fill);
+        FrameRect(dc, &rect, edge);
+        if (MultiByteToWideChar(CP_UTF8, 0, state->completion_detail_text, -1, text,
+                                (int)(sizeof(text) / sizeof(text[0]))) == 0)
+            text[0] = L'\0';
+        rest = axyne_completion_detail_rest(text);
+        InflateRect(&rect, -8, -5);
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, state->ui_font != NULL ? state->ui_font : GetStockObject(DEFAULT_GUI_FONT));
+        head = rect;
+        SetTextColor(dc, axyne_win_color(AXYNE_WIN_COLOR_ACCENT));
+        DrawTextW(dc, text, rest != NULL ? (int)(rest - 3 - text) : -1, &head,
+                  DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | DT_CALCRECT);
+        DrawTextW(dc, text, rest != NULL ? (int)(rest - 3 - text) : -1, &head,
+                  DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (rest != NULL) {
+            rect.top = head.bottom + 2;
+            SetTextColor(dc, axyne_win_color(AXYNE_WIN_COLOR_MUTED));
+            DrawTextW(dc, rest, -1, &rect, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        }
+        DeleteObject(fill);
+        DeleteObject(edge);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    return DefWindowProcW(window, message, w_param, l_param);
+}
+
+static void axyne_completion_detail_hide(AxyneWindowState *state)
+{
+    if (state != NULL && state->completion_detail != NULL)
+        ShowWindow(state->completion_detail, SW_HIDE);
+}
+
+/* Fills state->completion_detail_text for the selected entry; 0 = no note. */
+static int axyne_completion_detail_text(AxyneWindowState *state, const char *word)
+{
+    const char *detail;
+    LRESULT length, caret;
+    size_t begin, end;
+    const char *text;
+    state->completion_detail_text[0] = '\0';
+    if (SendMessageA(state->editor, SCI_AUTOCGETSEPARATOR, 0, 0) == '\n') {
+        detail = axyne_win_lsp_completion_detail(state, word);
+        if (detail == NULL) return 0;
+        (void)snprintf(state->completion_detail_text,
+                       sizeof(state->completion_detail_text), "%s", detail);
+        return 1;
+    }
+    length = SendMessageA(state->editor, SCI_GETLENGTH, 0, 0);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    if (length <= 0 || caret < 0 || caret > length) return 0;
+    axyne_completion_window((size_t)length, (size_t)caret, &begin, &end);
+    text = (const char *)SendMessageA(state->editor, SCI_GETRANGEPOINTER,
+                                      (WPARAM)begin, (LPARAM)(end - begin));
+    if (text != NULL &&
+        axyne_completion_describe_word(text, end - begin, (size_t)caret - begin, word,
+                                       state->completion_detail_text,
+                                       sizeof(state->completion_detail_text)))
+        return 1;
+    /* Word lists hold document words and the language keywords only. */
+    (void)snprintf(state->completion_detail_text,
+                   sizeof(state->completion_detail_text), "keyword");
+    return 1;
+}
+
+static void axyne_completion_detail_update(AxyneWindowState *state)
+{
+    static int registered;
+    AxyneCompletionPopupSearch search = { NULL };
+    RECT popup, bounds, measure = { 0, 0, 360, 0 };
+    wchar_t text[512];
+    char word[AXYNE_COMPLETION_MAX_WORD + 1];
+    LRESULT word_length;
+    HDC dc;
+    int width, height, x, y;
+    if (state == NULL || state->editor == NULL) return;
+    if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0) {
+        axyne_completion_detail_hide(state);
+        return;
+    }
+    word_length = SendMessageA(state->editor, SCI_AUTOCGETCURRENTTEXT, 0, 0);
+    if (word_length <= 0 || word_length > AXYNE_COMPLETION_MAX_WORD) {
+        axyne_completion_detail_hide(state);
+        return;
+    }
+    SendMessageA(state->editor, SCI_AUTOCGETCURRENTTEXT, 0, (LPARAM)word);
+    word[word_length] = '\0';
+    EnumThreadWindows(GetCurrentThreadId(), axyne_find_completion_popup, (LPARAM)&search);
+    if (!axyne_completion_detail_text(state, word) || search.found == NULL ||
+        !GetWindowRect(search.found, &popup) || !GetClientRect(state->main_window, &bounds)) {
+        axyne_completion_detail_hide(state);
+        return;
+    }
+    MapWindowPoints(state->main_window, NULL, (POINT *)&bounds, 2);
+    if (!registered) {
+        WNDCLASSEXW detail_class = { sizeof(detail_class) };
+        detail_class.lpfnWndProc = axyne_completion_detail_proc;
+        detail_class.hInstance = GetModuleHandleW(NULL);
+        detail_class.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        detail_class.lpszClassName = L"AxyneCompletionDetail";
+        registered = RegisterClassExW(&detail_class) != 0;
+        if (!registered) return;
+    }
+    if (state->completion_detail == NULL) {
+        state->completion_detail = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"AxyneCompletionDetail", L"",
+            WS_POPUP, 0, 0, 0, 0, state->main_window, NULL, GetModuleHandleW(NULL), state);
+        if (state->completion_detail == NULL) return;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, state->completion_detail_text, -1, text,
+                            (int)(sizeof(text) / sizeof(text[0]))) == 0)
+        return;
+    dc = GetDC(state->completion_detail);
+    SelectObject(dc, state->ui_font != NULL ? state->ui_font : GetStockObject(DEFAULT_GUI_FONT));
+    {
+        const wchar_t *rest = axyne_completion_detail_rest(text);
+        RECT head = measure;
+        DrawTextW(dc, text, rest != NULL ? (int)(rest - 3 - text) : -1, &head,
+                  DT_CALCRECT | DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+        if (head.right > measure.right) head.right = measure.right;
+        if (rest != NULL)
+            DrawTextW(dc, rest, -1, &measure, DT_CALCRECT | DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        else
+            measure.right = measure.bottom = 0;
+        width = (head.right > measure.right ? head.right : measure.right) + 16;
+        height = (head.bottom - head.top) + (rest != NULL ? measure.bottom - measure.top + 2 : 0) + 10;
+    }
+    ReleaseDC(state->completion_detail, dc);
+    x = popup.right + 2;
+    y = popup.top;
+    if (x + width > bounds.right) x = popup.left - width - 2;
+    if (x < bounds.left) {
+        x = popup.left;
+        y = popup.bottom + 2;
+        if (y + height > bounds.bottom) y = popup.top - height - 2;
+    }
+    SetWindowPos(state->completion_detail, HWND_TOP, x, y, width, height,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(state->completion_detail, NULL, TRUE);
 }
 
 /* Native scrollbars of the Scintilla window follow the editor theme: the
@@ -11249,6 +11432,15 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             (void)axyne_documents_mark_dirty(&state->documents,
                 state->documents.active_index, NULL);
             axyne_update_title(window, state);
+        }
+        if (header != NULL && header->hwndFrom == state->editor) {
+            if (header->code == SCN_AUTOCSELECTIONCHANGE)
+                axyne_completion_detail_update(state);
+            else if (header->code == SCN_AUTOCCANCELLED || header->code == SCN_AUTOCCOMPLETED ||
+                     header->code == SCN_AUTOCSELECTION ||
+                     (header->code == SCN_UPDATEUI &&
+                      SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0))
+                axyne_completion_detail_hide(state);
         }
         if (header != NULL && header->hwndFrom == state->editor && !state->loading_editor)
             axyne_win_hooks_editor_notify(state, (const SCNotification *)l_param);

@@ -337,6 +337,8 @@ typedef struct AxyneDiscoveryBox { id target; } AxyneDiscoveryBox;
     id _toolsUi;
     id _helpUi;
     id _lspNavUi;
+    NSPanel *_completionDetail;          /* completion entry detail popup */
+    NSTextField *_completionDetailLabel; /* owned by _completionDetail */
     id _diagUi;
     id _releaseUi;
 }
@@ -453,6 +455,11 @@ static inline uint32_t axyne_macos_output_background(const AxyneThemePreferences
 // Nonzero when the caret sits in a comment or string literal; completion
 // (word and LSP) stays closed there.
 - (BOOL)completionBlocked;
+- (void)styleCompletionList;
+- (void)completionDetailUpdate;
+- (void)completionDetailHide;
+- (void)completionDetailTeardown;
+- (void)completionDetailShow:(const char *)detail;
 - (void)updateEmptyState;
 - (void)applyEmptyGuideTheme;
 - (BOOL)editorReadyForSave;
@@ -890,7 +897,8 @@ void axyne_macos_terminal_exit(AxyneProcess *process, int exit_code, void *user_
 - (void)lspNavEditorNotification:(SCNotification *)notification;
 - (AxyneMacLspNavState *)lspNavState;
 - (void)lspNavRequestCompletion;
-- (void)lspNavApplyCompletion:(char **)words count:(size_t)count
+- (const char *)lspNavCompletionDetail:(const char *)word;
+- (void)lspNavApplyCompletion:(char **)words details:(char **)details count:(size_t)count
                       client:(AxyneLspClient *)client request:(uint64_t)request;
 - (void)lspNavApplyNavigation:(char *)uri line:(size_t)line character:(size_t)character
                         count:(size_t)count client:(AxyneLspClient *)client
