@@ -917,6 +917,15 @@ void axyne_win_completion_show_list(AxyneWindowState *state, size_t prefix,
     SendMessageA(state->editor, SCI_AUTOCSETMAXHEIGHT, 8, 0);
     SendMessageA(state->editor, SCI_AUTOCSETMAXWIDTH, 60, 0);
     SendMessageA(state->editor, SCI_AUTOCSETSEPARATOR, (WPARAM)(unsigned char)separator, 0);
+    /* Match the palette popup: panel background, light text, accent-tinted selection. */
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_TEXT));
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_PANEL));
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_TEXT));
+    SendMessageA(state->editor, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK,
+                 0xff000000u | axyne_win_color(AXYNE_WIN_COLOR_SELECTION));
     SendMessageA(state->editor, SCI_AUTOCSHOW, (WPARAM)prefix, (LPARAM)list);
     axyne_fit_completion_popup(state);
     axyne_completion_detail_update(state);
@@ -924,7 +933,14 @@ void axyne_win_completion_show_list(AxyneWindowState *state, size_t prefix,
 
 /* Detail panel: a borderless popup beside the completion list showing the
  * selected entry's LSP kind and type, or, for document words, how often and
- * where the word is used. It follows the editor's default style colours. */
+ * where the word is used. Styled like the palette popup: panel fill, border,
+ * the head (kind or use count) in the accent colour and the rest muted. */
+static const wchar_t *axyne_completion_detail_rest(const wchar_t *text)
+{
+    const wchar_t *dot = wcsstr(text, L" \x00b7 ");
+    return dot != NULL ? dot + 3 : NULL;
+}
+
 static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
                                                      WPARAM w_param, LPARAM l_param)
 {
@@ -939,23 +955,31 @@ static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
         RECT rect;
         wchar_t text[512];
         HDC dc = BeginPaint(window, &paint);
-        COLORREF back = (COLORREF)SendMessageA(state->editor, SCI_STYLEGETBACK, STYLE_DEFAULT, 0);
-        COLORREF fore = (COLORREF)SendMessageA(state->editor, SCI_STYLEGETFORE, STYLE_DEFAULT, 0);
-        HBRUSH fill = CreateSolidBrush(back);
-        HBRUSH edge = CreateSolidBrush(RGB((GetRValue(back) + GetRValue(fore)) / 2,
-                                           (GetGValue(back) + GetGValue(fore)) / 2,
-                                           (GetBValue(back) + GetBValue(fore)) / 2));
+        const wchar_t *rest;
+        RECT head;
+        HBRUSH fill = CreateSolidBrush(axyne_win_color(AXYNE_WIN_COLOR_PANEL));
+        HBRUSH edge = CreateSolidBrush(axyne_win_color(AXYNE_WIN_COLOR_BORDER));
         GetClientRect(window, &rect);
         FillRect(dc, &rect, fill);
         FrameRect(dc, &rect, edge);
         if (MultiByteToWideChar(CP_UTF8, 0, state->completion_detail_text, -1, text,
                                 (int)(sizeof(text) / sizeof(text[0]))) == 0)
             text[0] = L'\0';
-        InflateRect(&rect, -6, -4);
+        rest = axyne_completion_detail_rest(text);
+        InflateRect(&rect, -8, -5);
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, fore);
         SelectObject(dc, state->ui_font != NULL ? state->ui_font : GetStockObject(DEFAULT_GUI_FONT));
-        DrawTextW(dc, text, -1, &rect, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        head = rect;
+        SetTextColor(dc, axyne_win_color(AXYNE_WIN_COLOR_ACCENT));
+        DrawTextW(dc, text, rest != NULL ? (int)(rest - 3 - text) : -1, &head,
+                  DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | DT_CALCRECT);
+        DrawTextW(dc, text, rest != NULL ? (int)(rest - 3 - text) : -1, &head,
+                  DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (rest != NULL) {
+            rect.top = head.bottom + 2;
+            SetTextColor(dc, axyne_win_color(AXYNE_WIN_COLOR_MUTED));
+            DrawTextW(dc, rest, -1, &rect, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        }
         DeleteObject(fill);
         DeleteObject(edge);
         EndPaint(window, &paint);
@@ -1051,10 +1075,20 @@ static void axyne_completion_detail_update(AxyneWindowState *state)
         return;
     dc = GetDC(state->completion_detail);
     SelectObject(dc, state->ui_font != NULL ? state->ui_font : GetStockObject(DEFAULT_GUI_FONT));
-    DrawTextW(dc, text, -1, &measure, DT_CALCRECT | DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+    {
+        const wchar_t *rest = axyne_completion_detail_rest(text);
+        RECT head = measure;
+        DrawTextW(dc, text, rest != NULL ? (int)(rest - 3 - text) : -1, &head,
+                  DT_CALCRECT | DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+        if (head.right > measure.right) head.right = measure.right;
+        if (rest != NULL)
+            DrawTextW(dc, rest, -1, &measure, DT_CALCRECT | DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        else
+            measure.right = measure.bottom = 0;
+        width = (head.right > measure.right ? head.right : measure.right) + 16;
+        height = (head.bottom - head.top) + (rest != NULL ? measure.bottom - measure.top + 2 : 0) + 10;
+    }
     ReleaseDC(state->completion_detail, dc);
-    width = measure.right - measure.left + 12;
-    height = measure.bottom - measure.top + 8;
     x = popup.right + 2;
     y = popup.top;
     if (x + width > bounds.right) x = popup.left - width - 2;
