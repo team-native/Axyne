@@ -210,6 +210,8 @@ typedef struct AxyneWindowState {
     int runtimes_discovered;
     int build_menu_open; /* chevron points up while the popup is open */
     int runtime_discovery_posted;
+    HANDLE runtime_thread; /* background discovery, joined before use */
+    AxyneRuntimeList runtime_result; /* written by runtime_thread only */
     HWND completion_detail; /* detail panel beside the completion list */
     char completion_detail_text[512];
     AxyneLanguagePlan pending_plan; /* run step that follows a successful build */

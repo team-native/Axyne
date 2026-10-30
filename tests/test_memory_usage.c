@@ -33,9 +33,9 @@ int axyne_test_memory_usage(const char *root)
     /* Gauge text and thresholds (D15). */
     (void)axyne_memory_format_gauge((uint64_t)(38.4 * 1048576.0), AXYNE_MEMORY_BUDGET_BYTES,
                                     buffer, sizeof(buffer));
-    AXYNE_TEST_STREQ(buffer, "38.4 / 100 MB");
+    AXYNE_TEST_STREQ(buffer, "38.4 / 250 MB");
     (void)axyne_memory_format_gauge(0, AXYNE_MEMORY_BUDGET_BYTES, buffer, sizeof(buffer));
-    AXYNE_TEST_STREQ(buffer, "0.0 / 100 MB");
+    AXYNE_TEST_STREQ(buffer, "0.0 / 250 MB");
     (void)axyne_memory_format_gauge(AXYNE_MEMORY_MB * 3 / 2, AXYNE_MEMORY_MB * 5 / 2,
                                     buffer, sizeof(buffer));
     AXYNE_TEST_STREQ(buffer, "1.5 / 2.5 MB");
@@ -45,9 +45,9 @@ int axyne_test_memory_usage(const char *root)
                                                 buffer, 4), 12);
     AXYNE_TEST_STREQ(buffer, "1.0");
     AXYNE_TEST_EQ_INT(axyne_memory_format_bytes(AXYNE_MEMORY_MB, NULL, 0), 6);
-    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(80 * AXYNE_MEMORY_MB), AXYNE_MEMORY_LEVEL_NORMAL);
-    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(80 * AXYNE_MEMORY_MB + 1), AXYNE_MEMORY_LEVEL_WARNING);
-    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(100 * AXYNE_MEMORY_MB), AXYNE_MEMORY_LEVEL_WARNING);
-    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(100 * AXYNE_MEMORY_MB + 1), AXYNE_MEMORY_LEVEL_ERROR);
+    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(200 * AXYNE_MEMORY_MB), AXYNE_MEMORY_LEVEL_NORMAL);
+    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(200 * AXYNE_MEMORY_MB + 1), AXYNE_MEMORY_LEVEL_WARNING);
+    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(250 * AXYNE_MEMORY_MB), AXYNE_MEMORY_LEVEL_WARNING);
+    AXYNE_TEST_EQ_INT(axyne_memory_usage_level(250 * AXYNE_MEMORY_MB + 1), AXYNE_MEMORY_LEVEL_ERROR);
     return 1;
 }

@@ -69,24 +69,51 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $installed = $false
+          $downloadDirectory = Join-Path $env:RUNNER_TEMP 'nsis-download'
+          $packagePath = Join-Path $downloadDirectory 'nsis.portable.3.13.0.nupkg'
+          $packageZipPath = Join-Path $downloadDirectory 'nsis.portable.3.13.0.zip'
+          $packageDirectory = Join-Path $downloadDirectory 'package'
+          $nsisDirectory = Join-Path $downloadDirectory 'nsis'
+          New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
+
+          $packageUrl = 'https://packages.chocolatey.org/nsis.portable.3.13.0.nupkg'
+          $downloaded = $false
           for ($attempt = 1; $attempt -le 3; $attempt++) {
-            choco install nsis -y --no-progress
-            if ($LASTEXITCODE -eq 0) {
-              $installed = $true
+            try {
+              Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -TimeoutSec 120
+              $downloaded = $true
               break
             }
-            if ($attempt -lt 3) {
-              Write-Host "NSIS installation attempt $attempt failed; retrying after 15 seconds."
+            catch {
+              if ($attempt -eq 3) { throw }
+              Write-Host "NSIS package download attempt $attempt failed; retrying in 15 seconds."
               Start-Sleep -Seconds 15
             }
           }
-          if (-not $installed) {
-            throw 'NSIS installation failed after 3 attempts.'
+          if (-not $downloaded) {
+            throw 'NSIS package download failed after 3 attempts.'
           }
-          $env:Path = "C:\Program Files (x86)\NSIS;$env:Path"
-          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
-            throw 'NSIS compiler was not installed.'
+
+          Copy-Item -LiteralPath $packagePath -Destination $packageZipPath
+          Expand-Archive -LiteralPath $packageZipPath -DestinationPath $packageDirectory
+          $nsisArchive = Join-Path $packageDirectory 'tools\nsis-3.13.zip'
+          $expectedHash = 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8'
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nsisArchive).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "NSIS archive SHA-256 mismatch: $actualHash"
+          }
+
+          Expand-Archive -LiteralPath $nsisArchive -DestinationPath $nsisDirectory
+          $nsisBinDirectory = Join-Path $nsisDirectory 'nsis-3.13'
+          $makensisPath = Join-Path $nsisBinDirectory 'makensis.exe'
+          if (-not (Test-Path -LiteralPath $makensisPath -PathType Leaf)) {
+            throw 'Verified NSIS archive did not contain makensis.exe.'
+          }
+          $env:Path = "$nsisBinDirectory;$env:Path"
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $nsisBinDirectory
+          & $makensisPath /VERSION
+          if ($LASTEXITCODE -ne 0) {
+            throw 'NSIS compiler could not be executed.'
           }
 
       - name: Package Windows app output
