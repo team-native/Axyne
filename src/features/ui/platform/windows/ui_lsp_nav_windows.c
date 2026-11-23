@@ -812,6 +812,8 @@ static int axyne_win_lsp_active_path_is(AxyneWindowState *state, const char *pat
            strcmp(document->path, path) == 0;
 }
 
+static char *axyne_win_lsp_uri_path(const char *uri);
+
 /* ---- applying edits ------------------------------------------------------ */
 
 /* Applies `edits` (LSP positions) to the document in the editor as one undo
