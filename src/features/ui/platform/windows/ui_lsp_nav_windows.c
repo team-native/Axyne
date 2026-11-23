@@ -58,6 +58,12 @@ struct AxyneWinLspNavUi {
     uint64_t hover_request;
     LRESULT hover_position;
     LRESULT hover_word_start, hover_word_end; /* the word the tip belongs to */
+    /* The tip is our own popup (not a Scintilla call tip): it is created once,
+     * painted in the theme colours and only moved/updated, so it never flashes. */
+    HWND tip_window;
+    HFONT tip_font;
+    char tip_text[2048];
+    size_t tip_hl_start, tip_hl_end;
     char *hover_path;
     uint64_t signature_request;
     LRESULT signature_caret;
@@ -702,34 +708,193 @@ static AxyneLspPosition axyne_win_lsp_position_at(AxyneWindowState *state,
     return position;
 }
 
+static int axyne_win_lsp_tip_visible(const struct AxyneWinLspNavUi *ui)
+{
+    return ui != NULL && ui->tip_window != NULL && IsWindowVisible(ui->tip_window);
+}
+
 static void axyne_win_lsp_hide_tip(AxyneWindowState *state)
 {
     struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
-    if (state->editor != NULL && SendMessageA(state->editor, SCI_CALLTIPACTIVE, 0, 0) != 0)
-        SendMessageA(state->editor, SCI_CALLTIPCANCEL, 0, 0);
-    if (ui != NULL) ui->signature_active = 0;
+    if (ui == NULL) return;
+    if (ui->tip_window != NULL && IsWindowVisible(ui->tip_window))
+        ShowWindow(ui->tip_window, SW_HIDE);
+    ui->signature_active = 0;
 }
 
-/* Shows `text` as a call tip at `position`; the byte range [hl_start, hl_end)
- * of the text is highlighted (the active parameter). */
+static wchar_t *axyne_win_lsp_tip_wide(const char *utf8, size_t length)
+{
+    int count = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)length, NULL, 0);
+    wchar_t *wide = (wchar_t *)malloc(((size_t)count + 1) * sizeof(wchar_t));
+    if (wide == NULL) return NULL;
+    if (count > 0) MultiByteToWideChar(CP_UTF8, 0, utf8, (int)length, wide, count);
+    wide[count] = L'\0';
+    return wide;
+}
+
+/* Layout shared by painting and measuring: with a highlight the first line is
+ * the signature (drawn in pieces, the active parameter in the accent colour)
+ * and the rest is muted documentation; otherwise everything is plain text. */
+static void axyne_win_lsp_tip_draw(HDC dc, const struct AxyneWinLspNavUi *ui, RECT area,
+                                   int measure_only, int *out_width, int *out_height)
+{
+    const char *text = ui->tip_text;
+    const char *newline = strchr(text, '\n');
+    size_t first_length = newline != NULL ? (size_t)(newline - text) : strlen(text);
+    int has_highlight = ui->tip_hl_end > ui->tip_hl_start && ui->tip_hl_end <= first_length;
+    int width = 0, height = 0;
+    SetBkMode(dc, TRANSPARENT);
+    if (has_highlight) {
+        size_t parts[3][2] = { { 0, ui->tip_hl_start }, { ui->tip_hl_start, ui->tip_hl_end },
+                               { ui->tip_hl_end, first_length } };
+        int x = area.left, line_height = 0;
+        for (int i = 0; i < 3; ++i) {
+            wchar_t *wide = axyne_win_lsp_tip_wide(text + parts[i][0], parts[i][1] - parts[i][0]);
+            SIZE size = { 0, 0 };
+            if (wide == NULL) continue;
+            GetTextExtentPoint32W(dc, wide, (int)wcslen(wide), &size);
+            if (!measure_only) {
+                SetTextColor(dc, axyne_win_color(i == 1 ? AXYNE_WIN_COLOR_ACCENT : AXYNE_WIN_COLOR_TEXT));
+                TextOutW(dc, x, area.top, wide, (int)wcslen(wide));
+            }
+            x += size.cx;
+            if (size.cy > line_height) line_height = size.cy;
+            free(wide);
+        }
+        width = x - area.left;
+        height = line_height;
+        if (newline != NULL && newline[1] != '\0') {
+            wchar_t *wide = axyne_win_lsp_tip_wide(newline + 1, strlen(newline + 1));
+            RECT rest = area;
+            rest.top += height + 4;
+            if (wide != NULL) {
+                RECT calc = rest;
+                DrawTextW(dc, wide, -1, &calc, DT_CALCRECT | DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+                if (!measure_only) {
+                    SetTextColor(dc, axyne_win_color(AXYNE_WIN_COLOR_MUTED));
+                    DrawTextW(dc, wide, -1, &rest, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+                }
+                if (calc.right - area.left > width) width = calc.right - area.left;
+                height += 4 + (calc.bottom - calc.top);
+                free(wide);
+            }
+        }
+    } else {
+        wchar_t *wide = axyne_win_lsp_tip_wide(text, strlen(text));
+        if (wide != NULL) {
+            RECT calc = area;
+            DrawTextW(dc, wide, -1, &calc, DT_CALCRECT | DT_LEFT | DT_NOPREFIX | DT_EXPANDTABS);
+            if (!measure_only) {
+                SetTextColor(dc, axyne_win_color(AXYNE_WIN_COLOR_TEXT));
+                DrawTextW(dc, wide, -1, &area, DT_LEFT | DT_NOPREFIX | DT_EXPANDTABS);
+            }
+            width = calc.right - calc.left;
+            height = calc.bottom - calc.top;
+            free(wide);
+        }
+    }
+    if (out_width != NULL) *out_width = width;
+    if (out_height != NULL) *out_height = height;
+}
+
+static LRESULT CALLBACK axyne_win_lsp_tip_proc(HWND window, UINT message, WPARAM w_param,
+                                               LPARAM l_param)
+{
+    AxyneWindowState *state = (AxyneWindowState *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    if (message == WM_NCCREATE) {
+        SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW *)l_param)->lpCreateParams);
+    } else if (message == WM_MOUSEACTIVATE) {
+        return MA_NOACTIVATE;
+    } else if (message == WM_ERASEBKGND) {
+        return 1; /* WM_PAINT fills everything: no white flash */
+    } else if (message == WM_PAINT && state != NULL && state->lsp_nav_ui != NULL) {
+        struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+        PAINTSTRUCT paint;
+        RECT client;
+        HDC dc = BeginPaint(window, &paint);
+        HDC buffer = CreateCompatibleDC(dc);
+        GetClientRect(window, &client);
+        {
+            HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+            HGDIOBJ old_bitmap = SelectObject(buffer, bitmap);
+            HBRUSH fill = CreateSolidBrush(axyne_win_color(AXYNE_WIN_COLOR_PANEL));
+            HBRUSH edge = CreateSolidBrush(axyne_win_color(AXYNE_WIN_COLOR_BORDER));
+            RECT area = client;
+            FillRect(buffer, &client, fill);
+            FrameRect(buffer, &client, edge);
+            SelectObject(buffer, ui->tip_font != NULL ? ui->tip_font : GetStockObject(DEFAULT_GUI_FONT));
+            area.left += 8; area.top += 5; area.right -= 8; area.bottom -= 5;
+            axyne_win_lsp_tip_draw(buffer, ui, area, 0, NULL, NULL);
+            BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
+            SelectObject(buffer, old_bitmap);
+            DeleteObject(bitmap); DeleteObject(fill); DeleteObject(edge);
+        }
+        DeleteDC(buffer);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    return DefWindowProcW(window, message, w_param, l_param);
+}
+
+/* Shows `text` above the line of `position`; the byte range [hl_start, hl_end)
+ * of its first line is highlighted (the active parameter). */
 static void axyne_win_lsp_show_tip(AxyneWindowState *state, LRESULT position, const char *text,
                                    size_t hl_start, size_t hl_end)
 {
-    char font[128] = "";
-    /* Draw the tip with a style of its own: the editor font, the panel colours. */
-    SendMessageA(state->editor, SCI_STYLEGETFONT, STYLE_DEFAULT, (LPARAM)font);
-    if (font[0] != '\0') SendMessageA(state->editor, SCI_STYLESETFONT, STYLE_CALLTIP, (LPARAM)font);
-    SendMessageA(state->editor, SCI_STYLESETSIZE, STYLE_CALLTIP,
-                 SendMessageA(state->editor, SCI_STYLEGETSIZE, STYLE_DEFAULT, 0));
-    SendMessageA(state->editor, SCI_STYLESETBACK, STYLE_CALLTIP, axyne_win_color(AXYNE_WIN_COLOR_PANEL));
-    SendMessageA(state->editor, SCI_STYLESETFORE, STYLE_CALLTIP, axyne_win_color(AXYNE_WIN_COLOR_TEXT));
-    SendMessageA(state->editor, SCI_CALLTIPUSESTYLE, 4, 0);
-    SendMessageA(state->editor, SCI_CALLTIPSETBACK, axyne_win_color(AXYNE_WIN_COLOR_PANEL), 0);
-    SendMessageA(state->editor, SCI_CALLTIPSETFORE, axyne_win_color(AXYNE_WIN_COLOR_TEXT), 0);
-    SendMessageA(state->editor, SCI_CALLTIPSETFOREHLT, axyne_win_color(AXYNE_WIN_COLOR_ACCENT), 0);
-    SendMessageA(state->editor, SCI_CALLTIPSHOW, (WPARAM)position, (LPARAM)text);
-    if (hl_end > hl_start)
-        SendMessageA(state->editor, SCI_CALLTIPSETHLT, (WPARAM)hl_start, (LPARAM)hl_end);
+    static int registered;
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    char font_name[128] = "";
+    RECT main_rect, measure_area = { 0, 0, 640, 0 };
+    POINT point;
+    LRESULT line_height, font_size;
+    HDC screen, dc;
+    int width = 0, height = 0, x, y;
+    if (ui == NULL || state->editor == NULL || text == NULL) return;
+    if (!registered) {
+        WNDCLASSEXW tip_class = { sizeof(tip_class) };
+        tip_class.lpfnWndProc = axyne_win_lsp_tip_proc;
+        tip_class.hInstance = GetModuleHandleW(NULL);
+        tip_class.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        tip_class.lpszClassName = L"AxyneLspTip";
+        registered = RegisterClassExW(&tip_class) != 0;
+        if (!registered) return;
+    }
+    if (ui->tip_window == NULL) {
+        ui->tip_window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"AxyneLspTip", L"",
+                                         WS_POPUP, 0, 0, 0, 0, state->main_window, NULL,
+                                         GetModuleHandleW(NULL), state);
+        if (ui->tip_window == NULL) return;
+    }
+    (void)snprintf(ui->tip_text, sizeof(ui->tip_text), "%s", text);
+    ui->tip_hl_start = hl_start;
+    ui->tip_hl_end = hl_end;
+    /* the editor's font, so code in the tip matches the code it describes */
+    SendMessageA(state->editor, SCI_STYLEGETFONT, STYLE_DEFAULT, (LPARAM)font_name);
+    font_size = SendMessageA(state->editor, SCI_STYLEGETSIZE, STYLE_DEFAULT, 0);
+    screen = GetDC(NULL);
+    if (ui->tip_font != NULL) DeleteObject(ui->tip_font);
+    ui->tip_font = CreateFontA(-MulDiv((int)(font_size > 0 ? font_size : 10), GetDeviceCaps(screen, LOGPIXELSY), 72),
+                               0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               FIXED_PITCH | FF_MODERN, font_name[0] != '\0' ? font_name : "Consolas");
+    ReleaseDC(NULL, screen);
+    dc = GetDC(ui->tip_window);
+    SelectObject(dc, ui->tip_font != NULL ? ui->tip_font : GetStockObject(DEFAULT_GUI_FONT));
+    axyne_win_lsp_tip_draw(dc, ui, measure_area, 1, &width, &height);
+    ReleaseDC(ui->tip_window, dc);
+    width += 18; height += 12;
+    point.x = (LONG)SendMessageA(state->editor, SCI_POINTXFROMPOSITION, 0, position);
+    point.y = (LONG)SendMessageA(state->editor, SCI_POINTYFROMPOSITION, 0, position);
+    line_height = SendMessageA(state->editor, SCI_TEXTHEIGHT, 0, 0);
+    ClientToScreen(state->editor, &point);
+    GetWindowRect(state->main_window, &main_rect);
+    x = point.x - 4;
+    y = point.y - height - 2; /* above the line: the pointer stays on the code */
+    if (y < main_rect.top) y = point.y + (int)line_height + 2;
+    if (x + width > main_rect.right) x = main_rect.right - width;
+    if (x < main_rect.left) x = main_rect.left;
+    SetWindowPos(ui->tip_window, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(ui->tip_window, NULL, FALSE);
 }
 
 /* At most 18 lines / 1400 bytes of plain text for a tip. */
@@ -1167,6 +1332,8 @@ static void axyne_win_lsp_nav_destroy(AxyneWindowState *state)
     if (state == NULL || state->lsp_nav_ui == NULL) return;
     axyne_win_lsp_clear_request_paths(state->lsp_nav_ui);
     axyne_win_lsp_forget_shown(state->lsp_nav_ui);
+    if (state->lsp_nav_ui->tip_window != NULL) DestroyWindow(state->lsp_nav_ui->tip_window);
+    if (state->lsp_nav_ui->tip_font != NULL) DeleteObject(state->lsp_nav_ui->tip_font);
     free(state->lsp_nav_ui->hover_path);
     free(state->lsp_nav_ui->signature_path);
     free(state->lsp_nav_ui);
@@ -1324,7 +1491,7 @@ static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
     } else if (notification->nmhdr.code == SCN_DWELLSTART) {
         struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
         /* still on the word whose tip is showing: nothing to do (no blinking) */
-        if (SendMessageA(state->editor, SCI_CALLTIPACTIVE, 0, 0) != 0 &&
+        if (axyne_win_lsp_tip_visible(ui) &&
             ui->hover_word_end > ui->hover_word_start &&
             notification->position >= ui->hover_word_start &&
             notification->position <= ui->hover_word_end)
@@ -1334,18 +1501,12 @@ static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
             (void)axyne_win_lsp_request_hover(state, notification->position);
     } else if (notification->nmhdr.code == SCN_DWELLEND) {
         struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
-        if (!ui->signature_active && SendMessageA(state->editor, SCI_CALLTIPACTIVE, 0, 0) != 0) {
+        if (!ui->signature_active && axyne_win_lsp_tip_visible(ui)) {
             /* The pointer moved: keep the tip while it is still on the same word
              * or on the tip itself, hide it once it leaves both. */
             int keep = 0;
             POINT cursor;
-            char name[16];
-            if (GetCursorPos(&cursor)) {
-                HWND under = WindowFromPoint(cursor);
-                if (under != NULL && GetClassNameA(under, name, sizeof(name)) > 0 &&
-                    strcmp(name, "CallTip") == 0)
-                    keep = 1;
-            }
+            if (GetCursorPos(&cursor) && WindowFromPoint(cursor) == ui->tip_window) keep = 1;
             if (!keep) {
                 LRESULT at = SendMessageA(state->editor, SCI_POSITIONFROMPOINTCLOSE,
                                           (WPARAM)notification->x, (LPARAM)notification->y);
