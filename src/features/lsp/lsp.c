@@ -1099,6 +1099,35 @@ static int lsp_send_position_request_locked(AxyneLspClient *client,
     return ok;
 }
 
+/* What Axyne's editor can consume. snippetSupport stays false so servers send
+ * plain insert text; markdown is accepted for documentation and hover. */
+#define LSP_CLIENT_CAPABILITIES \
+    "{\"general\":{\"positionEncodings\":[\"utf-16\"]}," \
+    "\"window\":{\"workDoneProgress\":true}," \
+    "\"workspace\":{\"workspaceFolders\":true,\"configuration\":true," \
+        "\"applyEdit\":false,\"workspaceEdit\":{\"documentChanges\":false}}," \
+    "\"textDocument\":{" \
+        "\"synchronization\":{\"didSave\":true,\"dynamicRegistration\":false}," \
+        "\"publishDiagnostics\":{}," \
+        "\"completion\":{\"contextSupport\":true,\"completionItem\":{" \
+            "\"snippetSupport\":false,\"deprecatedSupport\":true," \
+            "\"documentationFormat\":[\"markdown\",\"plaintext\"]," \
+            "\"labelDetailsSupport\":true,\"tagSupport\":{\"valueSet\":[1]}," \
+            "\"resolveSupport\":{\"properties\":[\"documentation\",\"detail\",\"additionalTextEdits\"]}}}," \
+        "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}," \
+        "\"signatureHelp\":{\"signatureInformation\":{" \
+            "\"documentationFormat\":[\"markdown\",\"plaintext\"]," \
+            "\"parameterInformation\":{\"labelOffsetSupport\":true}," \
+            "\"activeParameterSupport\":true}}," \
+        "\"definition\":{},\"references\":{}," \
+        "\"rename\":{\"prepareSupport\":false}," \
+        "\"codeAction\":{\"isPreferredSupport\":true,\"dataSupport\":true," \
+            "\"resolveSupport\":{\"properties\":[\"edit\"]}," \
+            "\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":" \
+            "[\"quickfix\",\"refactor\",\"source\",\"source.organizeImports\"]}}}," \
+        "\"formatting\":{}," \
+        "\"documentSymbol\":{\"hierarchicalDocumentSymbolSupport\":true}}}"
+
 static int lsp_send_initialize_locked(AxyneLspClient *client)
 {
     LspBuffer body = { 0 };
@@ -1113,7 +1142,20 @@ static int lsp_send_initialize_locked(AxyneLspClient *client)
     if (client->root_uri == NULL) {
         if (!LSP_APPEND_LITERAL(&body, "null")) goto fail;
     } else if (!lsp_json_cstr(&body, client->root_uri)) goto fail;
-    if (!LSP_APPEND_LITERAL(&body, ",\"capabilities\":{\"textDocument\":{\"publishDiagnostics\":{},\"completion\":{\"completionItem\":{\"snippetSupport\":false}},\"definition\":{}}},\"initializationOptions\":") ||
+    if (client->root_uri != NULL) {
+        /* workspaceFolders: servers such as pyright and tsserver locate the
+         * project (tsconfig, node_modules) from the folder, not rootUri. */
+        const char *name = client->root_path;
+        const char *cursor;
+        for (cursor = client->root_path; cursor != NULL && *cursor != '\0'; ++cursor)
+            if ((*cursor == '/' || *cursor == '\\') && cursor[1] != '\0') name = cursor + 1;
+        if (!LSP_APPEND_LITERAL(&body, ",\"workspaceFolders\":[{\"uri\":") ||
+            !lsp_json_cstr(&body, client->root_uri) ||
+            !LSP_APPEND_LITERAL(&body, ",\"name\":") ||
+            !lsp_json_cstr(&body, name != NULL ? name : "workspace") ||
+            !LSP_APPEND_LITERAL(&body, "}]")) goto fail;
+    } else if (!LSP_APPEND_LITERAL(&body, ",\"workspaceFolders\":null")) goto fail;
+    if (!LSP_APPEND_LITERAL(&body, ",\"capabilities\":" LSP_CLIENT_CAPABILITIES ",\"initializationOptions\":") ||
         !lsp_buffer_append(&body, client->initialization_options_json,
                            strlen(client->initialization_options_json)) ||
         !LSP_APPEND_LITERAL(&body, "}}")) goto fail; /* params, message */
@@ -1158,10 +1200,86 @@ static void lsp_dispatch_event(AxyneLspClient *client, LspEvent *event)
     lsp_event_dispose(event);
 }
 
+/* Number of entries in params.items (workspace/configuration). */
+static size_t lsp_count_configuration_items(const char *start, const char *end)
+{
+    JsonCursor cursor = { start, end };
+    size_t count = 0;
+    char *key;
+    if (start == NULL || !json_expect(&cursor, '{')) return 0;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == '}') return 0;
+    for (;;) {
+        key = json_read_string(&cursor);
+        if (key == NULL || !json_expect(&cursor, ':')) { free(key); return 0; }
+        if (strcmp(key, "items") == 0) {
+            free(key);
+            if (!json_expect(&cursor, '[')) return 0;
+            json_skip_space(&cursor);
+            if (cursor.at < cursor.end && *cursor.at == ']') return 0;
+            for (;;) {
+                if (!json_skip_value(&cursor, 0)) return count;
+                ++count;
+                json_skip_space(&cursor);
+                if (cursor.at < cursor.end && *cursor.at == ']') return count;
+                if (!json_expect(&cursor, ',')) return count;
+            }
+        }
+        free(key);
+        if (!json_skip_value(&cursor, 0)) return 0;
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == '}') return 0;
+        if (!json_expect(&cursor, ',')) return 0;
+    }
+}
+
+/* Answers a request the server sent to the client. Without a reply servers
+ * such as pyright and typescript-language-server wait forever on
+ * workspace/configuration or client/registerCapability. */
+static void lsp_reply_server_request_locked(AxyneLspClient *client, const char *method,
+                                            const char *id, size_t id_length,
+                                            const char *params_start,
+                                            const char *params_end)
+{
+    LspBuffer body = { 0 };
+    int ok = 1;
+    ok = ok && LSP_APPEND_LITERAL(&body, "{\"jsonrpc\":\"2.0\",\"id\":") &&
+         lsp_buffer_append(&body, id, id_length);
+    if (strcmp(method, "workspace/configuration") == 0) {
+        size_t count = lsp_count_configuration_items(params_start, params_end), i;
+        ok = ok && LSP_APPEND_LITERAL(&body, ",\"result\":[");
+        for (i = 0; ok && i < count; ++i)
+            ok = (i == 0 || lsp_buffer_put(&body, ',')) && LSP_APPEND_LITERAL(&body, "null");
+        ok = ok && LSP_APPEND_LITERAL(&body, "]}");
+    } else if (strcmp(method, "workspace/workspaceFolders") == 0) {
+        if (client->root_uri != NULL) {
+            ok = ok && LSP_APPEND_LITERAL(&body, ",\"result\":[{\"uri\":") &&
+                 lsp_json_cstr(&body, client->root_uri) &&
+                 LSP_APPEND_LITERAL(&body, ",\"name\":\"workspace\"}]}");
+        } else ok = ok && LSP_APPEND_LITERAL(&body, ",\"result\":null}");
+    } else if (strcmp(method, "workspace/applyEdit") == 0) {
+        ok = ok && LSP_APPEND_LITERAL(&body, ",\"result\":{\"applied\":false,"
+                                             "\"failureReason\":\"not supported\"}}");
+    } else if (strcmp(method, "client/registerCapability") == 0 ||
+               strcmp(method, "client/unregisterCapability") == 0 ||
+               strcmp(method, "window/workDoneProgress/create") == 0 ||
+               strcmp(method, "window/showMessageRequest") == 0 ||
+               strcmp(method, "window/showDocument") == 0) {
+        ok = ok && LSP_APPEND_LITERAL(&body, ",\"result\":null}");
+    } else {
+        ok = ok && LSP_APPEND_LITERAL(&body, ",\"error\":{\"code\":-32601,"
+                                             "\"message\":\"Method not found\"}}");
+    }
+    if (ok) (void)lsp_send_body_locked(client, body.data, body.length);
+    lsp_buffer_dispose(&body);
+}
+
 static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
                                     size_t length, LspEvent *event)
 {
     JsonCursor cursor = { body, body + length };
+    const char *raw_id = NULL;
+    size_t raw_id_length = 0;
     const char *params_start = NULL, *params_end = NULL;
     const char *result_start = NULL, *result_end = NULL;
     char *key, *method = NULL;
@@ -1180,8 +1298,18 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
             }
         }
         else if (strcmp(key, "id") == 0) {
-            if (!json_read_uint(&cursor, &id)) { free(key); free(method); return 0; }
-            has_id = 1;
+            const char *id_begin;
+            json_skip_space(&cursor);
+            id_begin = cursor.at;
+            if (json_read_uint(&cursor, &id)) {
+                has_id = 1;
+            } else {
+                /* A string id from a server request: echoed back verbatim. */
+                cursor.at = id_begin;
+                if (!json_skip_value(&cursor, 0)) { free(key); free(method); return 0; }
+            }
+            raw_id = id_begin;
+            raw_id_length = (size_t)(cursor.at - id_begin);
         } else if (strcmp(key, "params") == 0) {
             params_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); free(method); return 0; }
             params_end = cursor.at;
@@ -1194,6 +1322,11 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
         free(key); json_skip_space(&cursor);
         if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; break; }
         if (!json_expect(&cursor, ',')) { free(method); return 0; }
+    }
+    if (method != NULL && raw_id != NULL && result_start == NULL && !has_error) {
+        lsp_reply_server_request_locked(client, method, raw_id, raw_id_length,
+                                        params_start, params_end);
+        free(method); return 1;
     }
     if (method != NULL && strcmp(method, "textDocument/publishDiagnostics") == 0 && params_start != NULL) {
         char *uri = NULL;
