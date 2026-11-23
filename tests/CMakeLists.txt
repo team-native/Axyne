@@ -517,4 +517,13 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_LIST_DIR}/lsp_test_server.py"
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-protocol")
     set_tests_properties(axyne-lsp-protocol PROPERTIES TIMEOUT 20)
+    add_executable(axyne_lsp_requests_tests test_lsp_requests.c)
+    target_link_libraries(axyne_lsp_requests_tests PRIVATE axyne_lsp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-requests")
+    add_test(NAME axyne-lsp-requests
+        COMMAND $<TARGET_FILE:axyne_lsp_requests_tests>
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/lsp_requests_server.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-requests")
+    set_tests_properties(axyne-lsp-requests PROPERTIES TIMEOUT 30)
 endif()

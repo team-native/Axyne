@@ -42,13 +42,22 @@ typedef struct LspDocument {
     size_t length;
     uint64_t version;
     int open_sent;
+    char *diagnostics_raw;   /* latest "diagnostics" array as sent, for code actions */
 } LspDocument;
 
 typedef enum LspRequestKind {
     LSP_REQUEST_INITIALIZE = 1,
     LSP_REQUEST_COMPLETION,
     LSP_REQUEST_DEFINITION,
-    LSP_REQUEST_REFERENCES
+    LSP_REQUEST_REFERENCES,
+    LSP_REQUEST_HOVER,
+    LSP_REQUEST_SIGNATURE,
+    LSP_REQUEST_RENAME,
+    LSP_REQUEST_CODE_ACTIONS,
+    LSP_REQUEST_FORMAT,
+    LSP_REQUEST_SYMBOLS,
+    LSP_REQUEST_RESOLVE_COMPLETION,
+    LSP_REQUEST_RESOLVE_ACTION
 } LspRequestKind;
 
 typedef struct LspRequest {
@@ -61,6 +70,7 @@ typedef struct LspQueuedRequest {
     LspRequestKind kind;
     char *uri;
     AxyneLspPosition position;
+    char *body;              /* prebuilt message (new request kinds), else NULL */
 } LspQueuedRequest;
 
 struct AxyneLspClient {
@@ -78,6 +88,7 @@ struct AxyneLspClient {
     AxyneLspCompletionFn on_completion;
     AxyneLspNavigationFn on_navigation;
     AxyneLspErrorFn on_error;
+    AxyneLspResultFn on_result;
     void *user_data;
 
     AxyneProcess *process;
@@ -114,6 +125,7 @@ typedef struct LspEvent {
     size_t completion_count;
     AxyneLspLocation *locations;
     size_t location_count;
+    AxyneLspResult *result;
     uint64_t request_id;
 } LspEvent;
 
@@ -121,7 +133,8 @@ enum {
     LSP_EVENT_DIAGNOSTICS = 1,
     LSP_EVENT_COMPLETION,
     LSP_EVENT_NAVIGATION,
-    LSP_EVENT_ERROR
+    LSP_EVENT_ERROR,
+    LSP_EVENT_RESULT
 };
 
 static char *lsp_copy_bytes(const char *value, size_t length)
@@ -602,10 +615,56 @@ static void lsp_free_completions(AxyneLspCompletionItem *items, size_t count)
     free(items);
 }
 
+static void lsp_free_workspace_edit(AxyneLspWorkspaceEdit *edit)
+{
+    size_t i;
+    for (i = 0; i < edit->file_count; ++i) {
+        free(edit->files[i].uri);
+        lsp_free_text_edits(edit->files[i].edits, edit->files[i].edit_count);
+    }
+    free(edit->files);
+    memset(edit, 0, sizeof(*edit));
+}
+
+static void lsp_free_code_actions(AxyneLspCodeAction *actions, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; ++i) {
+        free(actions[i].title);
+        free(actions[i].kind);
+        free(actions[i].raw_json);
+        lsp_free_workspace_edit(&actions[i].edit);
+    }
+    free(actions);
+}
+
+void axyne_lsp_result_free(AxyneLspResult *result)
+{
+    size_t i;
+    if (result == NULL) return;
+    free(result->error_message);
+    free(result->text);
+    free(result->signature.label);
+    free(result->signature.documentation);
+    free(result->signature.parameter_starts);
+    free(result->signature.parameter_ends);
+    lsp_free_text_edits(result->edits, result->edit_count);
+    lsp_free_workspace_edit(&result->workspace_edit);
+    lsp_free_code_actions(result->actions, result->action_count);
+    for (i = 0; i < result->symbol_count; ++i) {
+        free(result->symbols[i].name);
+        free(result->symbols[i].container);
+    }
+    free(result->symbols);
+    lsp_free_completion_fields(&result->completion_item);
+    free(result);
+}
+
 static void lsp_event_dispose(LspEvent *event)
 {
     if (event == NULL) return;
     free(event->document_path);
+    axyne_lsp_result_free(event->result);
     lsp_free_diagnostics(event->diagnostics, event->diagnostic_count);
     lsp_free_completions(event->completion_items, event->completion_count);
     lsp_free_locations(event->locations, event->location_count);
@@ -1106,6 +1165,7 @@ fail:
 static void lsp_document_dispose(LspDocument *document)
 {
     free(document->path); free(document->uri); free(document->text);
+    free(document->diagnostics_raw);
     memset(document, 0, sizeof(*document));
 }
 
@@ -1154,6 +1214,7 @@ static void lsp_remove_queued_for_uri_locked(AxyneLspClient *client,
         if (strcmp(client->queued[i].uri, uri) == 0) {
             uint64_t id = client->queued[i].id;
             free(client->queued[i].uri);
+            free(client->queued[i].body);
             client->queued[i] = client->queued[--client->queued_count];
             (void)lsp_take_request(client, id);
         } else {
@@ -1377,7 +1438,756 @@ static void lsp_dispatch_event(AxyneLspClient *client, LspEvent *event)
     else if (event->kind == LSP_EVENT_NAVIGATION && client->on_navigation != NULL)
         client->on_navigation(client, event->request_id, event->locations,
                               event->location_count, client->user_data);
+    else if (event->kind == LSP_EVENT_RESULT && event->result != NULL &&
+             client->on_result != NULL) {
+        client->on_result(client, event->result, client->user_data);
+        if (event->result->detached) event->result = NULL; /* the callback owns it now */
+    }
     lsp_event_dispose(event);
+}
+
+/* ---- results of the requests beyond completion/navigation --------------- */
+
+static char *lsp_error_message(const char *start, const char *end)
+{
+    JsonCursor cursor = { start, end };
+    char *key, *message = NULL;
+    if (start == NULL || !json_expect(&cursor, '{')) return NULL;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == '}') return NULL;
+    for (;;) {
+        key = json_read_string(&cursor);
+        if (key == NULL || !json_expect(&cursor, ':')) { free(key); return message; }
+        if (strcmp(key, "message") == 0) {
+            if (!lsp_replace_string(&message, json_read_string(&cursor))) { free(key); return message; }
+        } else if (!json_skip_value(&cursor, 0)) { free(key); return message; }
+        free(key);
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == '}') return message;
+        if (!json_expect(&cursor, ',')) return message;
+    }
+}
+
+/* A hover piece: a string, {kind,value} or {language,value}. */
+static int lsp_hover_piece(JsonCursor *cursor, LspBuffer *out)
+{
+    char *key, *value = NULL;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '"') {
+        value = json_read_string(cursor);
+        if (value == NULL) return 0;
+    } else {
+        if (!json_expect(cursor, '{')) return 0;
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 1; }
+        for (;;) {
+            key = json_read_string(cursor);
+            if (key == NULL || !json_expect(cursor, ':')) { free(key); free(value); return 0; }
+            if (strcmp(key, "value") == 0) {
+                if (!lsp_replace_string(&value, json_read_string(cursor))) { free(key); free(value); return 0; }
+            } else if (!json_skip_value(cursor, 0)) { free(key); free(value); return 0; }
+            free(key);
+            json_skip_space(cursor);
+            if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+            if (!json_expect(cursor, ',')) { free(value); return 0; }
+        }
+    }
+    if (value != NULL && value[0] != '\0') {
+        if (out->length != 0 && !LSP_APPEND_LITERAL(out, "\n\n")) { free(value); return 0; }
+        if (!lsp_buffer_append(out, value, strlen(value))) { free(value); return 0; }
+    }
+    free(value);
+    return 1;
+}
+
+static int lsp_parse_hover(const char *start, const char *end, AxyneLspResult *result)
+{
+    JsonCursor cursor = { start, end };
+    LspBuffer text = { 0 };
+    char *key;
+    json_skip_space(&cursor);
+    if (cursor.at >= cursor.end || *cursor.at == 'n') return 1; /* null: nothing to show */
+    if (!json_expect(&cursor, '{')) return 0;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; return 1; }
+    for (;;) {
+        key = json_read_string(&cursor);
+        if (key == NULL || !json_expect(&cursor, ':')) { free(key); goto fail; }
+        if (strcmp(key, "contents") == 0) {
+            json_skip_space(&cursor);
+            if (cursor.at < cursor.end && *cursor.at == '[') {
+                ++cursor.at; json_skip_space(&cursor);
+                if (cursor.at < cursor.end && *cursor.at == ']') ++cursor.at;
+                else for (;;) {
+                    if (!lsp_hover_piece(&cursor, &text)) { free(key); goto fail; }
+                    json_skip_space(&cursor);
+                    if (cursor.at < cursor.end && *cursor.at == ']') { ++cursor.at; break; }
+                    if (!json_expect(&cursor, ',')) { free(key); goto fail; }
+                }
+            } else if (!lsp_hover_piece(&cursor, &text)) { free(key); goto fail; }
+        } else if (strcmp(key, "range") == 0) {
+            const char *range_start = cursor.at;
+            result->has_range = lsp_parse_range(&cursor, &result->range);
+            if (!result->has_range) {
+                cursor.at = range_start;
+                if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
+            }
+        } else if (!json_skip_value(&cursor, 0)) { free(key); goto fail; }
+        free(key);
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; break; }
+        if (!json_expect(&cursor, ',')) goto fail;
+    }
+    if (text.length != 0) result->text = lsp_copy_bytes(text.data, text.length);
+    lsp_buffer_dispose(&text);
+    return 1;
+fail:
+    lsp_buffer_dispose(&text);
+    return 0;
+}
+
+/* One SignatureInformation; parameter labels become byte ranges in `label`. */
+static int lsp_parse_signature(JsonCursor *cursor, AxyneLspSignature *signature)
+{
+    char *key;
+    const char *parameters_start = NULL;
+    memset(signature, 0, sizeof(*signature));
+    if (!json_expect(cursor, '{')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
+    for (;;) {
+        key = json_read_string(cursor);
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
+        if (strcmp(key, "label") == 0) {
+            if (!lsp_replace_string(&signature->label, json_read_string(cursor))) { free(key); goto fail; }
+        } else if (strcmp(key, "documentation") == 0) {
+            if (!lsp_read_markup(cursor, &signature->documentation)) { free(key); goto fail; }
+        } else if (strcmp(key, "activeParameter") == 0) {
+            uint64_t index;
+            json_skip_space(cursor);
+            if (json_read_uint(cursor, &index)) {
+                signature->active_parameter = (size_t)index;
+                signature->has_active_parameter = 1;
+            } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        } else if (strcmp(key, "parameters") == 0) {
+            json_skip_space(cursor);
+            parameters_start = cursor->at;
+            if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        free(key);
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) goto fail;
+    }
+    if (signature->label == NULL) goto fail;
+    if (parameters_start != NULL) {
+        JsonCursor list = { parameters_start, cursor->end };
+        size_t capacity = 0, label_length = strlen(signature->label), search_from = 0;
+        if (!json_expect(&list, '[')) goto fail;
+        json_skip_space(&list);
+        if (list.at < list.end && *list.at == ']') return 1;
+        for (;;) {
+            size_t begin = 0, finish = 0;
+            int have = 0;
+            if (!json_expect(&list, '{')) goto fail;
+            for (;;) {
+                key = json_read_string(&list);
+                if (key == NULL || !json_expect(&list, ':')) { free(key); goto fail; }
+                if (strcmp(key, "label") == 0) {
+                    json_skip_space(&list);
+                    if (list.at < list.end && *list.at == '"') {
+                        char *text = json_read_string(&list);
+                        const char *found;
+                        if (text == NULL) { free(key); goto fail; }
+                        found = strstr(signature->label + search_from, text);
+                        if (found != NULL) {
+                            begin = (size_t)(found - signature->label);
+                            finish = begin + strlen(text);
+                            have = 1;
+                        }
+                        free(text);
+                    } else if (list.at < list.end && *list.at == '[') {
+                        uint64_t a, b;
+                        ++list.at;
+                        if (!json_read_uint(&list, &a) || !json_expect(&list, ',') ||
+                            !json_read_uint(&list, &b) || !json_expect(&list, ']')) { free(key); goto fail; }
+                        begin = axyne_lsp_offset_for_position(signature->label, label_length,
+                                                              (AxyneLspPosition){ 0, (size_t)a });
+                        finish = axyne_lsp_offset_for_position(signature->label, label_length,
+                                                               (AxyneLspPosition){ 0, (size_t)b });
+                        have = finish >= begin;
+                    } else if (!json_skip_value(&list, 0)) { free(key); goto fail; }
+                } else if (!json_skip_value(&list, 0)) { free(key); goto fail; }
+                free(key);
+                json_skip_space(&list);
+                if (list.at < list.end && *list.at == '}') { ++list.at; break; }
+                if (!json_expect(&list, ',')) goto fail;
+            }
+            if (!have) { begin = 0; finish = 0; } else search_from = finish;
+            if (signature->parameter_count == capacity) {
+                size_t next = capacity == 0 ? 4 : capacity * 2;
+                size_t *starts = (size_t *)realloc(signature->parameter_starts, next * sizeof(size_t));
+                size_t *ends;
+                if (starts == NULL) goto fail;
+                signature->parameter_starts = starts;
+                ends = (size_t *)realloc(signature->parameter_ends, next * sizeof(size_t));
+                if (ends == NULL) goto fail;
+                signature->parameter_ends = ends;
+                capacity = next;
+            }
+            signature->parameter_starts[signature->parameter_count] = begin;
+            signature->parameter_ends[signature->parameter_count] = finish;
+            ++signature->parameter_count;
+            json_skip_space(&list);
+            if (list.at < list.end && *list.at == ']') break;
+            if (!json_expect(&list, ',')) goto fail;
+        }
+    }
+    return 1;
+fail:
+    free(signature->label);
+    free(signature->documentation);
+    free(signature->parameter_starts);
+    free(signature->parameter_ends);
+    memset(signature, 0, sizeof(*signature));
+    return 0;
+}
+
+static int lsp_parse_signature_help(const char *start, const char *end, AxyneLspResult *result)
+{
+    JsonCursor cursor = { start, end };
+    const char *signatures_start = NULL;
+    uint64_t active_signature = 0, active_parameter = 0, value;
+    int has_active_parameter = 0;
+    char *key;
+    json_skip_space(&cursor);
+    if (cursor.at >= cursor.end || *cursor.at == 'n') return 1;
+    if (!json_expect(&cursor, '{')) return 0;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; return 1; }
+    for (;;) {
+        key = json_read_string(&cursor);
+        if (key == NULL || !json_expect(&cursor, ':')) { free(key); return 0; }
+        if (strcmp(key, "signatures") == 0) {
+            json_skip_space(&cursor);
+            signatures_start = cursor.at;
+            if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+        } else if (strcmp(key, "activeSignature") == 0) {
+            json_skip_space(&cursor);
+            if (json_read_uint(&cursor, &value)) active_signature = value;
+            else if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+        } else if (strcmp(key, "activeParameter") == 0) {
+            json_skip_space(&cursor);
+            if (json_read_uint(&cursor, &value)) { active_parameter = value; has_active_parameter = 1; }
+            else if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+        } else if (!json_skip_value(&cursor, 0)) { free(key); return 0; }
+        free(key);
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; break; }
+        if (!json_expect(&cursor, ',')) return 0;
+    }
+    if (signatures_start != NULL) {
+        JsonCursor list = { signatures_start, end };
+        size_t index = 0, total = 0;
+        if (!json_expect(&list, '[')) return 0;
+        json_skip_space(&list);
+        if (list.at < list.end && *list.at == ']') return 1;
+        for (;;) {
+            AxyneLspSignature signature;
+            if (!lsp_parse_signature(&list, &signature)) return result->has_signature != 0;
+            ++total;
+            if (index == active_signature && !result->has_signature) {
+                if (!signature.has_active_parameter && has_active_parameter) {
+                    signature.active_parameter = (size_t)active_parameter;
+                    signature.has_active_parameter = 1;
+                }
+                result->signature = signature;
+                result->has_signature = 1;
+            } else {
+                free(signature.label); free(signature.documentation);
+                free(signature.parameter_starts); free(signature.parameter_ends);
+            }
+            ++index;
+            json_skip_space(&list);
+            if (list.at < list.end && *list.at == ']') break;
+            if (!json_expect(&list, ',')) break;
+        }
+        result->signature_count = total;
+    }
+    return 1;
+}
+
+static int lsp_workspace_edit_add_file(AxyneLspWorkspaceEdit *edit, char *uri,
+                                       AxyneLspTextEdit *edits, size_t count)
+{
+    AxyneLspFileEdit *grown = (AxyneLspFileEdit *)realloc(
+        edit->files, (edit->file_count + 1) * sizeof(*edit->files));
+    if (grown == NULL) { free(uri); lsp_free_text_edits(edits, count); return 0; }
+    edit->files = grown;
+    edit->files[edit->file_count].uri = uri;
+    edit->files[edit->file_count].edits = edits;
+    edit->files[edit->file_count].edit_count = count;
+    ++edit->file_count;
+    return 1;
+}
+
+/* WorkspaceEdit {changes, documentChanges}; file create/rename/delete
+ * operations are not applied and are skipped. */
+static int lsp_parse_workspace_edit(JsonCursor *cursor, AxyneLspWorkspaceEdit *edit)
+{
+    char *key;
+    memset(edit, 0, sizeof(*edit));
+    if (!json_expect(cursor, '{')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 1; }
+    for (;;) {
+        key = json_read_string(cursor);
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
+        if (strcmp(key, "changes") == 0) {
+            if (!json_expect(cursor, '{')) { free(key); goto fail; }
+            json_skip_space(cursor);
+            if (cursor->at < cursor->end && *cursor->at == '}') ++cursor->at;
+            else for (;;) {
+                char *uri = json_read_string(cursor);
+                AxyneLspTextEdit *edits; size_t count;
+                if (uri == NULL || !json_expect(cursor, ':') ||
+                    !lsp_parse_text_edit_array(cursor, &edits, &count)) { free(uri); free(key); goto fail; }
+                if (!lsp_workspace_edit_add_file(edit, uri, edits, count)) { free(key); goto fail; }
+                json_skip_space(cursor);
+                if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+                if (!json_expect(cursor, ',')) { free(key); goto fail; }
+            }
+        } else if (strcmp(key, "documentChanges") == 0) {
+            if (!json_expect(cursor, '[')) { free(key); goto fail; }
+            json_skip_space(cursor);
+            if (cursor->at < cursor->end && *cursor->at == ']') ++cursor->at;
+            else for (;;) {
+                const char *element = cursor->at;
+                char *uri = NULL, *inner;
+                AxyneLspTextEdit *edits = NULL; size_t count = 0;
+                if (!json_expect(cursor, '{')) { free(key); goto fail; }
+                for (;;) {
+                    inner = json_read_string(cursor);
+                    if (inner == NULL || !json_expect(cursor, ':')) { free(inner); free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                    if (strcmp(inner, "textDocument") == 0) {
+                        char *field;
+                        if (!json_expect(cursor, '{')) { free(inner); free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                        json_skip_space(cursor);
+                        if (cursor->at < cursor->end && *cursor->at == '}') ++cursor->at;
+                        else for (;;) {
+                            field = json_read_string(cursor);
+                            if (field == NULL || !json_expect(cursor, ':')) { free(field); free(inner); free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                            if (strcmp(field, "uri") == 0) {
+                                if (!lsp_replace_string(&uri, json_read_string(cursor))) { free(field); free(inner); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                            } else if (!json_skip_value(cursor, 0)) { free(field); free(inner); free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                            free(field);
+                            json_skip_space(cursor);
+                            if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+                            if (!json_expect(cursor, ',')) { free(inner); free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                        }
+                    } else if (strcmp(inner, "edits") == 0) {
+                        lsp_free_text_edits(edits, count);
+                        edits = NULL; count = 0;
+                        if (!lsp_parse_text_edit_array(cursor, &edits, &count)) { free(inner); free(uri); free(key); goto fail; }
+                    } else if (!json_skip_value(cursor, 0)) { free(inner); free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                    free(inner);
+                    json_skip_space(cursor);
+                    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+                    if (!json_expect(cursor, ',')) { free(uri); lsp_free_text_edits(edits, count); free(key); goto fail; }
+                }
+                (void)element;
+                if (uri != NULL && edits != NULL) {
+                    if (!lsp_workspace_edit_add_file(edit, uri, edits, count)) { free(key); goto fail; }
+                } else { free(uri); lsp_free_text_edits(edits, count); }
+                json_skip_space(cursor);
+                if (cursor->at < cursor->end && *cursor->at == ']') { ++cursor->at; break; }
+                if (!json_expect(cursor, ',')) { free(key); goto fail; }
+            }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        free(key);
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) goto fail;
+    }
+    return 1;
+fail:
+    lsp_free_workspace_edit(edit);
+    return 0;
+}
+
+#define LSP_RAW_ACTION_MAX 32768
+
+static int lsp_parse_code_action(JsonCursor *cursor, AxyneLspCodeAction *action)
+{
+    char *key;
+    const char *start;
+    memset(action, 0, sizeof(*action));
+    json_skip_space(cursor);
+    start = cursor->at;
+    if (!json_expect(cursor, '{')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
+    for (;;) {
+        key = json_read_string(cursor);
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
+        if (strcmp(key, "title") == 0) {
+            if (!lsp_replace_string(&action->title, json_read_string(cursor))) { free(key); goto fail; }
+        } else if (strcmp(key, "kind") == 0) {
+            if (!lsp_replace_string(&action->kind, json_read_string(cursor))) { free(key); goto fail; }
+        } else if (strcmp(key, "isPreferred") == 0) {
+            json_skip_space(cursor);
+            action->preferred = cursor->at < cursor->end && *cursor->at == 't';
+            if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        } else if (strcmp(key, "edit") == 0) {
+            const char *edit_start;
+            json_skip_space(cursor);
+            edit_start = cursor->at;
+            lsp_free_workspace_edit(&action->edit);
+            action->has_edit = lsp_parse_workspace_edit(cursor, &action->edit);
+            if (!action->has_edit) {
+                cursor->at = edit_start;
+                if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+            }
+        } else if (strcmp(key, "command") == 0) {
+            action->has_command = 1;
+            if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        free(key);
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) goto fail;
+    }
+    if (action->title == NULL) goto fail;
+    if ((size_t)(cursor->at - start) <= LSP_RAW_ACTION_MAX)
+        action->raw_json = lsp_copy_bytes(start, (size_t)(cursor->at - start));
+    return 1;
+fail:
+    free(action->title); free(action->kind); free(action->raw_json);
+    lsp_free_workspace_edit(&action->edit);
+    memset(action, 0, sizeof(*action));
+    return 0;
+}
+
+static int lsp_parse_code_actions(const char *start, const char *end, AxyneLspResult *result)
+{
+    JsonCursor cursor = { start, end };
+    size_t capacity = 0;
+    json_skip_space(&cursor);
+    if (cursor.at >= cursor.end || *cursor.at == 'n') return 1;
+    if (!json_expect(&cursor, '[')) return 0;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == ']') return 1;
+    for (;;) {
+        AxyneLspCodeAction action;
+        if (!lsp_parse_code_action(&cursor, &action)) goto fail;
+        if (result->action_count == capacity) {
+            size_t next = capacity == 0 ? 8 : capacity * 2;
+            AxyneLspCodeAction *grown = (AxyneLspCodeAction *)realloc(
+                result->actions, next * sizeof(*grown));
+            if (grown == NULL) { lsp_free_code_actions(&action, 1); goto fail; }
+            result->actions = grown; capacity = next;
+        }
+        result->actions[result->action_count++] = action;
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == ']') break;
+        if (!json_expect(&cursor, ',')) goto fail;
+    }
+    return 1;
+fail:
+    lsp_free_code_actions(result->actions, result->action_count);
+    result->actions = NULL; result->action_count = 0;
+    return 0;
+}
+
+typedef struct LspSymbolList {
+    AxyneLspSymbol *items;
+    size_t count, capacity;
+} LspSymbolList;
+
+static int lsp_symbol_add(LspSymbolList *list, char *name, char *container, int kind,
+                          AxyneLspPosition position)
+{
+    if (list->count == list->capacity) {
+        size_t next = list->capacity == 0 ? 32 : list->capacity * 2;
+        AxyneLspSymbol *grown = (AxyneLspSymbol *)realloc(list->items, next * sizeof(*grown));
+        if (grown == NULL) return 0;
+        list->items = grown; list->capacity = next;
+    }
+    list->items[list->count].name = name;
+    list->items[list->count].container = container;
+    list->items[list->count].kind = kind;
+    list->items[list->count].position = position;
+    ++list->count;
+    return 1;
+}
+
+/* DocumentSymbol[] (hierarchical) or SymbolInformation[]. */
+static int lsp_parse_symbol_array(JsonCursor *cursor, const char *container,
+                                  LspSymbolList *list, int depth)
+{
+    if (depth > 8) return json_skip_value(cursor, 0);
+    if (!json_expect(cursor, '[')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == ']') { ++cursor->at; return 1; }
+    for (;;) {
+        char *key, *name = NULL, *own_container = NULL;
+        AxyneLspPosition position = { 0, 0 };
+        uint64_t kind = 0;
+        const char *children = NULL;
+        int have_position = 0;
+        if (!json_expect(cursor, '{')) return 0;
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') ++cursor->at;
+        else for (;;) {
+            key = json_read_string(cursor);
+            if (key == NULL || !json_expect(cursor, ':')) { free(key); free(name); free(own_container); return 0; }
+            if (strcmp(key, "name") == 0) {
+                if (!lsp_replace_string(&name, json_read_string(cursor))) { free(key); free(own_container); return 0; }
+            } else if (strcmp(key, "kind") == 0) {
+                if (!json_read_uint(cursor, &kind)) { free(key); free(name); free(own_container); return 0; }
+            } else if (strcmp(key, "selectionRange") == 0 || (strcmp(key, "range") == 0 && !have_position)) {
+                AxyneLspRange range;
+                const char *range_start = cursor->at;
+                if (lsp_parse_range(cursor, &range)) {
+                    position = range.start;
+                    have_position = 1;
+                } else {
+                    cursor->at = range_start;
+                    if (!json_skip_value(cursor, 0)) { free(key); free(name); free(own_container); return 0; }
+                }
+            } else if (strcmp(key, "location") == 0) {
+                char *field;
+                if (!json_expect(cursor, '{')) { free(key); free(name); free(own_container); return 0; }
+                json_skip_space(cursor);
+                if (cursor->at < cursor->end && *cursor->at == '}') ++cursor->at;
+                else for (;;) {
+                    field = json_read_string(cursor);
+                    if (field == NULL || !json_expect(cursor, ':')) { free(field); free(key); free(name); free(own_container); return 0; }
+                    if (strcmp(field, "range") == 0) {
+                        AxyneLspRange range;
+                        const char *range_start = cursor->at;
+                        if (lsp_parse_range(cursor, &range)) { position = range.start; have_position = 1; }
+                        else { cursor->at = range_start; if (!json_skip_value(cursor, 0)) { free(field); free(key); free(name); free(own_container); return 0; } }
+                    } else if (!json_skip_value(cursor, 0)) { free(field); free(key); free(name); free(own_container); return 0; }
+                    free(field);
+                    json_skip_space(cursor);
+                    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+                    if (!json_expect(cursor, ',')) { free(key); free(name); free(own_container); return 0; }
+                }
+            } else if (strcmp(key, "containerName") == 0) {
+                if (!lsp_replace_string(&own_container, json_read_string(cursor))) { free(key); free(name); return 0; }
+            } else if (strcmp(key, "children") == 0) {
+                json_skip_space(cursor);
+                children = cursor->at;
+                if (!json_skip_value(cursor, 0)) { free(key); free(name); free(own_container); return 0; }
+            } else if (!json_skip_value(cursor, 0)) { free(key); free(name); free(own_container); return 0; }
+            free(key);
+            json_skip_space(cursor);
+            if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+            if (!json_expect(cursor, ',')) { free(name); free(own_container); return 0; }
+        }
+        if (name != NULL && name[0] != '\0') {
+            char *container_copy = own_container != NULL ? own_container :
+                (container != NULL ? lsp_copy(container) : NULL);
+            if (own_container == NULL && container != NULL && container_copy == NULL) { free(name); return 0; }
+            if (!lsp_symbol_add(list, name, container_copy, (int)kind, position)) {
+                free(name); free(container_copy); return 0;
+            }
+            if (children != NULL) {
+                JsonCursor child = { children, cursor->end };
+                if (!lsp_parse_symbol_array(&child, name, list, depth + 1)) return 0;
+            }
+        } else { free(name); free(own_container); }
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == ']') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) return 0;
+    }
+    return 1;
+}
+
+static int compare_lsp_symbols(const void *left, const void *right)
+{
+    const AxyneLspSymbol *a = (const AxyneLspSymbol *)left;
+    const AxyneLspSymbol *b = (const AxyneLspSymbol *)right;
+    if (a->position.line != b->position.line) return a->position.line < b->position.line ? -1 : 1;
+    if (a->position.character != b->position.character)
+        return a->position.character < b->position.character ? -1 : 1;
+    return 0;
+}
+
+static int lsp_parse_symbols(const char *start, const char *end, AxyneLspResult *result)
+{
+    JsonCursor cursor = { start, end };
+    LspSymbolList list = { 0 };
+    json_skip_space(&cursor);
+    if (cursor.at >= cursor.end || *cursor.at == 'n') return 1;
+    if (!lsp_parse_symbol_array(&cursor, NULL, &list, 0)) {
+        size_t i;
+        for (i = 0; i < list.count; ++i) { free(list.items[i].name); free(list.items[i].container); }
+        free(list.items);
+        return 0;
+    }
+    if (list.count > 1) qsort(list.items, list.count, sizeof(*list.items), compare_lsp_symbols);
+    result->symbols = list.items;
+    result->symbol_count = list.count;
+    return 1;
+}
+
+static AxyneLspResultKind lsp_result_kind_for(LspRequestKind kind)
+{
+    switch (kind) {
+    case LSP_REQUEST_HOVER: return AXYNE_LSP_RESULT_HOVER;
+    case LSP_REQUEST_SIGNATURE: return AXYNE_LSP_RESULT_SIGNATURE;
+    case LSP_REQUEST_RENAME: return AXYNE_LSP_RESULT_RENAME;
+    case LSP_REQUEST_CODE_ACTIONS: return AXYNE_LSP_RESULT_CODE_ACTIONS;
+    case LSP_REQUEST_FORMAT: return AXYNE_LSP_RESULT_FORMAT;
+    case LSP_REQUEST_SYMBOLS: return AXYNE_LSP_RESULT_SYMBOLS;
+    case LSP_REQUEST_RESOLVE_COMPLETION: return AXYNE_LSP_RESULT_RESOLVED_COMPLETION;
+    default: return AXYNE_LSP_RESULT_RESOLVED_ACTION;
+    }
+}
+
+static AxyneLspResult *lsp_build_result(LspRequestKind kind, uint64_t id, int has_error,
+                                        const char *error_start, const char *error_end,
+                                        const char *result_start, const char *result_end)
+{
+    AxyneLspResult *result = (AxyneLspResult *)calloc(1, sizeof(*result));
+    int ok = 1;
+    if (result == NULL) return NULL;
+    result->kind = lsp_result_kind_for(kind);
+    result->request_id = id;
+    if (has_error || result_start == NULL) {
+        result->failed = 1;
+        result->error_message = lsp_error_message(error_start, error_end);
+        return result;
+    }
+    switch (kind) {
+    case LSP_REQUEST_HOVER: ok = lsp_parse_hover(result_start, result_end, result); break;
+    case LSP_REQUEST_SIGNATURE: ok = lsp_parse_signature_help(result_start, result_end, result); break;
+    case LSP_REQUEST_RENAME: {
+        JsonCursor cursor = { result_start, result_end };
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at != 'n')
+            result->has_workspace_edit = lsp_parse_workspace_edit(&cursor, &result->workspace_edit);
+        ok = result->has_workspace_edit || (cursor.at < cursor.end && *cursor.at == 'n') ||
+             cursor.at >= cursor.end;
+        break;
+    }
+    case LSP_REQUEST_CODE_ACTIONS: ok = lsp_parse_code_actions(result_start, result_end, result); break;
+    case LSP_REQUEST_FORMAT: {
+        JsonCursor cursor = { result_start, result_end };
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at != 'n')
+            ok = lsp_parse_text_edit_array(&cursor, &result->edits, &result->edit_count);
+        break;
+    }
+    case LSP_REQUEST_SYMBOLS: ok = lsp_parse_symbols(result_start, result_end, result); break;
+    case LSP_REQUEST_RESOLVE_COMPLETION: {
+        JsonCursor cursor = { result_start, result_end };
+        ok = lsp_parse_completion_item(&cursor, &result->completion_item);
+        result->has_completion_item = ok;
+        break;
+    }
+    default: {
+        JsonCursor cursor = { result_start, result_end };
+        AxyneLspCodeAction action;
+        ok = lsp_parse_code_action(&cursor, &action);
+        if (ok) {
+            result->actions = (AxyneLspCodeAction *)malloc(sizeof(action));
+            if (result->actions == NULL) { lsp_free_code_actions(&action, 1); ok = 0; }
+            else { result->actions[0] = action; result->action_count = 1; }
+        }
+        break;
+    }
+    }
+    if (!ok) {
+        result->failed = 1;
+        free(result->error_message);
+        result->error_message = lsp_copy("malformed response");
+    }
+    return result;
+}
+
+/* The raw "diagnostics" array of a publishDiagnostics notification. */
+static char *lsp_copy_diagnostics_array(const char *start, const char *end)
+{
+    JsonCursor cursor = { start, end };
+    char *key;
+    if (start == NULL || !json_expect(&cursor, '{')) return NULL;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == '}') return NULL;
+    for (;;) {
+        key = json_read_string(&cursor);
+        if (key == NULL || !json_expect(&cursor, ':')) { free(key); return NULL; }
+        if (strcmp(key, "diagnostics") == 0) {
+            const char *array;
+            free(key);
+            json_skip_space(&cursor);
+            array = cursor.at;
+            if (!json_skip_value(&cursor, 0)) return NULL;
+            return lsp_copy_bytes(array, (size_t)(cursor.at - array));
+        }
+        free(key);
+        if (!json_skip_value(&cursor, 0)) return NULL;
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == '}') return NULL;
+        if (!json_expect(&cursor, ',')) return NULL;
+    }
+}
+
+static int lsp_position_before(AxyneLspPosition a, AxyneLspPosition b)
+{
+    return a.line < b.line || (a.line == b.line && a.character < b.character);
+}
+
+/* Appends the diagnostics of `raw` (a JSON array) that overlap `range`. */
+static int lsp_append_overlapping_diagnostics(LspBuffer *out, const char *raw,
+                                              AxyneLspRange range)
+{
+    JsonCursor cursor;
+    int first = 1;
+    if (raw == NULL) return 1;
+    cursor.at = raw; cursor.end = raw + strlen(raw);
+    if (!json_expect(&cursor, '[')) return 1;
+    json_skip_space(&cursor);
+    if (cursor.at < cursor.end && *cursor.at == ']') return 1;
+    for (;;) {
+        const char *element;
+        AxyneLspRange diagnostic_range = {{0, 0}, {0, 0}};
+        int have_range = 0;
+        json_skip_space(&cursor);
+        element = cursor.at;
+        {
+            JsonCursor object = cursor;
+            char *key;
+            if (!json_expect(&object, '{')) return 1;
+            json_skip_space(&object);
+            if (!(object.at < object.end && *object.at == '}')) for (;;) {
+                key = json_read_string(&object);
+                if (key == NULL || !json_expect(&object, ':')) { free(key); return 1; }
+                if (strcmp(key, "range") == 0) {
+                    const char *range_start = object.at;
+                    have_range = lsp_parse_range(&object, &diagnostic_range);
+                    if (!have_range) { object.at = range_start; if (!json_skip_value(&object, 0)) { free(key); return 1; } }
+                } else if (!json_skip_value(&object, 0)) { free(key); return 1; }
+                free(key);
+                json_skip_space(&object);
+                if (object.at < object.end && *object.at == '}') break;
+                if (!json_expect(&object, ',')) return 1;
+            }
+        }
+        if (!json_skip_value(&cursor, 0)) return 1;
+        if (have_range && !lsp_position_before(diagnostic_range.end, range.start) &&
+            !lsp_position_before(range.end, diagnostic_range.start)) {
+            if (!first && !lsp_buffer_put(out, ',')) return 0;
+            if (!lsp_buffer_append(out, element, (size_t)(cursor.at - element))) return 0;
+            first = 0;
+        }
+        json_skip_space(&cursor);
+        if (cursor.at < cursor.end && *cursor.at == ']') break;
+        if (!json_expect(&cursor, ',')) break;
+    }
+    return 1;
 }
 
 /* Number of entries in params.items (workspace/configuration). */
@@ -1462,6 +2272,7 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
     size_t raw_id_length = 0;
     const char *params_start = NULL, *params_end = NULL;
     const char *result_start = NULL, *result_end = NULL;
+    const char *error_start = NULL, *error_end = NULL;
     char *key, *method = NULL;
     uint64_t id = 0;
     int has_id = 0, has_error = 0;
@@ -1497,7 +2308,9 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
             result_start = cursor.at; if (!json_skip_value(&cursor, 0)) { free(key); free(method); return 0; }
             result_end = cursor.at;
         } else if (strcmp(key, "error") == 0) {
-            has_error = 1; if (!json_skip_value(&cursor, 0)) { free(key); free(method); return 0; }
+            has_error = 1; json_skip_space(&cursor); error_start = cursor.at;
+            if (!json_skip_value(&cursor, 0)) { free(key); free(method); return 0; }
+            error_end = cursor.at;
         } else if (!json_skip_value(&cursor, 0)) { free(key); free(method); return 0; }
         free(key); json_skip_space(&cursor);
         if (cursor.at < cursor.end && *cursor.at == '}') { ++cursor.at; break; }
@@ -1513,6 +2326,10 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
         if (lsp_parse_diagnostics(params_start, params_end, &uri,
                                   &event->diagnostics, &event->diagnostic_count)) {
             LspDocument *document = lsp_find_uri(client, uri);
+            if (document != NULL) {
+                free(document->diagnostics_raw);
+                document->diagnostics_raw = lsp_copy_diagnostics_array(params_start, params_end);
+            }
             event->kind = LSP_EVENT_DIAGNOSTICS;
             event->document_path = lsp_copy(document == NULL ? uri : document->path);
         }
@@ -1525,10 +2342,21 @@ static int lsp_parse_message_locked(AxyneLspClient *client, const char *body,
         for (size_t i = 0; i < client->document_count; ++i)
             if (!client->documents[i].open_sent) (void)lsp_send_open_locked(client, &client->documents[i]);
         for (size_t i = 0; i < client->queued_count; ++i) {
-            (void)lsp_send_position_request_locked(client, &client->queued[i]);
+            if (client->queued[i].body != NULL)
+                (void)lsp_send_body_locked(client, client->queued[i].body,
+                                           strlen(client->queued[i].body));
+            else
+                (void)lsp_send_position_request_locked(client, &client->queued[i]);
             free(client->queued[i].uri);
+            free(client->queued[i].body);
         }
         client->queued_count = 0;
+        free(method); return 1;
+    }
+    if (request_kind >= LSP_REQUEST_HOVER && request_kind <= LSP_REQUEST_RESOLVE_ACTION) {
+        event->result = lsp_build_result(request_kind, id, has_error, error_start, error_end,
+                                         result_start, result_end);
+        if (event->result != NULL) { event->kind = LSP_EVENT_RESULT; event->request_id = id; }
         free(method); return 1;
     }
     if (!has_error && result_start != NULL &&
@@ -1818,8 +2646,10 @@ static void lsp_cleanup_failed_start(AxyneLspClient *client)
     lsp_mutex_unlock(&client->mutex);
     axyne_process_release(process);
     lsp_mutex_lock(&client->mutex);
-    for (size_t i = 0; i < client->queued_count; ++i)
+    for (size_t i = 0; i < client->queued_count; ++i) {
         free(client->queued[i].uri);
+        free(client->queued[i].body);
+    }
     client->queued_count = 0;
     client->request_count = 0;
     client->initialize_id = 0;
@@ -1865,6 +2695,7 @@ AxyneStatus axyne_lsp_create(const AxyneLspConfig *config,
     client->on_completion = config->on_completion;
     client->on_navigation = config->on_navigation;
     client->on_error = config->on_error;
+    client->on_result = config->on_result;
     client->user_data = config->user_data;
     client->next_id = 1;
     if (client->command == NULL || (config->working_directory != NULL && client->working_directory == NULL) ||
@@ -1903,7 +2734,10 @@ void axyne_lsp_destroy(AxyneLspClient *client)
     lsp_mutex_lock(&client->mutex); client->stopping = 1; process = client->process; lsp_mutex_unlock(&client->mutex);
     if (process != NULL) axyne_process_release(process);
     for (i = 0; i < client->document_count; ++i) lsp_document_dispose(&client->documents[i]);
-    for (i = 0; i < client->queued_count; ++i) free(client->queued[i].uri);
+    for (i = 0; i < client->queued_count; ++i) {
+        free(client->queued[i].uri);
+        free(client->queued[i].body);
+    }
     free(client->documents); free(client->requests); free(client->queued); lsp_buffer_dispose(&client->input);
     lsp_free_string_array(client->arguments, client->argument_count);
     lsp_free_string_array(client->environment, client->environment_count);
@@ -2010,6 +2844,7 @@ static AxyneStatus lsp_request(AxyneLspClient *client, const AxyneDocument *docu
         lsp_cleanup_failed_start(client);
         return status;
     }
+    memset(&request, 0, sizeof(request));
     request.id = client->next_id++; request.kind = kind; request.uri = lsp_copy(entry->uri); request.position = position;
     if (request.uri == NULL || !lsp_add_request(client, request.id, kind)) {
         free(request.uri); lsp_mutex_unlock(&client->mutex); return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to queue LSP request");
@@ -2053,4 +2888,246 @@ AxyneStatus axyne_lsp_references(AxyneLspClient *client, const AxyneDocument *do
                                  AxyneError *error)
 {
     return lsp_request(client, document, position, LSP_REQUEST_REFERENCES, request_id, error);
+}
+
+/* ---- requests beyond completion and navigation --------------------------- */
+
+/* Sends `method` for `document` (or, with document NULL, with `extra` as the
+ * complete params object). `extra` follows {"textDocument":{"uri":...}.
+ * With `diagnostic_range`, the overlapping published diagnostics are added as
+ * context.diagnostics (code actions). */
+static AxyneStatus lsp_send_request(AxyneLspClient *client, const AxyneDocument *document,
+                                    LspRequestKind kind, const char *method,
+                                    const char *extra, const AxyneLspRange *diagnostic_range,
+                                    uint64_t *request_id, AxyneError *error)
+{
+    LspDocument *entry = NULL;
+    LspBuffer body = { 0 };
+    LspQueuedRequest queued;
+    AxyneStatus status;
+    uint64_t id;
+    if (request_id != NULL) *request_id = 0;
+    if (client == NULL || request_id == NULL || method == NULL || extra == NULL)
+        return lsp_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid LSP request");
+    if (document != NULL) {
+        status = lsp_validate_document(document, error);
+        if (status != AXYNE_STATUS_OK) return status;
+    }
+    lsp_mutex_lock(&client->mutex);
+    if (document != NULL) {
+        entry = lsp_find_document(client, document->path);
+        if (entry == NULL) {
+            lsp_mutex_unlock(&client->mutex);
+            return lsp_error(error, AXYNE_STATUS_NOT_FOUND, "Document is not open in LSP");
+        }
+    }
+    status = lsp_start_with_callbacks_locked(client, error);
+    if (status != AXYNE_STATUS_OK) {
+        lsp_mutex_unlock(&client->mutex);
+        lsp_cleanup_failed_start(client);
+        return status;
+    }
+    id = client->next_id++;
+    if (!LSP_APPEND_LITERAL(&body, "{\"jsonrpc\":\"2.0\",\"id\":") || !lsp_buffer_uint(&body, id) ||
+        !LSP_APPEND_LITERAL(&body, ",\"method\":") || !lsp_json_cstr(&body, method) ||
+        !LSP_APPEND_LITERAL(&body, ",\"params\":")) goto memory;
+    if (entry != NULL) {
+        if (!LSP_APPEND_LITERAL(&body, "{\"textDocument\":{\"uri\":") ||
+            !lsp_json_cstr(&body, entry->uri) || !LSP_APPEND_LITERAL(&body, "}") ||
+            !lsp_buffer_append(&body, extra, strlen(extra))) goto memory;
+        if (diagnostic_range != NULL) {
+            if (!LSP_APPEND_LITERAL(&body, ",\"context\":{\"diagnostics\":[") ||
+                !lsp_append_overlapping_diagnostics(&body, entry->diagnostics_raw, *diagnostic_range) ||
+                !LSP_APPEND_LITERAL(&body, "]}")) goto memory;
+        }
+        if (!LSP_APPEND_LITERAL(&body, "}")) goto memory;
+    } else if (!lsp_buffer_append(&body, extra, strlen(extra))) goto memory;
+    if (!LSP_APPEND_LITERAL(&body, "}")) goto memory;
+    if (!lsp_add_request(client, id, kind)) goto memory;
+    *request_id = id;
+    if (client->initialized) {
+        if (!lsp_send_body_locked(client, body.data, body.length)) {
+            (void)lsp_take_request(client, id);
+            lsp_buffer_dispose(&body);
+            lsp_mutex_unlock(&client->mutex);
+            lsp_cleanup_failed_start(client);
+            return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send LSP request");
+        }
+        lsp_buffer_dispose(&body);
+    } else {
+        memset(&queued, 0, sizeof(queued));
+        queued.id = id; queued.kind = kind;
+        queued.uri = lsp_copy(entry != NULL ? entry->uri : "");
+        queued.body = lsp_copy_bytes(body.data, body.length);
+        lsp_buffer_dispose(&body);
+        if (queued.uri == NULL || queued.body == NULL ||
+            (client->queued_count == client->queued_capacity &&
+             !lsp_grow((void **)&client->queued, &client->queued_capacity, sizeof(*client->queued)))) {
+            free(queued.uri); free(queued.body);
+            (void)lsp_take_request(client, id);
+            lsp_mutex_unlock(&client->mutex);
+            return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to queue LSP request");
+        }
+        client->queued[client->queued_count++] = queued;
+    }
+    lsp_mutex_unlock(&client->mutex);
+    return lsp_error(error, AXYNE_STATUS_OK, "");
+memory:
+    lsp_buffer_dispose(&body);
+    lsp_mutex_unlock(&client->mutex);
+    return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to build LSP request");
+}
+
+static int lsp_append_position(LspBuffer *buffer, AxyneLspPosition position)
+{
+    return LSP_APPEND_LITERAL(buffer, "{\"line\":") && lsp_buffer_size(buffer, position.line) &&
+           LSP_APPEND_LITERAL(buffer, ",\"character\":") &&
+           lsp_buffer_size(buffer, position.character) && LSP_APPEND_LITERAL(buffer, "}");
+}
+
+static AxyneStatus lsp_position_method(AxyneLspClient *client, const AxyneDocument *document,
+                                       AxyneLspPosition position, LspRequestKind kind,
+                                       const char *method, const char *tail,
+                                       uint64_t *request_id, AxyneError *error)
+{
+    LspBuffer extra = { 0 };
+    AxyneStatus status;
+    if (!LSP_APPEND_LITERAL(&extra, ",\"position\":") || !lsp_append_position(&extra, position) ||
+        (tail != NULL && !lsp_buffer_append(&extra, tail, strlen(tail))) ||
+        !lsp_buffer_put(&extra, '\0')) {
+        lsp_buffer_dispose(&extra);
+        return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to build LSP request");
+    }
+    status = lsp_send_request(client, document, kind, method, extra.data, NULL, request_id, error);
+    lsp_buffer_dispose(&extra);
+    return status;
+}
+
+AxyneStatus axyne_lsp_hover(AxyneLspClient *client, const AxyneDocument *document,
+                            AxyneLspPosition position, uint64_t *request_id,
+                            AxyneError *error)
+{
+    return lsp_position_method(client, document, position, LSP_REQUEST_HOVER,
+                               "textDocument/hover", NULL, request_id, error);
+}
+
+AxyneStatus axyne_lsp_signature_help(AxyneLspClient *client, const AxyneDocument *document,
+                                     AxyneLspPosition position, uint64_t *request_id,
+                                     AxyneError *error)
+{
+    return lsp_position_method(client, document, position, LSP_REQUEST_SIGNATURE,
+                               "textDocument/signatureHelp", NULL, request_id, error);
+}
+
+AxyneStatus axyne_lsp_rename(AxyneLspClient *client, const AxyneDocument *document,
+                             AxyneLspPosition position, const char *new_name,
+                             uint64_t *request_id, AxyneError *error)
+{
+    LspBuffer tail = { 0 };
+    AxyneStatus status;
+    if (new_name == NULL || new_name[0] == '\0') {
+        if (request_id != NULL) *request_id = 0;
+        return lsp_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "A new name is required");
+    }
+    if (!LSP_APPEND_LITERAL(&tail, ",\"newName\":") || !lsp_json_cstr(&tail, new_name) ||
+        !lsp_buffer_put(&tail, '\0')) {
+        lsp_buffer_dispose(&tail);
+        return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to build LSP request");
+    }
+    status = lsp_position_method(client, document, position, LSP_REQUEST_RENAME,
+                                 "textDocument/rename", tail.data, request_id, error);
+    lsp_buffer_dispose(&tail);
+    return status;
+}
+
+AxyneStatus axyne_lsp_code_actions(AxyneLspClient *client, const AxyneDocument *document,
+                                   AxyneLspRange range, uint64_t *request_id,
+                                   AxyneError *error)
+{
+    LspBuffer extra = { 0 };
+    AxyneStatus status;
+    if (!LSP_APPEND_LITERAL(&extra, ",\"range\":{\"start\":") ||
+        !lsp_append_position(&extra, range.start) || !LSP_APPEND_LITERAL(&extra, ",\"end\":") ||
+        !lsp_append_position(&extra, range.end) || !LSP_APPEND_LITERAL(&extra, "}") ||
+        !lsp_buffer_put(&extra, '\0')) {
+        lsp_buffer_dispose(&extra);
+        return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to build LSP request");
+    }
+    status = lsp_send_request(client, document, LSP_REQUEST_CODE_ACTIONS, "textDocument/codeAction",
+                              extra.data, &range, request_id, error);
+    lsp_buffer_dispose(&extra);
+    return status;
+}
+
+AxyneStatus axyne_lsp_format(AxyneLspClient *client, const AxyneDocument *document,
+                             size_t tab_size, int insert_spaces,
+                             uint64_t *request_id, AxyneError *error)
+{
+    LspBuffer extra = { 0 };
+    AxyneStatus status;
+    if (tab_size == 0) tab_size = 4;
+    if (!LSP_APPEND_LITERAL(&extra, ",\"options\":{\"tabSize\":") || !lsp_buffer_size(&extra, tab_size) ||
+        !LSP_APPEND_LITERAL(&extra, ",\"insertSpaces\":") ||
+        !(insert_spaces ? LSP_APPEND_LITERAL(&extra, "true") : LSP_APPEND_LITERAL(&extra, "false")) ||
+        !LSP_APPEND_LITERAL(&extra, "}") || !lsp_buffer_put(&extra, '\0')) {
+        lsp_buffer_dispose(&extra);
+        return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to build LSP request");
+    }
+    status = lsp_send_request(client, document, LSP_REQUEST_FORMAT, "textDocument/formatting",
+                              extra.data, NULL, request_id, error);
+    lsp_buffer_dispose(&extra);
+    return status;
+}
+
+AxyneStatus axyne_lsp_document_symbols(AxyneLspClient *client, const AxyneDocument *document,
+                                       uint64_t *request_id, AxyneError *error)
+{
+    return lsp_send_request(client, document, LSP_REQUEST_SYMBOLS,
+                            "textDocument/documentSymbol", "", NULL, request_id, error);
+}
+
+AxyneStatus axyne_lsp_resolve_completion(AxyneLspClient *client, const char *raw_json,
+                                         uint64_t *request_id, AxyneError *error)
+{
+    if (raw_json == NULL || !lsp_valid_json_object(raw_json)) {
+        if (request_id != NULL) *request_id = 0;
+        return lsp_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid completion item");
+    }
+    return lsp_send_request(client, NULL, LSP_REQUEST_RESOLVE_COMPLETION,
+                            "completionItem/resolve", raw_json, NULL, request_id, error);
+}
+
+AxyneStatus axyne_lsp_resolve_code_action(AxyneLspClient *client, const char *raw_json,
+                                          uint64_t *request_id, AxyneError *error)
+{
+    if (raw_json == NULL || !lsp_valid_json_object(raw_json)) {
+        if (request_id != NULL) *request_id = 0;
+        return lsp_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid code action");
+    }
+    return lsp_send_request(client, NULL, LSP_REQUEST_RESOLVE_ACTION,
+                            "codeAction/resolve", raw_json, NULL, request_id, error);
+}
+
+AxyneStatus axyne_lsp_did_save(AxyneLspClient *client, const AxyneDocument *document,
+                               AxyneError *error)
+{
+    LspDocument *entry;
+    LspBuffer body = { 0 };
+    AxyneStatus status;
+    int ok = 1;
+    if (client == NULL) return lsp_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "LSP client is null");
+    status = lsp_validate_document(document, error);
+    if (status != AXYNE_STATUS_OK) return status;
+    lsp_mutex_lock(&client->mutex);
+    entry = lsp_find_document(client, document->path);
+    if (entry != NULL && client->initialized && entry->open_sent) {
+        ok = LSP_APPEND_LITERAL(&body, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\","
+                                       "\"params\":{\"textDocument\":{\"uri\":") &&
+             lsp_json_cstr(&body, entry->uri) && LSP_APPEND_LITERAL(&body, "}}}") &&
+             lsp_send_body_locked(client, body.data, body.length);
+        lsp_buffer_dispose(&body);
+    }
+    lsp_mutex_unlock(&client->mutex);
+    return ok ? lsp_error(error, AXYNE_STATUS_OK, "") :
+                lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to send didSave");
 }
