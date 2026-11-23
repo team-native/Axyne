@@ -57,6 +57,7 @@ struct AxyneWinLspNavUi {
     /* Hover and signature help tooltips (one Scintilla call tip at a time). */
     uint64_t hover_request;
     LRESULT hover_position;
+    LRESULT hover_word_start, hover_word_end; /* the word the tip belongs to */
     char *hover_path;
     uint64_t signature_request;
     LRESULT signature_caret;
@@ -714,8 +715,17 @@ static void axyne_win_lsp_hide_tip(AxyneWindowState *state)
 static void axyne_win_lsp_show_tip(AxyneWindowState *state, LRESULT position, const char *text,
                                    size_t hl_start, size_t hl_end)
 {
+    char font[128] = "";
+    /* Draw the tip with a style of its own: the editor font, the panel colours. */
+    SendMessageA(state->editor, SCI_STYLEGETFONT, STYLE_DEFAULT, (LPARAM)font);
+    if (font[0] != '\0') SendMessageA(state->editor, SCI_STYLESETFONT, STYLE_CALLTIP, (LPARAM)font);
+    SendMessageA(state->editor, SCI_STYLESETSIZE, STYLE_CALLTIP,
+                 SendMessageA(state->editor, SCI_STYLEGETSIZE, STYLE_DEFAULT, 0));
+    SendMessageA(state->editor, SCI_STYLESETBACK, STYLE_CALLTIP, axyne_win_color(AXYNE_WIN_COLOR_PANEL));
+    SendMessageA(state->editor, SCI_STYLESETFORE, STYLE_CALLTIP, axyne_win_color(AXYNE_WIN_COLOR_TEXT));
+    SendMessageA(state->editor, SCI_CALLTIPUSESTYLE, 4, 0);
     SendMessageA(state->editor, SCI_CALLTIPSETBACK, axyne_win_color(AXYNE_WIN_COLOR_PANEL), 0);
-    SendMessageA(state->editor, SCI_CALLTIPSETFORE, axyne_win_color(AXYNE_WIN_COLOR_MUTED), 0);
+    SendMessageA(state->editor, SCI_CALLTIPSETFORE, axyne_win_color(AXYNE_WIN_COLOR_TEXT), 0);
     SendMessageA(state->editor, SCI_CALLTIPSETFOREHLT, axyne_win_color(AXYNE_WIN_COLOR_ACCENT), 0);
     SendMessageA(state->editor, SCI_CALLTIPSHOW, (WPARAM)position, (LPARAM)text);
     if (hl_end > hl_start)
@@ -728,6 +738,16 @@ static char *axyne_win_lsp_tip_text(const char *markdown)
     char *plain = axyne_lsp_markdown_to_plain(markdown);
     size_t length, lines = 0, i;
     if (plain == NULL) return NULL;
+    /* no blank lines or spaces around the text (the tip would show them) */
+    {
+        size_t lead = 0;
+        while (plain[lead] == '\n' || plain[lead] == ' ' || plain[lead] == '\t') ++lead;
+        if (lead > 0) memmove(plain, plain + lead, strlen(plain + lead) + 1);
+        length = strlen(plain);
+        while (length > 0 && (plain[length - 1] == '\n' || plain[length - 1] == ' ' ||
+                              plain[length - 1] == '\t'))
+            plain[--length] = '\0';
+    }
     length = strlen(plain);
     for (i = 0; i < length; ++i) {
         if (plain[i] == '\n' && ++lines >= 18) { plain[i] = '\0'; length = i; break; }
@@ -762,6 +782,8 @@ static int axyne_win_lsp_request_hover(AxyneWindowState *state, LRESULT byte_pos
     ui->hover_path = _strdup(document->path);
     ui->hover_request = request_id;
     ui->hover_position = byte_position;
+    ui->hover_word_start = SendMessageA(state->editor, SCI_WORDSTARTPOSITION, (WPARAM)byte_position, TRUE);
+    ui->hover_word_end = SendMessageA(state->editor, SCI_WORDENDPOSITION, (WPARAM)byte_position, TRUE);
     return 1;
 }
 
@@ -1300,12 +1322,40 @@ static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
         }
         axyne_win_lsp_request_completion(state, notification);
     } else if (notification->nmhdr.code == SCN_DWELLSTART) {
+        struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+        /* still on the word whose tip is showing: nothing to do (no blinking) */
+        if (SendMessageA(state->editor, SCI_CALLTIPACTIVE, 0, 0) != 0 &&
+            ui->hover_word_end > ui->hover_word_start &&
+            notification->position >= ui->hover_word_start &&
+            notification->position <= ui->hover_word_end)
+            return;
         if (notification->position >= 0 && SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0 &&
-            !state->lsp_nav_ui->signature_active)
+            !ui->signature_active)
             (void)axyne_win_lsp_request_hover(state, notification->position);
     } else if (notification->nmhdr.code == SCN_DWELLEND) {
-        state->lsp_nav_ui->hover_request = 0;
-        if (!state->lsp_nav_ui->signature_active) axyne_win_lsp_hide_tip(state);
+        struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+        if (!ui->signature_active && SendMessageA(state->editor, SCI_CALLTIPACTIVE, 0, 0) != 0) {
+            /* The pointer moved: keep the tip while it is still on the same word
+             * or on the tip itself, hide it once it leaves both. */
+            int keep = 0;
+            POINT cursor;
+            char name[16];
+            if (GetCursorPos(&cursor)) {
+                HWND under = WindowFromPoint(cursor);
+                if (under != NULL && GetClassNameA(under, name, sizeof(name)) > 0 &&
+                    strcmp(name, "CallTip") == 0)
+                    keep = 1;
+            }
+            if (!keep) {
+                LRESULT at = SendMessageA(state->editor, SCI_POSITIONFROMPOINTCLOSE,
+                                          (WPARAM)notification->x, (LPARAM)notification->y);
+                keep = at >= ui->hover_word_start && at <= ui->hover_word_end &&
+                       ui->hover_word_end > ui->hover_word_start;
+            }
+            if (keep) return;
+        }
+        ui->hover_request = 0;
+        if (!ui->signature_active) axyne_win_lsp_hide_tip(state);
     } else if (notification->nmhdr.code == SCN_AUTOCSELECTION && state->lsp_nav_ui->list_active)
         axyne_win_lsp_apply_selection(state);
     else if (notification->nmhdr.code == SCN_AUTOCCANCELLED ||
