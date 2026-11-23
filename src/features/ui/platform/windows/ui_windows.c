@@ -10823,7 +10823,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return 0;
         }
         if (state != NULL && w_param == AXYNE_STATUS_TIMER) {
-            InvalidateRect(window, NULL, FALSE);
+            /* only the status bar shows the changing memory figure */
+            RECT status = { 0, state->client_height - AXYNE_STATUS,
+                            state->client_width, state->client_height };
+            if (status.bottom > status.top && status.right > status.left)
+                InvalidateRect(window, &status, FALSE);
             return 0;
         }
         if (state != NULL && w_param == AXYNE_WIN_CHORD_TIMER_ID) {
@@ -11766,8 +11770,10 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     axyne_splash_step(splash, AXYNE_STARTUP_SETTINGS);
     axyne_load_global_preferences(state);
     axyne_splash_step(splash, AXYNE_STARTUP_WORKSPACE);
+    /* WS_CLIPCHILDREN: the parent never paints over the editor, terminal or
+     * panel children, so a full-window repaint no longer makes them flash. */
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne",
-        WS_OVERLAPPEDWINDOW, bounds.left, bounds.top,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, bounds.left, bounds.top,
         bounds.right - bounds.left, bounds.bottom - bounds.top,
         NULL, NULL, instance, state);
     if (window == NULL) {
