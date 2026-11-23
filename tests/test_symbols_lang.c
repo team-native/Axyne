@@ -311,6 +311,21 @@ static int test_edges(void)
     /* Unterminated string / comment do not read past the end. */
     CHECK(expect("a.js", "function a() {}\nconst s = \"unterminated", "f a@1 c s@2"));
     CHECK(expect("a.rs", "fn a() {}\n/* open comment fn b() {}", "f a@1"));
+    /* Reads stay inside the buffer for a lone `b` / `async `. */
+    CHECK(expect("a.rs", "b", ""));
+    CHECK(expect("a.py", "async ", ""));
+    /* Callbacks are not function initializers; module.exports is not a module. */
+    CHECK(expect("a.js", "const names = users.map(u => u.name);\nconst f = async (a) => a;\n"
+                         "const g = x => x;\n", "c names@1 f f@2 f g@3"));
+    CHECK(expect("a.js", "module.exports = { run };\nfunction after() {}\n", "f after@2"));
+    /* Regex literals do not unbalance braces. */
+    CHECK(expect("a.js", "function f(){ s.replace(/{/g,\"\") }\nfunction g(){}\n", "f f@1 f g@2"));
+    /* Trailing `?` / `>` are type suffixes, not operators. */
+    CHECK(expect("a.swift", "class A {\n var name: String?\n func foo() {}\n}\n", "T A@1 m foo@3"));
+    CHECK(expect("a.ts", "type A = Array<string>\ntype B = number\n", "T A@1 T B@2"));
+    /* Supertypes on the line after the header keep the body a type body. */
+    CHECK(expect("a.kt", "class Foo\n    : Bar() {\n    fun m() {}\n}\n", "T Foo@1 m m@3"));
+    CHECK(expect("A.java", "public non-sealed class A {\n void m() {}\n}\n", "T A@1 m m@2"));
     return 1;
 }
 

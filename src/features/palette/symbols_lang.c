@@ -196,11 +196,26 @@ static int skip_mods(const Tok *t, int n, int i, const char *const *mods)
     return i;
 }
 
+/* True when the initializer that starts at `from` is itself a function:
+ * `function ...`, `async function ...`, `x => ...`, or a parenthesised
+ * parameter list followed by `=>`. A call such as `list.map(x => x)` is not. */
 static int has_arrow_or_function(const Tok *t, int n, int from)
 {
-    int i;
-    for (i = from; i < n; ++i)
-        if (t[i].c == 'A' || tok_is(&t[i], "function")) return 1;
+    int i = from;
+    if (i < n && tok_is(&t[i], "async")) ++i;
+    if (i >= n) return 0;
+    if (tok_is(&t[i], "function")) return 1;
+    if (t[i].c == 'w') return punct_at(t, n, i + 1, 'A');
+    if (t[i].c == '(') {
+        int end = skip_group(t, n, i);
+        if (end < n && t[end].c == ':') {
+            /* TS return type annotation: look for the arrow before any '=' */
+            for (; end < n && t[end].c != '='; ++end)
+                if (t[end].c == 'A') return 1;
+            return 0;
+        }
+        return end < n && t[end].c == 'A';
+    }
     return 0;
 }
 
@@ -257,7 +272,8 @@ static void classify_js(Scan *c, const Tok *t, int n, int ctx, int braces)
         c->next_frame = FR_OPAQUE;
     } else if (tok_is(&t[i], "namespace") || tok_is(&t[i], "module")) {
         if (word_at(t, n, i + 1)) add_symbol(c, &t[i + 1], AXYNE_SYMBOL_TYPE);
-        if (braces) c->next_frame = FR_SCOPE;
+        if (braces && (word_at(t, n, i + 1) || (i + 1 < n && t[i + 1].c == 's')))
+            c->next_frame = FR_SCOPE;
     } else if ((tok_is(&t[i], "const") || tok_is(&t[i], "let") || tok_is(&t[i], "var")) &&
                word_at(t, n, i + 1)) {
         int eq = index_of_punct(t, n, i + 2, '=');
@@ -339,7 +355,7 @@ static void classify_rust(Scan *c, const Tok *t, int n, int ctx, int braces)
 static const char *const java_mods[] = {
     "public", "private", "protected", "static", "final", "abstract", "native",
     "synchronized", "transient", "volatile", "strictfp", "default", "sealed",
-    "non", NULL };
+    NULL };
 static const char *const java_not_methods[] = {
     "if", "for", "while", "switch", "catch", "synchronized", "return", "new",
     "throw", "else", "do", "try", "assert", NULL };
@@ -357,7 +373,8 @@ static void classify_java(Scan *c, const Tok *t, int n, int ctx, int braces)
         int before = i;
         i = skip_mods(t, n, i, java_mods);
         /* `non-sealed`: "non" "-" "sealed" */
-        if (i + 2 < n && tok_is(&t[i], "non") && punct_at(t, n, i + 1, '-')) i += 3;
+        if (i + 2 < n && tok_is(&t[i], "non") && punct_at(t, n, i + 1, '-') &&
+            tok_is(&t[i + 2], "sealed")) i += 3;
         if (i == before) break;
     }
     if (i >= n) return;
@@ -680,8 +697,9 @@ static void skip_triple(Scan *c)
 }
 
 /* JavaScript template literal with ${...} nesting. */
-static void skip_template(Scan *c)
+static void skip_template(Scan *c, int nesting)
 {
+    if (nesting > 32) { c->pos = c->n; return; }
     ++c->pos;
     while (c->pos < c->n) {
         char ch = c->s[c->pos];
@@ -694,7 +712,7 @@ static void skip_template(Scan *c)
                 char inner = c->s[c->pos];
                 if (inner == '{') { ++depth; ++c->pos; }
                 else if (inner == '}') { --depth; ++c->pos; }
-                else if (inner == '`') skip_template(c);
+                else if (inner == '`') skip_template(c, nesting + 1);
                 else if (inner == '"' || inner == '\'') skip_quoted(c, inner, 1, 0);
                 else if (inner == '\r' || inner == '\n') {
                     ++c->pos;
@@ -740,6 +758,26 @@ static int newline_ends_statement(const Scan *c)
            c->family == FAM_KOTLIN || c->family == FAM_SWIFT;
 }
 
+static int starts_with_word_at(const Scan *c, size_t p, const char *word)
+{
+    size_t len = strlen(word);
+    return p + len < c->n && memcmp(c->s + p, word, len) == 0 &&
+           !is_ident_char((unsigned char)c->s[p + len]);
+}
+
+/* A type declaration header (class/struct/...) whose supertypes may continue
+ * on the next line before the opening brace. */
+static int statement_is_type_header(const Scan *c)
+{
+    static const char *const keywords[] = {
+        "class", "struct", "interface", "object", "enum", "protocol", "extension",
+        "actor", "trait", "impl", "component", NULL };
+    int i;
+    for (i = 0; i < c->ntoks; ++i)
+        if (tok_in(&c->toks[i], keywords)) return 1;
+    return 0;
+}
+
 /* After a newline: flush a declaration that has no body, unless the line
  * continues (operator at the end) or the next line opens the body. */
 static void maybe_flush_at_newline(Scan *c)
@@ -751,11 +789,16 @@ static void maybe_flush_at_newline(Scan *c)
     last = &c->toks[c->ntoks - 1];
     if (last->c == '=' || last->c == ',' || last->c == '(' || last->c == '.' ||
         last->c == 'A' || last->c == '+' || last->c == '-' || last->c == '*' ||
-        last->c == '/' || last->c == '&' || last->c == '|' || last->c == '?' ||
-        last->c == ':' || last->c == '<' || last->c == '>')
+        last->c == '/' || last->c == '&' || last->c == '|' ||
+        last->c == ':' || last->c == '<')
         return;
     while (p < c->n && (c->s[p] == ' ' || c->s[p] == '\t' || c->s[p] == '\r' || c->s[p] == '\n')) ++p;
     if (p < c->n && (c->s[p] == '{' || c->s[p] == '.')) return;
+    if (statement_is_type_header(c) && p < c->n &&
+        (c->s[p] == ':' || starts_with_word_at(c, p, "extends") ||
+         starts_with_word_at(c, p, "implements") || starts_with_word_at(c, p, "where") ||
+         starts_with_word_at(c, p, "inherits")))
+        return;
     if (c->family == FAM_GO && c->group_active) {
         classify_statement(c, 0);
         statement_reset(c);
@@ -765,6 +808,37 @@ static void maybe_flush_at_newline(Scan *c)
         classify_statement(c, 0);
         statement_reset(c);
     }
+}
+
+/* A '/' starts a regex literal when the previous token cannot end an
+ * expression (an operator, '(', ',', '=', the start of a statement or a
+ * keyword such as return). */
+static int regex_allowed(const Scan *c)
+{
+    const Tok *last;
+    if (c->ntoks == 0) return 1;
+    last = &c->toks[c->ntoks - 1];
+    if (last->c == 'w')
+        return tok_is(last, "return") || tok_is(last, "typeof") || tok_is(last, "case") ||
+               tok_is(last, "in") || tok_is(last, "of") || tok_is(last, "void");
+    if (last->c == 'n' || last->c == 's' || last->c == ')' || last->c == ']') return 0;
+    return 1;
+}
+
+static void skip_regex(Scan *c)
+{
+    int in_class = 0;
+    ++c->pos;
+    while (c->pos < c->n) {
+        char ch = c->s[c->pos];
+        if (ch == 92 && c->pos + 1 < c->n) { c->pos += 2; continue; } /* backslash */
+        if (ch == 10 || ch == 13) return; /* not a regex after all: stop at the line end */
+        if (ch == '[') in_class = 1;
+        else if (ch == ']') in_class = 0;
+        else if (ch == '/' && !in_class) { ++c->pos; break; }
+        ++c->pos;
+    }
+    while (c->pos < c->n && is_ident_char((unsigned char)c->s[c->pos])) ++c->pos; /* flags */
 }
 
 static void scan_braces(Scan *c)
@@ -784,6 +858,11 @@ static void scan_braces(Scan *c)
         if (ch == ' ' || ch == '\t' || ch == '\f' || ch == '\v') { ++c->pos; continue; }
         if (ch == '/' && c->pos + 1 < c->n && c->s[c->pos + 1] == '/') { skip_line_comment(c); continue; }
         if (ch == '/' && c->pos + 1 < c->n && c->s[c->pos + 1] == '*') { skip_block_comment(c, nested_comments); continue; }
+        if (ch == '/' && (c->family == FAM_JS || c->family == FAM_TS) && regex_allowed(c)) {
+            skip_regex(c);
+            push_token(c, 's', NULL, 0, col);
+            continue;
+        }
         if (ch == '"') {
             if ((c->family == FAM_JAVA || c->family == FAM_KOTLIN || c->family == FAM_SWIFT) &&
                 starts_with(c, "\"\"\"")) skip_triple(c);
@@ -792,7 +871,7 @@ static void scan_braces(Scan *c)
             continue;
         }
         if (ch == '`' && (c->family == FAM_JS || c->family == FAM_TS)) {
-            skip_template(c);
+            skip_template(c, 0);
             push_token(c, 's', NULL, 0, col);
             continue;
         }
@@ -829,7 +908,8 @@ static void scan_braces(Scan *c)
             ++c->pos;
             while (c->pos < c->n && is_ident_char((unsigned char)c->s[c->pos])) ++c->pos;
             if (c->family == FAM_RUST && (c->pos - start == 1 || c->pos - start == 2) &&
-                (c->s[start] == 'r' || (c->s[start] == 'b' && c->s[start + 1] == 'r')) &&
+                (c->s[start] == 'r' || (c->pos - start == 2 && c->s[start] == 'b' &&
+                                        c->s[start + 1] == 'r')) &&
                 c->pos < c->n && (c->s[c->pos] == '"' || c->s[c->pos] == '#') &&
                 skip_rust_raw(c)) {
                 push_token(c, 's', NULL, 0, col);
@@ -945,7 +1025,8 @@ static void scan_python(Scan *c)
                         add_symbol(c, &t, AXYNE_SYMBOL_TYPE);
                         if (nblocks < 64) { blocks[nblocks].indent = indent; blocks[nblocks].is_class = 1; ++nblocks; }
                     }
-                } else if (!in_class && indent == 0 && is_ident_start((unsigned char)c->s[q])) {
+                } else if (!in_class && indent == 0 && q < end &&
+                           is_ident_start((unsigned char)c->s[q])) {
                     size_t name_end = q, r;
                     int upper = 1;
                     while (name_end < end && is_ident_char((unsigned char)c->s[name_end])) ++name_end;
