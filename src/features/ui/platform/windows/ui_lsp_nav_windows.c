@@ -1496,6 +1496,11 @@ static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
             notification->position >= ui->hover_word_start &&
             notification->position <= ui->hover_word_end)
             return;
+        if (axyne_win_lsp_tip_visible(ui) && !ui->signature_active) {
+            POINT cursor;
+            if (!(GetCursorPos(&cursor) && WindowFromPoint(cursor) == ui->tip_window))
+                axyne_win_lsp_hide_tip(state); /* dwelling elsewhere: drop the old tip */
+        }
         if (notification->position >= 0 && SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0 &&
             !ui->signature_active)
             (void)axyne_win_lsp_request_hover(state, notification->position);
@@ -1505,11 +1510,15 @@ static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
             /* The pointer moved: keep the tip while it is still on the same word
              * or on the tip itself, hide it once it leaves both. */
             int keep = 0;
-            POINT cursor;
+            POINT cursor = { 0, 0 };
             if (GetCursorPos(&cursor) && WindowFromPoint(cursor) == ui->tip_window) keep = 1;
             if (!keep) {
-                LRESULT at = SendMessageA(state->editor, SCI_POSITIONFROMPOINTCLOSE,
-                                          (WPARAM)notification->x, (LPARAM)notification->y);
+                /* where the pointer is now (the notification may carry the old spot) */
+                POINT local = cursor;
+                LRESULT at;
+                ScreenToClient(state->editor, &local);
+                at = SendMessageA(state->editor, SCI_POSITIONFROMPOINTCLOSE,
+                                  (WPARAM)local.x, (LPARAM)local.y);
                 keep = at >= ui->hover_word_start && at <= ui->hover_word_end &&
                        ui->hover_word_end > ui->hover_word_start;
             }
