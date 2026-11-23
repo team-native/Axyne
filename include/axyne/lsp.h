@@ -71,6 +71,93 @@ typedef struct AxyneLspLocation {
     AxyneLspRange range;
 } AxyneLspLocation;
 
+typedef struct AxyneLspFileEdit {
+    char *uri;
+    AxyneLspTextEdit *edits;
+    size_t edit_count;
+} AxyneLspFileEdit;
+
+typedef struct AxyneLspWorkspaceEdit {
+    AxyneLspFileEdit *files;
+    size_t file_count;
+} AxyneLspWorkspaceEdit;
+
+typedef struct AxyneLspCodeAction {
+    char *title;
+    char *kind;              /* "quickfix", "refactor.extract", ... may be NULL */
+    int preferred;
+    int has_edit;
+    AxyneLspWorkspaceEdit edit;
+    int has_command;         /* a command that needs workspace/executeCommand (unsupported) */
+    char *raw_json;          /* for codeAction/resolve; may be NULL */
+} AxyneLspCodeAction;
+
+/* The active signature of a signatureHelp response. Parameter ranges are
+ * byte offsets into `label`. */
+typedef struct AxyneLspSignature {
+    char *label;
+    char *documentation;
+    size_t *parameter_starts;
+    size_t *parameter_ends;
+    size_t parameter_count;
+    size_t active_parameter;
+    int has_active_parameter;
+} AxyneLspSignature;
+
+typedef struct AxyneLspSymbol {
+    char *name;
+    char *container;         /* enclosing symbol, NULL at top level */
+    int kind;                /* LSP SymbolKind */
+    AxyneLspPosition position;
+} AxyneLspSymbol;
+
+typedef enum AxyneLspResultKind {
+    AXYNE_LSP_RESULT_HOVER = 1,
+    AXYNE_LSP_RESULT_SIGNATURE,
+    AXYNE_LSP_RESULT_RENAME,
+    AXYNE_LSP_RESULT_CODE_ACTIONS,
+    AXYNE_LSP_RESULT_FORMAT,
+    AXYNE_LSP_RESULT_SYMBOLS,
+    AXYNE_LSP_RESULT_RESOLVED_COMPLETION,
+    AXYNE_LSP_RESULT_RESOLVED_ACTION
+} AxyneLspResultKind;
+
+/* One response to a request made with axyne_lsp_hover and friends. Only the
+ * fields of `kind` are meaningful. `failed` is set when the server answered
+ * with an error (error_message) or does not support the request. */
+typedef struct AxyneLspResult {
+    AxyneLspResultKind kind;
+    uint64_t request_id;
+    int failed;
+    char *error_message;
+    char *text;                          /* HOVER: Markdown or plain text, NULL when empty */
+    AxyneLspRange range;                 /* HOVER */
+    int has_range;
+    AxyneLspSignature signature;         /* SIGNATURE */
+    int has_signature;
+    size_t signature_count;
+    AxyneLspTextEdit *edits;             /* FORMAT */
+    size_t edit_count;
+    AxyneLspWorkspaceEdit workspace_edit; /* RENAME */
+    int has_workspace_edit;
+    AxyneLspCodeAction *actions;         /* CODE_ACTIONS, RESOLVED_ACTION (one entry) */
+    size_t action_count;
+    AxyneLspSymbol *symbols;             /* SYMBOLS, flattened in document order */
+    size_t symbol_count;
+    AxyneLspCompletionItem completion_item; /* RESOLVED_COMPLETION */
+    int has_completion_item;
+    int detached;                        /* see AxyneLspResultFn */
+} AxyneLspResult;
+
+/* Releases the contents of `result` and the result itself. */
+void axyne_lsp_result_free(AxyneLspResult *result);
+
+/* Runs on the client's reader thread. The result is freed after the callback
+ * returns unless the callback sets `detached`; it then owns the result and
+ * releases it with axyne_lsp_result_free. */
+typedef void (*AxyneLspResultFn)(AxyneLspClient *client, AxyneLspResult *result,
+                                 void *user_data);
+
 typedef void (*AxyneLspDiagnosticsFn)(AxyneLspClient *client,
                                       const char *document_path,
                                       const AxyneLspDiagnostic *diagnostics,
@@ -109,6 +196,7 @@ typedef struct AxyneLspConfig {
     AxyneLspCompletionFn on_completion;
     AxyneLspNavigationFn on_navigation;
     AxyneLspErrorFn on_error;
+    AxyneLspResultFn on_result;      /* hover, signature, rename, ... (may be NULL) */
     void *user_data;
 } AxyneLspConfig;
 
@@ -155,6 +243,58 @@ AxyneStatus axyne_lsp_references(AxyneLspClient *client,
                                  AxyneLspPosition position,
                                  uint64_t *request_id,
                                  AxyneError *error);
+
+/* Further requests. The document must be open (axyne_lsp_did_open). Each
+ * returns a request id; the answer arrives through on_result with that id. */
+AxyneStatus axyne_lsp_hover(AxyneLspClient *client, const AxyneDocument *document,
+                            AxyneLspPosition position, uint64_t *request_id,
+                            AxyneError *error);
+AxyneStatus axyne_lsp_signature_help(AxyneLspClient *client, const AxyneDocument *document,
+                                     AxyneLspPosition position, uint64_t *request_id,
+                                     AxyneError *error);
+AxyneStatus axyne_lsp_rename(AxyneLspClient *client, const AxyneDocument *document,
+                             AxyneLspPosition position, const char *new_name,
+                             uint64_t *request_id, AxyneError *error);
+/* Code actions for `range`; the diagnostics last published for the document
+ * that overlap the range are sent as context so servers can offer quick fixes. */
+AxyneStatus axyne_lsp_code_actions(AxyneLspClient *client, const AxyneDocument *document,
+                                   AxyneLspRange range, uint64_t *request_id,
+                                   AxyneError *error);
+AxyneStatus axyne_lsp_format(AxyneLspClient *client, const AxyneDocument *document,
+                             size_t tab_size, int insert_spaces,
+                             uint64_t *request_id, AxyneError *error);
+AxyneStatus axyne_lsp_document_symbols(AxyneLspClient *client, const AxyneDocument *document,
+                                       uint64_t *request_id, AxyneError *error);
+/* completionItem/resolve with the item's raw_json (documentation, imports). */
+AxyneStatus axyne_lsp_resolve_completion(AxyneLspClient *client, const char *raw_json,
+                                         uint64_t *request_id, AxyneError *error);
+/* codeAction/resolve with the action's raw_json (fills in a lazy edit). */
+AxyneStatus axyne_lsp_resolve_code_action(AxyneLspClient *client, const char *raw_json,
+                                          uint64_t *request_id, AxyneError *error);
+/* textDocument/didSave. */
+AxyneStatus axyne_lsp_did_save(AxyneLspClient *client, const AxyneDocument *document,
+                               AxyneError *error);
+
+/* ---- helpers independent of a running client ----------------------------- */
+
+/* Byte offset in `text` of an LSP position (UTF-16 character). Positions past
+ * the end of a line clamp to the line end, past the end of the text to `length`. */
+size_t axyne_lsp_offset_for_position(const char *text, size_t length,
+                                     AxyneLspPosition position);
+
+/* Applies `edits` (any order, must not overlap) to `text`. `*out` is newly
+ * allocated and NUL-terminated; INVALID_ARGUMENT when edits overlap. */
+AxyneStatus axyne_lsp_apply_text_edits(const char *text, size_t length,
+                                       const AxyneLspTextEdit *edits, size_t count,
+                                       char **out, size_t *out_length);
+
+/* Readable plain text from Markdown: code fences, emphasis, backticks, headers
+ * and links are reduced to their text. Newly allocated; NULL on out of memory. */
+char *axyne_lsp_markdown_to_plain(const char *markdown);
+
+/* "file:///C:/dir/a%20b.js" -> "C:/dir/a b.js" (Windows) or "/dir/a b.js";
+ * NULL for non-file URIs. Newly allocated. */
+char *axyne_lsp_uri_to_path(const char *uri);
 
 #ifdef __cplusplus
 }

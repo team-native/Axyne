@@ -1,5 +1,6 @@
 add_library(axyne_lsp STATIC
     "${CMAKE_CURRENT_LIST_DIR}/lsp.c"
+    "${CMAKE_CURRENT_LIST_DIR}/lsp_edit.c"
 )
 target_include_directories(axyne_lsp PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(axyne_lsp PUBLIC axyne_process)
