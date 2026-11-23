@@ -272,6 +272,8 @@ typedef struct AxyneWindowState {
     AxyneLspClient *lsp;
     AxyneLanguageId lsp_language;
     char lsp_status[192];
+    unsigned lsp_install_busy;  /* bit per AxyneLanguageId: installer running */
+    unsigned lsp_install_tried; /* bit per AxyneLanguageId: attempted this session */
     /* Problems panel: the model (LSP diagnostics + build output), the rows
      * built from it for painting and the panel's view state. */
     AxyneProblemList problems;
