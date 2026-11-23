@@ -77,6 +77,9 @@ static int test_markdown(void)
     CHECK(plain != NULL);
     CHECK(strcmp(plain, "const version: string\n\nBold and code with a link\nTitle\nsnake_case") == 0);
     free(plain);
+    plain = axyne_lsp_markdown_to_plain("def f(*args, **kwargs) -> a * b");
+    CHECK(plain != NULL && strcmp(plain, "def f(*args, **kwargs) -> a * b") == 0);
+    free(plain);
     plain = axyne_lsp_markdown_to_plain("");
     CHECK(plain != NULL && plain[0] == '\0');
     free(plain);

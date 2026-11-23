@@ -91,7 +91,7 @@ AxyneStatus axyne_lsp_apply_text_edits(const char *text, size_t length,
     for (i = 0; i < count; ++i) {
         const char *replacement = edits[spans[i].index].new_text;
         size_t replacement_length = replacement != NULL ? strlen(replacement) : 0;
-        memcpy(result + used, text + cursor, spans[i].start - cursor);
+        if (spans[i].start > cursor) memcpy(result + used, text + cursor, spans[i].start - cursor);
         used += spans[i].start - cursor;
         if (replacement_length != 0) memcpy(result + used, replacement, replacement_length);
         used += replacement_length;
@@ -136,10 +136,37 @@ char *axyne_lsp_markdown_to_plain(const char *markdown)
         at_line_start = 0;
         if (ch == '\r') { ++i; continue; }
         if (ch == '\n') { out[used++] = '\n'; ++i; at_line_start = 1; continue; }
-        if (ch == '`' || ch == '*' || (ch == '_' && i + 1 < length && markdown[i + 1] == '_')) {
-            /* emphasis and inline code marks: keep the text between them */
-            ++i;
-            if (ch == '_' || (ch == '*' && i < length && markdown[i] == '*')) ++i;
+        if (ch == '`') { ++i; continue; } /* inline code marks */
+        if (ch == '*' || (ch == '_' && i + 1 < length && markdown[i + 1] == '_')) {
+            /* Emphasis: drop the marker run only when it opens a span, i.e. a
+             * run of the same length closes it later on the line. This keeps
+             * `*args`, `**kwargs` and `a * b` readable. */
+            size_t run = 0, j = 0;
+            int closes = 0;
+            while (i + run < length && markdown[i + run] == ch) ++run;
+            if (i + run < length && markdown[i + run] != ' ' && markdown[i + run] != '\n') {
+                for (j = i + run; j < length && markdown[j] != '\n'; ++j) {
+                    size_t other = 0;
+                    if (markdown[j] != ch) continue;
+                    while (j + other < length && markdown[j + other] == ch) ++other;
+                    if (other == run && markdown[j - 1] != ' ') { closes = 1; break; }
+                    j += other - 1;
+                }
+            }
+            if (closes) {
+                /* also drop the closing run below by remembering it */
+                size_t close_at = j;
+                size_t k;
+                for (k = i + run; k < close_at; ++k) {
+                    if (markdown[k] == '\n') break;
+                    out[used++] = markdown[k];
+                }
+                i = close_at + run;
+                continue;
+            }
+            memcpy(out + used, markdown + i, run);
+            used += run;
+            i += run;
             continue;
         }
         if (ch == '\\' && i + 1 < length && markdown[i + 1] != '\n') {

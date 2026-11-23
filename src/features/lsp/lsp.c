@@ -903,6 +903,14 @@ fail:
     return 0;
 }
 
+/* An optional string member: null leaves *out untouched. */
+static int lsp_read_optional_string(JsonCursor *cursor, char **out)
+{
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == 'n') return json_skip_value(cursor, 0);
+    return lsp_replace_string(out, json_read_string(cursor));
+}
+
 /* TextEdit {range,newText} or InsertReplaceEdit {insert,replace,newText}. */
 static int lsp_parse_text_edit(JsonCursor *cursor, AxyneLspTextEdit *edit)
 {
@@ -970,6 +978,7 @@ static int lsp_read_markup(JsonCursor *cursor, char **out)
 {
     char *key, *value = NULL;
     json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == 'n') return json_skip_value(cursor, 0);
     if (cursor->at < cursor->end && *cursor->at == '"') {
         value = json_read_string(cursor);
         if (value == NULL) return 0;
@@ -998,6 +1007,8 @@ static int lsp_read_markup(JsonCursor *cursor, char **out)
 static int lsp_parse_label_details(JsonCursor *cursor, char **out)
 {
     char *key;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == 'n') return json_skip_value(cursor, 0);
     if (!json_expect(cursor, '{')) return 0;
     json_skip_space(cursor);
     if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 1; }
@@ -1036,20 +1047,20 @@ static int lsp_parse_completion_item(JsonCursor *cursor, AxyneLspCompletionItem 
                 free(key); goto fail;
             }
         } else if (strcmp(key, "detail") == 0) {
-            if (!lsp_replace_string(&item->detail, json_read_string(cursor))) {
+            if (!lsp_read_optional_string(cursor, &item->detail)) {
                 free(key); goto fail;
             }
         } else if (strcmp(key, "insertText") == 0) {
-            if (!lsp_replace_string(&item->insert_text, json_read_string(cursor))) {
+            if (!lsp_read_optional_string(cursor, &item->insert_text)) {
                 free(key); goto fail;
             }
         } else if (strcmp(key, "kind") == 0) {
             if (!json_read_uint(cursor, &kind) || kind > INT_MAX) { free(key); goto fail; }
             item->kind = (int)kind;
         } else if (strcmp(key, "sortText") == 0) {
-            if (!lsp_replace_string(&item->sort_text, json_read_string(cursor))) { free(key); goto fail; }
+            if (!lsp_read_optional_string(cursor, &item->sort_text)) { free(key); goto fail; }
         } else if (strcmp(key, "filterText") == 0) {
-            if (!lsp_replace_string(&item->filter_text, json_read_string(cursor))) { free(key); goto fail; }
+            if (!lsp_read_optional_string(cursor, &item->filter_text)) { free(key); goto fail; }
         } else if (strcmp(key, "documentation") == 0) {
             if (!lsp_read_markup(cursor, &item->documentation)) { free(key); goto fail; }
         } else if (strcmp(key, "labelDetails") == 0) {
@@ -1473,6 +1484,7 @@ static int lsp_hover_piece(JsonCursor *cursor, LspBuffer *out)
 {
     char *key, *value = NULL;
     json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == 'n') return json_skip_value(cursor, 0);
     if (cursor->at < cursor->end && *cursor->at == '"') {
         value = json_read_string(cursor);
         if (value == NULL) return 0;
@@ -1546,6 +1558,20 @@ fail:
     return 0;
 }
 
+/* Byte offset of UTF-16 unit `units` in `text`; line breaks are ordinary here. */
+static size_t lsp_utf16_to_byte(const char *text, size_t length, size_t units)
+{
+    size_t offset = 0, counted = 0;
+    while (offset < length && counted < units) {
+        unsigned char lead = (unsigned char)text[offset];
+        size_t bytes = lead < 0x80 ? 1 : (lead & 0xe0) == 0xc0 ? 2 : (lead & 0xf0) == 0xe0 ? 3 :
+                       (lead & 0xf8) == 0xf0 ? 4 : 1;
+        counted += bytes == 4 ? 2 : 1;
+        offset += bytes;
+    }
+    return offset > length ? length : offset;
+}
+
 /* One SignatureInformation; parameter labels become byte ranges in `label`. */
 static int lsp_parse_signature(JsonCursor *cursor, AxyneLspSignature *signature)
 {
@@ -1580,7 +1606,7 @@ static int lsp_parse_signature(JsonCursor *cursor, AxyneLspSignature *signature)
         if (!json_expect(cursor, ',')) goto fail;
     }
     if (signature->label == NULL) goto fail;
-    if (parameters_start != NULL) {
+    if (parameters_start != NULL && *parameters_start != 'n') {
         JsonCursor list = { parameters_start, cursor->end };
         size_t capacity = 0, label_length = strlen(signature->label), search_from = 0;
         if (!json_expect(&list, '[')) goto fail;
@@ -1611,10 +1637,8 @@ static int lsp_parse_signature(JsonCursor *cursor, AxyneLspSignature *signature)
                         ++list.at;
                         if (!json_read_uint(&list, &a) || !json_expect(&list, ',') ||
                             !json_read_uint(&list, &b) || !json_expect(&list, ']')) { free(key); goto fail; }
-                        begin = axyne_lsp_offset_for_position(signature->label, label_length,
-                                                              (AxyneLspPosition){ 0, (size_t)a });
-                        finish = axyne_lsp_offset_for_position(signature->label, label_length,
-                                                               (AxyneLspPosition){ 0, (size_t)b });
+                        begin = lsp_utf16_to_byte(signature->label, label_length, (size_t)a);
+                        finish = lsp_utf16_to_byte(signature->label, label_length, (size_t)b);
                         have = finish >= begin;
                     } else if (!json_skip_value(&list, 0)) { free(key); goto fail; }
                 } else if (!json_skip_value(&list, 0)) { free(key); goto fail; }
@@ -1975,7 +1999,7 @@ static int lsp_parse_symbol_array(JsonCursor *cursor, const char *container,
                     if (!json_expect(cursor, ',')) { free(key); free(name); free(own_container); return 0; }
                 }
             } else if (strcmp(key, "containerName") == 0) {
-                if (!lsp_replace_string(&own_container, json_read_string(cursor))) { free(key); free(name); return 0; }
+                if (!lsp_read_optional_string(cursor, &own_container)) { free(key); free(name); return 0; }
             } else if (strcmp(key, "children") == 0) {
                 json_skip_space(cursor);
                 children = cursor->at;
@@ -2066,11 +2090,12 @@ static AxyneLspResult *lsp_build_result(LspRequestKind kind, uint64_t id, int ha
     case LSP_REQUEST_SIGNATURE: ok = lsp_parse_signature_help(result_start, result_end, result); break;
     case LSP_REQUEST_RENAME: {
         JsonCursor cursor = { result_start, result_end };
+        int is_null;
         json_skip_space(&cursor);
-        if (cursor.at < cursor.end && *cursor.at != 'n')
+        is_null = cursor.at >= cursor.end || *cursor.at == 'n';
+        if (!is_null)
             result->has_workspace_edit = lsp_parse_workspace_edit(&cursor, &result->workspace_edit);
-        ok = result->has_workspace_edit || (cursor.at < cursor.end && *cursor.at == 'n') ||
-             cursor.at >= cursor.end;
+        ok = is_null || result->has_workspace_edit;
         break;
     }
     case LSP_REQUEST_CODE_ACTIONS: ok = lsp_parse_code_actions(result_start, result_end, result); break;
@@ -2948,6 +2973,7 @@ static AxyneStatus lsp_send_request(AxyneLspClient *client, const AxyneDocument 
     if (client->initialized) {
         if (!lsp_send_body_locked(client, body.data, body.length)) {
             (void)lsp_take_request(client, id);
+            *request_id = 0;
             lsp_buffer_dispose(&body);
             lsp_mutex_unlock(&client->mutex);
             lsp_cleanup_failed_start(client);
@@ -2965,6 +2991,7 @@ static AxyneStatus lsp_send_request(AxyneLspClient *client, const AxyneDocument 
              !lsp_grow((void **)&client->queued, &client->queued_capacity, sizeof(*client->queued)))) {
             free(queued.uri); free(queued.body);
             (void)lsp_take_request(client, id);
+            *request_id = 0;
             lsp_mutex_unlock(&client->mutex);
             return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to queue LSP request");
         }

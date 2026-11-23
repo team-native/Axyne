@@ -85,6 +85,7 @@ while True:
         "result": {"isIncomplete": False, "items": [{
             "label": "probeCompletion", "kind": 3, "sortText": "0001",
             "filterText": "probe", "tags": [1], "preselect": True,
+            "detail": None, "insertText": None,
             "documentation": {"kind": "markdown", "value": "docs"},
             "labelDetails": {"detail": "(a: int)"},
             "textEdit": {"range": {"start": {"line": 0, "character": 4},
