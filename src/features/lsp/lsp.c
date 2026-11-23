@@ -17,6 +17,39 @@ static void lsp_mutex_init(AxyneLspMutex *mutex) { InitializeCriticalSection(mut
 static void lsp_mutex_destroy(AxyneLspMutex *mutex) { DeleteCriticalSection(mutex); }
 static void lsp_mutex_lock(AxyneLspMutex *mutex) { EnterCriticalSection(mutex); }
 static void lsp_mutex_unlock(AxyneLspMutex *mutex) { LeaveCriticalSection(mutex); }
+typedef CONDITION_VARIABLE AxyneLspCond;
+typedef HANDLE AxyneLspThread;
+static void lsp_cond_init(AxyneLspCond *cond) { InitializeConditionVariable(cond); }
+static void lsp_cond_destroy(AxyneLspCond *cond) { (void)cond; }
+static void lsp_cond_wait(AxyneLspCond *cond, AxyneLspMutex *mutex)
+{
+    (void)SleepConditionVariableCS(cond, mutex, INFINITE);
+}
+static void lsp_cond_signal(AxyneLspCond *cond) { WakeConditionVariable(cond); }
+typedef void (*AxyneLspThreadMain)(void *);
+typedef struct AxyneLspThreadStart { AxyneLspThreadMain main; void *argument; } AxyneLspThreadStart;
+static DWORD WINAPI lsp_thread_thunk(LPVOID raw)
+{
+    AxyneLspThreadStart start = *(AxyneLspThreadStart *)raw;
+    free(raw);
+    start.main(start.argument);
+    return 0;
+}
+static int lsp_thread_create(AxyneLspThread *thread, AxyneLspThreadMain main, void *argument)
+{
+    AxyneLspThreadStart *start = (AxyneLspThreadStart *)malloc(sizeof(*start));
+    if (start == NULL) return 0;
+    start->main = main; start->argument = argument;
+    *thread = CreateThread(NULL, 0, lsp_thread_thunk, start, 0, NULL);
+    if (*thread == NULL) { free(start); return 0; }
+    return 1;
+}
+static void lsp_thread_join(AxyneLspThread *thread)
+{
+    (void)WaitForSingleObject(*thread, INFINITE);
+    CloseHandle(*thread);
+    *thread = NULL;
+}
 #else
 #include <errno.h>
 #include <pthread.h>
@@ -25,6 +58,30 @@ static int lsp_mutex_init(AxyneLspMutex *mutex) { return pthread_mutex_init(mute
 static void lsp_mutex_destroy(AxyneLspMutex *mutex) { (void)pthread_mutex_destroy(mutex); }
 static void lsp_mutex_lock(AxyneLspMutex *mutex) { (void)pthread_mutex_lock(mutex); }
 static void lsp_mutex_unlock(AxyneLspMutex *mutex) { (void)pthread_mutex_unlock(mutex); }
+typedef pthread_cond_t AxyneLspCond;
+typedef pthread_t AxyneLspThread;
+static void lsp_cond_init(AxyneLspCond *cond) { (void)pthread_cond_init(cond, NULL); }
+static void lsp_cond_destroy(AxyneLspCond *cond) { (void)pthread_cond_destroy(cond); }
+static void lsp_cond_wait(AxyneLspCond *cond, AxyneLspMutex *mutex) { (void)pthread_cond_wait(cond, mutex); }
+static void lsp_cond_signal(AxyneLspCond *cond) { (void)pthread_cond_signal(cond); }
+typedef void (*AxyneLspThreadMain)(void *);
+typedef struct AxyneLspThreadStart { AxyneLspThreadMain main; void *argument; } AxyneLspThreadStart;
+static void *lsp_thread_thunk(void *raw)
+{
+    AxyneLspThreadStart start = *(AxyneLspThreadStart *)raw;
+    free(raw);
+    start.main(start.argument);
+    return NULL;
+}
+static int lsp_thread_create(AxyneLspThread *thread, AxyneLspThreadMain main, void *argument)
+{
+    AxyneLspThreadStart *start = (AxyneLspThreadStart *)malloc(sizeof(*start));
+    if (start == NULL) return 0;
+    start->main = main; start->argument = argument;
+    if (pthread_create(thread, NULL, lsp_thread_thunk, start) != 0) { free(start); return 0; }
+    return 1;
+}
+static void lsp_thread_join(AxyneLspThread *thread) { (void)pthread_join(*thread, NULL); }
 #endif
 
 #define AXYNE_LSP_MAX_MESSAGE (16U * 1024U * 1024U)
@@ -109,6 +166,18 @@ struct AxyneLspClient {
     size_t queued_count;
     size_t queued_capacity;
     AxyneLspMutex mutex;
+    /* Outbox: messages for the server are written by their own thread so that
+     * no caller (or the reader thread) ever blocks on a full stdin pipe while
+     * holding `mutex`. Lock order: mutex, then out_mutex. */
+    AxyneLspMutex out_mutex;
+    AxyneLspCond out_cond;
+    LspBuffer *out_items;
+    size_t out_count;
+    size_t out_capacity;
+    AxyneLspThread writer;
+    int writer_running;
+    int writer_stop;
+    AxyneProcess *writer_process;
 };
 
 typedef struct JsonCursor {
@@ -1247,6 +1316,61 @@ static LspRequestKind lsp_take_request(AxyneLspClient *client, uint64_t id)
     return 0;
 }
 
+static void lsp_writer_main(void *argument)
+{
+    AxyneLspClient *client = (AxyneLspClient *)argument;
+    for (;;) {
+        LspBuffer message;
+        AxyneProcess *process;
+        AxyneError error;
+        lsp_mutex_lock(&client->out_mutex);
+        while (client->out_count == 0 && !client->writer_stop) lsp_cond_wait(&client->out_cond, &client->out_mutex);
+        if (client->writer_stop) { lsp_mutex_unlock(&client->out_mutex); return; }
+        message = client->out_items[0];
+        memmove(client->out_items, client->out_items + 1, (client->out_count - 1) * sizeof(*client->out_items));
+        --client->out_count;
+        process = client->writer_process;
+        lsp_mutex_unlock(&client->out_mutex);
+        /* May block while the server is busy; nothing else waits on us. */
+        if (process != NULL) (void)axyne_process_write(process, message.data, message.length, &error);
+        lsp_buffer_dispose(&message);
+    }
+}
+
+/* Starts the writer for a freshly started `process`. */
+static int lsp_writer_start(AxyneLspClient *client, AxyneProcess *process)
+{
+    lsp_mutex_lock(&client->out_mutex);
+    client->writer_process = process;
+    client->writer_stop = 0;
+    lsp_mutex_unlock(&client->out_mutex);
+    if (!lsp_thread_create(&client->writer, lsp_writer_main, client)) return 0;
+    lsp_mutex_lock(&client->out_mutex);
+    client->writer_running = 1;
+    lsp_mutex_unlock(&client->out_mutex);
+    return 1;
+}
+
+/* Stops the writer before `process` is released. A write blocked on a stuck
+ * server is unblocked by terminating it. Call without holding `mutex`. */
+static void lsp_writer_stop(AxyneLspClient *client, AxyneProcess *process)
+{
+    size_t i;
+    lsp_mutex_lock(&client->out_mutex);
+    if (!client->writer_running) { lsp_mutex_unlock(&client->out_mutex); return; }
+    client->writer_stop = 1;
+    lsp_cond_signal(&client->out_cond);
+    lsp_mutex_unlock(&client->out_mutex);
+    if (process != NULL) (void)axyne_process_terminate(process, NULL);
+    lsp_thread_join(&client->writer);
+    lsp_mutex_lock(&client->out_mutex);
+    for (i = 0; i < client->out_count; ++i) lsp_buffer_dispose(&client->out_items[i]);
+    client->out_count = 0;
+    client->writer_running = 0;
+    client->writer_process = NULL;
+    lsp_mutex_unlock(&client->out_mutex);
+}
+
 static int lsp_send_body_locked(AxyneLspClient *client, const char *body, size_t length)
 {
     LspBuffer message = { 0 };
@@ -1259,7 +1383,23 @@ static int lsp_send_body_locked(AxyneLspClient *client, const char *body, size_t
         !lsp_buffer_append(&message, body, length)) {
         lsp_buffer_dispose(&message); return 0;
     }
-    ok = axyne_process_write(client->process, message.data, message.length, &error) == AXYNE_STATUS_OK;
+    ok = 0;
+    (void)error;
+    lsp_mutex_lock(&client->out_mutex);
+    if (client->writer_running && !client->writer_stop) {
+        if (client->out_count == client->out_capacity) {
+            size_t next = client->out_capacity == 0 ? 16 : client->out_capacity * 2;
+            LspBuffer *grown = (LspBuffer *)realloc(client->out_items, next * sizeof(*grown));
+            if (grown != NULL) { client->out_items = grown; client->out_capacity = next; }
+        }
+        if (client->out_count < client->out_capacity) {
+            client->out_items[client->out_count++] = message; /* ownership moves */
+            memset(&message, 0, sizeof(message));
+            ok = 1;
+            lsp_cond_signal(&client->out_cond);
+        }
+    }
+    lsp_mutex_unlock(&client->out_mutex);
     lsp_buffer_dispose(&message);
     return ok;
 }
@@ -2644,6 +2784,12 @@ static AxyneStatus lsp_start_with_callbacks_locked(AxyneLspClient *client,
     status = axyne_process_start(&spec, &client->process, error);
     if (status != AXYNE_STATUS_OK) return status;
     client->started = 1;
+    if (!lsp_writer_start(client, client->process)) {
+        client->stopping = 1;
+        client->initialized = 0;
+        client->exited = 1;
+        return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to start the LSP writer");
+    }
     if (!lsp_send_initialize_locked(client)) {
         /* The caller releases the process after dropping this mutex. */
         client->stopping = 1;
@@ -2669,6 +2815,7 @@ static void lsp_cleanup_failed_start(AxyneLspClient *client)
     client->initialized = 0;
     client->exited = 1;
     lsp_mutex_unlock(&client->mutex);
+    lsp_writer_stop(client, process);
     axyne_process_release(process);
     lsp_mutex_lock(&client->mutex);
     for (size_t i = 0; i < client->queued_count; ++i) {
@@ -2708,6 +2855,15 @@ AxyneStatus axyne_lsp_create(const AxyneLspConfig *config,
 #else
     lsp_mutex_init(&client->mutex);
 #endif
+#ifndef _WIN32
+    if (!lsp_mutex_init(&client->out_mutex)) {
+        lsp_mutex_destroy(&client->mutex); free(client);
+        return lsp_error(error, AXYNE_STATUS_IO_ERROR, "Unable to initialize LSP synchronization");
+    }
+#else
+    lsp_mutex_init(&client->out_mutex);
+#endif
+    lsp_cond_init(&client->out_cond);
     client->command = lsp_copy(config->command);
     client->working_directory = lsp_copy(config->working_directory);
     client->root_path = lsp_copy(config->root_path);
@@ -2732,6 +2888,8 @@ AxyneStatus axyne_lsp_create(const AxyneLspConfig *config,
         lsp_free_string_array(client->environment, client->environment_count);
         free(client->command); free(client->working_directory); free(client->root_path);
         free(client->root_uri); free(client->language_id); free(client->initialization_options_json);
+        lsp_cond_destroy(&client->out_cond);
+        lsp_mutex_destroy(&client->out_mutex);
         lsp_mutex_destroy(&client->mutex); free(client);
         return lsp_error(error, AXYNE_STATUS_OUT_OF_MEMORY, "Unable to copy LSP configuration");
     }
@@ -2757,7 +2915,11 @@ void axyne_lsp_destroy(AxyneLspClient *client)
     AxyneProcess *process;
     if (client == NULL) return;
     lsp_mutex_lock(&client->mutex); client->stopping = 1; process = client->process; lsp_mutex_unlock(&client->mutex);
+    lsp_writer_stop(client, process);
     if (process != NULL) axyne_process_release(process);
+    free(client->out_items);
+    lsp_cond_destroy(&client->out_cond);
+    lsp_mutex_destroy(&client->out_mutex);
     for (i = 0; i < client->document_count; ++i) lsp_document_dispose(&client->documents[i]);
     for (i = 0; i < client->queued_count; ++i) {
         free(client->queued[i].uri);

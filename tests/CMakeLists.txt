@@ -526,4 +526,13 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_LIST_DIR}/lsp_requests_server.py"
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-requests")
     set_tests_properties(axyne-lsp-requests PROPERTIES TIMEOUT 30)
+    add_executable(axyne_lsp_flood_tests test_lsp_flood.c)
+    target_link_libraries(axyne_lsp_flood_tests PRIVATE axyne_lsp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-flood")
+    add_test(NAME axyne-lsp-flood
+        COMMAND $<TARGET_FILE:axyne_lsp_flood_tests>
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/lsp_flood_server.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-flood")
+    set_tests_properties(axyne-lsp-flood PROPERTIES TIMEOUT 40)
 endif()
