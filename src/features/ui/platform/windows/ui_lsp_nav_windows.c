@@ -33,6 +33,7 @@ typedef struct AxyneWinLspItem {
     AxyneLspTextEdit *extra;
     size_t extra_count;
     int resolve_sent;
+    uint64_t resolve_id;
 } AxyneWinLspItem;
 
 struct AxyneWinLspNavUi {
@@ -52,8 +53,6 @@ struct AxyneWinLspNavUi {
     size_t prefix_bytes;
     int list_active;
     int icons_registered;
-    uint64_t resolve_request;
-    size_t resolve_index;
     char detail_text[1024];
 };
 
@@ -198,7 +197,6 @@ static void axyne_win_lsp_forget_shown(struct AxyneWinLspNavUi *ui)
     ui->item_count = 0;
     ui->order_count = 0;
     ui->list_active = 0;
-    ui->resolve_request = 0;
 }
 
 /* ---- ranking ------------------------------------------------------------ */
@@ -350,6 +348,10 @@ static long axyne_win_lsp_current_item(AxyneWindowState *state)
     struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
     LRESULT current;
     if (ui == NULL || state->editor == NULL || !ui->list_active) return -1;
+    /* A word-completion list (separator ' ') may have replaced ours. */
+    if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0 ||
+        SendMessageA(state->editor, SCI_AUTOCGETSEPARATOR, 0, 0) != '\n')
+        return -1;
     current = SendMessageA(state->editor, SCI_AUTOCGETCURRENT, 0, 0);
     if (current < 0 || (size_t)current >= ui->order_count) return -1;
     return (long)ui->order[current];
@@ -364,10 +366,8 @@ static void axyne_win_lsp_request_resolve(AxyneWindowState *state, size_t index)
     if (item->resolve_sent || item->raw_json == NULL || state->lsp == NULL) return;
     item->resolve_sent = 1;
     if (axyne_lsp_resolve_completion(state->lsp, item->raw_json, &request_id, &error) ==
-        AXYNE_STATUS_OK) {
-        ui->resolve_request = request_id;
-        ui->resolve_index = index;
-    }
+        AXYNE_STATUS_OK)
+        item->resolve_id = request_id;
 }
 
 /* "kind · detail" plus the documentation, for the panel beside the list. The
@@ -441,7 +441,11 @@ static void axyne_win_lsp_present(AxyneWindowState *state)
     caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     word_start = SendMessageA(state->editor, SCI_WORDSTARTPOSITION, (WPARAM)caret, TRUE);
     prefix_length = (size_t)(caret - word_start);
-    if (prefix_length >= sizeof(prefix) || ui->item_count == 0) return;
+    if (prefix_length >= sizeof(prefix) || ui->item_count == 0) {
+        if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+            SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
+        return;
+    }
     prefix[0] = '\0';
     if (prefix_length > 0) {
         struct Sci_TextRange range;
@@ -478,6 +482,8 @@ static void axyne_win_lsp_present(AxyneWindowState *state)
     list = (char *)malloc(shown * 160 + 1);
     if (ui->order == NULL || list == NULL) {
         free(ranked); free(list); free(ui->order); ui->order = NULL;
+        if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+            SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
         return;
     }
     axyne_win_lsp_register_icons(state, ui);
@@ -489,7 +495,19 @@ static void axyne_win_lsp_present(AxyneWindowState *state)
         length += (size_t)snprintf(list + length, 140, "%s%s%s", item->label,
                                    item->label_detail != NULL ? " " : "",
                                    item->label_detail != NULL ? item->label_detail : "");
-        if (length > before + 139) length = before + 139;
+        if (length > before + 139) {
+            length = before + 139;
+            /* back up over an incomplete UTF-8 sequence at the cut */
+            {
+                size_t cut = length;
+                while (cut > before && ((unsigned char)list[cut - 1] & 0xc0u) == 0x80u) --cut;
+                if (cut > before) {
+                    unsigned char lead = (unsigned char)list[cut - 1];
+                    size_t need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+                    if (length - (cut - 1) < need) length = cut - 1;
+                }
+            }
+        }
         for (size_t k = before + (i > 0 ? 1 : 0); k < length; ++k)
             if (list[k] == '\n' || list[k] == '\r' || list[k] == 0x1f) list[k] = ' ';
         list[length++] = 0x1f;
@@ -538,6 +556,7 @@ static void axyne_win_lsp_show_completion(
 typedef struct AxyneWinLspPlannedEdit {
     size_t start, end;
     const char *text;
+    size_t order; /* index in the server's list: breaks ties between equal starts */
 } AxyneWinLspPlannedEdit;
 
 static int axyne_win_lsp_planned_compare(const void *left, const void *right)
@@ -545,6 +564,7 @@ static int axyne_win_lsp_planned_compare(const void *left, const void *right)
     const AxyneWinLspPlannedEdit *a = (const AxyneWinLspPlannedEdit *)left;
     const AxyneWinLspPlannedEdit *b = (const AxyneWinLspPlannedEdit *)right;
     if (a->start != b->start) return a->start > b->start ? -1 : 1; /* last edit first */
+    if (a->order != b->order) return a->order > b->order ? -1 : 1;  /* later insert first */
     return 0;
 }
 
@@ -552,7 +572,6 @@ static int axyne_win_lsp_planned_compare(const void *left, const void *right)
  * applies its additional edits, e.g. an auto-import at the top of the file. */
 static void axyne_win_lsp_apply_item(AxyneWindowState *state, const AxyneWinLspItem *item)
 {
-    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
     AxyneWinLspPlannedEdit *plan;
     const char *text;
     LRESULT length, caret;
@@ -570,20 +589,24 @@ static void axyne_win_lsp_apply_item(AxyneWindowState *state, const AxyneWinLspI
         main_end = axyne_lsp_offset_for_position(text, (size_t)length, item->edit.range.end);
         main_text = item->edit.new_text;
         if (main_end < main_start) main_end = main_start;
+        /* characters typed since the request belong to the replaced word */
+        if ((size_t)caret > main_end && (size_t)caret >= main_start) main_end = (size_t)caret;
     } else {
-        size_t typed = ui->prefix_bytes <= (size_t)caret ? ui->prefix_bytes : (size_t)caret;
-        main_start = (size_t)caret - typed;
+        main_start = (size_t)SendMessageA(state->editor, SCI_WORDSTARTPOSITION, (WPARAM)caret, TRUE);
+        if (main_start > (size_t)caret) main_start = (size_t)caret;
         main_end = (size_t)caret;
         main_text = item->insert_text != NULL && item->insert_text[0] != '\0'
             ? item->insert_text : item->label;
     }
     main_length = strlen(main_text);
     plan[0].start = main_start; plan[0].end = main_end; plan[0].text = main_text;
+    plan[0].order = 0;
     for (i = 0; i < item->extra_count; ++i) {
         plan[1 + i].start = axyne_lsp_offset_for_position(text, (size_t)length, item->extra[i].range.start);
         plan[1 + i].end = axyne_lsp_offset_for_position(text, (size_t)length, item->extra[i].range.end);
         if (plan[1 + i].end < plan[1 + i].start) plan[1 + i].end = plan[1 + i].start;
         plan[1 + i].text = item->extra[i].new_text != NULL ? item->extra[i].new_text : "";
+        plan[1 + i].order = 1 + i;
         if (plan[1 + i].end <= main_start)
             shift += strlen(plan[1 + i].text) - (plan[1 + i].end - plan[1 + i].start);
     }
@@ -615,18 +638,19 @@ void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
 {
     AxyneWindowState *state = (AxyneWindowState *)user_data;
     AxyneWinLspCompletionMessage *message;
-    if (state == NULL || state->main_window == NULL || items == NULL ||
-        count == 0)
-        return;
+    if (state == NULL || state->main_window == NULL) return;
+    if (items == NULL) count = 0;
     if (count > 5000) count = 5000;
     message = (AxyneWinLspCompletionMessage *)calloc(1, sizeof(*message));
     if (message == NULL) return;
     message->client = client;
     message->request_id = request_id;
-    message->items = (AxyneWinLspItem *)calloc(count, sizeof(*message->items));
-    if (message->items == NULL) {
-        free(message);
-        return;
+    if (count > 0) {
+        message->items = (AxyneWinLspItem *)calloc(count, sizeof(*message->items));
+        if (message->items == NULL) {
+            free(message);
+            return;
+        }
     }
     for (size_t i = 0; i < count; ++i)
         if (axyne_win_lsp_item_from(&items[i], &message->items[message->count]))
@@ -652,10 +676,12 @@ static void axyne_win_lsp_handle_result(AxyneWindowState *state, AxyneLspResult 
     struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
     if (ui == NULL) return;
     if (result->kind == AXYNE_LSP_RESULT_RESOLVED_COMPLETION && !result->failed &&
-        result->has_completion_item && result->request_id == ui->resolve_request &&
-        ui->resolve_index < ui->item_count) {
-        AxyneWinLspItem *item = &ui->items[ui->resolve_index];
+        result->has_completion_item) {
+        AxyneWinLspItem *item = NULL;
         AxyneLspCompletionItem *resolved = &result->completion_item;
+        for (size_t i = 0; i < ui->item_count; ++i)
+            if (ui->items[i].resolve_id == result->request_id) { item = &ui->items[i]; break; }
+        if (item == NULL) return;
         if (resolved->documentation != NULL) {
             free(item->documentation);
             item->documentation = axyne_win_lsp_dup(resolved->documentation);
@@ -678,7 +704,7 @@ static void axyne_win_lsp_handle_result(AxyneWindowState *state, AxyneLspResult 
                 item->extra_count = resolved->additional_edit_count;
             }
         }
-        ui->resolve_request = 0;
+        item->resolve_id = 0;
         axyne_win_completion_refresh_detail(state);
     }
 }
@@ -1031,6 +1057,9 @@ static void axyne_win_lsp_document_activated(AxyneWindowState *state,
                                              AxyneDocument *document)
 {
     if (state == NULL || state->lsp_nav_ui == NULL) return;
+    if (state->editor != NULL && SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+        SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
+    axyne_win_lsp_forget_shown(state->lsp_nav_ui);
     axyne_win_lsp_clear_request_paths(state->lsp_nav_ui);
     if (axyne_win_lsp_document_supported(document) &&
         axyne_win_capture_editor(state))
