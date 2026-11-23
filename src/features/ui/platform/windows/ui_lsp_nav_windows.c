@@ -62,6 +62,16 @@ struct AxyneWinLspNavUi {
     LRESULT signature_caret;
     char *signature_path;
     int signature_active;
+    /* Rename, format and code actions: one request of each kind at a time. */
+    uint64_t rename_request;
+    char *rename_path;
+    uint64_t format_request;
+    char *format_path;
+    uint64_t actions_request;
+    char *actions_path;
+    LRESULT actions_x, actions_y;
+    uint64_t action_resolve_request;
+    char *action_resolve_path;
 };
 
 typedef struct AxyneWinLspCompletionMessage {
@@ -183,6 +193,10 @@ static void axyne_win_lsp_clear_request_paths(struct AxyneWinLspNavUi *ui)
     ui->hover_request = 0;
     ui->signature_request = 0;
     ui->signature_active = 0;
+    ui->rename_request = 0;
+    ui->format_request = 0;
+    ui->actions_request = 0;
+    ui->action_resolve_request = 0;
     free(ui->completion_path);
     free(ui->definition_path);
     free(ui->references_path);
@@ -798,10 +812,268 @@ static int axyne_win_lsp_active_path_is(AxyneWindowState *state, const char *pat
            strcmp(document->path, path) == 0;
 }
 
+/* ---- applying edits ------------------------------------------------------ */
+
+/* Applies `edits` (LSP positions) to the document in the editor as one undo
+ * step. Overlapping edits are refused. Returns 1 on success. */
+static int axyne_win_lsp_edit_active(AxyneWindowState *state, const AxyneLspTextEdit *edits,
+                                     size_t count)
+{
+    AxyneWinLspPlannedEdit *plan;
+    const char *text;
+    LRESULT length;
+    size_t i;
+    int ok = 1;
+    if (count == 0) return 1;
+    length = SendMessageA(state->editor, SCI_GETLENGTH, 0, 0);
+    text = (const char *)SendMessageA(state->editor, SCI_GETCHARACTERPOINTER, 0, 0);
+    if (text == NULL || length < 0) return 0;
+    plan = (AxyneWinLspPlannedEdit *)malloc(count * sizeof(*plan));
+    if (plan == NULL) return 0;
+    for (i = 0; i < count; ++i) {
+        plan[i].start = axyne_lsp_offset_for_position(text, (size_t)length, edits[i].range.start);
+        plan[i].end = axyne_lsp_offset_for_position(text, (size_t)length, edits[i].range.end);
+        if (plan[i].end < plan[i].start) plan[i].end = plan[i].start;
+        plan[i].text = edits[i].new_text != NULL ? edits[i].new_text : "";
+    }
+    qsort(plan, count, sizeof(*plan), axyne_win_lsp_planned_compare); /* last edit first */
+    for (i = 1; i < count; ++i)
+        if (plan[i - 1].start < plan[i].end) ok = 0; /* overlap */
+    if (ok) {
+        SendMessageA(state->editor, SCI_BEGINUNDOACTION, 0, 0);
+        for (i = 0; i < count; ++i) {
+            SendMessageA(state->editor, SCI_SETTARGETRANGE, (WPARAM)plan[i].start, (LPARAM)plan[i].end);
+            SendMessageA(state->editor, SCI_REPLACETARGET, (WPARAM)strlen(plan[i].text),
+                         (LPARAM)plan[i].text);
+        }
+        SendMessageA(state->editor, SCI_ENDUNDOACTION, 0, 0);
+    }
+    free(plan);
+    return ok;
+}
+
+/* Applies a WorkspaceEdit: every file it touches is opened (as a normal,
+ * unsaved tab) and edited in the editor. Returns the number of files edited. */
+static size_t axyne_win_lsp_apply_workspace_edit(AxyneWindowState *state,
+                                                 const AxyneLspWorkspaceEdit *edit)
+{
+    const AxyneDocument *active = axyne_win_active_document(state);
+    char *origin = active != NULL && active->path != NULL ? _strdup(active->path) : NULL;
+    size_t edited = 0;
+    for (size_t i = 0; i < edit->file_count; ++i) {
+        char *path = axyne_win_lsp_uri_path(edit->files[i].uri);
+        if (path == NULL) continue;
+        if (axyne_win_open_document(state, path, 0, 0) &&
+            axyne_win_lsp_edit_active(state, edit->files[i].edits, edit->files[i].edit_count))
+            ++edited;
+        free(path);
+    }
+    if (origin != NULL && edited > 1) (void)axyne_win_open_document(state, origin, 0, 0);
+    free(origin);
+    return edited;
+}
+
+/* ---- rename, quick fix, format ------------------------------------------ */
+
+static AxyneDocument *axyne_win_lsp_ready_document(AxyneWindowState *state)
+{
+    AxyneDocument *document;
+    if (state == NULL || state->lsp_nav_ui == NULL || state->editor == NULL ||
+        !axyne_win_capture_editor(state) || !axyne_win_lsp_open_active(state) || state->lsp == NULL)
+        return NULL;
+    document = axyne_win_active_document(state);
+    if (!axyne_win_lsp_document_supported(document) ||
+        axyne_language_for_path(document->path) != state->lsp_language)
+        return NULL;
+    axyne_win_lsp_sync_active(state);
+    return document;
+}
+
+static void axyne_win_lsp_remember(char **slot, const char *path)
+{
+    free(*slot);
+    *slot = _strdup(path);
+}
+
+static int axyne_win_lsp_start_rename(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui;
+    AxyneDocument *document = axyne_win_lsp_ready_document(state);
+    AxyneError error;
+    uint64_t request_id = 0;
+    LRESULT caret, begin, end;
+    char current[256], *answer;
+    if (document == NULL) return 0;
+    ui = state->lsp_nav_ui;
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    begin = SendMessageA(state->editor, SCI_WORDSTARTPOSITION, (WPARAM)caret, TRUE);
+    end = SendMessageA(state->editor, SCI_WORDENDPOSITION, (WPARAM)caret, TRUE);
+    if (end <= begin || (size_t)(end - begin) >= sizeof(current)) {
+        axyne_win_lsp_set_status(state, "이름을 바꿀 심볼 위에 커서를 두세요");
+        return 1;
+    }
+    {
+        struct Sci_TextRange range;
+        range.chrg.cpMin = (Sci_PositionCR)begin;
+        range.chrg.cpMax = (Sci_PositionCR)end;
+        range.lpstrText = current;
+        SendMessageA(state->editor, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+        current[end - begin] = '\0';
+    }
+    answer = axyne_win_prompt_text(state, "Rename Symbol", "New name:", current);
+    if (answer == NULL || strcmp(answer, current) == 0) { free(answer); return 1; }
+    if (axyne_lsp_rename(state->lsp, document, axyne_win_lsp_position_at(state, document, begin),
+                         answer, &request_id, &error) != AXYNE_STATUS_OK) {
+        axyne_win_lsp_set_status(state, error.message);
+        free(answer);
+        return 1;
+    }
+    free(answer);
+    axyne_win_lsp_remember(&ui->rename_path, document->path);
+    ui->rename_request = request_id;
+    axyne_win_lsp_set_status(state, "이름 바꾸는 중...");
+    return 1;
+}
+
+static int axyne_win_lsp_start_format(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui;
+    AxyneDocument *document = axyne_win_lsp_ready_document(state);
+    AxyneError error;
+    uint64_t request_id = 0;
+    if (document == NULL) return 0;
+    ui = state->lsp_nav_ui;
+    if (axyne_lsp_format(state->lsp, document,
+                         (size_t)SendMessageA(state->editor, SCI_GETTABWIDTH, 0, 0),
+                         SendMessageA(state->editor, SCI_GETUSETABS, 0, 0) == 0,
+                         &request_id, &error) != AXYNE_STATUS_OK) {
+        axyne_win_lsp_set_status(state, error.message);
+        return 1;
+    }
+    axyne_win_lsp_remember(&ui->format_path, document->path);
+    ui->format_request = request_id;
+    axyne_win_lsp_set_status(state, "서식 지정 중...");
+    return 1;
+}
+
+static int axyne_win_lsp_start_quick_fix(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui;
+    AxyneDocument *document = axyne_win_lsp_ready_document(state);
+    AxyneError error;
+    AxyneLspRange range;
+    uint64_t request_id = 0;
+    LRESULT begin, end, caret;
+    POINT point;
+    if (document == NULL) return 0;
+    ui = state->lsp_nav_ui;
+    begin = SendMessageA(state->editor, SCI_GETSELECTIONSTART, 0, 0);
+    end = SendMessageA(state->editor, SCI_GETSELECTIONEND, 0, 0);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    range.start = axyne_win_lsp_position_at(state, document, begin);
+    range.end = axyne_win_lsp_position_at(state, document, end);
+    point.x = (LONG)SendMessageA(state->editor, SCI_POINTXFROMPOSITION, 0, caret);
+    point.y = (LONG)SendMessageA(state->editor, SCI_POINTYFROMPOSITION, 0, caret) +
+              (LONG)SendMessageA(state->editor, SCI_TEXTHEIGHT, 0, 0);
+    ClientToScreen(state->editor, &point);
+    if (axyne_lsp_code_actions(state->lsp, document, range, &request_id, &error) != AXYNE_STATUS_OK) {
+        axyne_win_lsp_set_status(state, error.message);
+        return 1;
+    }
+    axyne_win_lsp_remember(&ui->actions_path, document->path);
+    ui->actions_request = request_id;
+    ui->actions_x = point.x;
+    ui->actions_y = point.y;
+    axyne_win_lsp_set_status(state, "코드 액션 확인 중...");
+    return 1;
+}
+
+static void axyne_win_lsp_set_failure(AxyneWindowState *state, const char *what,
+                                      const AxyneLspResult *result)
+{
+    char text[192];
+    (void)snprintf(text, sizeof(text), "%s: %s", what,
+                   result->error_message != NULL ? result->error_message : "서버가 지원하지 않습니다");
+    axyne_win_lsp_set_status(state, text);
+}
+
+static void axyne_win_lsp_handle_edit_result(AxyneWindowState *state, AxyneLspResult *result)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    char text[96];
+    if (result->kind == AXYNE_LSP_RESULT_RENAME && result->request_id == ui->rename_request) {
+        ui->rename_request = 0;
+        if (result->failed) axyne_win_lsp_set_failure(state, "이름 바꾸기 실패", result);
+        else if (!result->has_workspace_edit || result->workspace_edit.file_count == 0)
+            axyne_win_lsp_set_status(state, "바꿀 항목이 없습니다");
+        else {
+            size_t files = axyne_win_lsp_apply_workspace_edit(state, &result->workspace_edit);
+            (void)snprintf(text, sizeof(text), "%zu개 파일에서 이름을 바꿨습니다", files);
+            axyne_win_lsp_set_status(state, text);
+        }
+    } else if (result->kind == AXYNE_LSP_RESULT_FORMAT && result->request_id == ui->format_request) {
+        ui->format_request = 0;
+        if (result->failed) axyne_win_lsp_set_failure(state, "서식 지정 실패", result);
+        else if (!axyne_win_lsp_active_path_is(state, ui->format_path))
+            axyne_win_lsp_set_status(state, "문서가 바뀌어 서식을 적용하지 않았습니다");
+        else if (result->edit_count == 0) axyne_win_lsp_set_status(state, "서식 변경 사항이 없습니다");
+        else if (axyne_win_lsp_edit_active(state, result->edits, result->edit_count))
+            axyne_win_lsp_set_status(state, "서식을 적용했습니다");
+        else axyne_win_lsp_set_status(state, "서식 변경이 겹쳐 적용하지 못했습니다");
+    } else if (result->kind == AXYNE_LSP_RESULT_CODE_ACTIONS && result->request_id == ui->actions_request) {
+        const char *titles[64];
+        size_t usable[64], count = 0;
+        ui->actions_request = 0;
+        if (result->failed) { axyne_win_lsp_set_failure(state, "코드 액션 실패", result); return; }
+        if (!axyne_win_lsp_active_path_is(state, ui->actions_path)) return;
+        /* preferred fixes first; commands without an edit cannot be run here */
+        for (int pass = 0; pass < 2; ++pass)
+            for (size_t i = 0; i < result->action_count && count < 64; ++i) {
+                const AxyneLspCodeAction *action = &result->actions[i];
+                if ((action->preferred != 0) != (pass == 0)) continue;
+                if (!action->has_edit && (action->raw_json == NULL || action->has_command)) continue;
+                titles[count] = action->title;
+                usable[count++] = i;
+            }
+        if (count == 0) { axyne_win_lsp_set_status(state, "사용할 수 있는 코드 액션이 없습니다"); return; }
+        {
+            int chosen = axyne_win_choose_item(state, titles, count, (int)ui->actions_x, (int)ui->actions_y);
+            const AxyneLspCodeAction *action;
+            if (chosen < 0) { axyne_win_lsp_set_status(state, ""); return; }
+            action = &result->actions[usable[chosen]];
+            if (action->has_edit) {
+                size_t files = axyne_win_lsp_apply_workspace_edit(state, &action->edit);
+                (void)snprintf(text, sizeof(text), "%zu개 파일에 적용했습니다", files);
+                axyne_win_lsp_set_status(state, text);
+            } else {
+                AxyneError error;
+                uint64_t request_id = 0;
+                if (axyne_lsp_resolve_code_action(state->lsp, action->raw_json, &request_id, &error) ==
+                    AXYNE_STATUS_OK) {
+                    ui->action_resolve_request = request_id;
+                    axyne_win_lsp_remember(&ui->action_resolve_path, ui->actions_path);
+                    axyne_win_lsp_set_status(state, "코드 액션 적용 중...");
+                } else axyne_win_lsp_set_status(state, error.message);
+            }
+        }
+    } else if (result->kind == AXYNE_LSP_RESULT_RESOLVED_ACTION &&
+               result->request_id == ui->action_resolve_request) {
+        ui->action_resolve_request = 0;
+        if (result->failed) axyne_win_lsp_set_failure(state, "코드 액션 실패", result);
+        else if (result->action_count == 1 && result->actions[0].has_edit &&
+                 axyne_win_lsp_active_path_is(state, ui->action_resolve_path)) {
+            size_t files = axyne_win_lsp_apply_workspace_edit(state, &result->actions[0].edit);
+            (void)snprintf(text, sizeof(text), "%zu개 파일에 적용했습니다", files);
+            axyne_win_lsp_set_status(state, text);
+        } else axyne_win_lsp_set_status(state, "적용할 변경이 없습니다");
+    }
+}
+
 static void axyne_win_lsp_handle_result(AxyneWindowState *state, AxyneLspResult *result)
 {
     struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
     if (ui == NULL) return;
+    axyne_win_lsp_handle_edit_result(state, result);
     if (result->kind == AXYNE_LSP_RESULT_HOVER && result->request_id == ui->hover_request &&
         axyne_win_lsp_active_path_is(state, ui->hover_path)) {
         char *text = !result->failed && result->text != NULL ? axyne_win_lsp_tip_text(result->text) : NULL;
@@ -1147,6 +1419,10 @@ static void axyne_win_lsp_nav_destroy(AxyneWindowState *state)
     axyne_win_lsp_forget_shown(state->lsp_nav_ui);
     free(state->lsp_nav_ui->hover_path);
     free(state->lsp_nav_ui->signature_path);
+    free(state->lsp_nav_ui->rename_path);
+    free(state->lsp_nav_ui->format_path);
+    free(state->lsp_nav_ui->actions_path);
+    free(state->lsp_nav_ui->action_resolve_path);
     free(state->lsp_nav_ui);
     state->lsp_nav_ui = NULL;
 }
@@ -1197,7 +1473,10 @@ static int axyne_win_lsp_nav_command_state(AxyneWindowState *state,
         id != AXYNE_COMMAND_EDIT_FIND_REFERENCES &&
         id != AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST &&
         id != AXYNE_COMMAND_EDIT_SHOW_HOVER &&
-        id != AXYNE_COMMAND_EDIT_TRIGGER_PARAMETER_HINTS)
+        id != AXYNE_COMMAND_EDIT_TRIGGER_PARAMETER_HINTS &&
+        id != AXYNE_COMMAND_EDIT_RENAME_SYMBOL &&
+        id != AXYNE_COMMAND_EDIT_QUICK_FIX &&
+        id != AXYNE_COMMAND_EDIT_FORMAT_DOCUMENT)
         return 0;
     document = axyne_win_active_document(state);
     out->enabled = axyne_win_lsp_document_supported(document);
@@ -1219,6 +1498,9 @@ static int axyne_win_lsp_nav_command(AxyneWindowState *state, AxyneCommandId id)
 {
     if (id == AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST)
         return axyne_win_lsp_trigger_suggest(state);
+    if (id == AXYNE_COMMAND_EDIT_RENAME_SYMBOL) return axyne_win_lsp_start_rename(state);
+    if (id == AXYNE_COMMAND_EDIT_QUICK_FIX) return axyne_win_lsp_start_quick_fix(state);
+    if (id == AXYNE_COMMAND_EDIT_FORMAT_DOCUMENT) return axyne_win_lsp_start_format(state);
     if (id == AXYNE_COMMAND_EDIT_SHOW_HOVER || id == AXYNE_COMMAND_EDIT_TRIGGER_PARAMETER_HINTS) {
         if (state == NULL || state->lsp_nav_ui == NULL || state->editor == NULL ||
             !axyne_win_capture_editor(state) || !axyne_win_lsp_open_active(state))
