@@ -407,15 +407,10 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
                                      &limits, sizeof(limits))) goto os_error;
     }
-    /* Git is a console-subsystem executable.  Hide only Git's transient
-     * console; cmd.exe powers the interactive terminal and must keep its
-     * normal redirected-console lifetime for input to remain usable. */
-    {
-        const wchar_t *name = wcsrchr(exe, L'\\');
-        name = name != NULL ? name + 1 : exe;
-        if (_wcsicmp(name, L"git.exe") == 0)
-            creation_flags |= CREATE_NO_WINDOW;
-    }
+    /* All children here use redirected pipes (LSP servers, git, probes,
+     * plugins, debugger, cmd.exe wrappers); never flash a console window.
+     * The interactive terminal uses ConPTY in terminal_windows.cpp instead. */
+    creation_flags |= CREATE_NO_WINDOW;
     if (!CreateProcessW(exe, command, NULL, NULL, TRUE,
                         creation_flags,
                         environment, cwd, &startup, &info)) goto os_error;
