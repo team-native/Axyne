@@ -66,6 +66,15 @@ const char *axyne_lsp_server_candidates(AxyneLanguageId language);
 
 void axyne_lsp_server_command_clear(AxyneLspServerCommand *command);
 
+/* Resolves a helper tool (npm, go, ...) on PATH into a startable command with
+ * `arguments` appended; .cmd/.bat shims are wrapped through cmd.exe. NOT_FOUND
+ * when the tool is missing. `command` is cleared first and filled only on OK. */
+AxyneStatus axyne_lsp_tool_command(const char *tool,
+                                   const char *const *arguments,
+                                   size_t argument_count,
+                                   AxyneLspServerCommand *command,
+                                   AxyneError *error);
+
 #ifdef __cplusplus
 }
 #endif

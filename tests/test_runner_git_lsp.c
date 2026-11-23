@@ -13,6 +13,8 @@
 #include "axyne/document.h"
 #include "axyne/git.h"
 #include "axyne/lsp.h"
+#include "axyne/lsp_install.h"
+#include "axyne/lsp_servers.h"
 #include "axyne/process.h"
 #include "axyne/runner.h"
 
@@ -297,6 +299,35 @@ int axyne_test_runner_git_lsp(const char *root, const char *source_root)
     lsp_config.argument_count = 1;
     AXYNE_TEST_STATUS(axyne_lsp_create(&lsp_config, &client, &error),
                       AXYNE_STATUS_INVALID_ARGUMENT);
+
+    {
+        /* Isolated installs win over PATH; languages without an installer
+         * explain what to install by hand. */
+        char home[512], bin[512], server[512];
+        AxyneLspServerCommand command;
+        AxyneError install_error;
+        AXYNE_TEST_CHECK(axyne_test_path(home, sizeof(home), root, "lsphome"));
+        AXYNE_TEST_CHECK(axyne_test_path(bin, sizeof(bin), home, "bin"));
+        AXYNE_TEST_CHECK(axyne_test_make_directory(home));
+        AXYNE_TEST_CHECK(axyne_test_make_directory(bin));
+#ifdef _WIN32
+        AXYNE_TEST_CHECK(axyne_test_path(server, sizeof(server), bin, "gopls.exe"));
+        AXYNE_TEST_CHECK(axyne_test_write(server, "stub"));
+        AXYNE_TEST_CHECK(_putenv_s("AXYNE_LSP_HOME", home) == 0);
+        AXYNE_TEST_STATUS(axyne_lsp_server_resolve(AXYNE_LANGUAGE_GO, &command, &error),
+                          AXYNE_STATUS_OK);
+        AXYNE_TEST_CHECK(strcmp(command.executable, server) == 0);
+        axyne_lsp_server_command_clear(&command);
+        (void)_putenv_s("AXYNE_LSP_HOME", "");
+#else
+        (void)server;
+#endif
+        AXYNE_TEST_STATUS(axyne_lsp_install_start(AXYNE_LANGUAGE_CPP, NULL, NULL,
+                                                  &install_error),
+                          AXYNE_STATUS_UNSUPPORTED);
+        AXYNE_TEST_CHECK(strstr(install_error.message, "clangd") != NULL);
+        AXYNE_TEST_CHECK(strcmp(axyne_lsp_install_name(AXYNE_LANGUAGE_PYTHON), "pyright") == 0);
+    }
 
     axyne_test_remove_tree(root);
     return 1;

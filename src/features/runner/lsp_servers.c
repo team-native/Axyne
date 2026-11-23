@@ -1,6 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "axyne/lsp_servers.h"
 
+#include "axyne/app_paths.h"
+#include "axyne/lsp_install.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -175,6 +178,54 @@ static char *find_on_path(const char *name, int *command_script)
 }
 #endif
 
+/* Servers installed by lsp_install live under the app-owned directory; they
+ * win over PATH so an isolated install is found without touching PATH. */
+static char *find_installed(const char *name, int *command_script)
+{
+    static const char *const subdirs[] = {
+#ifdef _WIN32
+        "bin\\%s.exe", "node_modules\\.bin\\%s.cmd"
+#else
+        "bin/%s", "node_modules/.bin/%s"
+#endif
+    };
+    char *directory = axyne_lsp_install_directory();
+    size_t i;
+    *command_script = 0;
+    if (directory == NULL) return NULL;
+    for (i = 0; i < sizeof(subdirs) / sizeof(subdirs[0]); ++i) {
+        char relative[256];
+        char *path;
+        int exists;
+        (void)snprintf(relative, sizeof(relative), subdirs[i], name);
+        path = axyne_app_path_join(directory, relative);
+        if (path == NULL) continue;
+#ifdef _WIN32
+        {
+            wchar_t wide[MAX_PATH];
+            DWORD attributes = INVALID_FILE_ATTRIBUTES;
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, MAX_PATH) > 0)
+                attributes = GetFileAttributesW(wide);
+            exists = attributes != INVALID_FILE_ATTRIBUTES &&
+                     (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+            *command_script = exists && i == 1;
+        }
+#else
+        exists = access(path, X_OK) == 0;
+#endif
+        if (exists) { axyne_app_path_free(directory); return path; }
+        axyne_app_path_free(path);
+    }
+    axyne_app_path_free(directory);
+    return NULL;
+}
+
+static char *find_server(const char *name, int *command_script)
+{
+    char *path = find_installed(name, command_script);
+    return path != NULL ? path : find_on_path(name, command_script);
+}
+
 static AxyneStatus fill_command(AxyneLspServerCommand *command, char *executable,
                                 const char *name, const char *const *arguments,
                                 size_t argument_count, int command_script)
@@ -278,7 +329,7 @@ AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
         status = AXYNE_STATUS_NOT_FOUND;
         for (i = 0; i < entry->count; ++i) {
             int script = 0;
-            char *path = find_on_path(entry->candidates[i].name, &script);
+            char *path = find_server(entry->candidates[i].name, &script);
             if (path == NULL) continue;
             status = fill_command(command, path, entry->candidates[i].name,
                                   entry->candidates[i].arguments,
@@ -288,7 +339,7 @@ AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
         if (status == AXYNE_STATUS_NOT_FOUND) {
             char message[256];
             (void)snprintf(message, sizeof(message),
-                           "no language server found on PATH (install %s)", entry->names);
+                           "no language server found (install %s)", entry->names);
             set_error(error, status, message);
             return status;
         }
@@ -297,6 +348,33 @@ AxyneStatus axyne_lsp_server_resolve(AxyneLanguageId language,
         axyne_lsp_server_command_clear(command);
         set_error(error, status, status == AXYNE_STATUS_OUT_OF_MEMORY ? "out of memory"
                                  : "cannot start the language server command");
+        return status;
+    }
+    if (error != NULL) { error->code = AXYNE_STATUS_OK; error->message[0] = '\0'; }
+    return AXYNE_STATUS_OK;
+}
+
+AxyneStatus axyne_lsp_tool_command(const char *tool, const char *const *arguments,
+                                   size_t argument_count,
+                                   AxyneLspServerCommand *command, AxyneError *error)
+{
+    int script = 0;
+    char *path;
+    AxyneStatus status;
+    if (command == NULL || tool == NULL) {
+        set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "tool and command are required");
+        return AXYNE_STATUS_INVALID_ARGUMENT;
+    }
+    memset(command, 0, sizeof(*command));
+    path = find_on_path(tool, &script);
+    if (path == NULL) {
+        set_error(error, AXYNE_STATUS_NOT_FOUND, "tool not found on PATH");
+        return AXYNE_STATUS_NOT_FOUND;
+    }
+    status = fill_command(command, path, tool, arguments, argument_count, script);
+    if (status != AXYNE_STATUS_OK) {
+        axyne_lsp_server_command_clear(command);
+        set_error(error, status, "cannot start the tool command");
         return status;
     }
     if (error != NULL) { error->code = AXYNE_STATUS_OK; error->message[0] = '\0'; }
