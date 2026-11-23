@@ -43,11 +43,27 @@ typedef struct AxyneLspDiagnostic {
     char *message;
 } AxyneLspDiagnostic;
 
+typedef struct AxyneLspTextEdit {
+    AxyneLspRange range;
+    char *new_text;
+} AxyneLspTextEdit;
+
 typedef struct AxyneLspCompletionItem {
     char *label;
     char *detail;
     char *insert_text;
     int kind;
+    char *sort_text;            /* NULL: sort by label */
+    char *filter_text;          /* NULL: filter by label */
+    char *documentation;        /* plain text or markdown source, may be NULL */
+    char *label_detail;         /* labelDetails.detail, e.g. a signature */
+    int has_text_edit;          /* textEdit (or insert half of insert/replace) */
+    AxyneLspTextEdit text_edit; /* replaces text_edit.range with new_text */
+    AxyneLspTextEdit *additional_edits; /* e.g. the import for an auto-import */
+    size_t additional_edit_count;
+    int deprecated;             /* deprecated flag or tag */
+    int preselect;
+    char *raw_json;             /* the item as sent, for completionItem/resolve; may be NULL */
 } AxyneLspCompletionItem;
 
 typedef struct AxyneLspLocation {

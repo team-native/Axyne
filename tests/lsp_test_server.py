@@ -82,6 +82,17 @@ while True:
     send_message({
         "jsonrpc": "2.0",
         "id": message["id"],
-        "result": {"isIncomplete": False, "items": [{"label": "probeCompletion", "kind": 3}]},
+        "result": {"isIncomplete": False, "items": [{
+            "label": "probeCompletion", "kind": 3, "sortText": "0001",
+            "filterText": "probe", "tags": [1], "preselect": True,
+            "documentation": {"kind": "markdown", "value": "docs"},
+            "labelDetails": {"detail": "(a: int)"},
+            "textEdit": {"range": {"start": {"line": 0, "character": 4},
+                                   "end": {"line": 0, "character": 7}},
+                         "newText": "probeCompletion"},
+            "additionalTextEdits": [{"range": {"start": {"line": 0, "character": 0},
+                                               "end": {"line": 0, "character": 0}},
+                                     "newText": "import x\n"}],
+        }]},
     })
     break

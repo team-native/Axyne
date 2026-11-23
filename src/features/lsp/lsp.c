@@ -574,14 +574,31 @@ static void lsp_free_locations(AxyneLspLocation *locations, size_t count)
     free(locations);
 }
 
+static void lsp_free_text_edits(AxyneLspTextEdit *edits, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; ++i) free(edits[i].new_text);
+    free(edits);
+}
+
+static void lsp_free_completion_fields(AxyneLspCompletionItem *item)
+{
+    free(item->label);
+    free(item->detail);
+    free(item->insert_text);
+    free(item->sort_text);
+    free(item->filter_text);
+    free(item->documentation);
+    free(item->label_detail);
+    free(item->text_edit.new_text);
+    lsp_free_text_edits(item->additional_edits, item->additional_edit_count);
+    free(item->raw_json);
+}
+
 static void lsp_free_completions(AxyneLspCompletionItem *items, size_t count)
 {
     size_t i;
-    for (i = 0; i < count; ++i) {
-        free(items[i].label);
-        free(items[i].detail);
-        free(items[i].insert_text);
-    }
+    for (i = 0; i < count; ++i) lsp_free_completion_fields(&items[i]);
     free(items);
 }
 
@@ -827,11 +844,128 @@ fail:
     return 0;
 }
 
+/* TextEdit {range,newText} or InsertReplaceEdit {insert,replace,newText}. */
+static int lsp_parse_text_edit(JsonCursor *cursor, AxyneLspTextEdit *edit)
+{
+    char *key;
+    int got_range = 0;
+    memset(edit, 0, sizeof(*edit));
+    if (!json_expect(cursor, '{')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
+    for (;;) {
+        key = json_read_string(cursor);
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); goto fail; }
+        if (strcmp(key, "range") == 0 || strcmp(key, "insert") == 0) {
+            if (!got_range) got_range = lsp_parse_range(cursor, &edit->range);
+            else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        } else if (strcmp(key, "newText") == 0) {
+            if (!lsp_replace_string(&edit->new_text, json_read_string(cursor))) {
+                free(key); goto fail;
+            }
+        } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+        free(key);
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) goto fail;
+    }
+    if (got_range && edit->new_text != NULL) return 1;
+fail:
+    free(edit->new_text);
+    memset(edit, 0, sizeof(*edit));
+    return 0;
+}
+
+/* TextEdit[]. */
+static int lsp_parse_text_edit_array(JsonCursor *cursor, AxyneLspTextEdit **edits,
+                                     size_t *count)
+{
+    size_t capacity = 0;
+    *edits = NULL; *count = 0;
+    if (!json_expect(cursor, '[')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == ']') { ++cursor->at; return 1; }
+    for (;;) {
+        AxyneLspTextEdit edit;
+        if (!lsp_parse_text_edit(cursor, &edit)) goto fail;
+        if (*count == capacity) {
+            size_t next = capacity == 0 ? 4 : capacity * 2;
+            AxyneLspTextEdit *grown = (AxyneLspTextEdit *)realloc(*edits, next * sizeof(**edits));
+            if (grown == NULL) { free(edit.new_text); goto fail; }
+            *edits = grown; capacity = next;
+        }
+        (*edits)[(*count)++] = edit;
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == ']') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) goto fail;
+    }
+    return 1;
+fail:
+    lsp_free_text_edits(*edits, *count);
+    *edits = NULL; *count = 0;
+    return 0;
+}
+
+/* MarkupContent {kind,value} or a plain string; replaces *out. */
+static int lsp_read_markup(JsonCursor *cursor, char **out)
+{
+    char *key, *value = NULL;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '"') {
+        value = json_read_string(cursor);
+        if (value == NULL) return 0;
+        free(*out); *out = value;
+        return 1;
+    }
+    if (!json_expect(cursor, '{')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 1; }
+    for (;;) {
+        key = json_read_string(cursor);
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); free(value); return 0; }
+        if (strcmp(key, "value") == 0) {
+            if (!lsp_replace_string(&value, json_read_string(cursor))) { free(key); free(value); return 0; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); free(value); return 0; }
+        free(key);
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) { free(value); return 0; }
+    }
+    if (value != NULL) { free(*out); *out = value; }
+    return 1;
+}
+
+/* labelDetails {detail, description}: keeps the detail (usually a signature). */
+static int lsp_parse_label_details(JsonCursor *cursor, char **out)
+{
+    char *key;
+    if (!json_expect(cursor, '{')) return 0;
+    json_skip_space(cursor);
+    if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 1; }
+    for (;;) {
+        key = json_read_string(cursor);
+        if (key == NULL || !json_expect(cursor, ':')) { free(key); return 0; }
+        if (strcmp(key, "detail") == 0) {
+            if (!lsp_replace_string(out, json_read_string(cursor))) { free(key); return 0; }
+        } else if (!json_skip_value(cursor, 0)) { free(key); return 0; }
+        free(key);
+        json_skip_space(cursor);
+        if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
+        if (!json_expect(cursor, ',')) return 0;
+    }
+    return 1;
+}
+
+#define LSP_RAW_ITEM_MAX 8192
+
 static int lsp_parse_completion_item(JsonCursor *cursor, AxyneLspCompletionItem *item)
 {
     char *key;
     uint64_t kind;
+    const char *item_start;
     memset(item, 0, sizeof(*item));
+    json_skip_space(cursor);
+    item_start = cursor->at;
     if (!json_expect(cursor, '{')) return 0;
     json_skip_space(cursor);
     if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; return 0; }
@@ -853,18 +987,64 @@ static int lsp_parse_completion_item(JsonCursor *cursor, AxyneLspCompletionItem 
         } else if (strcmp(key, "kind") == 0) {
             if (!json_read_uint(cursor, &kind) || kind > INT_MAX) { free(key); goto fail; }
             item->kind = (int)kind;
+        } else if (strcmp(key, "sortText") == 0) {
+            if (!lsp_replace_string(&item->sort_text, json_read_string(cursor))) { free(key); goto fail; }
+        } else if (strcmp(key, "filterText") == 0) {
+            if (!lsp_replace_string(&item->filter_text, json_read_string(cursor))) { free(key); goto fail; }
+        } else if (strcmp(key, "documentation") == 0) {
+            if (!lsp_read_markup(cursor, &item->documentation)) { free(key); goto fail; }
+        } else if (strcmp(key, "labelDetails") == 0) {
+            if (!lsp_parse_label_details(cursor, &item->label_detail)) { free(key); goto fail; }
+        } else if (strcmp(key, "textEdit") == 0) {
+            const char *edit_start;
+            json_skip_space(cursor);
+            edit_start = cursor->at;
+            free(item->text_edit.new_text);
+            item->has_text_edit = lsp_parse_text_edit(cursor, &item->text_edit);
+            if (!item->has_text_edit) {
+                cursor->at = edit_start;
+                if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+            }
+        } else if (strcmp(key, "additionalTextEdits") == 0) {
+            const char *array_start;
+            json_skip_space(cursor);
+            array_start = cursor->at;
+            lsp_free_text_edits(item->additional_edits, item->additional_edit_count);
+            item->additional_edits = NULL; item->additional_edit_count = 0;
+            if (!lsp_parse_text_edit_array(cursor, &item->additional_edits,
+                                           &item->additional_edit_count)) {
+                cursor->at = array_start;
+                if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+            }
+        } else if (strcmp(key, "deprecated") == 0 || strcmp(key, "preselect") == 0 ||
+                   strcmp(key, "tags") == 0) {
+            const char *value_start;
+            json_skip_space(cursor);
+            value_start = cursor->at;
+            if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
+            if (key[0] == 't') {
+                const char *p;
+                for (p = value_start; p < cursor->at; ++p)
+                    if (*p == '1' && (p + 1 >= cursor->at || p[1] < '0' || p[1] > '9') &&
+                        (p == value_start || p[-1] < '0' || p[-1] > '9'))
+                        item->deprecated = 1;
+            } else if (value_start < cursor->at && *value_start == 't') {
+                if (key[0] == 'd') item->deprecated = 1; else item->preselect = 1;
+            }
         } else if (!json_skip_value(cursor, 0)) { free(key); goto fail; }
         free(key);
         json_skip_space(cursor);
         if (cursor->at < cursor->end && *cursor->at == '}') { ++cursor->at; break; }
         if (!json_expect(cursor, ',')) goto fail;
     }
-    if (item->label != NULL) return 1;
+    if (item->label != NULL) {
+        size_t raw_length = (size_t)(cursor->at - item_start);
+        if (raw_length <= LSP_RAW_ITEM_MAX) item->raw_json = lsp_copy_bytes(item_start, raw_length);
+        return 1;
+    }
 
 fail:
-    free(item->label);
-    free(item->detail);
-    free(item->insert_text);
+    lsp_free_completion_fields(item);
     memset(item, 0, sizeof(*item));
     return 0;
 }
