@@ -54,6 +54,14 @@ struct AxyneWinLspNavUi {
     int list_active;
     int icons_registered;
     char detail_text[1024];
+    /* Hover and signature help tooltips (one Scintilla call tip at a time). */
+    uint64_t hover_request;
+    LRESULT hover_position;
+    char *hover_path;
+    uint64_t signature_request;
+    LRESULT signature_caret;
+    char *signature_path;
+    int signature_active;
 };
 
 typedef struct AxyneWinLspCompletionMessage {
@@ -172,6 +180,9 @@ static void axyne_win_lsp_clear_request_paths(struct AxyneWinLspNavUi *ui)
     ui->completion_request = 0;
     ui->definition_request = 0;
     ui->references_request = 0;
+    ui->hover_request = 0;
+    ui->signature_request = 0;
+    ui->signature_active = 0;
     free(ui->completion_path);
     free(ui->definition_path);
     free(ui->references_path);
@@ -671,10 +682,168 @@ void axyne_win_lsp_result(AxyneLspClient *client, AxyneLspResult *result, void *
         axyne_lsp_result_free(result);
 }
 
+/* ---- hover and signature help ------------------------------------------- */
+
+/* LSP position (line, UTF-16 character) of a byte offset of the active
+ * document; the document text must be current (axyne_win_capture_editor). */
+static AxyneLspPosition axyne_win_lsp_position_at(AxyneWindowState *state,
+                                                  const AxyneDocument *document,
+                                                  LRESULT byte_position)
+{
+    AxyneLspPosition position;
+    LRESULT line_start;
+    position.line = (size_t)SendMessageA(state->editor, SCI_LINEFROMPOSITION,
+                                         (WPARAM)byte_position, 0);
+    line_start = SendMessageA(state->editor, SCI_POSITIONFROMLINE, (WPARAM)position.line, 0);
+    position.character = axyne_lsp_utf16_character(
+        (document->contents != NULL ? document->contents : "") + (size_t)line_start,
+        (size_t)(byte_position - line_start), (size_t)(byte_position - line_start));
+    return position;
+}
+
+static void axyne_win_lsp_hide_tip(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    if (state->editor != NULL && SendMessageA(state->editor, SCI_CALLTIPACTIVE, 0, 0) != 0)
+        SendMessageA(state->editor, SCI_CALLTIPCANCEL, 0, 0);
+    if (ui != NULL) ui->signature_active = 0;
+}
+
+/* Shows `text` as a call tip at `position`; the byte range [hl_start, hl_end)
+ * of the text is highlighted (the active parameter). */
+static void axyne_win_lsp_show_tip(AxyneWindowState *state, LRESULT position, const char *text,
+                                   size_t hl_start, size_t hl_end)
+{
+    SendMessageA(state->editor, SCI_CALLTIPSETBACK, axyne_win_color(AXYNE_WIN_COLOR_PANEL), 0);
+    SendMessageA(state->editor, SCI_CALLTIPSETFORE, axyne_win_color(AXYNE_WIN_COLOR_MUTED), 0);
+    SendMessageA(state->editor, SCI_CALLTIPSETFOREHLT, axyne_win_color(AXYNE_WIN_COLOR_ACCENT), 0);
+    SendMessageA(state->editor, SCI_CALLTIPSHOW, (WPARAM)position, (LPARAM)text);
+    if (hl_end > hl_start)
+        SendMessageA(state->editor, SCI_CALLTIPSETHLT, (WPARAM)hl_start, (LPARAM)hl_end);
+}
+
+/* At most 18 lines / 1400 bytes of plain text for a tip. */
+static char *axyne_win_lsp_tip_text(const char *markdown)
+{
+    char *plain = axyne_lsp_markdown_to_plain(markdown);
+    size_t length, lines = 0, i;
+    if (plain == NULL) return NULL;
+    length = strlen(plain);
+    for (i = 0; i < length; ++i) {
+        if (plain[i] == '\n' && ++lines >= 18) { plain[i] = '\0'; length = i; break; }
+    }
+    if (length > 1400) {
+        length = 1400;
+        while (length > 0 && ((unsigned char)plain[length] & 0xc0u) == 0x80u) --length;
+        plain[length] = '\0';
+    }
+    if (plain[0] == '\0') { free(plain); return NULL; }
+    return plain;
+}
+
+/* Asks for hover information at `position` (the mouse or the caret). */
+static int axyne_win_lsp_request_hover(AxyneWindowState *state, LRESULT byte_position)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    AxyneDocument *document;
+    AxyneError error;
+    uint64_t request_id = 0;
+    if (ui == NULL || state->editor == NULL || state->lsp == NULL || byte_position < 0) return 0;
+    if (!axyne_win_capture_editor(state)) return 0;
+    document = axyne_win_active_document(state);
+    if (!axyne_win_lsp_document_supported(document) ||
+        axyne_language_for_path(document->path) != state->lsp_language)
+        return 0;
+    axyne_win_lsp_sync_active(state);
+    if (axyne_lsp_hover(state->lsp, document, axyne_win_lsp_position_at(state, document, byte_position),
+                        &request_id, &error) != AXYNE_STATUS_OK)
+        return 0;
+    free(ui->hover_path);
+    ui->hover_path = _strdup(document->path);
+    ui->hover_request = request_id;
+    ui->hover_position = byte_position;
+    return 1;
+}
+
+/* Parameter hints at the caret, e.g. after "(" or ",". */
+static int axyne_win_lsp_request_signature(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    AxyneDocument *document;
+    AxyneError error;
+    uint64_t request_id = 0;
+    LRESULT caret;
+    if (ui == NULL || state->editor == NULL || state->lsp == NULL) return 0;
+    if (!axyne_win_capture_editor(state)) return 0;
+    document = axyne_win_active_document(state);
+    if (!axyne_win_lsp_document_supported(document) ||
+        axyne_language_for_path(document->path) != state->lsp_language)
+        return 0;
+    axyne_win_lsp_sync_active(state);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    if (axyne_lsp_signature_help(state->lsp, document, axyne_win_lsp_position_at(state, document, caret),
+                                 &request_id, &error) != AXYNE_STATUS_OK)
+        return 0;
+    free(ui->signature_path);
+    ui->signature_path = _strdup(document->path);
+    ui->signature_request = request_id;
+    ui->signature_caret = caret;
+    return 1;
+}
+
+static int axyne_win_lsp_active_path_is(AxyneWindowState *state, const char *path)
+{
+    const AxyneDocument *document = axyne_win_active_document(state);
+    return document != NULL && document->path != NULL && path != NULL &&
+           strcmp(document->path, path) == 0;
+}
+
 static void axyne_win_lsp_handle_result(AxyneWindowState *state, AxyneLspResult *result)
 {
     struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
     if (ui == NULL) return;
+    if (result->kind == AXYNE_LSP_RESULT_HOVER && result->request_id == ui->hover_request &&
+        axyne_win_lsp_active_path_is(state, ui->hover_path)) {
+        char *text = !result->failed && result->text != NULL ? axyne_win_lsp_tip_text(result->text) : NULL;
+        ui->hover_request = 0;
+        if (text != NULL && SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0)
+            axyne_win_lsp_show_tip(state, ui->hover_position, text, 0, 0);
+        free(text);
+        return;
+    }
+    if (result->kind == AXYNE_LSP_RESULT_SIGNATURE && result->request_id == ui->signature_request &&
+        axyne_win_lsp_active_path_is(state, ui->signature_path)) {
+        ui->signature_request = 0;
+        if (result->failed || !result->has_signature || result->signature.label == NULL) {
+            if (ui->signature_active) axyne_win_lsp_hide_tip(state);
+            return;
+        }
+        {
+            const AxyneLspSignature *signature = &result->signature;
+            size_t label_length = strlen(signature->label), hl_start = 0, hl_end = 0;
+            char *documentation = signature->documentation != NULL
+                ? axyne_win_lsp_tip_text(signature->documentation) : NULL;
+            char *text = (char *)malloc(label_length + (documentation != NULL ? strlen(documentation) : 0) + 8);
+            if (text != NULL) {
+                memcpy(text, signature->label, label_length);
+                text[label_length] = '\0';
+                if (documentation != NULL) {
+                    (void)snprintf(text + label_length, strlen(documentation) + 4, "\n\n%s", documentation);
+                }
+                if (signature->has_active_parameter &&
+                    signature->active_parameter < signature->parameter_count &&
+                    signature->parameter_ends[signature->active_parameter] > signature->parameter_starts[signature->active_parameter]) {
+                    hl_start = signature->parameter_starts[signature->active_parameter];
+                    hl_end = signature->parameter_ends[signature->active_parameter];
+                }
+                axyne_win_lsp_show_tip(state, ui->signature_caret, text, hl_start, hl_end);
+                ui->signature_active = 1;
+                free(text);
+            }
+            free(documentation);
+        }
+        return;
+    }
     if (result->kind == AXYNE_LSP_RESULT_RESOLVED_COMPLETION && !result->failed &&
         result->has_completion_item) {
         AxyneWinLspItem *item = NULL;
@@ -976,6 +1145,8 @@ static void axyne_win_lsp_nav_destroy(AxyneWindowState *state)
     if (state == NULL || state->lsp_nav_ui == NULL) return;
     axyne_win_lsp_clear_request_paths(state->lsp_nav_ui);
     axyne_win_lsp_forget_shown(state->lsp_nav_ui);
+    free(state->lsp_nav_ui->hover_path);
+    free(state->lsp_nav_ui->signature_path);
     free(state->lsp_nav_ui);
     state->lsp_nav_ui = NULL;
 }
@@ -1024,7 +1195,9 @@ static int axyne_win_lsp_nav_command_state(AxyneWindowState *state,
     AxyneDocument *document;
     if (id != AXYNE_COMMAND_EDIT_GO_TO_DEFINITION &&
         id != AXYNE_COMMAND_EDIT_FIND_REFERENCES &&
-        id != AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST)
+        id != AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST &&
+        id != AXYNE_COMMAND_EDIT_SHOW_HOVER &&
+        id != AXYNE_COMMAND_EDIT_TRIGGER_PARAMETER_HINTS)
         return 0;
     document = axyne_win_active_document(state);
     out->enabled = axyne_win_lsp_document_supported(document);
@@ -1046,6 +1219,15 @@ static int axyne_win_lsp_nav_command(AxyneWindowState *state, AxyneCommandId id)
 {
     if (id == AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST)
         return axyne_win_lsp_trigger_suggest(state);
+    if (id == AXYNE_COMMAND_EDIT_SHOW_HOVER || id == AXYNE_COMMAND_EDIT_TRIGGER_PARAMETER_HINTS) {
+        if (state == NULL || state->lsp_nav_ui == NULL || state->editor == NULL ||
+            !axyne_win_capture_editor(state) || !axyne_win_lsp_open_active(state))
+            return 0;
+        if (id == AXYNE_COMMAND_EDIT_SHOW_HOVER)
+            return axyne_win_lsp_request_hover(
+                state, SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0));
+        return axyne_win_lsp_request_signature(state);
+    }
     if (id == AXYNE_COMMAND_EDIT_GO_TO_DEFINITION)
         return axyne_win_lsp_navigate(state, 0);
     if (id == AXYNE_COMMAND_EDIT_FIND_REFERENCES)
@@ -1061,6 +1243,8 @@ static void axyne_win_lsp_document_activated(AxyneWindowState *state,
         SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
     axyne_win_lsp_forget_shown(state->lsp_nav_ui);
     axyne_win_lsp_clear_request_paths(state->lsp_nav_ui);
+    if (state->editor != NULL)
+        SendMessageA(state->editor, SCI_SETMOUSEDWELLTIME, 500, 0);
     if (axyne_win_lsp_document_supported(document) &&
         axyne_win_capture_editor(state))
         (void)axyne_win_lsp_open_active(state);
@@ -1096,13 +1280,33 @@ static void axyne_win_lsp_document_saved(AxyneWindowState *state,
         (void)axyne_win_lsp_open_active(state);
 }
 
+/* Typing dismisses a hover tooltip but keeps parameter hints. */
+static void axyne_win_lsp_hide_tip_if_hover(AxyneWindowState *state)
+{
+    if (!state->lsp_nav_ui->signature_active) axyne_win_lsp_hide_tip(state);
+}
+
 static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
                                          const SCNotification *notification)
 {
     if (notification == NULL || state == NULL || state->lsp_nav_ui == NULL) return;
-    if (notification->nmhdr.code == SCN_CHARADDED)
+    if (notification->nmhdr.code == SCN_CHARADDED) {
+        struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+        axyne_win_lsp_hide_tip_if_hover(state);
+        if (notification->ch == '(' || notification->ch == ',') {
+            if (!axyne_win_completion_blocked(state)) (void)axyne_win_lsp_request_signature(state);
+        } else if (notification->ch == ')' && ui->signature_active) {
+            axyne_win_lsp_hide_tip(state);
+        }
         axyne_win_lsp_request_completion(state, notification);
-    else if (notification->nmhdr.code == SCN_AUTOCSELECTION && state->lsp_nav_ui->list_active)
+    } else if (notification->nmhdr.code == SCN_DWELLSTART) {
+        if (notification->position >= 0 && SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) == 0 &&
+            !state->lsp_nav_ui->signature_active)
+            (void)axyne_win_lsp_request_hover(state, notification->position);
+    } else if (notification->nmhdr.code == SCN_DWELLEND) {
+        state->lsp_nav_ui->hover_request = 0;
+        if (!state->lsp_nav_ui->signature_active) axyne_win_lsp_hide_tip(state);
+    } else if (notification->nmhdr.code == SCN_AUTOCSELECTION && state->lsp_nav_ui->list_active)
         axyne_win_lsp_apply_selection(state);
     else if (notification->nmhdr.code == SCN_AUTOCCANCELLED ||
              notification->nmhdr.code == SCN_AUTOCCOMPLETED)

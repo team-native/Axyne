@@ -120,6 +120,12 @@ static const AxyneCommandInfo command_table[] = {
     E(EDIT_TRIGGER_SUGGEST, "edit.triggerSuggest", "자동 완성 호출", NULL,
       "trigger suggest completion intellisense lsp", G(EDIT), PAL | DOC, WIN,
       "Ctrl+Space", NULL, NULL, NULL, 0, NOL),
+    E(EDIT_SHOW_HOVER, "edit.showHover", "정보 표시", NULL,
+      "show hover type info documentation lsp", G(EDIT), PAL | DOC, WIN,
+      "Ctrl+K Ctrl+I", NULL, NULL, NULL, 0, NOL),
+    E(EDIT_TRIGGER_PARAMETER_HINTS, "edit.triggerParameterHints", "매개변수 힌트", NULL,
+      "parameter hints signature help lsp", G(EDIT), PAL | DOC, WIN,
+      "Ctrl+Shift+Space", NULL, NULL, NULL, 0, NOL),
     /* 보기 */
     E(VIEW_COMMAND_PALETTE, "view.commandPalette", "명령 팔레트...", "명령 팔레트…",
       "command palette", G(VIEW), 0, BOTH, "Ctrl+Shift+P", NULL, "Cmd+Shift+P", NULL,
