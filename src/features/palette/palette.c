@@ -512,6 +512,8 @@ static const char *symbol_badge(AxyneSymbolKind kind, uint32_t *color)
     case AXYNE_SYMBOL_FUNCTION: *color = 0x7db5e3; return "f";
     case AXYNE_SYMBOL_MACRO: *color = 0xd98e73; return "#";
     case AXYNE_SYMBOL_TYPE: *color = 0xc79ad9; return "T";
+    case AXYNE_SYMBOL_METHOD: *color = 0x7db5e3; return "m";
+    case AXYNE_SYMBOL_CONSTANT: *color = 0xd9b36c; return "c";
     default: *color = 0xd9b36c; return "v";
     }
 }
