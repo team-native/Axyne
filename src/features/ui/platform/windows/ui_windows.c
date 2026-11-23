@@ -37,6 +37,7 @@
 #include "axyne/git_panel.h"
 #include "axyne/git_selection.h"
 #include "axyne/lsp.h"
+#include "axyne/lsp_install.h"
 #include "axyne/problems.h"
 #include "axyne/problems_feed.h"
 #include "axyne/palette_controller.h"
@@ -268,7 +269,8 @@ enum { AXYNE_WM_EXPLORER_EVENT = WM_APP + 21,
        AXYNE_WM_DISCOVER_RUNTIMES = WM_APP + 30,
        AXYNE_WM_GIT_PANEL_DONE = WM_APP + 31,
        AXYNE_WM_LSP_DIAGNOSTICS = WM_APP + 32,
-       AXYNE_WM_RUNTIMES_READY = WM_APP + 33 };
+       AXYNE_WM_RUNTIMES_READY = WM_APP + 33,
+       AXYNE_WM_LSP_INSTALLED = WM_APP + 34 };
 
 typedef struct AxyneExplorerMessage {
     AxyneWatchEventKind kind;
@@ -3081,6 +3083,56 @@ static int axyne_command_needs_document(UINT command)
     }
 }
 
+typedef struct AxyneLspInstallMessage {
+    HWND window;
+    AxyneStatus status;
+    char *text;
+} AxyneLspInstallMessage;
+
+/* Runs on a process worker thread: only posts to the UI thread. */
+static void axyne_lsp_install_done(AxyneLanguageId language, AxyneStatus status,
+                                   const char *message, void *user_data)
+{
+    AxyneLspInstallMessage *context = (AxyneLspInstallMessage *)user_data;
+    (void)language;
+    context->status = status;
+    context->text = _strdup(message != NULL ? message : "install finished");
+    if (!PostMessageW(context->window, AXYNE_WM_LSP_INSTALLED, 0, (LPARAM)context)) {
+        free(context->text);
+        free(context);
+    }
+}
+
+/* Installs the missing server once per language and session; a failed
+ * install is not retried until the app restarts. Returns 1 while an install
+ * is running (or was just started) so the caller keeps its LSP unavailable. */
+static int axyne_lsp_try_install(AxyneWindowState *state, AxyneLanguageId language)
+{
+    unsigned bit = 1u << (unsigned)language;
+    AxyneLspInstallMessage *context;
+    AxyneError error;
+    AxyneStatus status;
+    if (language == AXYNE_LANGUAGE_NONE || axyne_lsp_server_overridden()) return 0;
+    if ((state->lsp_install_busy & bit) != 0) return 1;
+    if ((state->lsp_install_tried & bit) != 0) return 0;
+    state->lsp_install_tried |= bit;
+    context = (AxyneLspInstallMessage *)calloc(1, sizeof(*context));
+    if (context == NULL) return 0;
+    context->window = state->main_window;
+    status = axyne_lsp_install_start(language, axyne_lsp_install_done, context, &error);
+    if (status != AXYNE_STATUS_OK) {
+        char note[192];
+        free(context);
+        (void)snprintf(note, sizeof(note), "%s; %s", state->lsp_status, error.message);
+        (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "%s", note);
+        return 0;
+    }
+    state->lsp_install_busy |= bit;
+    (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
+                   "LSP: installing %s...", axyne_lsp_install_name(language));
+    return 1;
+}
+
 static int axyne_lsp_ensure(AxyneWindowState *state)
 {
     AxyneDocument *doc = axyne_active(state);
@@ -3095,10 +3147,15 @@ static int axyne_lsp_ensure(AxyneWindowState *state)
         axyne_lsp_destroy(state->lsp);
         state->lsp = NULL;
     }
+    if ((state->lsp_install_busy & (1u << (unsigned)language)) != 0 &&
+        language != AXYNE_LANGUAGE_NONE)
+        return 0;
     status = axyne_lsp_server_resolve(language, &server, &error);
     if (status != AXYNE_STATUS_OK) {
         (void)snprintf(state->lsp_status, sizeof(state->lsp_status),
                        "LSP: %s", error.message);
+        if (status == AXYNE_STATUS_NOT_FOUND)
+            (void)axyne_lsp_try_install(state, language);
         return 0;
     }
     config.command = server.executable;
@@ -11380,6 +11437,21 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
                                          diagnostics_message->items,
                                          diagnostics_message->count);
             axyne_free_lsp_diagnostics_message(diagnostics_message);
+        }
+        return 0;
+    }
+    case AXYNE_WM_LSP_INSTALLED: {
+        AxyneLspInstallMessage *message = (AxyneLspInstallMessage *)l_param;
+        if (message != NULL) {
+            if (state != NULL) {
+                state->lsp_install_busy = 0;
+                (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s",
+                               message->text == NULL ? "install finished" : message->text);
+                InvalidateRect(window, NULL, FALSE);
+                if (message->status == AXYNE_STATUS_OK) (void)axyne_win_lsp_open_active(state);
+            }
+            free(message->text);
+            free(message);
         }
         return 0;
     }
