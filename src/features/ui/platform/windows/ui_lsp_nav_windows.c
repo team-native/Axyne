@@ -871,15 +871,12 @@ static int axyne_win_lsp_trigger_needs_pair(AxyneWindowState *state, int ch)
     return ch == '>' ? previous != '-' : previous != ':';
 }
 
+static void axyne_win_lsp_send_completion(AxyneWindowState *state);
+
 static void axyne_win_lsp_request_completion(AxyneWindowState *state,
                                               const SCNotification *notification)
 {
-    struct AxyneWinLspNavUi *ui;
     AxyneDocument *document;
-    AxyneLspPosition position;
-    AxyneError error;
-    uint64_t request_id = 0;
-    LRESULT caret, line_start;
     if (state == NULL || state->lsp_nav_ui == NULL || state->editor == NULL ||
         state->lsp == NULL || notification == NULL)
         return;
@@ -902,6 +899,18 @@ static void axyne_win_lsp_request_completion(AxyneWindowState *state,
             SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
         return;
     }
+    axyne_win_lsp_send_completion(state);
+}
+
+/* Requests completion at the caret: after typing, or on demand (Ctrl+Space). */
+static void axyne_win_lsp_send_completion(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui;
+    AxyneDocument *document;
+    AxyneLspPosition position;
+    AxyneError error;
+    uint64_t request_id = 0;
+    LRESULT caret, line_start;
     if (!axyne_win_capture_editor(state)) return;
     document = axyne_win_active_document(state);
     if (!axyne_win_lsp_document_supported(document)) return;
@@ -988,7 +997,8 @@ static int axyne_win_lsp_nav_command_state(AxyneWindowState *state,
 {
     AxyneDocument *document;
     if (id != AXYNE_COMMAND_EDIT_GO_TO_DEFINITION &&
-        id != AXYNE_COMMAND_EDIT_FIND_REFERENCES)
+        id != AXYNE_COMMAND_EDIT_FIND_REFERENCES &&
+        id != AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST)
         return 0;
     document = axyne_win_active_document(state);
     out->enabled = axyne_win_lsp_document_supported(document);
@@ -996,8 +1006,20 @@ static int axyne_win_lsp_nav_command_state(AxyneWindowState *state,
     return 1;
 }
 
+/* Ctrl+Space: opens the LSP completion list at the caret without typing. */
+static int axyne_win_lsp_trigger_suggest(AxyneWindowState *state)
+{
+    if (state == NULL || state->lsp_nav_ui == NULL || state->editor == NULL) return 0;
+    if (!axyne_win_capture_editor(state) || !axyne_win_lsp_open_active(state)) return 0;
+    if (state->lsp == NULL || axyne_win_completion_blocked(state)) return 0;
+    axyne_win_lsp_send_completion(state);
+    return 1;
+}
+
 static int axyne_win_lsp_nav_command(AxyneWindowState *state, AxyneCommandId id)
 {
+    if (id == AXYNE_COMMAND_EDIT_TRIGGER_SUGGEST)
+        return axyne_win_lsp_trigger_suggest(state);
     if (id == AXYNE_COMMAND_EDIT_GO_TO_DEFINITION)
         return axyne_win_lsp_navigate(state, 0);
     if (id == AXYNE_COMMAND_EDIT_FIND_REFERENCES)

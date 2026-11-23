@@ -117,6 +117,9 @@ static const AxyneCommandInfo command_table[] = {
     E(EDIT_GO_TO_SYMBOL, "edit.goToSymbol", "심볼로 이동", NULL,
       "go to symbol outline workspace", G(EDIT), PAL, BOTH, NULL, NULL, NULL, NULL,
       P(GO_TO_SYMBOL), NOL),
+    E(EDIT_TRIGGER_SUGGEST, "edit.triggerSuggest", "자동 완성 호출", NULL,
+      "trigger suggest completion intellisense lsp", G(EDIT), PAL | DOC, WIN,
+      "Ctrl+Space", NULL, NULL, NULL, 0, NOL),
     /* 보기 */
     E(VIEW_COMMAND_PALETTE, "view.commandPalette", "명령 팔레트...", "명령 팔레트…",
       "command palette", G(VIEW), 0, BOTH, "Ctrl+Shift+P", NULL, "Cmd+Shift+P", NULL,
