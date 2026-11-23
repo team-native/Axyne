@@ -10,8 +10,30 @@
 
 enum {
     AXYNE_WM_LSP_COMPLETION = AXYNE_WM_FEATURE(AXYNE_WIN_FEATURE_LSP_NAV, 0),
-    AXYNE_WM_LSP_NAVIGATION = AXYNE_WM_FEATURE(AXYNE_WIN_FEATURE_LSP_NAV, 1)
+    AXYNE_WM_LSP_NAVIGATION = AXYNE_WM_FEATURE(AXYNE_WIN_FEATURE_LSP_NAV, 1),
+    AXYNE_WM_LSP_RESULT = AXYNE_WM_FEATURE(AXYNE_WIN_FEATURE_LSP_NAV, 2)
 };
+
+/* One completion item as the UI keeps it: everything needed to rank it, show
+ * it and apply it, owned copies of what the reader thread received. */
+typedef struct AxyneWinLspItem {
+    char *label;
+    char *insert_text;
+    char *detail;
+    char *label_detail;
+    char *documentation;
+    char *sort_text;
+    char *filter_text;
+    char *raw_json;
+    int kind;
+    int deprecated;
+    int preselect;
+    int has_edit;
+    AxyneLspTextEdit edit;
+    AxyneLspTextEdit *extra;
+    size_t extra_count;
+    int resolve_sent;
+} AxyneWinLspItem;
 
 struct AxyneWinLspNavUi {
     uint64_t completion_request;
@@ -21,19 +43,90 @@ struct AxyneWinLspNavUi {
     char *definition_path;
     uint64_t references_request;
     char *references_path;
-    /* Words and details of the LSP list on screen, for the detail panel. */
-    char **shown_words;
-    char **shown_details;
-    size_t shown_count;
+    /* The LSP list on screen: all items of the last response, and the
+     * indexes of those that match the typed prefix in display order. */
+    AxyneWinLspItem *items;
+    size_t item_count;
+    size_t *order;
+    size_t order_count;
+    size_t prefix_bytes;
+    int list_active;
+    int icons_registered;
+    uint64_t resolve_request;
+    size_t resolve_index;
+    char detail_text[1024];
 };
 
 typedef struct AxyneWinLspCompletionMessage {
     AxyneLspClient *client;
     uint64_t request_id;
-    char **words;
-    char **details; /* "kind · detail" per word, entries may be NULL */
+    AxyneWinLspItem *items;
     size_t count;
 } AxyneWinLspCompletionMessage;
+
+static char *axyne_win_lsp_dup(const char *text)
+{
+    return text != NULL ? _strdup(text) : NULL;
+}
+
+static void axyne_win_lsp_item_free(AxyneWinLspItem *item)
+{
+    free(item->label); free(item->insert_text); free(item->detail);
+    free(item->label_detail); free(item->documentation); free(item->sort_text);
+    free(item->filter_text); free(item->raw_json); free(item->edit.new_text);
+    for (size_t i = 0; i < item->extra_count; ++i) free(item->extra[i].new_text);
+    free(item->extra);
+    memset(item, 0, sizeof(*item));
+}
+
+static void axyne_win_lsp_items_free(AxyneWinLspItem *items, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) axyne_win_lsp_item_free(&items[i]);
+    free(items);
+}
+
+static int axyne_win_lsp_item_from(const AxyneLspCompletionItem *source,
+                                   AxyneWinLspItem *item)
+{
+    memset(item, 0, sizeof(*item));
+    if (source->label == NULL) return 0;
+    item->label = axyne_win_lsp_dup(source->label);
+    item->insert_text = axyne_win_lsp_dup(source->insert_text);
+    item->detail = axyne_win_lsp_dup(source->detail);
+    item->label_detail = axyne_win_lsp_dup(source->label_detail);
+    item->documentation = axyne_win_lsp_dup(source->documentation);
+    item->sort_text = axyne_win_lsp_dup(source->sort_text);
+    item->filter_text = axyne_win_lsp_dup(source->filter_text);
+    item->raw_json = axyne_win_lsp_dup(source->raw_json);
+    item->kind = source->kind;
+    item->deprecated = source->deprecated;
+    item->preselect = source->preselect;
+    if (source->has_text_edit && source->text_edit.new_text != NULL) {
+        item->has_edit = 1;
+        item->edit.range = source->text_edit.range;
+        item->edit.new_text = axyne_win_lsp_dup(source->text_edit.new_text);
+    }
+    if (source->additional_edit_count > 0) {
+        item->extra = (AxyneLspTextEdit *)calloc(source->additional_edit_count,
+                                                  sizeof(*item->extra));
+        if (item->extra != NULL) {
+            for (size_t i = 0; i < source->additional_edit_count; ++i) {
+                item->extra[i].range = source->additional_edits[i].range;
+                item->extra[i].new_text = axyne_win_lsp_dup(source->additional_edits[i].new_text);
+            }
+            item->extra_count = source->additional_edit_count;
+        }
+    }
+    if (item->label == NULL) { axyne_win_lsp_item_free(item); return 0; }
+    return 1;
+}
+
+static void axyne_win_lsp_free_completion(AxyneWinLspCompletionMessage *message)
+{
+    if (message == NULL) return;
+    axyne_win_lsp_items_free(message->items, message->count);
+    free(message);
+}
 
 typedef struct AxyneWinLspNavigationMessage {
     AxyneLspClient *client;
@@ -42,18 +135,6 @@ typedef struct AxyneWinLspNavigationMessage {
     char *uri;
     AxyneLspPosition start;
 } AxyneWinLspNavigationMessage;
-
-static void axyne_win_lsp_free_completion(AxyneWinLspCompletionMessage *message)
-{
-    if (message == NULL) return;
-    for (size_t i = 0; i < message->count; ++i) {
-        free(message->words[i]);
-        if (message->details != NULL) free(message->details[i]);
-    }
-    free(message->words);
-    free(message->details);
-    free(message);
-}
 
 static void axyne_win_lsp_free_navigation(AxyneWinLspNavigationMessage *message)
 {
@@ -74,6 +155,9 @@ void axyne_win_lsp_nav_drain(HWND window)
                         AXYNE_WM_LSP_NAVIGATION, PM_REMOVE))
         axyne_win_lsp_free_navigation(
             (AxyneWinLspNavigationMessage *)pending.lParam);
+    while (PeekMessageW(&pending, window, AXYNE_WM_LSP_RESULT,
+                        AXYNE_WM_LSP_RESULT, PM_REMOVE))
+        axyne_lsp_result_free((AxyneLspResult *)pending.lParam);
 }
 
 static int axyne_win_lsp_document_supported(const AxyneDocument *document)
@@ -107,27 +191,319 @@ static void axyne_win_lsp_set_status(AxyneWindowState *state, const char *text)
 
 static void axyne_win_lsp_forget_shown(struct AxyneWinLspNavUi *ui)
 {
-    for (size_t i = 0; i < ui->shown_count; ++i) {
-        free(ui->shown_words[i]);
-        free(ui->shown_details[i]);
-    }
-    free(ui->shown_words);
-    free(ui->shown_details);
-    ui->shown_words = NULL;
-    ui->shown_details = NULL;
-    ui->shown_count = 0;
+    axyne_win_lsp_items_free(ui->items, ui->item_count);
+    free(ui->order);
+    ui->items = NULL;
+    ui->order = NULL;
+    ui->item_count = 0;
+    ui->order_count = 0;
+    ui->list_active = 0;
+    ui->resolve_request = 0;
 }
 
-const char *axyne_win_lsp_completion_detail(AxyneWindowState *state,
-                                            const char *word)
+/* ---- ranking ------------------------------------------------------------ */
+
+/* Case-insensitive subsequence match with bonuses for a prefix, consecutive
+ * runs and word starts (snake_case, camelCase). -1 when it does not match. */
+static int axyne_win_lsp_fuzzy_score(const char *pattern, size_t pattern_length,
+                                     const char *text)
+{
+    size_t text_length = strlen(text), ti = 0, pi;
+    int score = 0, run = 0;
+    long last = -2;
+    if (pattern_length == 0) return 0;
+    for (pi = 0; pi < pattern_length; ++pi) {
+        int wanted = tolower((unsigned char)pattern[pi]), found = 0;
+        for (; ti < text_length; ++ti)
+            if (tolower((unsigned char)text[ti]) == wanted) { found = 1; break; }
+        if (!found) return -1;
+        if ((long)ti == last + 1) { ++run; score += 6 + run; } else run = 0;
+        if (ti == 0) score += 12;
+        else if (text[ti - 1] == '_' || text[ti - 1] == '-' || text[ti - 1] == '.' ||
+                 (isupper((unsigned char)text[ti]) && islower((unsigned char)text[ti - 1])))
+            score += 8;
+        if (text[ti] == pattern[pi]) score += 1;
+        last = (long)ti;
+        ++ti;
+    }
+    if (_strnicmp(text, pattern, pattern_length) == 0)
+        score += 100 + (text_length == pattern_length ? 50 : 0);
+    score -= (int)((text_length - pattern_length) / 4);
+    return score;
+}
+
+typedef struct AxyneWinLspRanked {
+    size_t index;
+    int score;
+} AxyneWinLspRanked;
+
+static const AxyneWinLspItem *axyne_win_lsp_rank_items;
+
+static int axyne_win_lsp_rank_compare(const void *left, const void *right)
+{
+    const AxyneWinLspRanked *a = (const AxyneWinLspRanked *)left;
+    const AxyneWinLspRanked *b = (const AxyneWinLspRanked *)right;
+    const AxyneWinLspItem *x = &axyne_win_lsp_rank_items[a->index];
+    const AxyneWinLspItem *y = &axyne_win_lsp_rank_items[b->index];
+    int compare;
+    if (a->score != b->score) return a->score > b->score ? -1 : 1;
+    if (x->preselect != y->preselect) return x->preselect ? -1 : 1;
+    if (x->deprecated != y->deprecated) return x->deprecated ? 1 : -1;
+    compare = strcmp(x->sort_text != NULL ? x->sort_text : x->label,
+                     y->sort_text != NULL ? y->sort_text : y->label);
+    if (compare != 0) return compare;
+    compare = strcmp(x->label, y->label);
+    if (compare != 0) return compare;
+    return a->index < b->index ? -1 : 1;
+}
+
+/* ---- list icons ---------------------------------------------------------- */
+
+enum { AXYNE_LSP_ICON_SIZE = 16, AXYNE_LSP_ICON_GROUPS = 8 };
+
+typedef struct AxyneLspIconStyle {
+    uint32_t color;
+    char letter;
+} AxyneLspIconStyle;
+
+static const AxyneLspIconStyle axyne_lsp_icon_styles[AXYNE_LSP_ICON_GROUPS] = {
+    { 0xd18f4d, 'f' }, /* 1: method, function, constructor */
+    { 0xa0a63f, 'v' }, /* 2: variable, field, property, value */
+    { 0x3f80d9, 'C' }, /* 3: class, interface, struct, enum */
+    { 0xd17f9a, 'M' }, /* 4: module, file, folder, reference */
+    { 0xd16bb3, 'k' }, /* 5: keyword, operator */
+    { 0x3fb4d1, 'c' }, /* 6: constant, enum member */
+    { 0x3f80d9, 'T' }, /* 7: type parameter */
+    { 0x90857d, '.' }  /* 8: text, snippet, anything else */
+};
+
+static int axyne_win_lsp_icon_group(int kind)
+{
+    switch (kind) {
+    case 2: case 3: case 4: return 1;
+    case 5: case 6: case 10: case 12: return 2;
+    case 7: case 8: case 13: case 22: case 23: return 3;
+    case 9: case 17: case 18: case 19: return 4;
+    case 14: case 24: return 5;
+    case 20: case 21: return 6;
+    case 25: return 7;
+    default: return 8;
+    }
+}
+
+/* 5x7 glyphs, one row per string. */
+static const char *axyne_win_lsp_glyph(char letter)
+{
+    switch (letter) {
+    case 'f': return "..##." ".#..." "####." ".#..." ".#..." ".#..." ".#...";
+    case 'v': return "....." "#...#" "#...#" "#...#" ".#.#." ".#.#." "..#..";
+    case 'C': return ".###." "#...#" "#...." "#...." "#...." "#...#" ".###.";
+    case 'M': return "#...#" "##.##" "#.#.#" "#...#" "#...#" "#...#" "#...#";
+    case 'k': return "#...." "#...." "#..#." "#.#.." "###.." "#..#." "#...#";
+    case 'c': return "....." ".###." "#...#" "#...." "#...." "#...#" ".###.";
+    case 'T': return "#####" "..#.." "..#.." "..#.." "..#.." "..#.." "..#..";
+    default:  return "....." "....." "....." "..#.." "....." "....." ".....";
+    }
+}
+
+static void axyne_win_lsp_register_icons(AxyneWindowState *state, struct AxyneWinLspNavUi *ui)
+{
+    unsigned char pixels[AXYNE_LSP_ICON_SIZE * AXYNE_LSP_ICON_SIZE * 4];
+    if (ui->icons_registered || state->editor == NULL) return;
+    for (int group = 1; group <= AXYNE_LSP_ICON_GROUPS; ++group) {
+        const AxyneLspIconStyle *style = &axyne_lsp_icon_styles[group - 1];
+        const char *glyph = axyne_win_lsp_glyph(style->letter);
+        memset(pixels, 0, sizeof(pixels));
+        for (int y = 1; y < AXYNE_LSP_ICON_SIZE - 1; ++y) {
+            for (int x = 1; x < AXYNE_LSP_ICON_SIZE - 1; ++x) {
+                int corner = (x == 1 || x == AXYNE_LSP_ICON_SIZE - 2) &&
+                             (y == 1 || y == AXYNE_LSP_ICON_SIZE - 2);
+                unsigned char *pixel = pixels + (y * AXYNE_LSP_ICON_SIZE + x) * 4;
+                if (corner) continue;
+                pixel[0] = (unsigned char)(style->color & 0xff);
+                pixel[1] = (unsigned char)((style->color >> 8) & 0xff);
+                pixel[2] = (unsigned char)((style->color >> 16) & 0xff);
+                pixel[3] = 255;
+            }
+        }
+        for (int row = 0; row < 7; ++row) {
+            for (int column = 0; column < 5; ++column) {
+                unsigned char *pixel;
+                if (glyph[row * 5 + column] != '#') continue;
+                pixel = pixels + ((4 + row) * AXYNE_LSP_ICON_SIZE + 5 + column) * 4;
+                pixel[0] = pixel[1] = pixel[2] = 255;
+                pixel[3] = 255;
+            }
+        }
+        SendMessageA(state->editor, SCI_RGBAIMAGESETWIDTH, AXYNE_LSP_ICON_SIZE, 0);
+        SendMessageA(state->editor, SCI_RGBAIMAGESETHEIGHT, AXYNE_LSP_ICON_SIZE, 0);
+        SendMessageA(state->editor, SCI_REGISTERRGBAIMAGE, (WPARAM)group, (LPARAM)pixels);
+    }
+    ui->icons_registered = 1;
+}
+
+/* ---- detail panel -------------------------------------------------------- */
+
+/* Index into ui->items of the entry highlighted in the list, or -1. */
+static long axyne_win_lsp_current_item(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    LRESULT current;
+    if (ui == NULL || state->editor == NULL || !ui->list_active) return -1;
+    current = SendMessageA(state->editor, SCI_AUTOCGETCURRENT, 0, 0);
+    if (current < 0 || (size_t)current >= ui->order_count) return -1;
+    return (long)ui->order[current];
+}
+
+static void axyne_win_lsp_request_resolve(AxyneWindowState *state, size_t index)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    AxyneWinLspItem *item = &ui->items[index];
+    AxyneError error;
+    uint64_t request_id = 0;
+    if (item->resolve_sent || item->raw_json == NULL || state->lsp == NULL) return;
+    item->resolve_sent = 1;
+    if (axyne_lsp_resolve_completion(state->lsp, item->raw_json, &request_id, &error) ==
+        AXYNE_STATUS_OK) {
+        ui->resolve_request = request_id;
+        ui->resolve_index = index;
+    }
+}
+
+/* "kind · detail" plus the documentation, for the panel beside the list. The
+ * text before " · " is the accent-coloured head, the rest is muted. */
+const char *axyne_win_lsp_completion_detail(AxyneWindowState *state, const char *word)
 {
     struct AxyneWinLspNavUi *ui;
-    if (state == NULL || state->lsp_nav_ui == NULL || word == NULL) return NULL;
+    const AxyneWinLspItem *item;
+    const char *kind, *signature;
+    char *plain = NULL;
+    size_t used = 0;
+    long index;
+    (void)word;
+    if (state == NULL || state->lsp_nav_ui == NULL) return NULL;
     ui = state->lsp_nav_ui;
-    for (size_t i = 0; i < ui->shown_count; ++i)
-        if (ui->shown_words[i] != NULL && strcmp(ui->shown_words[i], word) == 0)
-            return ui->shown_details[i];
-    return NULL;
+    index = axyne_win_lsp_current_item(state);
+    if (index < 0) return NULL;
+    item = &ui->items[index];
+    if (item->documentation == NULL) axyne_win_lsp_request_resolve(state, (size_t)index);
+    kind = axyne_completion_kind_name(item->kind);
+    signature = item->detail != NULL && item->detail[0] != '\0' ? item->detail : item->label_detail;
+    while (signature != NULL && (*signature == ' ' || *signature == '\t')) ++signature;
+    if (signature != NULL && signature[0] == '\0') signature = NULL;
+    if (kind == NULL && signature == NULL && item->documentation == NULL && !item->deprecated)
+        return NULL;
+    used += (size_t)snprintf(ui->detail_text, sizeof(ui->detail_text), "%s%s%s",
+                             kind != NULL ? kind : "item",
+                             signature != NULL ? " \xc2\xb7 " : "",
+                             signature != NULL ? signature : "");
+    if (used >= sizeof(ui->detail_text)) used = sizeof(ui->detail_text) - 1;
+    if (item->documentation != NULL) {
+        plain = axyne_lsp_markdown_to_plain(item->documentation);
+        if (plain != NULL && plain[0] != '\0') {
+            size_t room = sizeof(ui->detail_text) - used - 1, length = strlen(plain);
+            const char *separator = signature != NULL ? "\n\n" : " \xc2\xb7 ";
+            if (room > strlen(separator) + 4) {
+                room -= strlen(separator);
+                if (length > room) {
+                    length = room;
+                    while (length > 0 && ((unsigned char)plain[length] & 0xc0u) == 0x80u) --length;
+                }
+                memcpy(ui->detail_text + used, separator, strlen(separator));
+                used += strlen(separator);
+                memcpy(ui->detail_text + used, plain, length);
+                used += length;
+                ui->detail_text[used] = '\0';
+            }
+        }
+    }
+    free(plain);
+    if (item->deprecated && used + 16 < sizeof(ui->detail_text))
+        (void)snprintf(ui->detail_text + used, sizeof(ui->detail_text) - used,
+                       "%sDeprecated", signature != NULL || item->documentation != NULL ? "\n\n" : " \xc2\xb7 ");
+    return ui->detail_text;
+}
+
+/* ---- showing the list ---------------------------------------------------- */
+
+static void axyne_win_lsp_present(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    AxyneWinLspRanked *ranked;
+    LRESULT caret, word_start;
+    char prefix[256];
+    size_t prefix_length, matches = 0, length = 0, shown;
+    char *list;
+    ui->list_active = 0;
+    free(ui->order);
+    ui->order = NULL;
+    ui->order_count = 0;
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    word_start = SendMessageA(state->editor, SCI_WORDSTARTPOSITION, (WPARAM)caret, TRUE);
+    prefix_length = (size_t)(caret - word_start);
+    if (prefix_length >= sizeof(prefix) || ui->item_count == 0) return;
+    prefix[0] = '\0';
+    if (prefix_length > 0) {
+        struct Sci_TextRange range;
+        range.chrg.cpMin = (Sci_PositionCR)word_start;
+        range.chrg.cpMax = (Sci_PositionCR)caret;
+        range.lpstrText = prefix;
+        SendMessageA(state->editor, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    }
+    prefix[prefix_length] = '\0';
+    ranked = (AxyneWinLspRanked *)malloc(ui->item_count * sizeof(*ranked));
+    if (ranked == NULL) return;
+    for (size_t i = 0; i < ui->item_count; ++i) {
+        const AxyneWinLspItem *item = &ui->items[i];
+        const char *key = item->filter_text != NULL ? item->filter_text : item->label;
+        int score = axyne_win_lsp_fuzzy_score(prefix, prefix_length, key);
+        /* An item that already equals the typed word has nothing to add. */
+        if (score < 0 || (prefix_length > 0 && strlen(item->label) == prefix_length &&
+                          _stricmp(item->label, prefix) == 0 && !item->has_edit))
+            continue;
+        ranked[matches].index = i;
+        ranked[matches].score = score;
+        ++matches;
+    }
+    if (matches == 0) {
+        free(ranked);
+        if (SendMessageA(state->editor, SCI_AUTOCACTIVE, 0, 0) != 0)
+            SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0);
+        return;
+    }
+    axyne_win_lsp_rank_items = ui->items;
+    qsort(ranked, matches, sizeof(*ranked), axyne_win_lsp_rank_compare);
+    shown = matches > 200 ? 200 : matches; /* the cap applies after filtering */
+    ui->order = (size_t *)malloc(shown * sizeof(*ui->order));
+    list = (char *)malloc(shown * 160 + 1);
+    if (ui->order == NULL || list == NULL) {
+        free(ranked); free(list); free(ui->order); ui->order = NULL;
+        return;
+    }
+    axyne_win_lsp_register_icons(state, ui);
+    for (size_t i = 0; i < shown; ++i) {
+        const AxyneWinLspItem *item = &ui->items[ranked[i].index];
+        size_t before = length;
+        ui->order[i] = ranked[i].index;
+        if (i > 0) list[length++] = '\n';
+        length += (size_t)snprintf(list + length, 140, "%s%s%s", item->label,
+                                   item->label_detail != NULL ? " " : "",
+                                   item->label_detail != NULL ? item->label_detail : "");
+        if (length > before + 139) length = before + 139;
+        for (size_t k = before + (i > 0 ? 1 : 0); k < length; ++k)
+            if (list[k] == '\n' || list[k] == '\r' || list[k] == 0x1f) list[k] = ' ';
+        list[length++] = 0x1f;
+        length += (size_t)snprintf(list + length, 8, "%d",
+                                   axyne_win_lsp_icon_group(item->kind));
+    }
+    list[length] = '\0';
+    ui->order_count = shown;
+    ui->prefix_bytes = prefix_length;
+    ui->list_active = 1;
+    SendMessageA(state->editor, SCI_AUTOCSETTYPESEPARATOR, 0x1f, 0);
+    axyne_win_completion_show_list(state, prefix_length, list, '\n');
+    free(list);
+    free(ranked);
 }
 
 static void axyne_win_lsp_show_completion(
@@ -135,12 +511,7 @@ static void axyne_win_lsp_show_completion(
 {
     struct AxyneWinLspNavUi *ui;
     AxyneDocument *document;
-    LRESULT caret, word_start;
-    char prefix[256];
-    char **matches;
-    size_t count = 0, length = 0, prefix_length;
-    char *list;
-
+    LRESULT caret;
     if (state == NULL || message == NULL || state->editor == NULL ||
         state->lsp_nav_ui == NULL)
         return;
@@ -154,91 +525,88 @@ static void axyne_win_lsp_show_completion(
         return;
     caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
     if (caret != ui->completion_caret) return;
-    word_start = SendMessageA(state->editor, SCI_WORDSTARTPOSITION,
-                              (WPARAM)caret, TRUE);
-    prefix_length = (size_t)(caret - word_start);
-    if (prefix_length >= sizeof(prefix)) return;
-    if (prefix_length > 0) {
-        struct Sci_TextRange range;
-        range.chrg.cpMin = (Sci_PositionCR)word_start;
-        range.chrg.cpMax = (Sci_PositionCR)caret;
-        range.lpstrText = prefix;
-        SendMessageA(state->editor, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
-    }
-    prefix[prefix_length] = '\0';
-    matches = message->count > 0
-        ? (char **)calloc(message->count, sizeof(*matches)) : NULL;
-    if (message->count > 0 && matches == NULL) return;
-    for (size_t i = 0; i < message->count; ++i) {
-        const char *word = message->words[i];
-        size_t word_length;
-        if (word == NULL || _strnicmp(word, prefix, prefix_length) != 0) continue;
-        word_length = strlen(word);
-        if (word_length == prefix_length) continue;
-        matches[count++] = (char *)word;
-    }
-    if (count == 0) {
-        free(matches);
-        return;
-    }
-    for (size_t i = 1; i < count; ++i) {
-        char *value = matches[i];
-        size_t j = i;
-        while (j > 0 && _stricmp(matches[j - 1], value) > 0) {
-            matches[j] = matches[j - 1];
-            --j;
-        }
-        matches[j] = value;
-    }
-    for (size_t i = 0; i < count; ++i) {
-        if (i > 0 && _stricmp(matches[i], matches[i - 1]) == 0) continue;
-        length += strlen(matches[i]) + 1;
-    }
-    list = (char *)malloc(length + 1);
-    if (list == NULL) {
-        free(matches);
-        return;
-    }
-    length = 0;
-    for (size_t i = 0; i < count; ++i) {
-        size_t word_length;
-        if (i > 0 && _stricmp(matches[i], matches[i - 1]) == 0) continue;
-        word_length = strlen(matches[i]);
-        if (length > 0) list[length++] = '\n';
-        memcpy(list + length, matches[i], word_length);
-        length += word_length;
-    }
-    list[length] = '\0';
-    /* The words stay alive in ui (matches point into them) so the detail
-     * panel can look up the selected entry while the list is open. */
     axyne_win_lsp_forget_shown(ui);
-    ui->shown_words = message->words;
-    ui->shown_details = message->details;
-    ui->shown_count = message->count;
-    message->words = NULL;
-    message->details = NULL;
+    ui->items = message->items;
+    ui->item_count = message->count;
+    message->items = NULL;
     message->count = 0;
-    axyne_win_completion_show_list(state, prefix_length, list, '\n');
-    free(list);
-    free(matches);
+    axyne_win_lsp_present(state);
 }
 
-static char *axyne_win_lsp_format_detail(const AxyneLspCompletionItem *item)
+/* ---- applying a chosen item ---------------------------------------------- */
+
+typedef struct AxyneWinLspPlannedEdit {
+    size_t start, end;
+    const char *text;
+} AxyneWinLspPlannedEdit;
+
+static int axyne_win_lsp_planned_compare(const void *left, const void *right)
 {
-    const char *kind = axyne_completion_kind_name(item->kind);
-    const char *detail = item->detail;
-    size_t size;
-    char *text;
-    while (detail != NULL && (*detail == ' ' || *detail == '\t')) ++detail;
-    if (detail != NULL && detail[0] == '\0') detail = NULL;
-    if (kind == NULL && detail == NULL) return NULL;
-    size = (kind != NULL ? strlen(kind) : 0) + (detail != NULL ? strlen(detail) : 0) + 8;
-    text = (char *)malloc(size);
-    if (text == NULL) return NULL;
-    (void)snprintf(text, size, "%s%s%s", kind != NULL ? kind : "",
-                   kind != NULL && detail != NULL ? " \xc2\xb7 " : "",
-                   detail != NULL ? detail : "");
-    return text;
+    const AxyneWinLspPlannedEdit *a = (const AxyneWinLspPlannedEdit *)left;
+    const AxyneWinLspPlannedEdit *b = (const AxyneWinLspPlannedEdit *)right;
+    if (a->start != b->start) return a->start > b->start ? -1 : 1; /* last edit first */
+    return 0;
+}
+
+/* Replaces the typed prefix (or the item's textEdit range) with the item and
+ * applies its additional edits, e.g. an auto-import at the top of the file. */
+static void axyne_win_lsp_apply_item(AxyneWindowState *state, const AxyneWinLspItem *item)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    AxyneWinLspPlannedEdit *plan;
+    const char *text;
+    LRESULT length, caret;
+    size_t count = 1 + item->extra_count, main_start, main_end, shift = 0, i;
+    const char *main_text;
+    size_t main_length;
+    length = SendMessageA(state->editor, SCI_GETLENGTH, 0, 0);
+    caret = SendMessageA(state->editor, SCI_GETCURRENTPOS, 0, 0);
+    text = (const char *)SendMessageA(state->editor, SCI_GETCHARACTERPOINTER, 0, 0);
+    if (text == NULL || length < 0 || caret < 0) return;
+    plan = (AxyneWinLspPlannedEdit *)malloc(count * sizeof(*plan));
+    if (plan == NULL) return;
+    if (item->has_edit) {
+        main_start = axyne_lsp_offset_for_position(text, (size_t)length, item->edit.range.start);
+        main_end = axyne_lsp_offset_for_position(text, (size_t)length, item->edit.range.end);
+        main_text = item->edit.new_text;
+        if (main_end < main_start) main_end = main_start;
+    } else {
+        size_t typed = ui->prefix_bytes <= (size_t)caret ? ui->prefix_bytes : (size_t)caret;
+        main_start = (size_t)caret - typed;
+        main_end = (size_t)caret;
+        main_text = item->insert_text != NULL && item->insert_text[0] != '\0'
+            ? item->insert_text : item->label;
+    }
+    main_length = strlen(main_text);
+    plan[0].start = main_start; plan[0].end = main_end; plan[0].text = main_text;
+    for (i = 0; i < item->extra_count; ++i) {
+        plan[1 + i].start = axyne_lsp_offset_for_position(text, (size_t)length, item->extra[i].range.start);
+        plan[1 + i].end = axyne_lsp_offset_for_position(text, (size_t)length, item->extra[i].range.end);
+        if (plan[1 + i].end < plan[1 + i].start) plan[1 + i].end = plan[1 + i].start;
+        plan[1 + i].text = item->extra[i].new_text != NULL ? item->extra[i].new_text : "";
+        if (plan[1 + i].end <= main_start)
+            shift += strlen(plan[1 + i].text) - (plan[1 + i].end - plan[1 + i].start);
+    }
+    qsort(plan, count, sizeof(*plan), axyne_win_lsp_planned_compare);
+    SendMessageA(state->editor, SCI_BEGINUNDOACTION, 0, 0);
+    for (i = 0; i < count; ++i) {
+        SendMessageA(state->editor, SCI_SETTARGETRANGE, (WPARAM)plan[i].start, (LPARAM)plan[i].end);
+        SendMessageA(state->editor, SCI_REPLACETARGET, (WPARAM)strlen(plan[i].text),
+                     (LPARAM)plan[i].text);
+    }
+    SendMessageA(state->editor, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(state->editor, SCI_GOTOPOS, (WPARAM)(main_start + main_length + shift), 0);
+    free(plan);
+}
+
+static void axyne_win_lsp_apply_selection(AxyneWindowState *state)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    long index = axyne_win_lsp_current_item(state);
+    if (index < 0) return;
+    SendMessageA(state->editor, SCI_AUTOCCANCEL, 0, 0); /* we insert it ourselves */
+    ui->list_active = 0;
+    axyne_win_lsp_apply_item(state, &ui->items[index]);
 }
 
 void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
@@ -250,43 +618,69 @@ void axyne_win_lsp_completion(AxyneLspClient *client, uint64_t request_id,
     if (state == NULL || state->main_window == NULL || items == NULL ||
         count == 0)
         return;
-    if (count > 200) count = 200;
+    if (count > 5000) count = 5000;
     message = (AxyneWinLspCompletionMessage *)calloc(1, sizeof(*message));
     if (message == NULL) return;
     message->client = client;
     message->request_id = request_id;
-    message->words = (char **)calloc(count, sizeof(*message->words));
-    message->details = (char **)calloc(count, sizeof(*message->details));
-    if (message->words == NULL || message->details == NULL) {
-        axyne_win_lsp_free_completion(message);
+    message->items = (AxyneWinLspItem *)calloc(count, sizeof(*message->items));
+    if (message->items == NULL) {
+        free(message);
         return;
     }
-    for (size_t i = 0; i < count; ++i) {
-        const char *word = items[i].insert_text != NULL &&
-            items[i].insert_text[0] != '\0' ? items[i].insert_text : items[i].label;
-        size_t length = 0;
-        if (word == NULL) continue;
-        while (*word == ' ' || *word == '\t') ++word;
-        if (strlen(word) >= 3 && (unsigned char)word[0] == 0xe2 &&
-            (unsigned char)word[1] == 0x80 &&
-            (unsigned char)word[2] == 0xa2)
-            word += 3;
-        while (*word == ' ') ++word;
-        while (word[length] != '\0' && word[length] != '\n' &&
-               word[length] != '(' && word[length] != ' ' &&
-               word[length] != '$')
-            ++length;
-        if (length == 0) continue;
-        message->words[message->count] = (char *)malloc(length + 1);
-        if (message->words[message->count] == NULL) break;
-        memcpy(message->words[message->count], word, length);
-        message->words[message->count][length] = '\0';
-        message->details[message->count] = axyne_win_lsp_format_detail(&items[i]);
-        ++message->count;
-    }
+    for (size_t i = 0; i < count; ++i)
+        if (axyne_win_lsp_item_from(&items[i], &message->items[message->count]))
+            ++message->count;
     if (!PostMessageW(state->main_window, AXYNE_WM_LSP_COMPLETION, 0,
                       (LPARAM)message))
         axyne_win_lsp_free_completion(message);
+}
+
+/* Results of the requests beyond completion; runs on the reader thread. */
+void axyne_win_lsp_result(AxyneLspClient *client, AxyneLspResult *result, void *user_data)
+{
+    AxyneWindowState *state = (AxyneWindowState *)user_data;
+    (void)client;
+    if (state == NULL || state->main_window == NULL || result == NULL) return;
+    result->detached = 1;
+    if (!PostMessageW(state->main_window, AXYNE_WM_LSP_RESULT, 0, (LPARAM)result))
+        axyne_lsp_result_free(result);
+}
+
+static void axyne_win_lsp_handle_result(AxyneWindowState *state, AxyneLspResult *result)
+{
+    struct AxyneWinLspNavUi *ui = state->lsp_nav_ui;
+    if (ui == NULL) return;
+    if (result->kind == AXYNE_LSP_RESULT_RESOLVED_COMPLETION && !result->failed &&
+        result->has_completion_item && result->request_id == ui->resolve_request &&
+        ui->resolve_index < ui->item_count) {
+        AxyneWinLspItem *item = &ui->items[ui->resolve_index];
+        AxyneLspCompletionItem *resolved = &result->completion_item;
+        if (resolved->documentation != NULL) {
+            free(item->documentation);
+            item->documentation = axyne_win_lsp_dup(resolved->documentation);
+        }
+        if (resolved->detail != NULL && resolved->detail[0] != '\0') {
+            free(item->detail);
+            item->detail = axyne_win_lsp_dup(resolved->detail);
+        }
+        if (resolved->additional_edit_count > 0) {
+            for (size_t i = 0; i < item->extra_count; ++i) free(item->extra[i].new_text);
+            free(item->extra);
+            item->extra = (AxyneLspTextEdit *)calloc(resolved->additional_edit_count,
+                                                      sizeof(*item->extra));
+            item->extra_count = 0;
+            if (item->extra != NULL) {
+                for (size_t i = 0; i < resolved->additional_edit_count; ++i) {
+                    item->extra[i].range = resolved->additional_edits[i].range;
+                    item->extra[i].new_text = axyne_win_lsp_dup(resolved->additional_edits[i].new_text);
+                }
+                item->extra_count = resolved->additional_edit_count;
+            }
+        }
+        ui->resolve_request = 0;
+        axyne_win_completion_refresh_detail(state);
+    }
 }
 
 void axyne_win_lsp_navigation(AxyneLspClient *client, uint64_t request_id,
@@ -566,6 +960,15 @@ static int axyne_win_lsp_nav_message(AxyneWindowState *state, HWND window,
         if (result != NULL) *result = 0;
         return 1;
     }
+    if (message == AXYNE_WM_LSP_RESULT) {
+        AxyneLspResult *lsp_result = (AxyneLspResult *)l_param;
+        if (lsp_result != NULL) {
+            if (state != NULL) axyne_win_lsp_handle_result(state, lsp_result);
+            axyne_lsp_result_free(lsp_result);
+        }
+        if (result != NULL) *result = 0;
+        return 1;
+    }
     if (message == AXYNE_WM_LSP_NAVIGATION) {
         AxyneWinLspNavigationMessage *navigation =
             (AxyneWinLspNavigationMessage *)l_param;
@@ -645,8 +1048,14 @@ static void axyne_win_lsp_document_saved(AxyneWindowState *state,
 static void axyne_win_lsp_editor_notify(AxyneWindowState *state,
                                          const SCNotification *notification)
 {
-    if (notification != NULL && notification->nmhdr.code == SCN_CHARADDED)
+    if (notification == NULL || state == NULL || state->lsp_nav_ui == NULL) return;
+    if (notification->nmhdr.code == SCN_CHARADDED)
         axyne_win_lsp_request_completion(state, notification);
+    else if (notification->nmhdr.code == SCN_AUTOCSELECTION && state->lsp_nav_ui->list_active)
+        axyne_win_lsp_apply_selection(state);
+    else if (notification->nmhdr.code == SCN_AUTOCCANCELLED ||
+             notification->nmhdr.code == SCN_AUTOCCOMPLETED)
+        state->lsp_nav_ui->list_active = 0;
 }
 
 const AxyneWinFeature axyne_win_feature_lsp_nav = {
