@@ -675,10 +675,11 @@ static int test_symbols_supports_file(void)
 {
     static const char *const yes[] = {
         "a.c", "a.h", "a.cc", "a.cpp", "a.cxx", "a.hpp", "a.m", "a.mm", "A.C",
-        "main.CPP", "/x/y/z.h", "C:\\x\\y.Hpp", "dir.d/file.c", "a.b.c"
+        "main.CPP", "/x/y/z.h", "C:\\x\\y.Hpp", "dir.d/file.c", "a.b.c",
+        "a.py", "a.js", "a.TS", "a.go", "a.rs", "a.java", "a.kt", "a.swift", "a.slint"
     };
     static const char *const no[] = {
-        "a.txt", "a", "", ".c", "a.", "a.cs", "a.cpp.bak", "a.hh", "a.py",
+        "a.txt", "a", "", ".c", "a.", "a.cs", "a.cpp.bak", "a.hh", "a.pyc", "a.rb",
         "dir.c/file", "Makefile", "a.mmm", "/x/.h"
     };
     for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); ++i)

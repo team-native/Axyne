@@ -47,6 +47,7 @@ add_executable(axyne_tests
     test_palette_controller.c
     test_problems_feed.c
     test_outline.c
+    test_symbols_lang.c
     test_binary_files.c
     test_empty_state.c
     test_build_target.c
@@ -210,6 +211,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/outline"
 )
 add_test(
+    NAME axyne-symbols-lang
+    COMMAND $<TARGET_FILE:axyne_tests> symbols-lang
+            "${AXYNE_TEST_FIXTURE_DIR}/symbols-lang"
+)
+add_test(
     NAME axyne-build-target
     COMMAND $<TARGET_FILE:axyne_tests> build-target
             "${AXYNE_TEST_FIXTURE_DIR}/build-target"
@@ -309,6 +315,7 @@ set_tests_properties(
     axyne-palette-controller
     axyne-problems-feed
     axyne-outline
+    axyne-symbols-lang
     axyne-binary-files
     axyne-empty-state
     axyne-layout-metrics
