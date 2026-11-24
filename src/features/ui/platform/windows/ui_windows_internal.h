@@ -613,6 +613,14 @@ void axyne_win_lsp_sync_active(AxyneWindowState *state);
 int axyne_win_lsp_open_active(AxyneWindowState *state);
 int axyne_win_lsp_nav_dispatch(AxyneWindowState *state, int references);
 void axyne_win_lsp_nav_drain(HWND window);
+/* A modal one-line text prompt; returns the entered UTF-8 text (free it) or
+ * NULL when cancelled or empty. */
+char *axyne_win_prompt_text(AxyneWindowState *state, const char *title,
+                            const char *label, const char *initial);
+/* A popup menu of `titles` at screen position (x, y); returns the chosen
+ * index or -1. */
+int axyne_win_choose_item(AxyneWindowState *state, const char *const *titles,
+                          size_t count, int x, int y);
 void axyne_win_lsp_result(AxyneLspClient *client, AxyneLspResult *result, void *user_data);
 void axyne_win_completion_refresh_detail(AxyneWindowState *state);
 void axyne_terminal_output(AxyneProcess *process, AxyneProcessStream stream,
