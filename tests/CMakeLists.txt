@@ -215,6 +215,8 @@ add_test(
     NAME axyne-lsp-edit
     COMMAND $<TARGET_FILE:axyne_tests> lsp-edit
             "${AXYNE_TEST_FIXTURE_DIR}/lsp-edit"
+)
+add_test(
     NAME axyne-symbols-lang
     COMMAND $<TARGET_FILE:axyne_tests> symbols-lang
             "${AXYNE_TEST_FIXTURE_DIR}/symbols-lang"
