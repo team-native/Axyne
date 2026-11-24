@@ -232,9 +232,13 @@ static void ew_paint_installed(EwState *st, HDC dc)
                              author != NULL && author[0] && category != NULL && category[0] ? L" · " : L"",
                              category != NULL ? category : L"", plugin->command_count);
         }
-        rc = (RECT){row.left + 14, top + 50, row.right - 190, top + 66};
-        ew_text(dc, st->font11, !plugin->compatible || missing != NULL ? 0xd9b36cu : AXYNE_PW_COLOR_MUTED,
-                line, rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (!plugin->compatible || missing != NULL) {
+            rc = (RECT){row.left + 14, top + 48, row.right - 190, top + 80};
+            ew_text(dc, st->font11, 0xd9b36cu, line, rc, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+        } else {
+            rc = (RECT){row.left + 14, top + 50, row.right - 190, top + 66};
+            ew_text(dc, st->font11, AXYNE_PW_COLOR_MUTED, line, rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
         free(name); free(version); free(author); free(category);
 
         ew_button(st, dc, (RECT){row.right - 176, top + 23, row.right - 84, top + 53},
