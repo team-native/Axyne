@@ -236,6 +236,14 @@ static int is_command_processor(const wchar_t *path)
     return _wcsicmp(base, L"cmd.exe") == 0;
 }
 
+/* "/d", "/s", "/c": quoted switches are not recognised by cmd.exe, so /s
+ * would not strip the command's outer quotes. */
+static int is_command_switch(const char *argument)
+{
+    return argument != NULL && argument[0] == '/' && argument[1] != '\0' &&
+           argument[2] == '\0';
+}
+
 static int append_command(wchar_t **command, size_t *used, size_t *capacity,
                           const wchar_t *argument, int raw)
 {
@@ -386,8 +394,9 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         wchar_t *arg = to_wide(spec->arguments[i]);
         /* The command string after "cmd.exe ... /c" is already in cmd.exe
          * syntax (""script" "arg""); backslash-escaping it would break it. */
-        int raw = i > 0 && is_command_processor(exe) &&
-                  _stricmp(spec->arguments[i - 1], "/c") == 0;
+        int raw = is_command_processor(exe) &&
+                  ((i > 0 && _stricmp(spec->arguments[i - 1], "/c") == 0) ||
+                   is_command_switch(spec->arguments[i]));
         int ok = arg != NULL && append_command(&command, &used, &capacity, arg, raw);
         free(arg);
         if (!ok) { result = axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid process argument"); goto done; }

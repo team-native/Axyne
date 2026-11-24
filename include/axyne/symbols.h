@@ -9,9 +9,11 @@
 extern "C" {
 #endif
 
-/* Dependency-free, heuristic symbol scanner for C, C++ and Objective-C-like
- * text. It is a lexical scan, not a parser: it is meant to feed the palette's
- * "@" mode and the explorer outline, never to drive refactoring. */
+/* Dependency-free, heuristic symbol scanners. axyne_symbols_scan understands
+ * C, C++ and Objective-C-like text; axyne_symbols_scan_file also dispatches
+ * JavaScript, TypeScript, Python, Go, Rust, Java, Kotlin, Swift and Slint by
+ * file extension. They are lexical scans, not parsers: they feed the palette's
+ * "@" mode and the explorer outline, never refactoring. */
 
 #define AXYNE_SYMBOLS_MAX 5000
 
@@ -19,7 +21,10 @@ typedef enum AxyneSymbolKind {
     AXYNE_SYMBOL_FUNCTION = 1, /* function definitions (not prototypes) */
     AXYNE_SYMBOL_MACRO = 2,    /* #define NAME and #define NAME(args) */
     AXYNE_SYMBOL_TYPE = 3,     /* struct/union/enum/class tags and typedef names */
-    AXYNE_SYMBOL_VARIABLE = 4  /* simple file-scope variable definitions */
+    AXYNE_SYMBOL_VARIABLE = 4, /* simple file-scope variable definitions */
+    AXYNE_SYMBOL_METHOD = 5,   /* functions declared inside a class/struct/impl body
+                                * (non-C languages only) */
+    AXYNE_SYMBOL_CONSTANT = 6  /* const/static/final/val constants (non-C languages) */
 } AxyneSymbolKind;
 
 typedef struct AxyneSymbol {
@@ -48,9 +53,22 @@ AxyneStatus axyne_symbols_scan(const char *text, size_t length,
                                AxyneSymbolList *out, AxyneError *error);
 void axyne_symbols_destroy(AxyneSymbolList *list);
 
+/* Scans `text` with the scanner for the language of `name_or_path` (by
+ * extension, see axyne_symbols_supports_file). C-family files use
+ * axyne_symbols_scan. The other languages report top-level functions, types
+ * and variables/constants plus methods declared directly in a type body;
+ * function bodies and local declarations are skipped. UNSUPPORTED for a file
+ * type without a scanner. */
+AxyneStatus axyne_symbols_scan_file(const char *name_or_path, const char *text,
+                                    size_t length, AxyneSymbolList *out,
+                                    AxyneError *error);
+
 /* Non-zero when the file name (or path, either separator) has one of the
- * extensions the scanner understands: .c .h .cc .cpp .cxx .hpp .m .mm
- * (ASCII case-insensitive). */
+ * extensions a scanner understands (ASCII case-insensitive):
+ *   C family    .c .h .cc .cpp .cxx .hpp .m .mm
+ *   JavaScript  .js .mjs .cjs .jsx      TypeScript  .ts .tsx .mts .cts
+ *   Python .py  Go .go  Rust .rs  Java .java  Kotlin .kt .kts
+ *   Swift .swift  Slint .slint */
 int axyne_symbols_supports_file(const char *name_or_path);
 
 #ifdef __cplusplus

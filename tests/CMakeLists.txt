@@ -48,6 +48,7 @@ add_executable(axyne_tests
     test_problems_feed.c
     test_outline.c
     test_lsp_edit.c
+    test_symbols_lang.c
     test_binary_files.c
     test_empty_state.c
     test_build_target.c
@@ -214,6 +215,9 @@ add_test(
     NAME axyne-lsp-edit
     COMMAND $<TARGET_FILE:axyne_tests> lsp-edit
             "${AXYNE_TEST_FIXTURE_DIR}/lsp-edit"
+    NAME axyne-symbols-lang
+    COMMAND $<TARGET_FILE:axyne_tests> symbols-lang
+            "${AXYNE_TEST_FIXTURE_DIR}/symbols-lang"
 )
 add_test(
     NAME axyne-build-target
@@ -316,6 +320,7 @@ set_tests_properties(
     axyne-problems-feed
     axyne-outline
     axyne-lsp-edit
+    axyne-symbols-lang
     axyne-binary-files
     axyne-empty-state
     axyne-layout-metrics

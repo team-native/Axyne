@@ -700,29 +700,3 @@ AxyneStatus axyne_symbols_scan(const char *text, size_t length,
     }
     return AXYNE_STATUS_OK;
 }
-
-int axyne_symbols_supports_file(const char *name_or_path)
-{
-    static const char *const extensions[] = {
-        "c", "h", "cc", "cpp", "cxx", "hpp", "m", "mm"
-    };
-    const char *base, *dot, *p;
-    if (name_or_path == NULL) return 0;
-    base = name_or_path;
-    for (p = name_or_path; *p != '\0'; ++p)
-        if (*p == '/' || *p == '\\') base = p + 1;
-    dot = strrchr(base, '.');
-    if (dot == NULL || dot == base) return 0;
-    ++dot;
-    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i) {
-        const char *a = dot, *b = extensions[i];
-        while (*a != '\0' && *b != '\0') {
-            char ca = *a >= 'A' && *a <= 'Z' ? (char)(*a + ('a' - 'A')) : *a;
-            if (ca != *b) break;
-            ++a;
-            ++b;
-        }
-        if (*a == '\0' && *b == '\0') return 1;
-    }
-    return 0;
-}
