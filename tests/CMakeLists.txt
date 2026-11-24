@@ -47,6 +47,7 @@ add_executable(axyne_tests
     test_palette_controller.c
     test_problems_feed.c
     test_outline.c
+    test_lsp_edit.c
     test_symbols_lang.c
     test_binary_files.c
     test_empty_state.c
@@ -211,6 +212,11 @@ add_test(
             "${AXYNE_TEST_FIXTURE_DIR}/outline"
 )
 add_test(
+    NAME axyne-lsp-edit
+    COMMAND $<TARGET_FILE:axyne_tests> lsp-edit
+            "${AXYNE_TEST_FIXTURE_DIR}/lsp-edit"
+)
+add_test(
     NAME axyne-symbols-lang
     COMMAND $<TARGET_FILE:axyne_tests> symbols-lang
             "${AXYNE_TEST_FIXTURE_DIR}/symbols-lang"
@@ -315,6 +321,7 @@ set_tests_properties(
     axyne-palette-controller
     axyne-problems-feed
     axyne-outline
+    axyne-lsp-edit
     axyne-symbols-lang
     axyne-binary-files
     axyne-empty-state
@@ -517,4 +524,22 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_LIST_DIR}/lsp_test_server.py"
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-protocol")
     set_tests_properties(axyne-lsp-protocol PROPERTIES TIMEOUT 20)
+    add_executable(axyne_lsp_requests_tests test_lsp_requests.c)
+    target_link_libraries(axyne_lsp_requests_tests PRIVATE axyne_lsp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-requests")
+    add_test(NAME axyne-lsp-requests
+        COMMAND $<TARGET_FILE:axyne_lsp_requests_tests>
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/lsp_requests_server.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-requests")
+    set_tests_properties(axyne-lsp-requests PROPERTIES TIMEOUT 30)
+    add_executable(axyne_lsp_flood_tests test_lsp_flood.c)
+    target_link_libraries(axyne_lsp_flood_tests PRIVATE axyne_lsp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-flood")
+    add_test(NAME axyne-lsp-flood
+        COMMAND $<TARGET_FILE:axyne_lsp_flood_tests>
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/lsp_flood_server.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/fixtures/lsp-flood")
+    set_tests_properties(axyne-lsp-flood PROPERTIES TIMEOUT 40)
 endif()

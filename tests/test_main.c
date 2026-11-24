@@ -22,6 +22,7 @@ int axyne_test_palette_problems(const char *root);
 int axyne_test_palette_controller(const char *root);
 int axyne_test_problems_feed(const char *root);
 int axyne_test_outline(const char *root);
+int axyne_test_lsp_edit(const char *root);
 int axyne_test_symbols_lang(const char *root);
 int axyne_test_binary_files(const char *root);
 int axyne_test_empty_state(const char *root);
@@ -61,7 +62,7 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "exit-with") == 0)
         return atoi(argv[2]);
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|git-actions|git-log|git-panel|preview-tabs|palette-problems|palette-controller|problems-feed|outline|symbols-lang|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu|completion|memory-limits|commands|keymap|app-state|app-paths|memory-usage|log|plugins|account> <fixture-root> [source-root]\n", argv[0]);
+        fprintf(stderr, "usage: %s <documents-search|settings-preferences|runner-git-lsp|process-stability|git-repair|git-actions|git-log|git-panel|preview-tabs|palette-problems|palette-controller|problems-feed|outline|symbols-lang|lsp-edit|binary-files|empty-state|build-target|languages|build-selector|layout-metrics|shortcut-chips|popup-menu|completion|memory-limits|commands|keymap|app-state|app-paths|memory-usage|log|plugins|account> <fixture-root> [source-root]\n", argv[0]);
         return EXIT_FAILURE;
     }
     written = snprintf(root, sizeof(root), "%s-%lu", argv[2],
@@ -102,6 +103,8 @@ int main(int argc, char **argv)
         return axyne_test_problems_feed(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "outline") == 0)
         return axyne_test_outline(root) ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (strcmp(argv[1], "lsp-edit") == 0)
+        return axyne_test_lsp_edit(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "symbols-lang") == 0)
         return axyne_test_symbols_lang(root) ? EXIT_SUCCESS : EXIT_FAILURE;
     if (strcmp(argv[1], "binary-files") == 0)
