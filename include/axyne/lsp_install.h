@@ -17,7 +17,7 @@ extern "C" {
  *   <dir>/bin and <dir>/node_modules/.bin before PATH.
  *
  * Installers (each needs its tool on PATH; nothing is bundled):
- *   javascript, typescript  npm: typescript-language-server + typescript
+ *   javascript, typescript  npm: typescript-language-server + typescript@5 (TypeScript 7 ships no tsserver.js)
  *   python                  npm: pyright
  *   go                      go install gopls (GOBIN=<dir>/bin)
  *   rust                    rustup component add rust-analyzer
