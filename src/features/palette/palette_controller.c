@@ -152,7 +152,7 @@ static void load_document(AxynePaletteController *c)
     if (lines > 0) c->line_count = lines;
     if (path != NULL && axyne_symbols_supports_file(path) && text != NULL) {
         AxyneSymbolList symbols = {0};
-        if (axyne_symbols_scan(text, length, &symbols, NULL) == AXYNE_STATUS_OK) {
+        if (axyne_symbols_scan_file(path, text, length, &symbols, NULL) == AXYNE_STATUS_OK) {
             axyne_symbols_destroy(&c->symbols);
             c->symbols = symbols;
             c->symbols_supported = 1;

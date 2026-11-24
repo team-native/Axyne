@@ -78,7 +78,7 @@ AxyneStatus axyne_outline_scan(AxyneOutline *outline, const char *text,
     AxyneSymbolList list = {0};
     AxyneStatus status;
     if (outline == NULL) return AXYNE_STATUS_INVALID_ARGUMENT;
-    status = axyne_symbols_scan(text, length, &list, error);
+    status = axyne_symbols_scan_file(outline->file_name, text, length, &list, error);
     release_symbols(outline);
     if (status != AXYNE_STATUS_OK) {
         outline->state = AXYNE_OUTLINE_HIDDEN;
@@ -224,6 +224,8 @@ char axyne_outline_glyph(AxyneSymbolKind kind)
     case AXYNE_SYMBOL_VARIABLE: return 'v';
     case AXYNE_SYMBOL_FUNCTION: return 'f';
     case AXYNE_SYMBOL_TYPE: return 'T';
+    case AXYNE_SYMBOL_METHOD: return 'm';
+    case AXYNE_SYMBOL_CONSTANT: return 'c';
     }
     return '?';
 }
@@ -235,6 +237,8 @@ uint32_t axyne_outline_glyph_color(AxyneSymbolKind kind)
     case AXYNE_SYMBOL_VARIABLE: return 0x8cc7c0;
     case AXYNE_SYMBOL_FUNCTION: return 0xe3cf86;
     case AXYNE_SYMBOL_TYPE: return 0x7db5e3;
+    case AXYNE_SYMBOL_METHOD: return 0xe3cf86;
+    case AXYNE_SYMBOL_CONSTANT: return 0xd9b36c;
     }
     return 0x8b919b;
 }
