@@ -213,7 +213,7 @@ typedef struct AxyneWindowState {
     HANDLE runtime_thread; /* background discovery, joined before use */
     AxyneRuntimeList runtime_result; /* written by runtime_thread only */
     HWND completion_detail; /* detail panel beside the completion list */
-    char completion_detail_text[512];
+    char completion_detail_text[1024];
     AxyneLanguagePlan pending_plan; /* run step that follows a successful build */
     int pending_run;
     AxyneDebugger debugger;
@@ -613,6 +613,8 @@ void axyne_win_lsp_sync_active(AxyneWindowState *state);
 int axyne_win_lsp_open_active(AxyneWindowState *state);
 int axyne_win_lsp_nav_dispatch(AxyneWindowState *state, int references);
 void axyne_win_lsp_nav_drain(HWND window);
+void axyne_win_lsp_result(AxyneLspClient *client, AxyneLspResult *result, void *user_data);
+void axyne_win_completion_refresh_detail(AxyneWindowState *state);
 void axyne_terminal_output(AxyneProcess *process, AxyneProcessStream stream,
                            const char *bytes, size_t length, void *user_data);
 void axyne_terminal_exit(AxyneProcess *process, int exit_code, void *user_data);

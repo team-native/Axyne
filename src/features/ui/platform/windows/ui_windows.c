@@ -956,7 +956,7 @@ static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
     } else if (message == WM_PAINT && state != NULL) {
         PAINTSTRUCT paint;
         RECT rect;
-        wchar_t text[512];
+        wchar_t text[1024];
         HDC dc = BeginPaint(window, &paint);
         const wchar_t *rest;
         RECT head;
@@ -989,6 +989,11 @@ static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
         return 0;
     }
     return DefWindowProcW(window, message, w_param, l_param);
+}
+
+void axyne_win_completion_refresh_detail(AxyneWindowState *state)
+{
+    axyne_completion_detail_update(state);
 }
 
 static void axyne_completion_detail_hide(AxyneWindowState *state)
@@ -1034,7 +1039,7 @@ static void axyne_completion_detail_update(AxyneWindowState *state)
     static int registered;
     AxyneCompletionPopupSearch search = { NULL };
     RECT popup, bounds, measure = { 0, 0, 360, 0 };
-    wchar_t text[512];
+    wchar_t text[1024];
     char word[AXYNE_COMPLETION_MAX_WORD + 1];
     LRESULT word_length;
     HDC dc;
@@ -3169,6 +3174,8 @@ static int axyne_lsp_ensure(AxyneWindowState *state)
     if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_lsp_diagnostics;
     config.on_completion = axyne_win_lsp_completion;
+    config.on_result = axyne_win_lsp_result;
+    config.root_path = state->explorer.root;
     config.on_navigation = axyne_win_lsp_navigation;
     config.on_error = axyne_lsp_error;
     config.user_data = state;
