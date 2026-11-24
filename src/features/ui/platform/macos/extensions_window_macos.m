@@ -130,6 +130,17 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
     [text drawInRect:rect withAttributes:attributes];
 }
 
+/* Word-wrapped, top-aligned text that may span several lines inside rect. */
+- (void)wrappedText:(NSString *)text rect:(NSRect)rect font:(NSFont *)font color:(uint32_t)color
+{
+    NSMutableParagraphStyle *style = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [style setAlignment:NSTextAlignmentLeft];
+    [style setLineBreakMode:NSLineBreakByWordWrapping];
+    [text drawInRect:rect withAttributes:@{ NSFontAttributeName: font,
+                                            NSForegroundColorAttributeName: ew_color(color),
+                                            NSParagraphStyleAttributeName: style }];
+}
+
 - (void)button:(NSRect)rect label:(NSString *)label accent:(BOOL)accent
         action:(EwAction)action index:(int)index
 {
@@ -213,8 +224,13 @@ static int ew_list_height(void) { return EW_FOOTER_Y - EW_LIST_Y - 8; }
             detail = [NSString stringWithFormat:@"%@%@%@ · 명령 %zu개", author,
                       [author length] && [category length] ? @" · " : @"", category, plugin->command_count];
         }
-        [self text:detail rect:NSMakeRect(row.origin.x + 14, top + 50, row.size.width - 204, 16) font:small
-             color:detail_color align:NSTextAlignmentLeft];
+        if (!plugin->compatible || missing != NULL) {
+            [self wrappedText:detail rect:NSMakeRect(row.origin.x + 14, top + 50, row.size.width - 204, 32)
+                         font:small color:detail_color];
+        } else {
+            [self text:detail rect:NSMakeRect(row.origin.x + 14, top + 50, row.size.width - 204, 16) font:small
+                 color:detail_color align:NSTextAlignmentLeft];
+        }
         [self button:NSMakeRect(NSMaxX(row) - 176, top + 23, 92, 30)
                label:plugin->enabled ? @"사용 중" : @"사용 안 함" accent:plugin->enabled && plugin->compatible
               action:EW_HIT_TOGGLE index:(int)i];

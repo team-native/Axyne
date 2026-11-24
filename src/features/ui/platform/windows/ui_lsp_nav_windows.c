@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "axyne/completion.h"
+#include "axyne/ui_design.h"
 #include "axyne/syntax.h"
 
 enum {
@@ -185,7 +186,14 @@ static void axyne_win_lsp_set_status(AxyneWindowState *state, const char *text)
     if (state == NULL) return;
     (void)snprintf(state->lsp_status, sizeof(state->lsp_status), "LSP: %s",
                    text != NULL ? text : "");
-    InvalidateRect(state->main_window, NULL, FALSE);
+    /* the message is drawn in the status bar: repaint only that strip */
+    {
+        RECT status = { 0, state->client_height - AXYNE_UI_STATUS,
+                        state->client_width, state->client_height };
+        if (status.bottom > status.top && status.right > status.left)
+            InvalidateRect(state->main_window, &status, FALSE);
+        else InvalidateRect(state->main_window, NULL, FALSE);
+    }
 }
 
 static void axyne_win_lsp_forget_shown(struct AxyneWinLspNavUi *ui)
