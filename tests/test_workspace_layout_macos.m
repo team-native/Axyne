@@ -242,7 +242,7 @@ int main(void)
         CHECK([shell acceptsFirstResponder] && [shell running]);
         CHECK(NSEqualRects([shell frame], [output frame]));
         CHECK(AXYNE_UI_TERMINAL_PANEL == 375);
-        CHECK(AXYNE_UI_TERMINAL_HEADER == 67);
+        CHECK(AXYNE_UI_TERMINAL_HEADER == AXYNE_UI_PANEL_HEADER);
         CHECK(NSMinY([shell frame]) ==
             842 - AXYNE_UI_STATUS - AXYNE_UI_TERMINAL_PANEL + AXYNE_UI_TERMINAL_HEADER);
         CHECK(NSHeight([shell frame]) ==
