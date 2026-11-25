@@ -956,7 +956,7 @@ static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
     } else if (message == WM_PAINT && state != NULL) {
         PAINTSTRUCT paint;
         RECT rect;
-        wchar_t text[512];
+        wchar_t text[1024];
         HDC dc = BeginPaint(window, &paint);
         const wchar_t *rest;
         RECT head;
@@ -989,6 +989,11 @@ static LRESULT CALLBACK axyne_completion_detail_proc(HWND window, UINT message,
         return 0;
     }
     return DefWindowProcW(window, message, w_param, l_param);
+}
+
+void axyne_win_completion_refresh_detail(AxyneWindowState *state)
+{
+    axyne_completion_detail_update(state);
 }
 
 static void axyne_completion_detail_hide(AxyneWindowState *state)
@@ -1034,7 +1039,7 @@ static void axyne_completion_detail_update(AxyneWindowState *state)
     static int registered;
     AxyneCompletionPopupSearch search = { NULL };
     RECT popup, bounds, measure = { 0, 0, 360, 0 };
-    wchar_t text[512];
+    wchar_t text[1024];
     char word[AXYNE_COMPLETION_MAX_WORD + 1];
     LRESULT word_length;
     HDC dc;
@@ -3169,6 +3174,8 @@ static int axyne_lsp_ensure(AxyneWindowState *state)
     if (config.language_id == NULL) config.language_id = "plaintext";
     config.on_diagnostics = axyne_lsp_diagnostics;
     config.on_completion = axyne_win_lsp_completion;
+    config.on_result = axyne_win_lsp_result;
+    config.root_path = state->explorer.root;
     config.on_navigation = axyne_win_lsp_navigation;
     config.on_error = axyne_lsp_error;
     config.user_data = state;
@@ -10444,6 +10451,49 @@ int axyne_win_capture_editor(AxyneWindowState *state)
     return state != NULL && axyne_capture_editor(state);
 }
 
+char *axyne_win_prompt_text(AxyneWindowState *state, const char *title,
+                            const char *label, const char *initial)
+{
+    wchar_t value[1024] = L"";
+    wchar_t *wide_title = axyne_wide(title), *wide_label = axyne_wide(label);
+    wchar_t *wide_initial = initial != NULL ? axyne_wide(initial) : NULL;
+    char *answer = NULL;
+    if (wide_initial != NULL) (void)wcsncpy_s(value, 1024, wide_initial, _TRUNCATE);
+    if (state != NULL && wide_title != NULL && wide_label != NULL &&
+        axyne_prompt(state->main_window, wide_title, wide_label, value,
+                     sizeof(value) / sizeof(value[0])) && value[0] != L'\0')
+        answer = axyne_utf8(value);
+    free(wide_title); free(wide_label); free(wide_initial);
+    return answer;
+}
+
+int axyne_win_choose_item(AxyneWindowState *state, const char *const *titles,
+                          size_t count, int x, int y)
+{
+    HMENU menu;
+    int chosen;
+    if (state == NULL || titles == NULL || count == 0) return -1;
+    menu = CreatePopupMenu();
+    if (menu == NULL) return -1;
+    for (size_t i = 0; i < count; ++i) {
+        wchar_t *wide = axyne_wide(titles[i] != NULL ? titles[i] : "");
+        wchar_t escaped[512];
+        size_t used = 0;
+        if (wide == NULL) continue;
+        for (size_t k = 0; wide[k] != L'\0' && used + 2 < sizeof(escaped) / sizeof(escaped[0]); ++k) {
+            if (wide[k] == L'&') escaped[used++] = L'&'; /* a literal ampersand */
+            escaped[used++] = wide[k];
+        }
+        escaped[used] = L'\0';
+        (void)AppendMenuW(menu, MF_STRING, (UINT_PTR)(i + 1), escaped);
+        free(wide);
+    }
+    chosen = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                 x, y, 0, state->main_window, NULL);
+    DestroyMenu(menu);
+    return chosen > 0 ? chosen - 1 : -1;
+}
+
 int axyne_win_open_document(AxyneWindowState *state, const char *path,
                             size_t line, size_t column)
 {
@@ -10823,7 +10873,11 @@ static LRESULT CALLBACK axyne_window_proc(HWND window, UINT message,
             return 0;
         }
         if (state != NULL && w_param == AXYNE_STATUS_TIMER) {
-            InvalidateRect(window, NULL, FALSE);
+            /* only the status bar shows the changing memory figure */
+            RECT status = { 0, state->client_height - AXYNE_STATUS,
+                            state->client_width, state->client_height };
+            if (status.bottom > status.top && status.right > status.left)
+                InvalidateRect(window, &status, FALSE);
             return 0;
         }
         if (state != NULL && w_param == AXYNE_WIN_CHORD_TIMER_ID) {
@@ -11766,8 +11820,10 @@ int axyne_ui_run(HINSTANCE instance, int show_command, const char *app_name)
     axyne_splash_step(splash, AXYNE_STARTUP_SETTINGS);
     axyne_load_global_preferences(state);
     axyne_splash_step(splash, AXYNE_STARTUP_WORKSPACE);
+    /* WS_CLIPCHILDREN: the parent never paints over the editor, terminal or
+     * panel children, so a full-window repaint no longer makes them flash. */
     HWND window = CreateWindowExW(0, AXYNE_WINDOW_CLASS, L"Axyne",
-        WS_OVERLAPPEDWINDOW, bounds.left, bounds.top,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, bounds.left, bounds.top,
         bounds.right - bounds.left, bounds.bottom - bounds.top,
         NULL, NULL, instance, state);
     if (window == NULL) {

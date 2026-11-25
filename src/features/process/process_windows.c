@@ -236,6 +236,14 @@ static int is_command_processor(const wchar_t *path)
     return _wcsicmp(base, L"cmd.exe") == 0;
 }
 
+/* "/d", "/s", "/c": quoted switches are not recognised by cmd.exe, so /s
+ * would not strip the command's outer quotes. */
+static int is_command_switch(const char *argument)
+{
+    return argument != NULL && argument[0] == '/' && argument[1] != '\0' &&
+           argument[2] == '\0';
+}
+
 static int append_command(wchar_t **command, size_t *used, size_t *capacity,
                           const wchar_t *argument, int raw)
 {
@@ -270,15 +278,17 @@ static DWORD WINAPI process_worker(void *opaque)
 {
     AxyneProcess *process = (AxyneProcess *)opaque;
     ProcessState *state = (ProcessState *)process->implementation;
-    char buffer[4096];
+    char buffer[65536];
     HANDLE pipes[2] = { state->stdout_read, state->stderr_read };
     int exited = 0;
     int eof[2] = { 0, 0 };
     int pipe_error = 0;
     DWORD exit_code = 1;
+    int busy = 0; /* the previous pass read output: do not wait before the next */
     while (!exited || !eof[0] || !eof[1]) {
         size_t i;
-        if (!exited && WaitForSingleObject(state->process, 10) == WAIT_OBJECT_0) {
+        int progressed = 0;
+        if (!exited && WaitForSingleObject(state->process, busy ? 0 : 10) == WAIT_OBJECT_0) {
             exited = 1;
             (void)GetExitCodeProcess(state->process, &exit_code);
         }
@@ -302,11 +312,12 @@ static DWORD WINAPI process_worker(void *opaque)
             if (available == 0) continue;
             if (available > sizeof(buffer)) available = (DWORD)sizeof(buffer);
             if (ReadFile(pipes[i], buffer, available, &read_count, NULL)) {
-                if (read_count > 0)
+                if (read_count > 0) {
+                    progressed = 1;
                     axyne_process_dispatch_output(process,
                         i == 0 ? AXYNE_PROCESS_STDOUT : AXYNE_PROCESS_STDERR,
                         buffer, (size_t)read_count);
-                else eof[i] = 1;
+                } else eof[i] = 1;
             } else {
                 DWORD read_error = GetLastError();
                 if (read_error == ERROR_BROKEN_PIPE || read_error == ERROR_NO_DATA) {
@@ -321,7 +332,8 @@ static DWORD WINAPI process_worker(void *opaque)
                 }
             }
         }
-        if (!exited || !eof[0] || !eof[1]) Sleep(1);
+        busy = progressed;
+        if ((!exited || !eof[0] || !eof[1]) && !progressed) Sleep(1);
     }
     axyne_process_dispatch_exit(process, pipe_error ? -1 : (int)exit_code);
     InterlockedExchange(&state->worker_finished, 1);
@@ -382,8 +394,9 @@ AxyneStatus axyne_process_start(const AxyneProcessSpec *spec,
         wchar_t *arg = to_wide(spec->arguments[i]);
         /* The command string after "cmd.exe ... /c" is already in cmd.exe
          * syntax (""script" "arg""); backslash-escaping it would break it. */
-        int raw = i > 0 && is_command_processor(exe) &&
-                  _stricmp(spec->arguments[i - 1], "/c") == 0;
+        int raw = is_command_processor(exe) &&
+                  ((i > 0 && _stricmp(spec->arguments[i - 1], "/c") == 0) ||
+                   is_command_switch(spec->arguments[i]));
         int ok = arg != NULL && append_command(&command, &used, &capacity, arg, raw);
         free(arg);
         if (!ok) { result = axyne_process_set_error(error, AXYNE_STATUS_INVALID_ARGUMENT, "Invalid process argument"); goto done; }

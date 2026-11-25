@@ -22,7 +22,7 @@ typedef enum AxyneExtensionsPage {
 } AxyneExtensionsPage;
 
 enum {
-    AXYNE_EW_ROW_HEIGHT = 76,
+    AXYNE_EW_ROW_HEIGHT = 86,
     AXYNE_EW_ROW_GAP = 8,
     AXYNE_EW_HEADER_HEIGHT = 56
 };

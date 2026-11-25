@@ -3,6 +3,7 @@
 target_sources(axyne_core PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/palette.c"
     "${CMAKE_CURRENT_LIST_DIR}/symbols.c"
+    "${CMAKE_CURRENT_LIST_DIR}/symbols_lang.c"
     "${CMAKE_CURRENT_LIST_DIR}/palette_controller.c"
 )
 if(MSVC)

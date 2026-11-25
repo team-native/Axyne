@@ -31,7 +31,18 @@ static void completion_received(AxyneLspClient *client, uint64_t request_id,
     file = fopen(marker, "wb");
     if (file == NULL) return;
     if (request_id != 0 && item_count == 1 && items != NULL &&
-        items[0].label != NULL && strcmp(items[0].label, "probeCompletion") == 0)
+        items[0].label != NULL && strcmp(items[0].label, "probeCompletion") == 0 &&
+        items[0].sort_text != NULL && strcmp(items[0].sort_text, "0001") == 0 &&
+        items[0].filter_text != NULL && strcmp(items[0].filter_text, "probe") == 0 &&
+        items[0].documentation != NULL && strcmp(items[0].documentation, "docs") == 0 &&
+        items[0].label_detail != NULL && strcmp(items[0].label_detail, "(a: int)") == 0 &&
+        items[0].has_text_edit && items[0].text_edit.range.start.character == 4 &&
+        items[0].text_edit.range.end.character == 7 &&
+        strcmp(items[0].text_edit.new_text, "probeCompletion") == 0 &&
+        items[0].additional_edit_count == 1 &&
+        strcmp(items[0].additional_edits[0].new_text, "import x\n") == 0 &&
+        items[0].deprecated && items[0].preselect && items[0].raw_json != NULL &&
+        strstr(items[0].raw_json, "probeCompletion") != NULL)
         fputs("ok", file);
     else
         fputs("bad", file);

@@ -31,9 +31,9 @@ typedef struct InstallPlan {
 static const InstallPlan plans[AXYNE_LANGUAGE_COUNT] = {
     /* python     */ { INSTALL_NPM, "pyright", { "pyright", NULL }, NULL },
     /* javascript */ { INSTALL_NPM, "typescript-language-server",
-                       { "typescript-language-server", "typescript" }, NULL },
+                       { "typescript-language-server", "typescript@5" }, NULL },
     /* typescript */ { INSTALL_NPM, "typescript-language-server",
-                       { "typescript-language-server", "typescript" }, NULL },
+                       { "typescript-language-server", "typescript@5" }, NULL },
     /* go         */ { INSTALL_GO, "gopls", { "golang.org/x/tools/gopls@latest", NULL }, NULL },
     /* rust       */ { INSTALL_RUSTUP, "rust-analyzer", { NULL, NULL }, NULL },
     /* slint      */ { INSTALL_CARGO, "slint-lsp", { "slint-lsp", NULL }, NULL },
